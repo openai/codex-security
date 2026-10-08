@@ -3225,7 +3225,7 @@ export async function main(
         const { preview } = prepared;
         const showPreview = () => {
           errorOutput.write(
-            `Account: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${diagnosticValue(preview.destination.import_environment_id)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+            `Account: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
           );
           for (const excluded of preview.excluded)
             errorOutput.write(
@@ -3259,7 +3259,7 @@ export async function main(
         if (result.counts.error) exitCode = 1;
         if (!structured)
           errorOutput.write(
-            `Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}\nOpen in Cloud: ${result.cloudUrl}\n`,
+            `Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}\nOpen the Codex Security Cloud app, go to Findings, and find this repository’s imported Wiz findings.\n`,
           );
         return { ...result, excluded: preview.excluded };
       } catch (error) {

@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import Ajv2020 from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
@@ -97,10 +98,24 @@ export function validateExternalEvidence(
       .replace(/[\t\r\n]/gu, "")
       .replace(/^[\u0000-\u0020]+/u, "");
     const authority = /^https?:\/\/([^/?#]+)/iu.exec(url)?.[1];
+    const normalizedAuthority = (authority ?? "")
+      .replace(/[@:#?]/gu, "")
+      .normalize("NFKC");
+    let validHost = true;
+    if (authority?.includes("[") || authority?.includes("]")) {
+      const hostname = /^\[([^\]]+)\](?::[\s\S]*)?$/u.exec(authority)?.[1];
+      const [address, scope, extraScope] = (hostname ?? "").split("%");
+      // Cloud accepts scoped IPv6 and IPvFuture hosts in brackets.
+      validHost =
+        hostname !== undefined &&
+        (/^v[a-fA-F0-9]+\.[\s\S]+$/u.test(hostname) ||
+          (isIP(address!) === 6 && scope !== "" && extraScope === undefined));
+    }
     if (
       !authority ||
       authority.includes("@") ||
-      authority.includes("[") !== authority.includes("]")
+      /[/?#@:]/u.test(normalizedAuthority) ||
+      !validHost
     )
       throw new Error(
         "Evidence URLs must be HTTP(S) links without credentials.",

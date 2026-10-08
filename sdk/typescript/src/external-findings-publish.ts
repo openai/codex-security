@@ -61,7 +61,6 @@ export interface PreparedExternalPublication {
   publish(): Promise<{
     receipts: FindingImportReceipt[];
     counts: FindingImportReceipt["counts"];
-    cloudUrl: string;
   }>;
 }
 
@@ -185,6 +184,8 @@ export async function prepareExternalPublication(
     body?: FindingImportRequest,
   ): Promise<unknown> {
     dependencies.signal?.throwIfAborted();
+    // Allow upload and response transport around the server's publication budget.
+    const timeout = AbortSignal.timeout(body ? 60_000 : 30_000);
     const response = await (dependencies.fetch ?? globalThis.fetch)(
       `${BASE_URL}${endpoint}`,
       {
@@ -198,8 +199,8 @@ export async function prepareExternalPublication(
         ...(body ? { body: JSON.stringify(body) } : {}),
         redirect: "error",
         signal: dependencies.signal
-          ? AbortSignal.any([dependencies.signal, AbortSignal.timeout(30_000)])
-          : AbortSignal.timeout(30_000),
+          ? AbortSignal.any([dependencies.signal, timeout])
+          : timeout,
       },
     );
     if (!response.ok) {
@@ -313,38 +314,15 @@ export async function prepareExternalPublication(
           "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
         );
       }
-      if (
-        submission.repository.environment_id !==
-        destination.import_environment_id
-      ) {
-        throw new Error(
-          "The Cloud environment changed since this submission. Restore the original destination before resuming the saved request.",
-        );
-      }
     }
     saved = content;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  if (destination.import_environment_id == null)
-    throw new CodexSecurityError(
-      "Configure an authorized Cloud environment for this repository before importing findings.",
-    );
   let requests = saved?.requests;
   if (!requests) {
-    const repository = {
-      id: destination.id,
-      repo_connector_id: destination.repo_connector_id,
-      environment_id: destination.import_environment_id,
-      reset_marker: destination.reset_marker,
-    };
     requests = [];
-    let current: FindingImportRequest = {
-      request_id: randomUUID(),
-      repository,
-      source,
-      items: [],
-    };
+    let current: FindingImportRequest | undefined;
     for (const [index, finding] of parsed.findings.entries()) {
       const query = new URLSearchParams({
         provider: source.provider,
@@ -371,6 +349,18 @@ export async function prepareExternalPublication(
         throw new CodexSecurityError(
           "Cloud returned a different source identity.",
         );
+      const environmentId =
+        previous?.environment_id ?? destination.import_environment_id;
+      if (environmentId == null)
+        throw new CodexSecurityError(
+          "Configure an authorized Cloud environment for this repository before importing findings.",
+        );
+      const repository = {
+        id: destination.id,
+        repo_connector_id: destination.repo_connector_id,
+        environment_id: environmentId,
+        reset_marker: destination.reset_marker,
+      };
       const item = {
         client_id: `item-${index + 1}`,
         source_finding_id: finding.source_finding_id,
@@ -378,18 +368,20 @@ export async function prepareExternalPublication(
         evidence: finding.evidence,
       };
       if (
-        current.items.length > 0 &&
-        (current.items.length === 100 ||
+        current &&
+        (current.repository.environment_id !== environmentId ||
+          current.items.length === 100 ||
           Buffer.byteLength(
             JSON.stringify({ ...current, items: [...current.items, item] }),
           ) > MAX_REQUEST_BYTES)
       ) {
         requests.push(validateImportRequest(current));
-        current = { request_id: randomUUID(), repository, source, items: [] };
+        current = undefined;
       }
+      current ??= { request_id: randomUUID(), repository, source, items: [] };
       current.items.push(item);
     }
-    if (current.items.length) requests.push(validateImportRequest(current));
+    if (current) requests.push(validateImportRequest(current));
   }
   const submission: SavedSubmission = {
     accountId: credentials.account_id,
@@ -495,8 +487,9 @@ export async function prepareExternalPublication(
           // Verify readable source records without mistaking a newer concurrent
           // observation for failure of the original, immutable import receipt.
           for (const [batchIndex, receipt] of receipts.entries()) {
+            const batch = requests[batchIndex]!;
             const batchItems = new Map(
-              requests[batchIndex]!.items.map((item) => [item.client_id, item]),
+              batch.items.map((item) => [item.client_id, item]),
             );
             for (const item of receipt.results) {
               if (item.outcome === "error") continue;
@@ -516,6 +509,7 @@ export async function prepareExternalPublication(
                 report.source_finding_id !== expected.source_finding_id ||
                 report.repo_id !== destination.id ||
                 report.repo_connector_id !== destination.repo_connector_id ||
+                report.environment_id !== batch.repository.environment_id ||
                 canonicalJson(report.source) !== canonicalJson(source)
               )
                 throw new CodexSecurityError(
@@ -538,7 +532,6 @@ export async function prepareExternalPublication(
         const result = {
           receipts,
           counts,
-          cloudUrl: `https://chatgpt.com/codex/cloud/security/findings?repo=${encodeURIComponent(destination.url)}&source=imported&provider=${source.provider}`,
         };
         await writeAtomicJson(join(state, `${key}.result.json`), result);
         await rm(pendingPath, { force: true });

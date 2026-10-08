@@ -784,10 +784,12 @@ codex-security publish findings selected-wiz.json \
 This command reads the authorized destination and current source versions during
 preview. It uses the same saved ChatGPT file login as scan publication. The Cloud
 repository needs an existing environment; no native scan is required. Review the
-account, repository, environment, findings, and exclusions, then rerun without
+account, repository, environments, findings, and exclusions, then rerun without
 `--dry-run`. The default terminal prompt is No; `--yes` confirms a previously
 reviewed input for scripts or the plugin. Without a terminal or `--yes`, no upload
-occurs.
+occurs. Existing source findings keep their Cloud environment; new findings use
+the repository’s current authorized default. Preview shows the environments that
+will receive the selected findings.
 
 Input can be a Wiz vulnerability finding, an array, a complete
 `data.vulnerabilityFindings.nodes` response, or JSONL with one vendor record per
@@ -822,7 +824,9 @@ fresh invocation. Final item errors are reported individually with exit code 1;
 correct the input or source conflict before a fresh submission. Transport or
 readback failures return exit code 2 and retain the resumable request. Successful
 receipts are saved locally; the CLI verifies Cloud source-report reads and
-returns a Findings link. Search indexing can lag an accepted import.
+returns publication receipts and counts. Open the Codex Security Cloud app, go
+to its main Findings view, and find the repository’s imported Wiz findings.
+Search indexing can lag an accepted import.
 
 Preview selected completed scans before uploading:
 
