@@ -153,6 +153,7 @@ const allowedFiles = new Set([
     "cli-mcp",
     "cli-mcp-commands",
     "cli-help",
+    "cli-mcp",
     "cli-scan-logs-json",
     "cli-signals",
     "classify-severity",
