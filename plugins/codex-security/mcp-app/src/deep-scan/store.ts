@@ -529,19 +529,11 @@ export class WorkbenchDeepScanStore {
               workerId: failure.workerId,
               attempts: failure.attempts,
               elapsedMs: failure.elapsedMs,
-              ...(failure.code === undefined ? {} : { code: failure.code }),
-              ...(failure.exitCode === undefined
-                ? {}
-                : { exitCode: failure.exitCode }),
-              ...(failure.signal === undefined
-                ? {}
-                : { signal: failure.signal }),
-              ...(failure.killed === undefined
-                ? {}
-                : { killed: failure.killed }),
-              ...(failure.timeoutMs === undefined
-                ? {}
-                : { timeoutMs: failure.timeoutMs }),
+              code: failure.code,
+              exitCode: failure.exitCode,
+              signal: failure.signal,
+              killed: failure.killed,
+              timeoutMs: failure.timeoutMs,
               error: boundedDeepScanErrorMessage(error),
             }),
           );

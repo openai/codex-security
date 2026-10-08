@@ -347,21 +347,20 @@ async function runCampaign(
     pending.push(task);
   }
   const skipped = completed + incomplete + untouched;
-  if (pending.length === 0) {
-    return {
-      total: tasks.length,
-      completed,
-      incomplete,
-      failed: 0,
-      skipped,
-      resultsPath: ledger,
-      ...(warnings.length === 0 ? {} : { warnings }),
-      ...(hasPolicy ? { policyFailed } : {}),
-    };
-  }
+  let failed = 0;
+  const summarize = (): MultiscanResult => ({
+    total: tasks.length,
+    completed,
+    incomplete,
+    failed,
+    skipped,
+    resultsPath: ledger,
+    ...(warnings.length === 0 ? {} : { warnings }),
+    ...(hasPolicy ? { policyFailed } : {}),
+  });
+  if (pending.length === 0) return summarize();
 
   let next = 0;
-  let failed = 0;
   const worker = async (
     security: Pick<CodexSecurity, "run" | "close">,
   ): Promise<void> => {
@@ -586,9 +585,7 @@ async function runCampaign(
             ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
             ...(warning === undefined ? {} : { warning }),
             ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
-            ...(attemptPolicyFailed === undefined
-              ? {}
-              : { policyFailed: attemptPolicyFailed }),
+            policyFailed: attemptPolicyFailed,
           })}\n`,
         );
         if (
@@ -637,16 +634,7 @@ async function runCampaign(
   );
   const rejection = results.find((result) => result.status === "rejected");
   if (rejection?.status === "rejected") throw rejection.reason;
-  return {
-    total: tasks.length,
-    completed,
-    incomplete,
-    failed,
-    skipped,
-    resultsPath: ledger,
-    ...(warnings.length === 0 ? {} : { warnings }),
-    ...(hasPolicy ? { policyFailed } : {}),
-  };
+  return summarize();
 }
 
 function notifyProgress(

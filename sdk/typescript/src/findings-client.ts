@@ -1,4 +1,8 @@
 import { CodexSecurityError } from "./errors.js";
+import {
+  parseFindingsErrorResponse,
+  type FindingsErrorCode,
+} from "./findings-errors.js";
 import { retryDelay, waitForRetry } from "./deduplication/retry.js";
 import type { Finding } from "./models.js";
 import type {
@@ -16,8 +20,26 @@ class FindingsHttpError extends CodexSecurityError {
     message: string,
     readonly status: number,
     readonly retryAfter: string | null,
+    readonly code?: FindingsErrorCode,
   ) {
     super(message);
+  }
+
+  static async fromResponse(
+    response: Response,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<FindingsHttpError> {
+    // Gateways can return plain text or HTML instead of the service's JSON error.
+    const body: unknown = await response.json().catch(() => undefined);
+    signal?.throwIfAborted();
+    const error = parseFindingsErrorResponse(body);
+    return new FindingsHttpError(
+      error?.message ? `${message} ${error.message}` : message,
+      response.status,
+      response.headers.get("Retry-After"),
+      error?.error,
+    );
   }
 }
 
@@ -52,15 +74,14 @@ export class FindingsClient {
     return await this.retry(async () => {
       const response = await this.request(url, { signal: this.signal });
       if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
-        throw new FindingsHttpError(
+        throw await FindingsHttpError.fromResponse(
+          response,
           `Potential-duplicates lookup for ${findingId} failed (HTTP ${response.status}).${
             response.status === 404
               ? " Import the finding with its repositoryId through POST /v1/bulk/findings before deduplicating."
               : ""
           }`,
-          response.status,
-          response.headers.get("Retry-After"),
+          this.signal,
         );
       }
       return (await response.json()) as FindingNeighborhood;
@@ -128,11 +149,10 @@ export class FindingsClient {
       signal: this.signal,
     });
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new FindingsHttpError(
+      throw await FindingsHttpError.fromResponse(
+        response,
         `Findings API POST /${path} failed (HTTP ${response.status}).`,
-        response.status,
-        response.headers.get("Retry-After"),
+        this.signal,
       );
     }
     return await response.json();

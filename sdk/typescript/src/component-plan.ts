@@ -22,20 +22,16 @@ import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 /** @internal */
-export const componentPlanSchema = z
-  .object({
-    components: z
-      .array(
-        z
-          .object({
-            name: z.string().trim().min(1),
-            paths: z.array(z.string().min(1)).min(1),
-          })
-          .strict(),
-      )
-      .min(1),
-  })
-  .strict();
+export const componentPlanSchema = z.strictObject({
+  components: z
+    .array(
+      z.strictObject({
+        name: z.string().trim().min(1),
+        paths: z.array(z.string().min(1)).min(1),
+      }),
+    )
+    .min(1),
+});
 
 export interface ComponentPlan {
   components: Array<{ name: string; paths: string[] }>;

@@ -244,6 +244,10 @@ For `finding_not_indexed`, import the finding with the matching `repositoryId`
 before retrying. Updating a document can invalidate its earlier embedding.
 This error does not mean that the finding has no duplicates.
 
+SDK findings API failures preserve the service's error code and message alongside
+the HTTP status. Responses without a recognized JSON error retain the HTTP-status
+diagnostic. Retry decisions continue to use the HTTP status and `Retry-After`.
+
 ## Browse the dashboard
 
 The dashboard has Findings and Duplicate groups views with search, repository
