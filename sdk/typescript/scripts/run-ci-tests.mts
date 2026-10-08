@@ -10,13 +10,21 @@ if (!Number.isSafeInteger(count) || shard > count) {
     "Usage: node --experimental-strip-types scripts/run-ci-tests.mts <shard>/<count> [bun test options]",
   );
 }
-const tests = (await readdir(new URL("../tests-ts/", import.meta.url))).filter(
-  (file) =>
-    file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
-);
+const tests = (await readdir(new URL("../tests-ts/", import.meta.url)))
+  .filter(
+    (file) =>
+      file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
+  )
+  .sort();
+// Match Bun 1.3.14's sorted round-robin assignment for startup diagnostics.
+// https://github.com/oven-sh/bun/blob/bun-v1.3.14/src/cli/test_command.zig
+const selected = tests.filter((_, index) => index % count === shard - 1);
+if (selected.length === 0) {
+  throw new Error(`Test shard ${shard}/${count} is empty.`);
+}
 const windows = process.platform === "win32";
 const defaultTestTimeoutMs = windows ? "120000" : "30000";
-console.log(`Test shard ${shard}/${count} (Bun native sharding)`);
+console.log(`Test shard ${shard}/${count}: ${selected.join(" ")}`);
 await mkdir(new URL("../reports/", import.meta.url), { recursive: true }).catch(
   () => {
     // Bun warns about report write failures without changing the test result.

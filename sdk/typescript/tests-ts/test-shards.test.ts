@@ -44,7 +44,9 @@ test(${JSON.stringify(file)}, () => {
         join(root, "tests-ts", "windows-machine-policy.test.ts"),
         'throw new Error("Machine policy test must run separately");\n',
       );
+      const executed: string[] = [];
       for (let shard = 1; shard <= count; shard++) {
+        await writeFile(executionLog, "");
         const child = Bun.spawn({
           cmd: [
             node!,
@@ -62,18 +64,73 @@ test(${JSON.stringify(file)}, () => {
           timeout: 30_000,
           windowsHide: true,
         });
-        const { status, stderr } = await readSubprocess(child);
+        const { status, stdout, stderr } = await readSubprocess(child);
         expect(status, stderr).toBe(0);
+        const shardFiles = (await readFile(executionLog, "utf8"))
+          .trim()
+          .split("\n");
+        expect(stdout).toContain(
+          `Test shard ${shard}/${count}: ${shardFiles.sort().join(" ")}`,
+        );
+        executed.push(...shardFiles);
       }
-      const executed = (await readFile(executionLog, "utf8"))
-        .trim()
-        .split("\n");
       expect(executed.sort()).toEqual(files.sort());
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   },
 );
+
+test("rejects an empty shard while allowing a nonempty shard with the same count", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-empty-shard-");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyFile(
+      new URL("../scripts/run-ci-tests.mts", import.meta.url),
+      join(root, "scripts", "run-ci-tests.mts"),
+    );
+    await writeFile(
+      join(root, "tests-ts", "probe.test.ts"),
+      'import { test } from "bun:test"; test("synthetic shard probe", () => {});\n',
+    );
+    await writeFile(
+      join(root, "tests-ts", "windows-machine-policy.test.ts"),
+      'throw new Error("Machine policy test must run separately");\n',
+    );
+    for (const shard of [1, 2]) {
+      const child = Bun.spawn({
+        cmd: [
+          node!,
+          "--experimental-strip-types",
+          join(root, "scripts", "run-ci-tests.mts"),
+          `${shard}/2`,
+        ],
+        env: {
+          ...process.env,
+          PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      const { status, stdout, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(shard === 1 ? 0 : 1);
+      if (shard === 1) {
+        expect(stdout).toContain("Test shard 1/2: probe.test.ts");
+        expect(stderr).toContain("synthetic shard probe");
+      } else {
+        expect(stderr).toContain("Test shard 2/2 is empty.");
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 const defaultTimeoutMs = process.platform === "win32" ? "120000" : "30000";
 
@@ -145,7 +202,7 @@ test("synthetic report probe --timeout=5000", () => {
       });
       const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(fail ? 1 : 0);
-      expect(stdout).toContain("Test shard 1/1");
+      expect(stdout).toContain("Test shard 1/1: probe.test.ts");
       expect(stderr).toContain("synthetic report probe");
       if (report === "available") {
         const xml = await readFile(
