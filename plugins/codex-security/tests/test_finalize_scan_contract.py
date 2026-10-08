@@ -1844,6 +1844,17 @@ The extraction root is not enforced.
         with self.preserving_sealed_findings(findings):
             self.assertNotIn("code_evidence", self.compatible_finding(findings))
 
+    def test_sealed_rerun_and_export_preserve_nullable_legacy_evidence_path(self) -> None:
+        self.write_sealed_scan()
+        findings = self.read_json("findings.json")
+        findings["findings"][0]["code_evidence"] = [
+            {"id": "legacy-source", "code": "legacy_source()", "path": None}
+        ]
+        with self.preserving_sealed_findings(findings):
+            result = self.run_finalizer("--export-format", "json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), findings)
+
     def test_sealed_rerun_accepts_empty_legacy_root_cause(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -2182,7 +2193,7 @@ The extraction root is not enforced.
             "code": "canonical_source()",
             "explanation": "Canonical snippet.",
         }
-        legacy_evidence = {"id": "legacy-source", "code": "legacy_source()"}
+        legacy_evidence = {"id": "legacy-source", "code": "legacy_source()", "path": None}
         for evidence_field, evidence in (
             ("codeEvidence", canonical_evidence),
             ("code_evidence", legacy_evidence),
@@ -2310,6 +2321,36 @@ The extraction root is not enforced.
             findings["findings"][0]["preventiveControls"], finding["preventiveControls"]
         )
         self.assertFalse(warnings)
+
+    def test_recovery_publishes_findings_without_unsafe_deferred_paths(self) -> None:
+        valid = {"id": "review", "reason": "Repository review is incomplete.", "paths": ["."]}
+        self.coverage["deferred"] = [
+            {"id": "invalid", "reason": "Invalid scope.", "paths": ["../outside.py"]},
+            valid,
+        ]
+        for status in ("completed", "interrupted"):
+            with self.subTest(status=status):
+                self.write_scan()
+                binding = {**self.completion_binding(), "status": status}
+                warnings: list[str] = []
+                prepared = FINALIZER._prepare_scan_finalization(
+                    self.scan_dir, completion_binding=binding, completion_warnings=warnings
+                )
+                manifest, findings, coverage = FINALIZER._write_prepared_scan_finalization(prepared)
+
+                self.assertEqual(manifest["scan"]["status"], status)
+                self.assertEqual(len(findings["findings"]), 1)
+                self.assertEqual(findings["findings"][0]["title"], self.finding["title"])
+                self.assertEqual(coverage["deferred"], [valid])
+                self.assertEqual(coverage["completeness"], "partial")
+                self.assertTrue(
+                    any(
+                        "Skipped malformed deferred coverage item 1" in warning
+                        for warning in warnings
+                    )
+                )
+                self.assertEqual(self.read_json("findings.json"), findings)
+                self.assertEqual(self.read_json("coverage.json"), coverage)
 
     def test_sealed_findings_keep_authored_identity_mismatches_strict(self) -> None:
         self.write_sealed_scan()
