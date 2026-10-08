@@ -574,8 +574,10 @@ export async function normalizeTarget(
       throw new InvalidTargetError(`Path target does not exist: ${value}`);
     }
     let canonical: string;
+    let metadata;
     try {
       canonical = await abortable(() => realpath(candidate), signal);
+      metadata = await abortable(() => stat(canonical), signal);
     } catch (error) {
       throwIfAborted(signal);
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
@@ -595,15 +597,6 @@ export async function normalizeTarget(
       throw new InvalidTargetError(
         `Path target contains an unsupported colon component: ${value}`,
       );
-    }
-    let metadata;
-    try {
-      metadata = await abortable(() => stat(canonical), signal);
-    } catch (error) {
-      throwIfAborted(signal);
-      throw new InvalidTargetError(`Path target does not exist: ${value}`, {
-        cause: error,
-      });
     }
     if (!metadata.isFile() && !metadata.isDirectory()) {
       throw new InvalidTargetError(
