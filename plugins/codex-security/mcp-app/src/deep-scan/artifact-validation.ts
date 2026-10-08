@@ -323,26 +323,27 @@ export function matchesSavedCoverageSource(
   if (field === "surfaces" && isRecord(original)) {
     original.receiptRefs ??= [];
     normalized.receiptRefs ??= [];
-    if (
-      receiptDigests !== undefined &&
-      !(original.receiptRefs as string[]).every((ref, index) => {
-        const digest = receiptDigests.get(ref);
-        return (
-          digest !== undefined &&
-          digest ===
-            receiptDigests.get((normalized.receiptRefs as string[])[index]!)
-        );
-      })
-    )
-      return false;
-    for (const row of [original, normalized])
-      row.receiptRefs = (row.receiptRefs as string[]).map((ref) => {
-        if (!ref.startsWith(archivePrefix)) return ref;
-        const saved = ref.slice(archivePrefix.length);
-        return /^attempt-[0-9]+\//u.test(saved)
-          ? saved.slice(saved.indexOf("/") + 1)
-          : ref;
-      });
+    for (const row of [original, normalized]) {
+      const refs = row.receiptRefs as string[];
+      if (receiptDigests && refs.some((ref) => !receiptDigests.has(ref)))
+        return false;
+      // Closing generic work can retain both current and archived copies of a receipt.
+      row.receiptRefs = [
+        ...new Set(
+          refs.map((ref) => {
+            let path = ref;
+            if (ref.startsWith(archivePrefix)) {
+              const saved = ref.slice(archivePrefix.length);
+              if (/^attempt-[0-9]+\//u.test(saved))
+                path = saved.slice(saved.indexOf("/") + 1);
+            }
+            return receiptDigests
+              ? JSON.stringify([path, receiptDigests.get(ref)])
+              : path;
+          }),
+        ),
+      ];
+    }
   }
   return isDeepStrictEqual(original, normalized);
 }
@@ -494,10 +495,10 @@ export function projectDiscoveryCoverage(
       : {
           resolvedDeferred: (
             coverage.resolvedDeferred as Record<string, unknown>[]
-          ).map((item) => ({
-            ...item,
-            id: `${worker.id}-attempt-${worker.attempt ?? "unknown"}-resolved-${item.id}`,
-          })),
+          ).map((item) => {
+            const projected = project("resolvedDeferred", item);
+            return { ...item, id: `${prefix(projected)}-resolved-${item.id}` };
+          }),
         }),
     ...(coverage.openQuestions === undefined
       ? {}

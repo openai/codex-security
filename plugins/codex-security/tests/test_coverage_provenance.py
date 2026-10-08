@@ -122,7 +122,8 @@ def test_recovery_preserves_descriptive_provenance(
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
     assert result.read_bytes() == original
     if field == "explicitExclusions" and not retained and not optional_ids:
-        assert actual[0].pop("id").startswith("saved-")
+        actual_id = actual[0].pop("id")
+        assert actual_id.startswith("saved-")
     assert actual == [expected]
 
 

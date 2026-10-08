@@ -5,6 +5,34 @@ import path from "node:path";
 import { test } from "node:test";
 import { publishCoverageFixture } from "./deep_scan_coverage_fixture.mjs";
 
+for (const stopAfterDraft of [false, true]) {
+  test(`retried closure keeps its origin through ${stopAfterDraft ? "stopped recovery" : "publication"}`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "closure-provenance-"));
+    try {
+      const { scanDir } = await publishCoverageFixture(root, "complete", {
+        streamRetry: true,
+        closeGeneric: true,
+        stopAfterDraft,
+      });
+      const coverage = JSON.parse(
+        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
+      );
+      assert.equal(coverage.resolvedDeferred.length, 1);
+      assert.match(
+        coverage.resolvedDeferred[0].id,
+        /-attempt-1-resolved-review-task$/,
+      );
+      assert.equal(
+        coverage.resolvedDeferred[0].reason,
+        "Source review completed.",
+      );
+      assert.ok(coverage.reviews.some((review) => review.attempt === 1));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const resume of [false, true]) {
   for (const stopAfterDraft of [false, true]) {
     test(`coverage provenance survives ${resume ? "reconstructed" : "live"} reduction and ${stopAfterDraft ? "recovery" : "completion"}`, async () => {

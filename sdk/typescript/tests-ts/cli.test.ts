@@ -2047,9 +2047,8 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
-  test.each([false, true])(
-    "shows durable Deep progress without changing stdout or TUI layout (interactive=%s)",
-    async (interactive) => {
+  for (const interactive of [false, true]) {
+    test(`shows durable Deep progress without changing stdout or TUI layout (interactive=${interactive})`, async () => {
       const { stdout, stderr, runCli } = createCliTest(main, {
         stderr: interactive,
       });
@@ -2149,8 +2148,8 @@ describe("CLI", () => {
         expect(running).toContain("consolidating results");
         expect(running).not.toContain("Files:");
       }
-    },
-  );
+    });
+  }
 
   test("omits stage and file counts from interactive Deep scan dashboards", async () => {
     const { stderr, runCli } = createCliTest(main, { stderr: true });

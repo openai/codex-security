@@ -131,6 +131,10 @@ for (const close of [false, true]) {
       if (close) {
         assert.equal(persisted.sourceCoverage.resolvedDeferred?.length, 1);
         assert.equal(
+          persisted.sourceCoverage.resolvedDeferred[0].id,
+          "synthetic-worker-attempt-2-resolved-review",
+        );
+        assert.equal(
           persisted.sourceCoverage.resolvedDeferred[0].reason,
           "Synthetic review completed.",
         );
@@ -144,6 +148,87 @@ for (const close of [false, true]) {
       await rm(f.root, { recursive: true, force: true });
     }
   });
+}
+
+for (const direct of [false, true]) {
+  for (const changed of [false, true]) {
+    test(`retry closure keeps its originating attempt, direct=${direct}, changed=${changed}`, async () => {
+      const f = await fixture();
+      try {
+        await recordCodexSecurityWorkerScanDraft(
+          f.workerContext,
+          workerDraft([], {
+            complete: false,
+            coverage: {
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [{ id: "review", reason: "Synthetic pending review." }],
+            },
+          }),
+        );
+        await recordCodexSecurityWorkerScanDraft(
+          f.workerContext,
+          workerDraft([], {
+            complete: true,
+            coverage: {
+              completeness: "complete",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [],
+              resolvedDeferred: [{ id: "review", reason: "Original closure." }],
+            },
+          }),
+        );
+        const archive = path.join(f.workerRoot, "attempts/attempt-01");
+        await archiveDirectory(f.output, archive);
+        const historical = await readFile(path.join(archive, "result.json"));
+        await mkdir(f.output, { recursive: true });
+        const current = workerDraft([], { complete: true });
+        if (changed)
+          current.coverage.resolvedDeferred = [
+            { id: "review", reason: "Updated closure." },
+          ];
+        if (direct) await writeFile(f.resultPath, JSON.stringify(current));
+        else await recordCodexSecurityWorkerScanDraft(f.workerContext, current);
+        const original = await readFile(f.resultPath);
+        await recordCodexSecurityDeepReduction(f.context, {
+          scanId,
+          complete: true,
+          findings: [],
+        });
+        const { sourceCoverage } = JSON.parse(
+          await readFile(path.join(f.reducerRoot, "result.json"), "utf8"),
+        );
+        parsePersistedScanDraft({
+          scanId,
+          complete: true,
+          findings: [],
+          coverage: sourceCoverage,
+        });
+        const attempt = changed ? 2 : 1;
+        assert.deepEqual(sourceCoverage.resolvedDeferred, [
+          {
+            id: `synthetic-worker-attempt-${attempt}-resolved-review`,
+            reason: changed ? "Updated closure." : "Original closure.",
+          },
+        ]);
+        assert.ok(
+          sourceCoverage.reviews.some(
+            (review: { attempt: number }) => review.attempt === attempt,
+          ),
+        );
+        assert.equal(sourceCoverage.deferred.length, 0);
+        assert.deepEqual(await readFile(f.resultPath), original);
+        assert.deepEqual(
+          await readFile(path.join(archive, "result.json")),
+          historical,
+        );
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 for (const direct of [false, true]) {

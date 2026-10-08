@@ -2234,9 +2234,8 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each([false, true])(
-    "archives accepted output before starting, cancellation=%s",
-    async (cancelRegistration) => {
+  for (const cancelRegistration of [false, true]) {
+    test(`archives accepted output before starting, cancellation=${cancelRegistration}`, async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -2312,8 +2311,8 @@ describe("CodexSecurity orchestration", () => {
       );
       await expect(stat(output)).resolves.toBeDefined();
       await client.close();
-    },
-  );
+    });
+  }
 
   test.each(
     (["preparation", "empty", "legacy", "commit", "rollback"] as const).flatMap(
@@ -2503,7 +2502,17 @@ describe("CodexSecurity orchestration", () => {
         expect(
           await readFile(join(root, "registration-input.json"), "utf8"),
         ).toBe(submitted!);
-        const closed = once(socket, "close", { signal: deadline });
+        deadline.throwIfAborted();
+        const closed = new Promise<void>((resolve, reject) => {
+          socket!.once("close", () => resolve());
+          socket!.once("error", (error: NodeJS.ErrnoException) => {
+            // Terminating the paused child can reset its connection on Windows.
+            if (error.code !== "ECONNRESET") reject(error);
+          });
+          deadline.addEventListener("abort", () => reject(deadline.reason), {
+            once: true,
+          });
+        });
         if (cancel === "close") closing = client.close();
         else controller.abort();
         if (boundary === "commit" || boundary === "rollback") {

@@ -2191,8 +2191,11 @@ def merge_saved_results(
                 parent["coverage"] if relative == "parent" else drafts_by_path[relative]["coverage"]
             )
             retained = (
-                retained_coverage_record(
-                    "surfaces", source["surfaces"][index - 1], worker, relative
+                (
+                    retained_coverage_record(
+                        "surfaces", source["surfaces"][index - 1], worker, relative
+                    )
+                    or retained_coverage_record("surfaces", surface, worker, relative)
                 )
                 if reviewed
                 else None
