@@ -18,6 +18,13 @@ const {
   new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
 );
 
+const { validateReducerArtifacts } = await importSource(
+  new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
+);
+const { createDeepScanArtifacts } = await importSource(
+  new URL("../src/deep-scan/artifacts.ts", import.meta.url).pathname,
+);
+
 const validReduction = reduction([]);
 
 assert.equal(
@@ -187,6 +194,211 @@ try {
   await assert.rejects(
     recordCodexSecurityDeepReduction(context, reduction([])),
     /discarded every accepted Standard scan finding/,
+  );
+
+  const severityError =
+    /without recording severity\.rationale and severity\.changeConditions/;
+  const severityContext = async (
+    label: string,
+    workers: Awaited<ReturnType<typeof createWorker>>[],
+    previousReducerResultPath?: string,
+  ) => {
+    const output = path.join(dedupRoot, label, "output");
+    await mkdir(output, { recursive: true });
+    return {
+      ...context,
+      root: output,
+      deepReducer: {
+        scanRoot,
+        claimedWorkers: workers,
+        previousReducerResultPath,
+      },
+    };
+  };
+  for (const [sourceLevel, changedLevel] of [
+    ["high", "medium"],
+    ["medium", "high"],
+  ] as const) {
+    const source = { ...shared, severity: { level: sourceLevel } };
+    const worker = await createWorker({
+      workersRoot,
+      label: `severity-${sourceLevel}`,
+      id: `severity-${sourceLevel}`,
+      result: workerDraft([source]),
+    });
+    const rawSource = await readFile(worker.resultPath, "utf8");
+    const current = await severityContext(`severity-${sourceLevel}`, [worker]);
+    const rationale =
+      "A source-backed control changes the demonstrated impact.";
+    const changeConditions =
+      "Different control coverage would change this assessment.";
+    for (const explanation of [{}, { rationale }, { changeConditions }]) {
+      await assert.rejects(
+        recordCodexSecurityDeepReduction(
+          current,
+          reduction([
+            { ...source, severity: { level: changedLevel, ...explanation } },
+          ]),
+        ),
+        severityError,
+        `a ${sourceLevel} to ${changedLevel} change needs both explanation fields`,
+      );
+    }
+    await assert.rejects(readFile(path.join(current.root, "result.json")), {
+      code: "ENOENT",
+    });
+    await assert.rejects(readdir(path.join(current.root, "checkpoints")), {
+      code: "ENOENT",
+    });
+    assert.equal(await readFile(worker.resultPath, "utf8"), rawSource);
+
+    const justified = {
+      ...source,
+      severity: { level: changedLevel, rationale, changeConditions },
+    };
+    await recordCodexSecurityDeepReduction(current, reduction([justified]));
+    const previousPath = path.join(current.root, "result.json");
+    const previousBytes = await readFile(previousPath, "utf8");
+    const accepted = JSON.parse(previousBytes);
+    assert.deepEqual(accepted.findings[0].severity, justified.severity);
+    assert.deepEqual(
+      accepted.findings[0].provenance.sourceFindings[0].finding,
+      source,
+    );
+    assert.equal(await readFile(worker.resultPath, "utf8"), rawSource);
+
+    const later = await createWorker({
+      workersRoot,
+      label: `later-severity-${sourceLevel}`,
+      id: `later-severity-${sourceLevel}`,
+      result: workerDraft([source]),
+    });
+    const next = await severityContext(
+      `revert-${sourceLevel}`,
+      [later],
+      previousPath,
+    );
+    await assert.rejects(
+      recordCodexSecurityDeepReduction(next, reduction([source])),
+      severityError,
+      "matching every original source does not justify changing the previous aggregate",
+    );
+    await assert.rejects(readFile(path.join(next.root, "result.json")), {
+      code: "ENOENT",
+    });
+    await assert.rejects(readdir(path.join(next.root, "checkpoints")), {
+      code: "ENOENT",
+    });
+    assert.equal(await readFile(previousPath, "utf8"), previousBytes);
+    const explainedRevert = {
+      ...source,
+      severity: {
+        level: sourceLevel,
+        rationale:
+          "The new evidence establishes that the limiting control does not apply.",
+        changeConditions:
+          "Evidence that the control covers this path would restore the earlier assessment.",
+      },
+    };
+    await recordCodexSecurityDeepReduction(next, reduction([explainedRevert]));
+    const reverted = await readJson(next.root, "result.json");
+    assert.deepEqual(reverted.findings[0].severity, explainedRevert.severity);
+    assert.deepEqual(
+      reverted.findings[0].provenance.previousFindings[0].severity,
+      justified.severity,
+    );
+    assert.equal(await readFile(previousPath, "utf8"), previousBytes);
+
+    const unchanged = await severityContext(
+      `unchanged-${sourceLevel}`,
+      [later],
+      previousPath,
+    );
+    await recordCodexSecurityDeepReduction(unchanged, reduction([justified]));
+    assert.deepEqual(
+      (await readJson(unchanged.root, "result.json")).findings[0].severity,
+      justified.severity,
+    );
+
+    const direct = await severityContext(`direct-${sourceLevel}`, [worker]);
+    const directPath = path.join(direct.root, "result.json");
+    const unaccountedChange = JSON.stringify(
+      reduction([{ ...source, severity: { level: changedLevel } }]),
+    );
+    await writeFile(directPath, unaccountedChange);
+    const sources = await getCodexSecurityDeepReducerInputs(direct);
+    const validate = () =>
+      validateReducerArtifacts(
+        {
+          artifacts: createDeepScanArtifacts(scanRoot),
+          artifactDir: direct.root,
+          resultPath: directPath,
+          reducerId: `direct-${sourceLevel}`,
+          sources,
+        },
+        scanId,
+      );
+    await assert.rejects(
+      validate(),
+      severityError,
+      "direct worker output obeys the same severity contract",
+    );
+    assert.equal(await readFile(directPath, "utf8"), unaccountedChange);
+    await assert.rejects(readdir(path.join(direct.root, "checkpoints")), {
+      code: "ENOENT",
+    });
+    await writeFile(directPath, JSON.stringify(reduction([justified])));
+    const validated = await validate();
+    assert.deepEqual(validated.result.findings[0].severity, justified.severity);
+    assert.deepEqual(
+      await readJson(direct.root, "result.json"),
+      validated.result,
+    );
+  }
+
+  const mediumShared = { ...shared, severity: { level: "medium" } };
+  const conflictingWorker = await createWorker({
+    workersRoot,
+    label: "severity-conflict",
+    id: "severity-conflict",
+    result: workerDraft([mediumShared]),
+  });
+  const conflicting = await severityContext("severity-conflict", [
+    first,
+    conflictingWorker,
+  ]);
+  const conflictFinding = {
+    ...shared,
+    provenance: {
+      ...shared.provenance,
+      sourceFindingIds: ["worker-001:0", "severity-conflict:0"],
+    },
+  };
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(conflicting, reduction([conflictFinding])),
+    severityError,
+  );
+  const explainedConflict = {
+    ...conflictFinding,
+    severity: {
+      level: "high",
+      rationale:
+        "The retained source demonstrates the additional reachable impact.",
+      changeConditions:
+        "Evidence excluding that impact would lower the assessment.",
+    },
+  };
+  await recordCodexSecurityDeepReduction(
+    conflicting,
+    reduction([explainedConflict]),
+  );
+  const reconciled = await readJson(conflicting.root, "result.json");
+  assert.deepEqual(reconciled.findings[0].severity, explainedConflict.severity);
+  assert.deepEqual(
+    reconciled.findings[0].provenance.sourceFindings.map(
+      (entry: { finding: Finding }) => entry.finding.severity.level,
+    ),
+    ["high", "medium"],
   );
 
   const merged = reduction([shared, independent], {
