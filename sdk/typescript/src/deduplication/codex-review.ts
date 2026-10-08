@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { z } from "incur";
+import type { JsonObject } from "../config.js";
 import {
   comparisonEnvironment,
   disabledMcpServers,
@@ -134,6 +135,24 @@ function transientCodexError(info: unknown): boolean {
   return false;
 }
 
+export function reviewSqliteHome(
+  environment: NodeJS.ProcessEnv,
+  executionConfig: JsonObject,
+): string {
+  return typeof executionConfig["sqlite_home"] === "string"
+    ? resolve(
+        configuredCodexHome(environment),
+        expandHome(executionConfig["sqlite_home"], environment),
+      )
+    : resolve(
+        expandHome(
+          environmentEntry(environment, "CODEX_SQLITE_HOME")?.trim() ||
+            configuredCodexHome(environment),
+          environment,
+        ),
+      );
+}
+
 export class CodexReviewRunner {
   constructor(
     private readonly environment: NodeJS.ProcessEnv = process.env,
@@ -257,14 +276,7 @@ export class CodexReviewRunner {
           expandHome(inheritedSqliteHome, environment),
         );
       }
-      const sqliteHome =
-        typeof executionConfig["sqlite_home"] === "string"
-          ? resolve(
-              configuredCodexHome(environment),
-              expandHome(executionConfig["sqlite_home"], environment),
-            )
-          : environmentEntry(environment, "CODEX_SQLITE_HOME")?.trim() ||
-            configuredCodexHome(environment);
+      const sqliteHome = reviewSqliteHome(environment, executionConfig);
       if (hasCommandAuth(config)) {
         args.push(
           ...modelProviderConfigOverride(
