@@ -838,19 +838,10 @@ export function createCodexSecurityServer(): McpServer {
             "Accepted user input did not contain structured answers.",
           );
         }
-        const answers: Record<string, string> = {};
-        for (const question of questions) {
-          const answer = result.content[question.id];
-          if (
-            typeof answer !== "string" ||
-            !question.options.some((option) => option.label === answer)
-          ) {
-            throw new Error(
-              `User input did not contain a valid answer for ${question.id}.`,
-            );
-          }
-          answers[question.id] = answer;
-        }
+        // elicitInput validates accepted content against requestedSchema.
+        const answers = Object.fromEntries(
+          questions.map(({ id }) => [id, result.content![id] as string]),
+        );
         return userInputToolResult("accepted", answers);
       } catch (error) {
         if (signal?.aborted) throw error;

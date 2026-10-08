@@ -143,6 +143,11 @@
 - preserve structured findings API errors ([#1081](https://github.com/openai/codex-security/pull/1081))
 - reuse object validation primitives ([#1452](https://github.com/openai/codex-security/pull/1452))
 - share MCP response and annotation construction ([#1444](https://github.com/openai/codex-security/pull/1444))
+- use Codex 0.162.0 stable ([#1533](https://github.com/openai/codex-security/pull/1533))
+- update incur and KaTeX ([#1534](https://github.com/openai/codex-security/pull/1534))
+- reuse SDK validation and protocol test helpers ([#1498](https://github.com/openai/codex-security/pull/1498))
+- bump napi from 3.13.0 to 3.14.0 in /plugins/codex-security/native ([#1532](https://github.com/openai/codex-security/pull/1532))
+- wrap text by terminal display width ([#1513](https://github.com/openai/codex-security/pull/1513))
 
 <!-- release-section: highlights:end -->
 
