@@ -39,6 +39,10 @@ function sourceFindingId(value: unknown): string {
 
 /** Keep a Wiz vulnerability occurrence intact; advisory names are not identities. */
 function wizFinding(record: Record<string, unknown>): VendorFinding {
+  if (record["detectionMethod"] === "EXTERNAL_NETWORK_SCAN")
+    throw new Error(
+      "Wiz external network findings are not supported by the package vulnerability mapping.",
+    );
   const id = sourceFindingId(record["id"]);
   const name = text(record["name"]);
   const packageName = text(record["detailedName"]);
@@ -54,7 +58,9 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
   const digest =
     text(asset?.["imageDigest"]) ??
     text(record["imageDigest"]) ??
-    (asset?.["type"] === "CONTAINER_IMAGE" ? text(asset["imageId"]) : null);
+    (asset?.["type"] === "CONTAINER_IMAGE"
+      ? (text(asset["imageId"]) ?? text(asset["containerImageId"]))
+      : null);
   const updated = text(record["updatedAt"]);
   const updatedSeconds = updated ? Date.parse(updated) / 1000 : null;
   if (
@@ -72,7 +78,7 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
     description: text(record["description"]),
     severity: severity?.toLowerCase(),
     url: text(record["portalUrl"]),
-    advisory_ids: [name],
+    advisory_ids: [text(record["vulnerabilityExternalId"]) ?? name],
     packages: [
       {
         name: packageName,
