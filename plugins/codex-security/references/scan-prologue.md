@@ -24,6 +24,12 @@ For a blocked, incomplete, or failed Standard preflight, report the exact reason
 
 A Deep scan has no parent capability preflight: do not load either preflight reference, inspect runtime tools, run the helper, request remediation, or publish preflight checks. Its coordinator validates the real scan ownership, target, scope, and sandbox and owns the existing transition from the durable `preflight` phase into discovery.
 
+## Deep Worker Failures
+
+Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight does not require a particular parent delegation runtime, ownership, capacity, or depth. Discovery workers inherit the scan's model and use the reserved `codex_security_deep_scan_worker` permission profile with the parent's supported filesystem denials. The selected Codex executable must support permission-profile configuration and allowance checks. If that command fails to start or exits early, report its path and the tool's diagnostic; do not infer that its version is unsupported. If the tool identifies a missing API, ask the user to update the Codex installation at the reported path: the desktop app for an app-bundled executable, or the selected CLI otherwise. If Codex policy rejects the profile, report the tool's administrator guidance. Do not remove deny rules or select a broader sandbox to work around the error.
+
+Deep Scan workers use the selected Codex home's credentials and provider configuration. An existing `CODEX_API_KEY` remains selected. When the worker has no Codex account and its provider requires OpenAI authentication, it can use `OPENAI_API_KEY` through the SDK's API-key option. This does not replace a stored account, custom-provider authentication, or a forced ChatGPT login. The key must be present in the process that launched the plugin; setting it later in a separate shell does not update a running plugin.
+
 ## Cancellation and Recovery
 
 Keep the authorized target and scope unchanged, preserve repository source, inspect only authorized current-state evidence, and follow the active mode's ownership boundaries. Use `cancel_codex_security_scan` only for explicit user cancellation. Reserve `fail_codex_security_scan` for a confirmed unrecoverable blocker after documented recovery is exhausted; never use failure for active workers, partial artifacts, unfinished work, temporary preflight problems, or an ending turn. Leave resumable durable scans running for a later continuation.

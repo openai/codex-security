@@ -1,18 +1,12 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   type JsonObject,
+  inlineToml,
+  modelProviderConfigOverride,
   resolveCodexProfile,
   scanModelConfiguration,
   scanModelProvider,
@@ -29,22 +23,40 @@ import {
   resolveCodexCommand,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-config-",
+  false,
+);
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
+afterEach(cleanup);
+
+test("inline Codex overrides omit optional null fields like the file writer", async () => {
+  for (const value of [null, { args: ["fixture", null] }]) {
+    expect(() => inlineToml(value)).toThrow(ConfigurationError);
+  }
+  expect(modelProviderConfigOverride({ model_providers: null })).toEqual([]);
+  const provider = {
+    fixture: {
+      auth: { command: "synthetic-helper", args: null },
+      enabled: true,
+    },
+  };
+  const root = await temporaryDirectory();
+  const config = await mergedCodexConfig({
+    codexOverrides: { model_providers: provider },
+  });
+  const path = join(root, "config.toml");
+  await writeCodexConfig(path, config);
+  const written = parse(await readFile(path, "utf8"));
+  expect(
+    parse(`model_providers = ${inlineToml(provider)}`)["model_providers"],
+  ).toEqual(written["model_providers"]);
+  expect(written["model_providers"]).toEqual({
+    fixture: { auth: { command: "synthetic-helper" }, enabled: true },
+  });
 });
-
-async function temporaryDirectory(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), "codex-security-config-"));
-  temporaryDirectories.push(path);
-  return path;
-}
 
 function runPinnedCodex(
   codexHome: string,
@@ -245,8 +257,13 @@ describe("Codex configuration", () => {
   test("rejects invalid model settings from the selected Codex profile", async () => {
     for (const [profile, message] of [
       [{ model: " " }, "model must be a nonempty string"],
+      [{ model: 12 }, "model must be a nonempty string"],
       [
         { model_reasoning_effort: " " },
+        "reasoning effort must be a nonempty string",
+      ],
+      [
+        { model_reasoning_effort: false },
         "reasoning effort must be a nonempty string",
       ],
     ] as const) {
@@ -255,6 +272,19 @@ describe("Codex configuration", () => {
       });
 
       expect(() => scanModelConfiguration(config)).toThrow(message);
+    }
+  });
+
+  test("still requires root model and effort when the profile omits them", async () => {
+    for (const field of ["model", "model_reasoning_effort"]) {
+      const config = await mergedCodexConfig({
+        codexOverrides: {
+          [field]: null,
+          profile: "review",
+          profiles: { review: { model: null, model_reasoning_effort: null } },
+        },
+      });
+      expect(() => scanModelConfiguration(config)).toThrow(ConfigurationError);
     }
   });
 
@@ -351,7 +381,7 @@ describe("Codex configuration", () => {
       },
     });
     expect(merged["agents"]).toBeUndefined();
-    expect(merged["model"]).toBe("gpt-6-sol");
+    expect(merged["model"]).toBe("gpt-5.6-sol");
     expect(merged["model_reasoning_effort"]).toBe("high");
     expect(merged["model_reasoning_summary"]).toBe("concise");
     expect(merged["show_raw_agent_reasoning"]).toBe(false);
@@ -384,7 +414,7 @@ describe("Codex configuration", () => {
     });
 
     expect(merged).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       profiles: {
         elevated: {
           features: { elevated_windows_sandbox: true },
@@ -459,7 +489,7 @@ describe("Codex configuration", () => {
     const merged = await mergedCodexConfig({});
 
     expect(scanRuntimeCodexConfig(merged)).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       default_permissions: "codex_security_scan",
       permissions: {
         codex_security_scan: {
@@ -651,9 +681,12 @@ describe("Codex configuration", () => {
               details,
             )) ||
           (process.platform === "win32" &&
-            details.includes(
+            (details.includes(
               "Restricted read-only access requires the elevated Windows sandbox backend",
-            ))
+            ) ||
+              details.includes(
+                "elevated Windows sandbox requires effective `:root` read access",
+              )))
         ) {
           expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
             0,
@@ -707,7 +740,7 @@ describe("Codex configuration", () => {
     await writeCodexConfig(path, await mergedCodexConfig({}));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
     });
 
     const result = runPinnedCodex(root, ["features", "list"]);
@@ -789,12 +822,12 @@ describe("Codex configuration", () => {
       },
     });
     expect(await mergedCodexConfig({})).toMatchObject({
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       model_reasoning_effort: "xhigh",
       model_reasoning_summary: "detailed",
       show_raw_agent_reasoning: true,
       windows: {
-        sandbox: "unelevated",
+        sandbox: "elevated",
       },
     });
   });

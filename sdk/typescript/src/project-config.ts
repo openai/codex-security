@@ -57,6 +57,7 @@ export type ConfigurationSource = "default" | "legacy" | "project" | "cli";
 const PROJECT_SETTING_KEYS = {
   auth: "auth",
   mode: "scan.mode",
+  cyberAccessProgram: "scan.cyber_access_program",
   target: "scan.scope",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
@@ -331,6 +332,11 @@ export function resolveScanSettings(
   const settings: ResolvedScanSettings = {
     ...pickScanSettings(overrides),
     auth: choose("auth", file?.auth, overrides.auth) ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram: choose(
+      "scan.cyber_access_program",
+      file?.scan?.cyber_access_program,
+      overrides.cyberAccessProgram,
+    ),
     mode,
     target,
     knowledgeBasePaths,

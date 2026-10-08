@@ -1,3 +1,4 @@
+import { decodeUtf8 } from "./utf8";
 import {
   closeSync,
   lstatSync,
@@ -10,22 +11,19 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, parse, sep } from "node:path";
+import { basename, dirname, sep, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { unixBinding, windowsBinding } from "../native";
 import { windowsFileSystem } from "../../../native/windows-files.mjs";
 import {
   decodePosixBytes,
   encodePosixPath,
-  SymlinkLoopError,
   resolvePosixPath,
 } from "./posix-path";
 
 const MAX_SECURITY_MD_BYTES = 1024 * 1024;
-const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-class HomeExpansionError extends Error {}
 const windows = process.platform === "win32";
-const windowsFiles = () => windowsFileSystem(windowsBinding());
+export const windowsFiles = () => windowsFileSystem(windowsBinding());
 const encodePath = (path: string) =>
   windows ? Buffer.from(path, "utf16le") : encodePosixPath(path);
 const decodePath = (path: Buffer) =>
@@ -36,73 +34,55 @@ type FileInfo = Pick<Stats, "isDirectory" | "isFile" | "isSymbolicLink"> & {
 const statPath = (path: Buffer): FileInfo =>
   windows ? windowsFiles().stat(path) : statSync(path);
 
-function windowsParts(value: string): [string, string, string] {
-  const path = value.replaceAll("/", "\\");
-  if (path.startsWith("\\\\")) {
-    const start = path.slice(0, 8).toUpperCase() === "\\\\?\\UNC\\" ? 8 : 2;
-    const server = path.indexOf("\\", start);
-    const share = server === -1 ? -1 : path.indexOf("\\", server + 1);
-    return share === -1
-      ? [value, "", ""]
-      : [value.slice(0, share), value[share]!, value.slice(share + 1)];
-  }
-  const drive = path[1] === ":" ? 2 : 0;
-  const root = path[drive] === "\\" ? 1 : 0;
-  return [
-    value.slice(0, drive),
-    value.slice(drive, drive + root),
-    value.slice(drive + root),
-  ];
-}
-
 function windowsJoin(left: string, right: string): string {
-  const [leftDrive, leftRoot, leftPath] = windowsParts(left);
-  const [rightDrive, rightRoot, rightPath] = windowsParts(right);
-  if (rightRoot) return (rightDrive || leftDrive) + rightRoot + rightPath;
-  if (rightDrive && rightDrive.toLowerCase() !== leftDrive.toLowerCase())
+  if (right.startsWith("\\\\?\\") || right.startsWith("\\\\.\\")) return right;
+  const namespaced = left.startsWith("\\\\?\\");
+  const base = left.startsWith("\\\\?\\UNC\\")
+    ? `\\\\${left.slice(8)}`
+    : namespaced
+      ? left.slice(4)
+      : left;
+  const drive = win32.parse(right).root;
+  if (
+    drive.endsWith(":") &&
+    drive.toLowerCase() !== base.slice(0, 2).toLowerCase()
+  )
     return right;
-  const drive = rightDrive || leftDrive;
-  const path =
-    leftPath + (leftPath && !/[/\\]$/u.test(leftPath) ? "\\" : "") + rightPath;
-  const root =
-    leftRoot || (path && drive && !/[:/\\]$/u.test(drive) ? "\\" : "");
-  return drive + root + path;
+  const joined = win32.resolve(base, right);
+  return namespaced && !win32.isAbsolute(right)
+    ? win32.toNamespacedPath(joined)
+    : joined;
 }
 
-function parsedPath(value: string): string {
-  // pathlib removes empty and '.' components while preserving symlink/.. pairs.
-  let root = windows
-    ? windowsParts(value).slice(0, 2).join("").replaceAll("/", "\\")
-    : value.startsWith("//") && !value.startsWith("///")
-      ? "//"
-      : parse(value).root;
-  if (windows && root.startsWith("\\\\") && !root.endsWith("\\")) {
-    const parts = root.split("\\");
-    if ((parts.length === 4 && !"?.".includes(parts[2]!)) || parts.length === 6)
-      root += "\\";
-  }
+export function parsedPath(value: string): string {
+  if (!windows) return value || ".";
+  const root = win32.parse(value).root.replaceAll("/", "\\");
   const parts = value
     .slice(root.length)
-    .split(process.platform === "win32" ? /[/\\]/u : /\//u)
+    .split(/[/\\]/u)
     .filter((part) => part !== "" && part !== ".");
-  if (windows && !root && windowsParts(parts[0] ?? "")[0]) parts.unshift(".");
+  if (!root && win32.parse(parts[0] ?? "").root) parts.unshift(".");
   return root + parts.join(sep) || ".";
 }
 
-function resolvedPath(path: Buffer): Buffer {
-  if (process.platform !== "win32") return resolvePosixPath(path);
-  try {
-    return windowsFiles().realpath(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ELOOP")
-      throw new SymlinkLoopError(`Symlink loop from ${decodePath(path)}`);
-    throw error;
-  }
+export function resolvedPath(path: Buffer, strict = true): Buffer {
+  return windows
+    ? windowsFiles().realpath(path, strict)
+    : resolvePosixPath(path, strict);
 }
 
-function expandHome(path: string, posixHome: string | undefined): string {
+export function expandHome(
+  path: string,
+  posixHome: string | undefined,
+): string {
   if (!path.startsWith("~")) return path;
   if (process.platform === "win32") {
+    // path.join('C:', 'name') is rooted; 'C:.' keeps it drive-relative.
+    const joinHome = (home: string, child: string) =>
+      win32.join(
+        home.length === 2 && home[1] === ":" ? `${home}.` : home,
+        child,
+      );
     const environment = (name: string) =>
       windowsBinding()
         .windowsEnvironment(Buffer.from(name, "utf16le"))
@@ -114,38 +94,41 @@ function expandHome(path: string, posixHome: string | undefined): string {
     let home = environment("USERPROFILE");
     const homePath = environment("HOMEPATH");
     if (home === undefined && homePath !== undefined) {
-      home = windowsJoin(environment("HOMEDRIVE") ?? "", homePath);
+      home = `${environment("HOMEDRIVE") ?? ""}${homePath}`;
     }
     if (home === undefined)
-      throw new HomeExpansionError("Could not determine home directory.");
+      throw new Error("Could not determine home directory.");
+    // node:path recognizes share roots in ordinary UNC paths, not extended UNC.
+    const namespacedUnc = home.slice(0, 8).toUpperCase() === "\\\\?\\UNC\\";
+    if (namespacedUnc) home = `\\\\${home.slice(8)}`;
     if (username !== "" && username !== currentUsername) {
-      const [drive, root, tail] = windowsParts(home);
-      const separator = Math.max(tail.lastIndexOf("/"), tail.lastIndexOf("\\"));
-      if (currentUsername !== tail.slice(separator + 1)) {
-        throw new HomeExpansionError("Could not determine home directory.");
+      if (currentUsername !== win32.parse(home).base) {
+        throw new Error("Could not determine home directory.");
       }
-      const parent =
-        drive + root + tail.slice(0, separator + 1).replace(/[/\\]+$/u, "");
-      home = windowsJoin(parent, username);
+      home = joinHome(win32.dirname(home), username);
     }
     if (home.startsWith("~"))
-      throw new HomeExpansionError("Could not determine home directory.");
-    return windowsJoin(home, separator === -1 ? "" : path.slice(end + 1));
+      throw new Error("Could not determine home directory.");
+    const expanded = joinHome(
+      home,
+      separator === -1 ? "" : path.slice(end + 1),
+    );
+    return namespacedUnc ? win32.toNamespacedPath(expanded) : expanded;
   }
   if (path === "~" || path.startsWith("~/")) {
     const home = posixHome ?? homedir();
     if (home.startsWith("~"))
-      throw new HomeExpansionError("Could not determine home directory.");
+      throw new Error("Could not determine home directory.");
     return home + path.slice(1) || "/";
   }
   const separator = path.indexOf("/");
   const end = separator === -1 ? path.length : separator;
   const result = unixBinding().userHome(encodePosixPath(path.slice(1, end)));
   if (result.value === null)
-    throw new HomeExpansionError("Could not determine home directory.");
+    throw new Error("Could not determine home directory.");
   const home = decodePosixBytes(result.value).replace(/\/+$/u, "");
   if (home.startsWith("~"))
-    throw new HomeExpansionError("Could not determine home directory.");
+    throw new Error("Could not determine home directory.");
   return home + path.slice(end) || "/";
 }
 
@@ -167,18 +150,27 @@ function parentDirectory(path: Buffer): Buffer {
     : path.subarray(0, Math.max(1, separator));
 }
 
-function windowsRelativePath(path: Buffer, root: Buffer): Buffer | undefined {
+export function windowsRelativePath(
+  path: Buffer,
+  root: Buffer,
+  allowMissing = false,
+): Buffer | undefined {
   const files = windowsFiles();
   const rootIdentity = files.identity(root);
   const parts: string[] = [];
   let current = path;
   while (true) {
-    const identity = files.identity(current);
-    if (
-      identity.volume === rootIdentity.volume &&
-      identity.fileId.equals(rootIdentity.fileId)
-    )
-      return encodePath(parts.reverse().join("\\"));
+    try {
+      const identity = files.identity(current);
+      if (
+        identity.volume === rootIdentity.volume &&
+        identity.fileId.equals(rootIdentity.fileId)
+      )
+        return encodePath(parts.reverse().join("\\"));
+    } catch (error) {
+      if (!allowMissing || (error as NodeJS.ErrnoException).code !== "ENOENT")
+        throw error;
+    }
     const parent = parentDirectory(current);
     if (parent.equals(current)) return undefined;
     parts.push(basename(decodePath(current)));
@@ -201,15 +193,11 @@ function inside(path: Buffer, root: Buffer, label: string): Buffer {
 }
 
 function resolveRoot(repo: string, posixHome: string | undefined): Buffer {
+  const expanded = encodePath(parsedPath(expandHome(repo, posixHome)));
   let root: Buffer;
   try {
-    root = resolvedPath(encodePath(parsedPath(expandHome(repo, posixHome))));
-  } catch (error) {
-    if (
-      error instanceof SymlinkLoopError ||
-      error instanceof HomeExpansionError
-    )
-      throw error;
+    root = resolvedPath(expanded);
+  } catch {
     throw new Error(`scan root does not exist: ${repo}`);
   }
   if (!statPath(root).isDirectory()) {
@@ -243,34 +231,46 @@ function asciiJson(value: string): string {
   );
 }
 
-function comparePaths(left: string, right: string): number {
-  let leftIndex = 0;
-  let rightIndex = 0;
-  while (leftIndex < left.length && rightIndex < right.length) {
-    const leftPoint = left.codePointAt(leftIndex)!;
-    const rightPoint = right.codePointAt(rightIndex)!;
-    if (leftPoint !== rightPoint) return leftPoint - rightPoint;
-    leftIndex += leftPoint > 0xffff ? 2 : 1;
-    rightIndex += rightPoint > 0xffff ? 2 : 1;
-  }
-  return left.length - right.length;
+function directoryEntries(directory: Buffer) {
+  return windows
+    ? windowsFiles().entriesWithTypes(directory)
+    : readdirSync(directory, {
+        encoding: "buffer",
+        withFileTypes: true,
+      }).flatMap((entry) => {
+        // Some Node-compatible runtimes return names without their types.
+        if (!(entry instanceof Uint8Array)) return [entry];
+        const name = Buffer.from(entry);
+        let metadata;
+        try {
+          metadata = lstatSync(appendPath(directory, name));
+        } catch (error) {
+          if (
+            ["ENOENT", "ENOTDIR"].includes(
+              (error as NodeJS.ErrnoException).code ?? "",
+            )
+          )
+            return [];
+          throw error;
+        }
+        return [
+          {
+            name,
+            isDirectory: () => metadata.isDirectory(),
+            isSymbolicLink: () => metadata.isSymbolicLink(),
+          },
+        ];
+      });
 }
 
 function listSecurityMd(repo: string, posixHome: string | undefined): string[] {
   const root = resolveRoot(repo, posixHome);
   const policies: string[] = [];
   function walk(directory: Buffer, prefix: string): void {
-    const entries = (
-      windows
-        ? windowsFiles().entriesWithTypes(directory)
-        : readdirSync(directory, { encoding: "buffer", withFileTypes: true })
-    ).map((entry) => ({
-      bytes: entry.name,
-      name: decodePath(entry.name),
-      entry,
-    }));
-    entries.sort((left, right) => comparePaths(left.name, right.name));
-    for (const { bytes, name, entry: listedEntry } of entries) {
+    const entries = directoryEntries(directory);
+    for (const listedEntry of entries) {
+      const bytes = listedEntry.name;
+      const name = decodePath(bytes);
       if (name === ".git") continue;
       const path = appendPath(directory, bytes);
       const source = prefix === "" ? name : `${prefix}/${name}`;
@@ -306,7 +306,7 @@ function listSecurityMd(repo: string, posixHome: string | undefined): string[] {
     }
   }
   walk(root, "");
-  return policies.sort(comparePaths);
+  return policies.sort();
 }
 
 function readPolicy(path: Buffer, displayedPath: Buffer): string {
@@ -336,7 +336,7 @@ function readPolicy(path: Buffer, displayedPath: Buffer): string {
     throw new Error(`SECURITY.md exceeds 1 MiB: ${decodePath(displayedPath)}`);
   }
   try {
-    return utf8.decode(buffer.subarray(0, length));
+    return decodeUtf8(buffer.subarray(0, length));
   } catch {
     throw new Error(
       `SECURITY.md is not valid UTF-8: ${decodePath(displayedPath)}`,
@@ -351,20 +351,29 @@ function resolveSecurityMd(
 ): string {
   const root = resolveRoot(repo, posixHome);
   const expandedScope = parsedPath(expandHome(scope, posixHome));
-  const requestedScope =
-    process.platform === "win32"
-      ? windowsFiles().absolute(
-          encodePath(windowsJoin(decodePath(root), expandedScope)),
-        )
-      : expandedScope.startsWith("/")
-        ? encodePosixPath(expandedScope)
-        : appendPath(root, encodePosixPath(expandedScope));
+  let requestedScope: Buffer;
+  if (windows) {
+    const files = windowsFiles();
+    const requestedRoot = decodePath(
+      files.absolute(encodePath(parsedPath(expandHome(repo, posixHome)))),
+    );
+    // Keep ordinary paths for OS normalization; canonicalize explicit device roots.
+    const scopeRoot =
+      requestedRoot.startsWith("\\\\?\\") || requestedRoot.startsWith("\\\\.\\")
+        ? decodePath(root)
+        : requestedRoot;
+    requestedScope = files.absolute(
+      encodePath(windowsJoin(scopeRoot, expandedScope)),
+    );
+  } else {
+    requestedScope = expandedScope.startsWith("/")
+      ? encodePosixPath(expandedScope)
+      : appendPath(root, encodePosixPath(expandedScope));
+  }
   let resolvedScope: Buffer;
   try {
-    // Resolve links before '..', including Python's accepted file/.. paths.
     resolvedScope = resolvedPath(requestedScope);
-  } catch (error) {
-    if (error instanceof SymlinkLoopError) throw error;
+  } catch {
     throw new Error(`scan scope does not exist: ${decodePath(requestedScope)}`);
   }
   inside(resolvedScope, root, "scan scope");
@@ -402,67 +411,15 @@ export function resolveSecurityMdCommand(
   posixHome = process.env.HOME,
 ): number {
   try {
-    const options = {
-      repo: { type: "string" },
-      list: { type: "boolean" },
-      scope: { type: "string" },
-      out: { type: "string", default: "-" },
-      help: { type: "boolean", short: "h" },
-    } as const;
-    const names = Object.keys(options) as (keyof typeof options)[];
-    let parsedArgs: string[] = [];
-    for (let index = 0; index < args.length; index++) {
-      let arg = args[index]!;
-      if (arg === "--") throw new Error("Unexpected argument '--'");
-      if (arg.startsWith("-h")) {
-        if (/^-h+-/u.test(arg)) throw new Error(`Unexpected argument '${arg}'`);
-        if (/^-h+=/u.test(arg)) parseArgs({ args: [arg], options });
-        arg = "--help";
-      }
-      if (arg.startsWith("--") && arg !== "--") {
-        const equals = arg.indexOf("=");
-        const name = arg.slice(2, equals === -1 ? undefined : equals);
-        const matches = names.filter((option) => option.startsWith(name));
-        const option = matches.length === 1 ? matches[0] : undefined;
-        if (option !== undefined) {
-          // argparse accepts unique long-option prefixes.
-          arg = `--${option}${equals === -1 ? "" : arg.slice(equals)}`;
-          const next = args[index + 1];
-          if (
-            equals === -1 &&
-            options[option].type === "string" &&
-            next !== undefined
-          ) {
-            const prefix = next.split("=", 1)[0]!;
-            const optional =
-              next.startsWith("-h") ||
-              names.some((name) => `--${name}`.startsWith(prefix));
-            // Declared options take precedence over negative numbers and spaces.
-            if (
-              !next.startsWith("-") ||
-              next === "-" ||
-              (!optional &&
-                (next.includes(" ") ||
-                  /^-(?:\p{Decimal_Number}+|\p{Decimal_Number}*\.\p{Decimal_Number}+)\n?$/u.test(
-                    next,
-                  )))
-            ) {
-              arg += `=${next}`;
-              index++;
-            }
-          }
-        }
-        if (matches.length) parseArgs({ args: [arg], options });
-      }
-      parsedArgs.push(arg);
-      if (arg === "--help") {
-        parsedArgs = [arg];
-        break;
-      }
-    }
     const { values } = parseArgs({
-      args: parsedArgs,
-      options,
+      args,
+      options: {
+        repo: { type: "string" },
+        list: { type: "boolean" },
+        scope: { type: "string" },
+        out: { type: "string", default: "-" },
+        help: { type: "boolean", short: "h" },
+      },
     });
     if (values.help) {
       console.log(
@@ -501,10 +458,7 @@ export function resolveSecurityMdCommand(
     }
   } catch (error) {
     console.error(`resolve-security-md: error: ${(error as Error).message}`);
-    return error instanceof SymlinkLoopError ||
-      error instanceof HomeExpansionError
-      ? 1
-      : 2;
+    return 2;
   }
   return 0;
 }
