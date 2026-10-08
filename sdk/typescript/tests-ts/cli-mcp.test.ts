@@ -1,5 +1,10 @@
 import { writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { build } from "esbuild";
+import { nodeCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PassThrough, Writable } from "node:stream";
 import { setImmediate } from "node:timers/promises";
@@ -102,6 +107,113 @@ async function connect(
 }
 
 describe("CLI MCP scans", () => {
+  for (const shutdown of ["SIGINT", "SIGTERM", "EOF", "flowing"] as const) {
+    // Windows uses synchronous stdout pipes and does not deliver POSIX signals.
+    test.skipIf(process.platform === "win32" && shutdown !== "flowing")(
+      `handles Node stdout during ${shutdown} shutdown`,
+      async () => {
+        const root = await temporaryDirectory();
+        const fixture = join(root, "mcp-stdio.cjs");
+        await build({
+          entryPoints: [join(import.meta.dir, "fixtures/mcp-stdio.mjs")],
+          outfile: fixture,
+          bundle: true,
+          platform: "node",
+          format: "cjs",
+          define: {
+            "import.meta.url": JSON.stringify(
+              new URL("../src/version.ts", import.meta.url).href,
+            ),
+          },
+        });
+        const child = spawn(nodeCommand().command, [fixture, shutdown], {
+          stdio: ["pipe", "pipe", "pipe", "ipc"],
+          timeout: 10_000,
+          killSignal: "SIGKILL",
+          windowsHide: true,
+        });
+        const exited = once(child, "exit");
+        const closed = once(child, "close");
+        const stderr = capture();
+        child.stderr!.setEncoding("utf8").on("data", stderr.stream.write);
+        const lines = createInterface({ input: child.stdout! });
+        const responses = lines[Symbol.asyncIterator]();
+        const send = (
+          id: number | undefined,
+          method: string,
+          params: object = {},
+        ) =>
+          child.stdin!.write(
+            JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
+          );
+        try {
+          send(1, "initialize", {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "stdio-test", version: "1" },
+          });
+          expect(JSON.parse((await responses.next()).value!).id).toBe(1);
+          send(undefined, "notifications/initialized");
+          if (shutdown === "SIGINT" || shutdown === "SIGTERM") {
+            const started = once(child, "message");
+            send(2, "tools/call", {
+              name: "scan",
+              arguments: { waitForAbort: true },
+            });
+            expect((await started)[0]).toEqual({ event: "scan-started" });
+          }
+          const paused = shutdown !== "flowing";
+          if (paused) lines.pause();
+          const buffered = paused ? once(child, "message") : undefined;
+          send(3, "tools/call", { name: "scan", arguments: {} });
+          if (buffered)
+            expect((await buffered)[0]).toEqual({ event: "backpressure" });
+          let response = paused
+            ? undefined
+            : JSON.parse((await responses.next()).value!);
+          const returned = once(child, "message");
+          if (shutdown === "EOF" || shutdown === "flowing") {
+            child.stdin!.end();
+            expect((await returned)[0]).toMatchObject({
+              event: "returned",
+              exitCode: 0,
+            });
+            // EOF still allows queued responses to drain in full.
+            if (paused) {
+              lines.resume();
+              response = JSON.parse((await responses.next()).value!);
+            }
+            expect(response.id).toBe(3);
+            expect(response.result.structuredContent.data.payload).toBe(
+              "x".repeat(1024 * 1024),
+            );
+          } else {
+            child.kill(shutdown);
+            expect((await returned)[0]).toEqual({
+              event: "cleanup-started",
+              outputDestroyed: false,
+            });
+            const cleaned = once(child, "message");
+            child.send("finish-cleanup");
+            expect((await cleaned)[0]).toEqual({ event: "cleanup-finished" });
+          }
+          expect(await exited, stderr.text()).toEqual(
+            shutdown === "EOF" || shutdown === "flowing"
+              ? [0, null]
+              : [null, shutdown],
+          );
+        } finally {
+          if (child.exitCode === null && child.signalCode === null)
+            child.kill("SIGKILL");
+          child.stdout!.resume();
+          await closed;
+          lines.close();
+        }
+      },
+      30_000,
+    );
+  }
+
   test("advertises scan-only inputs and read-only metadata", async () => {
     const session = await connect();
     try {
