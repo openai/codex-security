@@ -613,13 +613,14 @@ def _semantic_digest(value: Any) -> str:
 
     def normalize(item: Any) -> Any:
         if isinstance(item, dict):
-            return ["object", [[key, normalize(item[key])] for key in sorted(item)]]
+            return {key: normalize(child) for key, child in item.items()}
         if isinstance(item, (list, tuple)):
-            return ["array", [normalize(child) for child in item]]
+            # Reserve number markers without adding another container level.
+            return ["array", *(normalize(child) for child in item)]
         if isinstance(item, (int, float)) and not isinstance(item, bool):
             sign, coefficient, exponent = json_number_key(item)
             return ["number", sign, coefficient, hex(exponent)]
-        return ["literal", item]
+        return item
 
     return _digest(normalize(value))
 

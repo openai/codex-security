@@ -1825,6 +1825,7 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
         "raw-underflow",
         "raw-large-underflow",
         "raw-exponent",
+        "deep-extension",
     ],
 )
 def test_recovery_does_not_promote_already_retained_historical_finding(
@@ -1847,6 +1848,11 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     historical["confidence"]["level"] = "high"
     historical.pop("identity")
     checkpoint_historical = copy.deepcopy(historical)
+    if variant == "deep-extension":
+        deep: object = 1.5
+        for _ in range(350):
+            deep = {"nested": deep}
+        checkpoint_historical["extensions"]["deep"] = deep
     if variant in {"location", "evidence"}:
         for location in checkpoint_historical[
             "locations" if variant == "location" else "codeEvidence"
@@ -1923,6 +1929,7 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
         "raw-long-fraction",
         "raw-underflow",
         "raw-large-underflow",
+        "deep-extension",
     }:
         assert retained["locations"][0]["startLine"] == 1
         assert retained["severity"]["level"] == "critical"
@@ -1942,7 +1949,13 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
 
 @pytest.mark.parametrize(
     ("parent_value", "worker_value", "distinct"),
-    [(1, 1.0, False), (1, True, True), (0, False, True), (1, "1", True)],
+    [
+        (1, 1.0, False),
+        (1, True, True),
+        (0, False, True),
+        (1, "1", True),
+        (1, ["number", 1, "1", "0x0"], True),
+    ],
 )
 def test_recovery_distinguishes_parent_and_worker_json_values(
     tmp_path: Path, parent_value: object, worker_value: object, distinct: bool
