@@ -151,6 +151,7 @@
 - group deduplication pairs by existing roots ([#1468](https://github.com/openai/codex-security/pull/1468))
 - simplify export and progress delegation ([#1478](https://github.com/openai/codex-security/pull/1478))
 - bump ruff from 0.16.9 to 0.16.10 in /plugins/codex-security ([#1531](https://github.com/openai/codex-security/pull/1531))
+- share workbench migration repair instructions ([#1496](https://github.com/openai/codex-security/pull/1496))
 
 <!-- release-section: highlights:end -->
 
