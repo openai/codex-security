@@ -163,7 +163,14 @@ describe("CodexSecurity policy API", () => {
     "symlink",
     ...(process.platform === "win32"
       ? []
-      : ["npm", "npm-vendor", "npm-linked", "npm-vendor-linked"]),
+      : [
+          "npm",
+          "npm-vendor",
+          "npm-linked",
+          "npm-vendor-linked",
+          "npm-legacy",
+          "npm-vendor-legacy",
+        ]),
   ])(
     "grants only the selected runtime files to policy turns (%s)",
     async (installation) => {
@@ -204,7 +211,13 @@ describe("CodexSecurity policy API", () => {
             );
         const architecture = process.arch === "arm64" ? "aarch64" : "x86_64";
         const target = `${architecture}-${process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`;
-        const native = join(nativeRoot, "vendor", target, "bin", "codex");
+        const native = join(
+          nativeRoot,
+          "vendor",
+          target,
+          installation.endsWith("-legacy") ? "codex" : "bin",
+          "codex",
+        );
         await mkdir(dirname(native), { recursive: true });
         await writeFile(native, "synthetic native executable\n");
         if (installation.startsWith("npm-vendor"))

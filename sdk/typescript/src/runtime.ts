@@ -2801,12 +2801,11 @@ function packagedCodexCommand(codexPackageJson?: string): CodexCommand {
     (entry) =>
       entry.isDirectory() && (!legacyVendor || entry.name === legacyTarget),
   );
-  const command = join(
-    vendor,
-    target?.name ?? "",
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  );
+  const targetRoot = join(vendor, target?.name ?? "");
+  const binaryName = process.platform === "win32" ? "codex.exe" : "codex";
+  let command = join(targetRoot, "bin", binaryName);
+  if (codexPackageJson !== undefined && !existsSync(command))
+    command = join(targetRoot, "codex", binaryName);
   if (target === undefined || !existsSync(command)) {
     throw new PluginBootstrapError(
       `The ${packageName} package does not contain the Codex executable. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
