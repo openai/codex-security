@@ -690,7 +690,6 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
   return {
     scanId: requiredString(value.scanId, "deepScan.scanId"),
     status,
-    phase: deepScanPhase(value.phase),
     coordinatorGeneration: optionalPositiveInteger(value.coordinatorGeneration),
     createdAt: optionalString(value.createdAt),
     updatedAt: optionalString(value.updatedAt),
@@ -708,7 +707,6 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
       value.consecutiveErrors ?? 0,
       "deepScan.consecutiveErrors",
     ),
-    canonicalArtifacts: parseCanonicalArtifacts(value.canonicalArtifacts),
     manifestPath: optionalString(value.manifestPath),
     terminalReason:
       value.terminalReason === "saturated" || value.terminalReason === "capped"
@@ -748,19 +746,6 @@ function parsePersistedDedupInputs(
   });
 }
 
-function deepScanPhase(value: unknown): DeepScanRunState["phase"] {
-  if (value === undefined || value === null) return undefined;
-  if (
-    value === "setup" ||
-    value === "discovery" ||
-    value === "reducing" ||
-    value === "terminal"
-  ) {
-    return value;
-  }
-  throw new Error("Codex Security workbench returned invalid deepScan.phase.");
-}
-
 function parsePersistedWorkers(value: unknown): PersistedDeepScanWorker[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
@@ -771,23 +756,6 @@ function parsePersistedWorkers(value: unknown): PersistedDeepScanWorker[] {
   return value.map((candidate) =>
     parsePersistedWorker(objectValue(candidate, "deepScan.worker")),
   );
-}
-
-function parseCanonicalArtifacts(
-  value: unknown,
-): DeepScanRunState["canonicalArtifacts"] {
-  if (value === null || value === undefined) return undefined;
-  const artifacts = objectValue(value, "deepScan.canonicalArtifacts");
-  return {
-    inScopeFilesPath: requiredString(
-      artifacts.inScopeFilesPath,
-      "deepScan.canonicalArtifacts.inScopeFilesPath",
-    ),
-    candidateLedgerPath: requiredString(
-      artifacts.candidateLedgerPath,
-      "deepScan.canonicalArtifacts.candidateLedgerPath",
-    ),
-  };
 }
 
 function parseWorker(

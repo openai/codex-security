@@ -38,6 +38,8 @@ export async function testDeepScanLifecycle({
     canceledPublicationWaitsForHeartbeat,
     delayedReducerDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
+    concurrentOwnershipReadsKeepReplacementResult,
+    lateFailurePersistenceKeepsStoppedState,
     shutdownStopsReplacementObservation,
     failedCancellationStillPreservesResults,
     lateCancellationKeepsPersistedFailure,
@@ -884,6 +886,163 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     assert.equal((await coordinator.settled()).status, "succeeded");
   }
 
+  async function concurrentOwnershipReadsKeepReplacementResult() {
+    for (const [readFails, leaseLossConfirmed] of [
+      [false, false],
+      [true, false],
+      [true, true],
+    ]) {
+      const fixture = await fixtureRun(config);
+      fixture.run.coordinatorGeneration = 2;
+      const store = new FakeStore(fixture.run);
+      const preparing = Promise.withResolvers<void>();
+      const failProgress = Promise.withResolvers<void>();
+      const heartbeatReadStarted = Promise.withResolvers<void>();
+      const failureReadStarted = Promise.withResolvers<void>();
+      const heartbeatRead = Promise.withResolvers<DeepScanRunState>();
+      const failureRead = Promise.withResolvers<DeepScanRunState>();
+      const observing = Promise.withResolvers<void>();
+      const replacement = Promise.withResolvers<DeepScanRunState>();
+      const releaseStaleFailure = Promise.withResolvers<void>();
+      let reads = 0;
+      let failureCalls = 0;
+      let observations = 0;
+      store.updateProgress = async () => {
+        preparing.resolve();
+        await failProgress.promise;
+        throw new Error(
+          leaseLossConfirmed
+            ? "Deep Scan coordinator lease belongs to a newer generation."
+            : "fixture progress persistence failure",
+        );
+      };
+      store.get = async () => {
+        reads += 1;
+        if (reads === 1) {
+          heartbeatReadStarted.resolve();
+          return await heartbeatRead.promise;
+        }
+        failureReadStarted.resolve();
+        return await failureRead.promise;
+      };
+      store.fail = async () => {
+        failureCalls += 1;
+        await releaseStaleFailure.promise;
+        throw new Error(
+          "Deep Scan coordinator lease belongs to a newer generation.",
+        );
+      };
+      const coordinator = createCoordinator(
+        fixture,
+        store,
+        new FakeExecutor(),
+        {
+          threadId: "fixture-owner",
+          heartbeatIntervalMs: 60_000,
+          observeReplacement: async () => {
+            observations += 1;
+            observing.resolve();
+            return await replacement.promise;
+          },
+        },
+      );
+      coordinator.start();
+      await preparing.promise;
+      const heartbeat = coordinator.renewHeartbeat();
+      await heartbeatReadStarted.promise;
+      failProgress.resolve();
+      await failureReadStarted.promise;
+      const newer = { ...store.run, coordinatorGeneration: 3 };
+      store.run = newer;
+      heartbeatRead.resolve(structuredClone(newer));
+      await observing.promise;
+      if (readFails) failureRead.reject(new Error("database is locked"));
+      else failureRead.resolve(structuredClone(newer));
+      replacement.resolve({
+        ...newer,
+        status: "succeeded",
+        terminalReason: "capped",
+      });
+      await heartbeat;
+      // A stale failure response must arrive only after replacement observation.
+      releaseStaleFailure.resolve();
+      const terminal = await coordinator.settled();
+      assert.equal(terminal.status, "succeeded");
+      assert.equal(terminal.coordinatorGeneration, 3);
+      assert.equal(
+        failureCalls,
+        0,
+        "a replaced coordinator must not fail the scan",
+      );
+      assert.equal(observations, 1, "concurrent reads must share one observer");
+    }
+  }
+
+  async function lateFailurePersistenceKeepsStoppedState() {
+    for (const status of ["succeeded", "canceled", "failed"] as const) {
+      for (const rejectFailure of [false, true]) {
+        const fixture = await fixtureRun(config);
+        fixture.run.coordinatorGeneration = 2;
+        const store = new FakeStore(fixture.run);
+        store.failProgressAt = 1;
+        const failing = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        store.fail = async (_scanId, message) => {
+          const stale = {
+            ...store.run,
+            status: "failed" as const,
+            error: message,
+          };
+          failing.resolve();
+          await release.promise;
+          if (rejectFailure) throw new Error("fixture stale failure rejected");
+          return stale;
+        };
+        const coordinator = createCoordinator(
+          fixture,
+          store,
+          new FakeExecutor(),
+          {
+            threadId: "fixture-owner",
+            heartbeatIntervalMs: 60_000,
+            observeReplacement: async (run) => ({
+              ...run,
+              status: "succeeded",
+              terminalReason: "capped",
+            }),
+          },
+        );
+        coordinator.start();
+        await failing.promise;
+        try {
+          if (status === "succeeded") {
+            store.run.coordinatorGeneration = 3;
+            await coordinator.renewHeartbeat();
+          } else if (status === "canceled") {
+            store.run.status = "canceled";
+            coordinator.cancel("fixture cancellation");
+          } else {
+            store.run.status = "failed";
+            coordinator.failExternallyPersisted("fixture external failure");
+          }
+        } finally {
+          release.resolve();
+        }
+        const terminal = await coordinator.settled();
+        assert.equal(terminal.status, status);
+        assert.equal(
+          terminal.coordinatorGeneration,
+          status === "succeeded" ? 3 : 2,
+        );
+        assert.equal(
+          terminal.error,
+          status === "failed" ? "fixture external failure" : undefined,
+          "stale failure persistence must not replace the stopped result",
+        );
+      }
+    }
+  }
+
   async function shutdownStopsReplacementObservation() {
     const fixture = await fixtureRun(config);
     fixture.run.coordinatorGeneration = 1;
@@ -915,27 +1074,47 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     const fixture = await fixtureRun(config);
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+    const publishing = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
     let publications = 0;
+    let cancellationSettled = false;
     const coordinator = createCoordinator(fixture, store, executor, {
       threadId: "fixture-owner",
       onStopped: async () => {
+        publishing.resolve();
+        await release.promise;
         publications += 1;
       },
     });
     coordinator.start();
     const terminal = coordinator.settled().catch((error: Error) => error);
     await executor.discoveryStarted.promise;
-    await assert.rejects(
-      coordinator.cancelAfterPersistence(
+    const cancellation = coordinator
+      .cancelAfterPersistence(
         "fixture cancellation",
         async () => {
           store.run.status = "canceled";
           throw new Error("fixture cancellation response lost");
         },
         async () => ({ status: "running" }),
-      ),
-      /response lost/,
-    );
+      )
+      .catch((error: Error) => {
+        cancellationSettled = true;
+        return error;
+      });
+    await publishing.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    try {
+      assert.equal(
+        cancellationSettled,
+        false,
+        "lost response must wait for saved result publication",
+      );
+    } finally {
+      release.resolve();
+      await terminal;
+    }
+    assert.match((await cancellation).message, /response lost/);
     const result = await terminal;
     assert.equal(
       publications,
@@ -1047,40 +1226,46 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
   }
 
   async function orphanWorkerDirectoriesAreNotReused() {
-    const fixture = await fixtureRun(config);
-    for (const [directory, label] of [
-      ["workers", "discovery-0001"],
-      ["dedup", "dedup-0001"],
-    ]) {
-      const root = path.join(
-        fixture.run.scanDir,
-        "artifacts",
-        "deep_discovery",
-        directory,
-        label,
-      );
-      await mkdir(root, { recursive: true });
-      await writeFile(
-        path.join(root, "prompt.md"),
-        "interrupted before worker registration\n",
-      );
+    for (const suffix of ["0001", "9007199254740992"]) {
+      const fixture = await fixtureRun(config);
+      const savedPrompts: string[] = [];
+      for (const [directory, kind] of [
+        ["workers", "discovery"],
+        ["dedup", "dedup"],
+      ]) {
+        const root = path.join(
+          fixture.run.scanDir,
+          "artifacts",
+          "deep_discovery",
+          directory,
+          `${kind}-${suffix}`,
+        );
+        await mkdir(root, { recursive: true });
+        const prompt = path.join(root, "prompt.md");
+        savedPrompts.push(prompt);
+        await writeFile(prompt, "interrupted before worker registration\n");
+      }
+      const store = new FakeStore(fixture.run);
+      const executor = new FakeExecutor();
+      const coordinator = createCoordinator(fixture, store, executor);
+      coordinator.start();
+      const terminal = await coordinator.wait(undefined, 5_000);
+      assert.equal(terminal?.status, "succeeded", terminal?.error);
+      const next = String(BigInt(suffix) + 1n).padStart(4, "0");
+      for (const kind of ["discovery", "dedup"]) {
+        assert.ok(
+          [...store.workers.values()].some((worker) =>
+            worker.promptPath.includes(`${kind}-${next}`),
+          ),
+        );
+      }
+      for (const prompt of savedPrompts) {
+        assert.equal(
+          await readFile(prompt, "utf8"),
+          "interrupted before worker registration\n",
+        );
+      }
     }
-    const store = new FakeStore(fixture.run);
-    const executor = new FakeExecutor();
-    const coordinator = createCoordinator(fixture, store, executor);
-    coordinator.start();
-    const terminal = await coordinator.wait(undefined, 5_000);
-    assert.equal(terminal?.status, "succeeded", terminal?.error);
-    assert.ok(
-      [...store.workers.values()].some((worker) =>
-        worker.promptPath.includes("discovery-0002"),
-      ),
-    );
-    assert.ok(
-      [...store.workers.values()].some((worker) =>
-        worker.promptPath.includes("dedup-0002"),
-      ),
-    );
   }
 
   async function ancestorNamesDoNotChooseWorkerSequence() {

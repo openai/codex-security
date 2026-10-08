@@ -1,3 +1,4 @@
+import { modelResponseText } from "./support/model-response-text.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -71,10 +72,7 @@ function fakeCodex(decide: (context: OwnerContext) => unknown = chooseAlex) {
           ) as OwnerContext;
           calls.push({ context, thread, turn });
           const result = decide(context);
-          return {
-            finalResponse:
-              typeof result === "string" ? result : JSON.stringify(result),
-          };
+          return { finalResponse: modelResponseText(result) };
         },
       };
     },
@@ -480,4 +478,57 @@ test("propagates cancellation", async () => {
       signal: controller.signal,
     }),
   ).rejects.toThrow("Canceled by caller");
+});
+
+test("subdirectory roots retain repository-relative paths when filenames collide", async () => {
+  const repo = await repository();
+  const subdir = join(repo.path, "src");
+  await mkdir(subdir);
+  await writeFile(
+    join(subdir, "handler.ts"),
+    "// Subdirectory handler\nexport function readOther(id) {\n  return other[id];\n}\n",
+  );
+  await repo.git("add", "src/handler.ts");
+  await repo.git(
+    "-c",
+    "user.name=Casey Example",
+    "-c",
+    "user.email=casey@example.test",
+    "commit",
+    "-qm",
+    "Add subdirectory handler",
+  );
+  const { codex, calls } = fakeCodex((context) => {
+    const identityIndex = context.identities.findIndex(
+      (identity) =>
+        identity.email ===
+        (context.evidence[0]!.path.startsWith("src/")
+          ? "casey@example.test"
+          : "alex@example.test"),
+    );
+    return {
+      identityIndex,
+      reason: "Author of the affected committed lines.",
+      evidenceIds: context.evidence
+        .filter((item) => item.identityIndex === identityIndex)
+        .map((item) => item.id),
+    };
+  });
+  const report = await suggestOwners(
+    subdir,
+    [
+      finding,
+      {
+        ...finding,
+        findingId: "subdirectory-finding",
+        locations: [{ path: "src/handler.ts", startLine: 2, endLine: 3 }],
+      },
+    ],
+    { codex },
+  );
+  expect(report.results.map((result) => result.owner?.email)).toEqual([
+    "alex@example.test",
+    "casey@example.test",
+  ]);
+  expect(calls).toHaveLength(2);
 });

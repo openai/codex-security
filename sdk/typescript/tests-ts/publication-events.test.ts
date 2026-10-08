@@ -9,7 +9,6 @@ import type { PreparedScanPublication } from "../src/publication.js";
 function publication(count = 1): PreparedScanPublication {
   return {
     scanId: "scan_example",
-    uploadId: "scan_example",
     scanDirectory: "/synthetic/sealed-scan",
     destination: {
       type: "linear",

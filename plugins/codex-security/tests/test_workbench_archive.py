@@ -221,3 +221,32 @@ def test_interrupted_commit_keeps_files_at_their_saved_paths(previous_scan, monk
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 1 + committed
     assert list(output.iterdir()) == ([] if committed else [output / "report.md"])
+
+
+@pytest.mark.parametrize("layout", ["same", "nested", "alias"])
+def test_registration_does_not_archive_its_active_workbench_state(tmp_path, layout):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "fixture.py").write_text("preserved source\n")
+    output = tmp_path / "output"
+    output.mkdir(mode=0o700)
+    state = output if layout == "same" else output / "state"
+    state.mkdir(mode=0o700, exist_ok=True)
+    if layout == "alias":
+        alias = tmp_path / "state-alias"
+        try:
+            alias.symlink_to(state, target_is_directory=True)
+        except OSError:
+            pytest.skip("Directory symlinks are unavailable")
+        state = alias
+    saved = tmp_path / "saved"
+    saved.mkdir(mode=0o700)
+    previous = register(state, target, saved)
+    (saved / "report.md").write_text("saved report\n")
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        register(state, target, output, "--archive-existing")
+    assert "workbench state" in error.value.stderr
+    assert list(tmp_path.glob("output.previous-*")) == []
+    assert (saved / "report.md").read_text() == "saved report\n"
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT id FROM scans").fetchall() == [(previous["scanId"],)]

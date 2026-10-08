@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -37,17 +38,11 @@ import deep_scan_workbench as deep_scan
 import workbench_native_indexes as native_indexes
 import workbench_progress as progress
 import workbench_publication as publication
-import workbench_remediation as remediation
+import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
 import workbench_severity as severity
-from filesystem_identity import (
-    serialize_filesystem_identity as serialize_filesystem_identity,
-)
-from filesystem_identity import (
-    stored_filesystem_identity_matches as stored_filesystem_identity_matches,
-)
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -82,18 +77,10 @@ from workbench_constants import (
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
-from workbench_dashboard import dashboard
 from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
-from workbench_findings import (
-    find_potential_duplicates,
-    list_dedupe_groups,
-    list_stored_findings,
-    store_dedupe_groups,
-    store_findings,
-)
-from workbench_remediation import remediation_claim_is_active
+from workbench_local_dedupe import local_dedupe
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
@@ -102,17 +89,11 @@ from workbench_scan_start import (
     scan_target_identity,
     stored_diff_target,
 )
-from workbench_scan_start import (
-    compact_timestamp as compact_timestamp,
-)
 from workbench_schema import (
     MIGRATIONS,
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
-)
-from workbench_schema import (
-    sql_statements as sql_statements,
 )
 from workbench_source_excerpt import finding_source_excerpt, safe_source_path
 from workbench_target import (
@@ -405,7 +386,7 @@ def inspect_setup_values(
 def require_review_changes_target(target: Path) -> str:
     revision = require_git_worktree_head(target)
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None or Path(repository_root).resolve() != target:
+    if repository_root is None or not Path(repository_root).samefile(target):
         raise SystemExit(
             "Review changes requires the checked-out Git repository root as the target."
         )
@@ -697,6 +678,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_head_revision = inspected["diffTarget"]["headRevision"]
                 diff_content_digest = inspected["diffTarget"].get("contentDigest")
         except SystemExit:
+            # Preserve an incomplete setup so workspace_state can report its validation error.
             pass
     with connection:
         target_id = (
@@ -1637,7 +1619,12 @@ def complete_scan_locked(
     return context
 
 
-def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+def register_cli_scan(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    before_archive: Callable[[], None] | None = None,
+) -> dict[str, Any]:
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
@@ -1701,7 +1688,12 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     connection.execute("BEGIN IMMEDIATE")
     try:
         with archive_scan(
-            connection, args, scan_dir, timestamp, require_canonical_scan_directory
+            connection,
+            args,
+            scan_dir,
+            timestamp,
+            require_canonical_scan_directory,
+            before_archive=before_archive,
         ) as archived_scan_dir:
             target_id = ensure_security_target(connection, str(repository))
             if parent_scan_id is not None:
@@ -1862,24 +1854,6 @@ def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
     return saved_results.coverage_for_comparison(_WORKBENCH_DB_CONTEXT, scan)
 
 
-def preserve_scan_results_locked(connection: sqlite3.Connection, scan_id: str) -> bool:
-    return saved_results.preserve_scan_results_locked(_WORKBENCH_DB_CONTEXT, connection, scan_id)
-
-
-def recover_scan_results(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def cancel_scan_locked(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.cancel_scan_locked(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
 def preserve_stopped_results_after_transition(connection: sqlite3.Connection, scan_id: str) -> None:
     saved_results.preserve_stopped_results_after_transition(
         _WORKBENCH_DB_CONTEXT, connection, scan_id
@@ -1914,7 +1888,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 and remediation["pending_action"] is not None
                 and not (
                     remediation["state"] == "failed"
-                    and not remediation_claim_is_active(remediation)
+                    and not remediation_state.remediation_claim_is_active(remediation)
                 )
             ):
                 raise SystemExit(
@@ -1984,7 +1958,7 @@ def request_finding_remediation(
 ) -> dict[str, Any]:
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
@@ -2026,7 +2000,7 @@ def request_finding_remediation(
                 "verifying",
             }
             if active_operation and (
-                latest["state"] != "failed" or remediation_claim_is_active(latest)
+                latest["state"] != "failed" or remediation_state.remediation_claim_is_active(latest)
             ):
                 raise SystemExit(
                     "Finish or retry the active remediation operation before regenerating."
@@ -2073,10 +2047,6 @@ def request_finding_remediation(
                 timestamp,
             ),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2085,7 +2055,7 @@ def request_finding_remediation_action(
 ) -> dict[str, Any]:
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
@@ -2149,10 +2119,6 @@ def request_finding_remediation_action(
             raise SystemExit(
                 "This remediation request changed. Refresh it before recording an update."
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2162,7 +2128,7 @@ def claim_finding_remediation_resend(
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
@@ -2229,10 +2195,6 @@ def claim_finding_remediation_resend(
             unavailable = "This remediation host request is still owned by another panel. Retry after its lease expires."
         if updated.rowcount != 1:
             raise SystemExit(unavailable)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     result = scan_context(connection, occurrence["scan_id"])
     result["actionToken"] = claimed_token
     return result
@@ -2310,8 +2272,8 @@ def set_finding_remediation(
             )
         if current["pending_action_claim_token"] != action_token:
             raise SystemExit("This remediation host request is owned by a different action token.")
-        remediation.require_transition(current["state"], args.state)
-        remediation.require_pending_action(current, args.state)
+        remediation_state.require_transition(current["state"], args.state)
+        remediation_state.require_pending_action(current, args.state)
         patch_path = current["patch_path"]
         if args.patch_path is not None:
             requested_patch_path = require_scan_relative_file(scan, args.patch_path)
@@ -2406,10 +2368,6 @@ def set_finding_remediation(
                 "This remediation request changed. Refresh it before recording an update."
             )
     return scan_context(connection, occurrence["scan_id"])
-
-
-def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
 
 
 def require_reviewed_patch_applied(
@@ -2631,6 +2589,7 @@ def workspace_state(
                 target = require_target(workspace["target_path"])
                 target_metadata = git_target_metadata(target)
             except SystemExit:
+                # Target metadata is optional; retain the original setup error for the caller.
                 pass
     result["diffTarget"] = validated_diff_target or persisted_diff_target
     result["setupValidation"] = {
@@ -2821,6 +2780,7 @@ def scan_result(
         "mode": scan["mode"],
         "model": scan["model"],
         "diffTarget": stored_diff_target(scan),
+        "name": scan["name"],
         "progress": progress_result,
         "reasoningEffort": scan["reasoning_effort"],
         "remediationAvailable": remediation_available,
@@ -2848,7 +2808,7 @@ def scan_result(
 
 def remediation_availability(scan: sqlite3.Row) -> tuple[bool, str | None]:
     if scan["status"] != "complete":
-        return False, remediation.SCAN_STATUS_ERROR
+        return False, remediation_state.SCAN_STATUS_ERROR
     try:
         current_revision = git_revision(require_scan_target_identity(scan))
     except SystemExit as exc:
@@ -3313,13 +3273,10 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-_WORKBENCH_PUBLICATION_CONTEXT = SimpleNamespace(**globals())
+_WORKBENCH_PUBLICATION_CONTEXT = _WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
-_WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
-
-
-def main() -> None:
+def main(*, before_archive: Callable[[], None] | None = None) -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
@@ -3361,7 +3318,7 @@ def main() -> None:
     with closing(
         connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
     ) as connection:
-        remediation.require_available(connection, args, require_scan)
+        remediation_state.require_available(connection, args, require_scan)
         if args.command == "create-workspace":
             result = create_workspace(connection, args)
         elif args.command == "get-workspace":
@@ -3398,6 +3355,10 @@ def main() -> None:
             result = deep_scan.record_deep_scan_publication_failure(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "rename-scan":
+            result = scan_history.rename_scan(
+                connection, require_scan(connection, args.scan_id), args.name
+            )
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
@@ -3410,7 +3371,7 @@ def main() -> None:
                 read_coverage=coverage_for_comparison,
             )
         elif args.command == "register-cli-scan":
-            result = register_cli_scan(connection, args)
+            result = register_cli_scan(connection, args, before_archive=before_archive)
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
         elif args.command == "set-scan-cost-limit":
@@ -3467,11 +3428,11 @@ def main() -> None:
         elif args.command == "cancel-scan":
             result = saved_results.cancel_scan(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "fail-scan":
-            result = fail_scan(connection, args)
+            result = saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "preserve-scan-results":
             result = saved_results.preserve_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "recover-scan-results":
-            result = recover_scan_results(connection, args)
+            result = saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "write-scan-draft":
             result = saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "save-scan-artifact":
@@ -3499,7 +3460,7 @@ def main() -> None:
         elif args.command == "cancel-finding-remediation-request":
             result = scan_context(
                 connection,
-                remediation.cancel_finding_remediation_request(connection, args),
+                remediation_state.cancel_finding_remediation_request(connection, args),
             )
         elif args.command == "set-finding-remediation":
             result = set_finding_remediation(connection, args)
@@ -3512,28 +3473,15 @@ def main() -> None:
                 _WORKBENCH_PUBLICATION_CONTEXT, connection, args
             )
         elif args.command == "export-findings":
-            result = export_findings(connection, args)
+            result = publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
         elif args.command == "severity-classification":
             result = severity.checkpoint(connection, json.load(sys.stdin), now())
+        elif args.command == "local-dedupe":
+            result = local_dedupe(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
-        elif args.command == "dashboard":
-            result = dashboard(connection, json.load(sys.stdin))
-        elif args.command == "store-findings":
-            payload = json.load(sys.stdin)
-            result = store_findings(
-                connection, payload["entries"], now(), payload.get("repositoryId")
-            )
-        elif args.command == "find-potential-duplicates":
-            result = find_potential_duplicates(connection, args.finding_id, args.repository_id)
-        elif args.command == "store-dedupe-groups":
-            result = store_dedupe_groups(connection, json.load(sys.stdin)["groups"], now())
-        elif args.command == "list-dedupe-groups":
-            result = list_dedupe_groups(connection, args.finding_id)
-        elif args.command == "list-stored-findings":
-            result = list_stored_findings(connection, limit=args.limit, offset=args.offset)
         else:
             raise SystemExit(f"Unknown command: {args.command}")
     print(json.dumps(result, allow_nan=False, sort_keys=True))

@@ -41,6 +41,7 @@ export function scanPhaseLabel(value: ScanWorkerPhase | ScanPhase): string {
   }[value];
 }
 
+/** Preflight is tool-derived; dispatch counts depend on model-emitted markers. */
 export type ScanWorkerStatus =
   | {
       kind: "preflight";
@@ -159,7 +160,6 @@ function preflightStatus(
   if (capacity.length > 1) return null;
   const capacityResult = capacity[0];
   const configuredSlots =
-    capacity.length === 1 &&
     capacityResult !== undefined &&
     isSafeNonNegativeInteger(capacityResult["actual"])
       ? capacityResult["actual"]

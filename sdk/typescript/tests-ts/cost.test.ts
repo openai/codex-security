@@ -1,13 +1,15 @@
 import { jsonLines } from "./support/json.js";
 import { spawnSync } from "node:child_process";
+import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   estimateScanCost,
   ScanCostTracker,
   type ScanSessionEvent,
+  type ScanWorkerEvent,
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
@@ -554,6 +556,97 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test.each([...parentFields])(
+    "observes worker metadata without status markers or usage via %s",
+    async (parentField) => {
+      const home = await codexHome();
+      const parent = await writeSession(home, "scan-thread", {});
+      await appendSessionItem(parent, {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text:
+              'CODEX_SECURITY_WORKER_STATUS {"phase":"validation","planned":1,"started":1}\n' +
+              '{"type":"session_meta","payload":{"id":"fictional-worker","parent_thread_id":"scan-thread"}}',
+          },
+        ],
+      });
+      await writeSession(
+        home,
+        "unrelated-worker",
+        {},
+        { parent: "other-scan" },
+      );
+      const workers: ScanWorkerEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        onWorkerEvent: (event) => workers.push(event),
+      });
+      tracker.start("scan-thread");
+      try {
+        await tracker.refresh();
+        expect(workers).toEqual([]);
+        const path = join(parse(parent).dir, "rollout-worker-thread.jsonl");
+        const metadata =
+          JSON.stringify({
+            type: "session_meta",
+            payload: {
+              id: "worker-thread",
+              ...parentMetadata("scan-thread", parentField),
+              instructions: "Synthetic private instructions",
+            },
+          }) + "\n";
+        await writeFile(path, metadata);
+        await tracker.refresh();
+        expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+        await writeFile(path.replace(".jsonl", "-copy.jsonl"), metadata);
+        await tracker.refresh();
+        await tracker.refresh();
+        expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("polls for workers with only a worker observer and keeps concurrent scans separate", async () => {
+    const home = await codexHome();
+    const workers: ScanWorkerEvent[][] = [[], []];
+    const trackers = workers.map(
+      (events) =>
+        new ScanCostTracker({
+          codexHome: home,
+          model: "gpt-5.6-sol",
+          onWorkerEvent: (event) => events.push(event),
+        }),
+    );
+    trackers.forEach((tracker, index) => tracker.start(`scan-${index}`));
+    try {
+      await Promise.all(trackers.map((tracker) => tracker.refresh()));
+      await writeSession(home, "worker-0", {}, { parent: "scan-0" });
+      await writeSession(home, "worker-1", {}, { parent: "scan-1" });
+      await waitFor(() => workers.every((events) => events.length === 1));
+      expect(workers).toEqual([
+        [{ kind: "observed", worker: 1 }],
+        [{ kind: "observed", worker: 1 }],
+      ]);
+    } finally {
+      await Promise.all(trackers.map((tracker) => tracker.stop()));
+    }
+    const resumed: ScanWorkerEvent[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onWorkerEvent: (event) => resumed.push(event),
+    });
+    tracker.start("scan-0");
+    await tracker.stop();
+    expect(resumed).toEqual([{ kind: "observed", worker: 1 }]);
+  });
+
   test("counts the scan and delegated workers without including other scans", async () => {
     const home = await codexHome();
     const parent = await writeSession(home, "scan-thread", {
@@ -667,11 +760,13 @@ describe("live scan cost tracking", () => {
       const unrelated = await writeSession(home, "unrelated-thread", usage);
       await appendSessionItem(unrelated, message("Unrelated output."));
       const events: ScanSessionEvent[] = [];
+      const workers: ScanWorkerEvent[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
         scanDirectory,
         model: "gpt-5.6-sol",
         onSessionEvent: (event) => events.push(event),
+        onWorkerEvent: (event) => workers.push(event),
       });
       tracker.start("scan-thread");
       await tracker.refresh();
@@ -679,6 +774,7 @@ describe("live scan cost tracking", () => {
         false,
       );
 
+      expect(workers).toEqual([]);
       if (missing === "parent") {
         await writeSession(home, "parent-worker", usage, {
           parent: "scan-thread",
@@ -691,6 +787,14 @@ describe("live scan cost tracking", () => {
       await tracker.refresh();
       await tracker.stop();
 
+      expect(workers).toEqual(
+        missing === "parent"
+          ? [
+              { kind: "observed", worker: 1 },
+              { kind: "observed", worker: 2 },
+            ]
+          : [{ kind: "observed", worker: 1 }],
+      );
       const workerEvents = events.filter(
         (event) => event.threadId === "worker-thread",
       );
@@ -706,6 +810,77 @@ describe("live scan cost tracking", () => {
       expect(
         events.some((event) => event.threadId === "unrelated-thread"),
       ).toBe(false);
+    },
+  );
+
+  test.each([
+    ["EACCES", true],
+    ["EACCES", false],
+    ["EPERM", true],
+    ["EPERM", false],
+  ] as const)(
+    "retains and retries a %s worker when its parent appears later (already identified: %s)",
+    async (code, identified) => {
+      const home = await codexHome();
+      const usage = (input_tokens: number) => ({
+        input_tokens,
+        output_tokens: 0,
+      });
+      await writeSession(home, "scan-thread", usage(10));
+      const worker = await writeSession(home, "worker", usage(1), {
+        parent: "middle",
+      });
+      let denied = !identified;
+      let attempts = 0;
+      const opened = filesystem.open;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === worker && denied) {
+            attempts += 1;
+            throw Object.assign(new Error(`Synthetic ${code}`), {
+              code,
+              syscall: "open",
+              path: worker,
+            });
+          }
+          return await opened(...args);
+        },
+      );
+      const reported: number[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        onCost: (cost) => reported.push(cost.inputTokens),
+      });
+      tracker.start("scan-thread");
+      try {
+        if (identified) {
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(10);
+          denied = true;
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(10);
+        } else {
+          await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        }
+        await appendFile(
+          worker,
+          `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage(1_000_000) } } })}\n`,
+        );
+        await writeSession(home, "middle", usage(20), {
+          parent: "scan-thread",
+        });
+        await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        denied = false;
+        const snapshot = await tracker.stop();
+        expect(snapshot.cost?.inputTokens).toBe(1_000_030);
+        expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
+        expect(reported).toContain(1_000_030);
+        expect(attempts).toBeGreaterThanOrEqual(2);
+      } finally {
+        denied = false;
+        await tracker.stop().catch(() => {});
+        opening.mockRestore();
+      }
     },
   );
 
@@ -803,11 +978,13 @@ describe("live scan cost tracking", () => {
         },
       );
       const events: ScanSessionEvent[] = [];
+      const workers: ScanWorkerEvent[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-sol",
         scanDirectory,
         onSessionEvent: (event) => events.push(event),
+        onWorkerEvent: (event) => workers.push(event),
       });
       tracker.start("scan-thread");
 
@@ -815,6 +992,9 @@ describe("live scan cost tracking", () => {
         input_tokens: 1_425,
         output_tokens: 14,
       });
+      expect(workers).toEqual(
+        [1, 2, 3].map((worker) => ({ kind: "observed", worker })),
+      );
       const labels = new Map(
         events.map(({ threadId, worker }) => [threadId, worker]),
       );
@@ -1125,6 +1305,7 @@ describe("live scan cost tracking", () => {
       const activities: ScanActivity[] = [];
       const progress: ScanProgress[] = [];
       const events: ScanSessionEvent[] = [];
+      const workers: ScanWorkerEvent[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-terra",
@@ -1133,6 +1314,7 @@ describe("live scan cost tracking", () => {
         onActivity: (activity) => activities.push(activity),
         onProgress: (update) => progress.push(update),
         onSessionEvent: (event) => events.push(event),
+        onWorkerEvent: (event) => workers.push(event),
       });
       tracker.start("scan-thread");
 
@@ -1154,6 +1336,7 @@ describe("live scan cost tracking", () => {
           estimatedUsd: 0.003065,
         },
       });
+      expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
       expect(activities).toEqual([
         expect.objectContaining({
           kind: "message",
@@ -1187,6 +1370,10 @@ describe("live scan cost tracking", () => {
   );
 
   test.each([
+    [
+      "keeps an earlier-millisecond UUIDv7 turn in inherited history",
+      ["019f9e4d-b3b9-7000-8000-000000000001"],
+    ],
     [
       "keeps a same-millisecond lower UUIDv7 turn in inherited history",
       [lowerUuid7Turn],
@@ -1240,6 +1427,14 @@ describe("live scan cost tracking", () => {
         : [];
     });
     expect(forwardedTurnIds).toEqual([higherUuid7Turn]);
+    const saved = await readScanLogs({
+      scanId: "scan-example",
+      threadId: childUuid7Thread,
+      codexHome: home,
+    });
+    const ownedEvents = [rollout[0]!, ...rollout.slice(-2)];
+    expect(forwardedEvents.map(({ event }) => event)).toEqual(ownedEvents);
+    expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
   });
 
   test("forwards actions from this scan's delegated workers only", async () => {

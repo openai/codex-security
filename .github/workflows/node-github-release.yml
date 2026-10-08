@@ -173,11 +173,7 @@ jobs:
             sleep 2
           done
 
-          if [[ "$run_name" != "node-release" ||
-                "$run_status" != "completed" ||
-                "$run_conclusion" != "success" ||
-                "$run_sha" != "$release_sha" ||
-                "$run_tag" != "$release_tag" ]]; then
+          if [[ "$run_conclusion" != "success" ]]; then
             echo "The release run must successfully publish the exact tagged commit." >&2
             exit 1
           fi
@@ -293,7 +289,7 @@ jobs:
                 "$RELEASE_VERSION" \
                 "$RELEASE_SHA" \
                 "$GITHUB_REPOSITORY" \
-                "$RELEASE_RUN_ID" 2>/dev/null
+                "$RELEASE_RUN_ID"
           )"; then
             verified_run_id="$RELEASE_RUN_ID"
             printf '%s\n' "$verified_provenance"

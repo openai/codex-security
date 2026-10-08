@@ -30,7 +30,18 @@ Supported runtimes:
 
 - Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, on macOS, Linux, or Windows.
 - Python 3.10+ for scans, policy generation, exports, scan history, and saved
-  findings. Python 3.10 also needs `tomli`.
+  findings. Python 3.10 also needs `tomli`. The findings server (`serve`) uses
+  Node’s built-in SQLite and does not require Python.
+
+Reading compressed Codex session logs (`.jsonl.zst`) requires Node.js 22.15.0+
+within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14, compressed sessions
+are unavailable when reading saved activity or attaching scan logs to feedback, and
+scans whose original session is compressed cannot resume. Plain `.jsonl` logs
+work on all supported runtimes.
+
+`LocalPluginBootstrapError` identifies local plugin setup failures and extends
+`PluginBootstrapError`, so existing catches keep working. Knowledge-base
+preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
 
 ## Authentication
 
@@ -187,9 +198,25 @@ Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
 
+Deep Scans with non-default provider selection or custom provider definitions
+require a plugin that supports per-scan worker provider snapshots. Older custom plugins
+fail before starting model work with an upgrade message; update the plugin or
+omit `pluginPath` to use the bundled version. Older custom plugins remain usable
+for standard scans and Deep Scans that inherit native provider configuration or
+explicitly select the built-in OpenAI provider without custom provider definitions
+when their workers forward that selection or native configuration selects the
+same effective provider for both the parent and workers. Otherwise, the scan
+stops before model work with the plugin upgrade message.
+When no provider is selected, discovery, reducer, and resumed workers inherit the
+same native configuration as the parent.
+
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
 for supported overrides and defaults.
+
+Windows defaults to `windows.sandbox = "elevated"` to enforce credential read
+denials. Explicit `windows.sandbox` settings remain unchanged; Codex reports
+policies unsupported by the selected backend.
 
 ### Load a project file
 
@@ -259,9 +286,44 @@ stops, the scan combines and returns completed findings. See
 
 ### Progress and cost
 
-Use `onProgress` for scan progress, `onWorkerStatus` for individual workers, and
-`onCost` for cost updates. `onDeepProgress` reports completed, active, and maximum
-independent reviews; the maximum is a cap, not a percentage denominator.
+Use `onProgress` for scan progress and `onCost` for cost updates.
+
+Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
+persisted worker sessions discovered by the SDK's existing session tracker,
+independently of model-emitted status markers:
+
+```ts
+await security.run(repository, {
+  onWorkerEvent(event) {
+    console.log(`Worker ${event.worker} observed`);
+  },
+});
+```
+
+The callback contains only `{ kind: "observed", worker: number }`. The scan-local
+worker number matches `onActivity` and `onSessionEvent`; no prompts, raw thread
+IDs, or session contents are exposed. Each session is reported once per run,
+including nested workers and scan-associated validation or Deep Scan sessions.
+On resume, already persisted workers can be reported again. Observation ends
+with scan cost tracking, before `postScanPrompt`.
+
+This works with the bundled Codex version. Persistence and polling can delay
+notification, and missing notifications do not prove that delegation was skipped.
+An observed session does not establish that a worker just started or that file
+review has begun. The callback does not report failed spawn attempts, phase names,
+or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
+`signal` for cancellation. Observer failures go to `onObserverError` without
+stopping the scan.
+
+`onWorkerStatus` remains available for tool-derived preflight status and
+**best-effort** phase dispatch counts from model-emitted text markers. A missing
+dispatch status does not mean delegation was skipped. `onSessionEvent` receives
+saved events with thread IDs and worker numbers and can contain source code or
+credentials. Deep scans additionally expose durable independent-review counts
+through `onDeepProgress`: `completed`, `active`, and `maximum`. The maximum is a
+configured cap, not a percentage denominator. The optional `consolidating` flag
+reports when results are being combined or the coordinator has finished.
+`ScanOptions` lists all callbacks.
 
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription
 allowance. Use `cost.estimatedUsdRange` for reporting. `maxCostUsd` uses the

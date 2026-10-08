@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
+from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -27,10 +29,7 @@ from workbench_validation import optional_text
 
 
 def safe_segment(value: str) -> str:
-    segment = "".join(
-        character if character.isalnum() or character in "._-" else "-" for character in value
-    )
-    return segment.strip("-") or "scan"
+    return re.sub(r"[^\w.-]", "-", value).strip("-") or "scan"
 
 
 def compact_timestamp() -> str:
@@ -94,6 +93,8 @@ def archive_scan(
     scan_dir: Path,
     timestamp: str,
     canonical_directory: Callable[[Path], Path],
+    *,
+    before_archive: Callable[[], None] | None = None,
 ) -> Iterator[Path | None]:
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
@@ -119,6 +120,8 @@ def archive_scan(
         if previous_scan["status"] == "running":
             raise SystemExit("Cannot archive the output of a running scan.")
     has_contents = next(scan_dir.iterdir(), None) is not None
+    if has_contents and (not args.archive_existing or archived_scan_dir is not None):
+        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
     if previous_scan is None and not (args.archive_existing and has_contents):
         yield archived_scan_dir
         return
@@ -132,10 +135,25 @@ def archive_scan(
     moved = False
     try:
         if archived_scan_dir is None:
+            configured_state = state_dir(canonical=False)
+            protected_directories = [
+                *(path.resolve() for path in (configured_state, *configured_state.parents)),
+                *(
+                    Path(row[2]).resolve().parent
+                    for row in connection.execute("PRAGMA database_list")
+                    if row[2]
+                ),
+            ]
+            if any(path == scan_dir or scan_dir in path.parents for path in protected_directories):
+                raise SystemExit(
+                    "Cannot archive output containing the workbench state or active database."
+                )
             if artifacts and not has_contents:
                 raise SystemExit(
                     "The archived scan directory is required to preserve existing scan artifacts."
                 )
+            if before_archive is not None:
+                before_archive()
             archived_scan_dir = Path(
                 tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
             ).resolve()
@@ -175,6 +193,7 @@ def archive_scan(
             try:
                 scan_dir.rmdir()
             except FileNotFoundError:
+                # Registration may fail before recreating the empty output directory.
                 pass
             archived_scan_dir.rename(scan_dir)
         raise
