@@ -3226,7 +3226,9 @@ def test_parent_closure_cannot_discard_reopened_worker_same_id(
     assert pending["coverage"]["deferred"][0] in first[2]["deferred"]
 
 
-@pytest.mark.parametrize("layout", ["newer_raw", "newer_head", "legacy", "legacy_parent"])
+@pytest.mark.parametrize(
+    "layout", ["newer_raw", "newer_head", "legacy", "legacy_parent", "legacy_parent_newer_head"]
+)
 def test_parent_head_preserves_newer_and_frozen_observations(
     tmp_path: Path, generic_review_recovery, layout: str
 ) -> None:
@@ -3238,7 +3240,7 @@ def test_parent_head_preserves_newer_and_frozen_observations(
     head = tmp_path / "checkpoint-head.json"
     selected = pending_checkpoint if layout == "newer_head" else closed_checkpoint
     head.write_text(json.dumps({"checkpoint": selected.name}))
-    head_time = 400 if layout == "newer_head" else 200
+    head_time = 400 if layout in {"newer_head", "legacy_parent_newer_head"} else 200
     os.utime(head, ns=(head_time, head_time))
     original_head = head.read_bytes()
     write_saved_parent(tmp_path, closed, 350 if layout.startswith("legacy") else 100)
@@ -3259,10 +3261,10 @@ def test_parent_head_preserves_newer_and_frozen_observations(
         stopped=True,
         reason="interrupted",
         frozen_source_digests=frozen,
-        allow_frozen_legacy_parent=layout == "legacy_parent",
+        allow_frozen_legacy_parent=layout.startswith("legacy_parent"),
     )
     assert first is not None
-    expected_pending = layout != "legacy_parent"
+    expected_pending = not layout.startswith("legacy_parent")
     assert (pending["coverage"]["deferred"][0] in first[2]["deferred"]) is expected_pending
     preserved = first[0]["scan"]["preservedSources"]
     assert any(path.startswith("checkpoint-heads/") for path in preserved) is (layout != "legacy")

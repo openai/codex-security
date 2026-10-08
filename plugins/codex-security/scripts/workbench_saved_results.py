@@ -232,15 +232,21 @@ def _capture_saved_source(
     kind: str | None = None,
     snapshot_head: bool = True,
     write: bool = True,
+    expected_digests: dict[str, str] | None = None,
 ) -> dict[str, tuple[str, int]]:
+    expected = expected_digests or {}
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
-        _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
+        _, digest, observed = _read_saved_result(
+            scan_dir, relative, scan_id, kind=kind, expected_digest=expected.get(relative)
+        )
         return {relative: (digest, observed)}
     head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
     observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
     directory = Path(relative).parent
     selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
-    _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
+    _, selected_digest, selected_time = _read_saved_result(
+        scan_dir, selected, scan_id, expected_digest=expected.get(selected)
+    )
     digest = _digest(observation)
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
@@ -260,7 +266,12 @@ def _is_source_order_snapshot(relative: str) -> bool:
 
 
 def _read_saved_result(
-    scan_dir: Path, relative: str, scan_id: str, *, kind: str | None = None
+    scan_dir: Path,
+    relative: str,
+    scan_id: str,
+    *,
+    kind: str | None = None,
+    expected_digest: str | None = None,
 ) -> tuple[dict[str, Any], str, int]:
     draft, _, metadata = _read_scan_local_json_with_metadata(
         scan_dir, relative, "Saved scan checkpoint"
@@ -284,7 +295,15 @@ def _read_saved_result(
         or not isinstance(draft.get("coverage", {} if kind == "dedup" else None), dict)
     ):
         raise ContractError("checkpoint has no semantic findings or coverage")
-    return draft, _digest(draft), metadata.st_mtime_ns
+    legacy_digest = _digest(draft)
+    if _is_source_order_snapshot(relative):
+        return draft, legacy_digest, metadata.st_mtime_ns
+    if expected_digest == legacy_digest:
+        # Legacy freezes and canonical parent copies authenticate this rounded view.
+        return json.loads(_encoded(draft)), legacy_digest, metadata.st_mtime_ns
+    # Bind both the existing JSON representation and its exact numeric meaning.
+    digest = _digest([legacy_digest, _semantic_digest(draft)])
+    return draft, digest, metadata.st_mtime_ns
 
 
 def _frozen_source_times(scan_dir: Path, scan_id: str, sources: dict[str, str]) -> dict[str, int]:
@@ -452,6 +471,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
                     kind=paths[path],
                     snapshot_head=path not in published_sources,
                     write=False,
+                    expected_digests=published_sources,
                 )
                 current_sources.update({path: value[0] for path, value in captured.items()})
             except (ContractError, OSError, ValueError):
@@ -511,7 +531,11 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     for relative, expected_digest in recovery_sources.items():
         try:
             _, digest, observed = _read_saved_result(
-                scan_dir, relative, scan["id"], kind=paths.get(relative)
+                scan_dir,
+                relative,
+                scan["id"],
+                kind=paths.get(relative),
+                expected_digest=expected_digest,
             )
         except (ContractError, OSError, ValueError) as exc:
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.") from exc
@@ -522,7 +546,13 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
 
     for relative in paths.keys() - recovery_sources.keys():
         try:
-            captured = _capture_saved_source(scan_dir, relative, scan["id"], kind=paths[relative])
+            captured = _capture_saved_source(
+                scan_dir,
+                relative,
+                scan["id"],
+                kind=paths[relative],
+                expected_digests=recovery_sources,
+            )
         except (ContractError, OSError, ValueError):
             continue
         for path, (digest, observed) in captured.items():
@@ -609,7 +639,7 @@ def _worker_candidate_key(
 
 
 def _semantic_digest(value: Any) -> str:
-    """Compare JSON values; source and checkpoint digests retain their exact encoding."""
+    """Compare exact JSON values while retaining their JSON type distinctions."""
 
     def normalize(item: Any) -> Any:
         if isinstance(item, dict):
@@ -1007,12 +1037,19 @@ def merge_saved_results(
                     )
                     os.utime(head_path, ns=(parent_modified, parent_modified))
                 if frozen_source_digests is not None:
-                    captured = _capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
                     frozen_source_digests = {
                         **frozen_source_digests,
                         parent_checkpoint: parent_digest,
-                        **{path: value[0] for path, value in captured.items()},
                     }
+                    captured = _capture_saved_source(
+                        scan_dir,
+                        "checkpoint-head.json",
+                        scan_id,
+                        expected_digests=frozen_source_digests,
+                    )
+                    frozen_source_digests.update(
+                        {path: value[0] for path, value in captured.items()}
+                    )
 
     sources: list[tuple[str, dict[str, Any], str | None]] = []
     parent_preserved_sources: dict[str, str] = {}
@@ -1092,7 +1129,9 @@ def merge_saved_results(
                 continue
             del paths[relative]
             try:
-                captured = _capture_saved_source(scan_dir, relative, scan_id)
+                captured = _capture_saved_source(
+                    scan_dir, relative, scan_id, expected_digests=parent_preserved_sources
+                )
                 paths.update({path: worker_id for path in captured})
             except (ContractError, OSError, ValueError) as exc:
                 if (scan_dir / relative).exists():
@@ -1118,7 +1157,15 @@ def merge_saved_results(
     for relative, worker_id in paths.items():
         try:
             draft, digest, observed = _read_saved_result(
-                scan_dir, relative, scan_id, kind="dedup" if relative in reducer_paths else None
+                scan_dir,
+                relative,
+                scan_id,
+                kind="dedup" if relative in reducer_paths else None,
+                expected_digest=(
+                    frozen_source_digests
+                    if frozen_source_digests is not None
+                    else parent_preserved_sources
+                ).get(relative),
             )
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
