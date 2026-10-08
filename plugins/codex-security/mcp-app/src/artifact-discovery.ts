@@ -206,8 +206,11 @@ async function diffCandidateSources(
     }
     for (const value of new Set([...paths, ...locations])) {
       try {
-        const [currentName] = relativeFile(value, context.repoRoot);
-        const name = selectedPaths.get(pathKey(currentName)) ?? currentName;
+        let name = selectedPaths.get(pathKey(value));
+        if (!name) {
+          const [currentName] = relativeFile(value, context.repoRoot);
+          name = selectedPaths.get(pathKey(currentName)) ?? currentName;
+        }
         if (value !== name && pathKey(value) === pathKey(name))
           aliases.set(value, name);
       } catch {
@@ -251,9 +254,7 @@ except subprocess.CalledProcessError as error:
   for (const [value, name] of aliases) {
     const source = sources.get(value);
     if (
-      source &&
-      "error" in source &&
-      source.error === "missing" &&
+      (!source || ("error" in source && source.error === "missing")) &&
       sources.has(name)
     )
       sources.set(value, sources.get(name)!);
