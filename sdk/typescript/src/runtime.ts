@@ -55,6 +55,7 @@ import {
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
+  LocalPluginBootstrapError,
   PluginPythonUnavailableError,
   type ProtectedScanPathKind,
   SandboxUnavailableError,
@@ -2562,26 +2563,32 @@ export async function resolvePluginPath(
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (pluginPath === undefined) {
-    return await bundledPluginRoot();
-  }
+  try {
+    if (pluginPath === undefined) {
+      return await bundledPluginRoot();
+    }
 
-  const path = resolve(expandHome(pluginPath));
-  const metadata = await lstat(path).catch(() => null);
-  if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
-    return await extractPluginZip(
-      path,
-      join(workspace, "extracted-plugin"),
-      signal,
+    const path = resolve(expandHome(pluginPath));
+    const metadata = await lstat(path).catch(() => null);
+    if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
+      return await extractPluginZip(
+        path,
+        join(workspace, "extracted-plugin"),
+        signal,
+      );
+    }
+    if (metadata?.isDirectory()) {
+      throwIfSignalAborted(signal);
+      return await validatePluginRoot(path);
+    }
+    throw new PluginBootstrapError(
+      `Plugin path must be a directory or ZIP: ${path}`,
     );
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError)
+      throw error;
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  if (metadata?.isDirectory()) {
-    throwIfSignalAborted(signal);
-    return await validatePluginRoot(path);
-  }
-  throw new PluginBootstrapError(
-    `Plugin path must be a directory or ZIP: ${path}`,
-  );
 }
 
 export async function createMarketplace(
@@ -2589,20 +2596,26 @@ export async function createMarketplace(
   pluginRoot: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  throwIfSignalAborted(signal);
-  const root = await realpath(pluginRoot);
-  const marketplace = join(codexHome, "sdk-marketplace");
-  const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
-  await copyPluginTree(root, pluginDestination, signal);
-  const projection = await legacyPluginProjection(pluginDestination, signal);
-  for (const [path, file] of projection?.files ?? []) {
-    const destination = join(pluginDestination, path);
-    await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, file.contents, { mode: file.mode, signal });
-    if (file.mode !== undefined) await chmod(destination, file.mode);
+  try {
+    throwIfSignalAborted(signal);
+    const root = await realpath(pluginRoot);
+    const marketplace = join(codexHome, "sdk-marketplace");
+    const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
+    await copyPluginTree(root, pluginDestination, signal);
+    const projection = await legacyPluginProjection(pluginDestination, signal);
+    for (const [path, file] of projection?.files ?? []) {
+      const destination = join(pluginDestination, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, file.contents, { mode: file.mode, signal });
+      if (file.mode !== undefined) await chmod(destination, file.mode);
+    }
+    await writeMarketplaceManifest(marketplace, signal);
+    return marketplace;
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError)
+      throw error;
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  await writeMarketplaceManifest(marketplace, signal);
-  return marketplace;
 }
 
 async function writeMarketplaceManifest(
@@ -2814,7 +2827,14 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const projection = await legacyPluginProjection(root, options.signal);
+  const projection = await legacyPluginProjection(root, options.signal).catch(
+    (error: unknown) => {
+      if (options.signal?.aborted) throw error;
+      throw new LocalPluginBootstrapError(errorMessage(error), {
+        cause: error,
+      });
+    },
+  );
   const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
   const command =
@@ -2826,7 +2846,7 @@ export async function bootstrapPlugin(
   const run = options.runCodex ?? runPluginCommand;
   const existing = await lstat(marketplace).catch(nullIfMissingFileError);
   if (existing !== null && !existing.isDirectory()) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
     );
   }
@@ -3079,18 +3099,21 @@ export async function pluginMetadata(
     }
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
-    throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
-      cause: error,
-    });
+    throw new LocalPluginBootstrapError(
+      `Invalid Codex plugin directory: ${root}`,
+      {
+        cause: error,
+      },
+    );
   }
   if (!isRecord(manifest) || manifest["name"] !== PLUGIN_NAME) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have name 'codex-security'.",
     );
   }
   const version = manifest["version"];
   if (typeof version !== "string" || version.trim().length === 0) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have a non-empty version.",
     );
   }

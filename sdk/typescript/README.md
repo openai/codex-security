@@ -39,6 +39,10 @@ are unavailable when reading saved activity or attaching scan logs to feedback, 
 scans whose original session is compressed cannot resume. Plain `.jsonl` logs
 work on all supported runtimes.
 
+`LocalPluginBootstrapError` identifies local plugin setup failures and extends
+`PluginBootstrapError`, so existing catches keep working. Knowledge-base
+preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
+
 ## Authentication
 
 Sign in with ChatGPT:
