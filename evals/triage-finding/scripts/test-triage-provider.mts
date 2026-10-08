@@ -1155,6 +1155,12 @@ for (const suite of ["SAST", "calibration"] as const) {
       t.after(() =>
         fs.rmSync(targetRepository, { recursive: true, force: true }),
       );
+      const targetRoot = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), "sast-other-targets-")),
+      );
+      t.after(() => fs.rmSync(targetRoot, { recursive: true, force: true }));
+      const siblingRepository = path.join(targetRoot, "other-case");
+      fs.mkdirSync(siblingRepository);
       const capture = path.join(root, "captures.jsonl");
       const failure = path.join(root, "failure");
       const fakeCodex = path.join(root, "codex");
@@ -1181,6 +1187,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         PROMPTFOO_DISABLE_WAL_MODE: "true",
         PROMPTFOO_DISABLE_TELEMETRY: "1",
         PROMPTFOO_DISABLE_UPDATE: "1",
+        SASTBENCH_TARGET_ROOT: targetRoot,
       };
       const template = parse(
         fs.readFileSync(
@@ -1397,7 +1404,6 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         assert.deepEqual(row.directories, [
           ...(suite === "SAST"
             ? [
-                path.join(evalRoot, "artifacts", "sastbench-targets"),
                 path.join(evalRoot, "artifacts", "sastbench-git-cache"),
                 targetRepository,
               ]
@@ -1413,6 +1419,13 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
           path.dirname(process.execPath),
           path.dirname(fakeCodex),
         ]);
+        assert.ok(
+          row.directories.every(
+            (directory: string) =>
+              siblingRepository !== directory &&
+              !siblingRepository.startsWith(directory + path.sep),
+          ),
+        );
       }
     },
   );

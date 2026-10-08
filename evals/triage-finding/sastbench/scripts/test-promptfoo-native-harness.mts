@@ -28,7 +28,7 @@ assert.doesNotMatch(
 );
 assert.match(
   config,
-  /additional_directories:\n\s+- "\{\{env\.SASTBENCH_TARGET_ROOT\}\}"\n\s+- "\{\{env\.SASTBENCH_GIT_CACHE_ROOT\}\}"/,
+  /additional_directories:\n\s+- "\{\{env\.SASTBENCH_GIT_CACHE_ROOT\}\}"\n\s+- "\{\{target_repo\}\}"/,
 );
 assert.doesNotMatch(config, /sandbox_mode:/);
 assert.doesNotMatch(config, /network_access_enabled:/);

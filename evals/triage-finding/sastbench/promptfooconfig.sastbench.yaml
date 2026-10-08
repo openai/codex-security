@@ -11,10 +11,9 @@ providers:
     label: "Codex SDK triage-finding SastBench (gpt-5.5)"
     config:
       # The provider binds working_dir to the current staged skill runtime.
-      # Target worktrees and their label-free Git cache are the only
+      # The selected target worktree and its label-free Git cache are the only
       # additional readable workspace roots.
       additional_directories:
-        - "{{env.SASTBENCH_TARGET_ROOT}}"
         - "{{env.SASTBENCH_GIT_CACHE_ROOT}}"
         - "{{target_repo}}"
       skip_git_repo_check: true
