@@ -175,7 +175,6 @@ export async function readDeepReductionSources(
             ).findIndex(
               (current, index) =>
                 !matchedCurrentSurfaces.has(index) &&
-                current.id === undefined &&
                 matchesSavedCoverageSource(
                   "surfaces",
                   current,
@@ -196,20 +195,21 @@ export async function readDeepReductionSources(
           result,
           ...archived.map(({ input }) => input),
         ]);
+        let currentCheckpointCoverage: (typeof originalCoverage)[] = [];
         if (archived.length) {
-          result = (
-            await preserveScanDraft(
-              {
-                ...context,
-                root: dirname(worker.resultPath),
-                layout: "worker",
-                scanId: result.scanId,
-              },
-              result,
-              false,
-              archived,
-            )
-          ).input;
+          const preserved = await preserveScanDraft(
+            {
+              ...context,
+              root: dirname(worker.resultPath),
+              layout: "worker",
+              scanId: result.scanId,
+            },
+            result,
+            false,
+            archived,
+          );
+          result = preserved.input;
+          currentCheckpointCoverage = preserved.originalCurrentCoverage;
         }
         result.findings = result.findings.map((finding, index) => ({
           ...finding,
@@ -236,7 +236,7 @@ export async function readDeepReductionSources(
                     },
                   ];
             }),
-            originalCoverage,
+            [originalCoverage, ...currentCheckpointCoverage],
             receiptDigests,
           ),
           result: reduction,

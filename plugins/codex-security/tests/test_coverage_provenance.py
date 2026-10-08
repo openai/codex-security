@@ -1373,15 +1373,26 @@ def test_restored_optional_worker_id_matches_accepted_projection(
     assert all(path.read_bytes() == value for path, value in originals.items())
 
 
-@pytest.mark.parametrize("worker_state", ["pending", "accepted-pending", "host-projection"])
+@pytest.mark.parametrize(
+    "projected_alias", [False, True], ids=["raw-candidate", "projected-candidate"]
+)
+@pytest.mark.parametrize(
+    "worker_state", ["pending", "canceled", "accepted-pending", "host-projection"]
+)
 @pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
 def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
-    workbench_api, workbench_db, publication_scan, monkeypatch, worker_state, retry
+    workbench_api, workbench_db, publication_scan, monkeypatch, worker_state, retry, projected_alias
 ):
     scan = publication_scan()
     accepted_worker = worker_state == "host-projection"
     result = add_worker(
-        workbench_db, scan, status="running" if worker_state == "pending" else "succeeded"
+        workbench_db,
+        scan,
+        status="running"
+        if worker_state == "pending"
+        else "canceled"
+        if worker_state == "canceled"
+        else "succeeded",
     )
     worker = result.parent.name
     pending = {
@@ -1414,6 +1425,7 @@ def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
     projected = {
         **rejected,
         "id": f"{worker}-attempt-1-surface-1",
+        "candidateId": f"{worker}-attempt-1-candidate-1" if projected_alias else "candidate-1",
         "provenance": {
             "workerId": worker,
             "attempt": 1,
@@ -1433,20 +1445,25 @@ def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     assert projected in coverage["surfaces"]
     assert review in coverage["reviews"]
+    accepted_review = accepted_worker or (projected_alias and worker_state == "accepted-pending")
     assert (
         any(row.get("reason") == task["reason"] for row in coverage["deferred"])
-        is not accepted_worker
+        is not accepted_review
     )
     assert (
         any(row.get("disposition") == "needs_follow_up" for row in coverage["surfaces"])
-        is not accepted_worker
+        is not accepted_review
     )
     assert all(path.read_bytes() == value for path, value in originals.items())
 
 
-@pytest.mark.parametrize("receipt_state", ["copied", "changed", "missing-archive"])
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "receipt_state",
+    ["copied", "changed", "missing-archive", "shared-archive", "shared-archive-missing"],
+)
 def test_reconstructed_retry_surface_compares_receipt_bytes(
-    workbench_api, workbench_db, publication_scan, receipt_state
+    workbench_api, workbench_db, publication_scan, monkeypatch, receipt_state, retry
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -1488,37 +1505,47 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
         receipt.write_text("Original synthetic evidence.\n")
     if receipt_state == "changed":
         (output / "artifacts/review.txt").write_text("Changed synthetic evidence.\n")
-    if receipt_state == "missing-archive":
+    if receipt_state in {"missing-archive", "shared-archive-missing"}:
         (archived.parent / "artifacts/review.txt").unlink()
-    (scan.scan_dir / "coverage.json").write_text(
-        json.dumps(
-            {
-                **scan.coverage,
-                "reviews": [
-                    {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
-                    for attempt in (1, 2)
-                ],
-            }
-        )
+    if receipt_state.startswith("shared-archive"):
+        draft["coverage"]["surfaces"][0]["receiptRefs"] = [
+            (archived.parent / "artifacts/review.txt").relative_to(scan.scan_dir).as_posix()
+        ]
+        result.write_text(json.dumps(draft))
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2)
+            ],
+        },
     )
     originals = {path: path.read_bytes() for path in (result, archived)}
-    saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
-    saved.fail_scan(
-        context,
-        workbench_db,
-        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    expected_attempt = (
+        1 if receipt_state == "copied" or receipt_state.startswith("shared-archive") else 2
     )
-    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    expected_attempt = 1 if receipt_state == "copied" else 2
     assert len(coverage["surfaces"]) == 1
     retained = coverage["surfaces"][0]
     assert retained["provenance"]["attempt"] == expected_attempt
     assert retained["id"] == f"{worker_id}-attempt-{expected_attempt}-surface-1"
-    assert retained["receiptRefs"] == [
-        (output / "artifacts/review.txt").relative_to(scan.scan_dir).as_posix()
-    ]
+    if receipt_state == "shared-archive-missing":
+        assert retained["receiptRefs"] == []
+        assert retained["disposition"] == "needs_follow_up"
+        assert coverage["completeness"] == "partial"
+    else:
+        assert retained["receiptRefs"] == [
+            (
+                (archived.parent if receipt_state.startswith("shared-archive") else output)
+                / "artifacts/review.txt"
+            )
+            .relative_to(scan.scan_dir)
+            .as_posix()
+        ]
     gap = next(row for row in coverage["deferred"] if row.get("reason") == "Validate this source.")
     assert gap["surfaceIds"] == [retained["id"]]
     assert all(path.read_bytes() == data for path, data in originals.items())

@@ -33,6 +33,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     parent_draft,
     retry_publication,
     monkeypatch,
+    archived=False,
 ):
     scan = publication_scan(scope=scope)
     with workbench_db:
@@ -102,6 +103,35 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
                 }
             )
         )
+        if archived:
+            archive = result.parent.parent / "attempts" / "attempt-01"
+            archive.parent.mkdir(parents=True)
+            shutil.move(result.parent, archive)
+            output = result.parent
+            output.mkdir()
+            (output / "result.json").write_text(
+                json.dumps(
+                    {
+                        "scanId": scan.scan_id,
+                        "complete": True,
+                        "findings": [],
+                        "coverage": {
+                            "completeness": "partial",
+                            "surfaces": [],
+                            "explicitExclusions": [],
+                            "deferred": [],
+                        },
+                    }
+                )
+            )
+            source_files.append(output / "result.json")
+            result = archive / "result.json"
+            receipt = archive / "artifacts" / "review.txt"
+            source_files[-2] = receipt
+            with workbench_db:
+                workbench_db.execute(
+                    "UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,)
+                )
         source_files.append(result)
         prefix = f"{worker_id}-attempt-1"
         provenance = {"workerId": worker_id, "attempt": 1, "candidateId": "candidate-1"}
@@ -235,7 +265,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     assert coverage["completeness"] == "partial"
     assert coverage["mode"] == ("scoped_path" if scope != "." else "deep_repository")
     assert coverage["inventoryStrategy"] == ("scoped_path" if scope != "." else "repository")
-    assert len(coverage["deferred"]) == 2
+    assert len(coverage["deferred"]) == 2, json.dumps(coverage)
     assert coverage["deferred"][-1]["id"] == "scan-stopped"
     assert len(coverage["surfaces"]) == 2
     assert all(review["workerId"] != "other-worker" for review in coverage.get("reviews", []))
@@ -1797,3 +1827,22 @@ def test_retained_two_surface_actual_recovery(
         for row in rows:
             assert set(row["surfaceIds"]) == set(proof["expectedSurfaceIds"])
         assert all(p.read_bytes() == content for p, content in saved.items())
+
+
+@pytest.mark.parametrize("archived", [False, True], ids=["current", "headless-archive"])
+@pytest.mark.parametrize("retry_publication", [False, True])
+def test_archived_projected_worker_candidates_keep_independent_pending_evidence(
+    workbench_api, workbench_db, publication_scan, monkeypatch, archived, retry_publication
+):
+    test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisions(
+        workbench_api,
+        workbench_db,
+        publication_scan,
+        True,
+        ".",
+        "rejected",
+        "projected",
+        retry_publication,
+        monkeypatch,
+        archived=archived,
+    )

@@ -12,6 +12,7 @@ import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
   artifactDestination,
   readArtifactJsonObject,
+  readArtifactBytes,
   readArtifactText,
   readArtifactTextWithMetadata,
   replaceArtifactJson,
@@ -320,7 +321,66 @@ export async function recordCodexSecurityWorkerScanDraft(
           ),
         }
       : parsed;
-  scoped = (await preserveScanDraft(context, scoped)).input;
+  if (!resolvedDeferred(scoped.coverage).length)
+    await saveScanDraftCheckpoint(context, scoped, false);
+  const archived = await readArchivedWorkerCheckpoints(context);
+  const archivePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/attempts/`;
+  const receiptDigests = new Map<string, string>();
+  const surfaces = input.coverage.surfaces as JsonObject[];
+  for (const coverage of archived.length
+    ? [input.coverage, ...archived.map(({ input }) => input.coverage)]
+    : []) {
+    for (const surface of coverage.surfaces as JsonObject[]) {
+      for (const ref of (surface.receiptRefs as string[] | undefined) ?? []) {
+        if (receiptDigests.has(ref)) continue;
+        try {
+          const archivedRef = ref.startsWith(archivePrefix);
+          const bytes = await readArtifactBytes(
+            archivedRef
+              ? { ...context, root: join(dirname(context.root), "attempts") }
+              : context,
+            (archivedRef ? ref.slice(archivePrefix.length) : ref)
+              .split("/")
+              .filter(
+                (component, index) =>
+                  component !== "." && (component !== "" || index === 0),
+              ),
+            "Saved discovery receipt",
+          );
+          receiptDigests.set(
+            ref,
+            createHash("sha256").update(bytes).digest("hex"),
+          );
+        } catch {
+          // Unreadable evidence cannot establish an earlier receipt origin.
+        }
+      }
+    }
+  }
+  for (const { input: saved } of archived) {
+    const matched = new Set<number>();
+    for (const surface of saved.coverage.surfaces as JsonObject[]) {
+      if (surface.id !== undefined) continue;
+      const index = surfaces.findIndex(
+        (current, index) =>
+          !matched.has(index) &&
+          current.id === undefined &&
+          matchesSavedCoverageSource(
+            "surfaces",
+            current,
+            surface,
+            archivePrefix,
+            receiptDigests,
+          ),
+      );
+      if (index === -1) continue;
+      matched.add(index);
+      const current = (parsed.coverage.surfaces as JsonObject[])[index]!;
+      surface.id = current.id;
+      surface.receiptRefs = current.receiptRefs;
+    }
+  }
+  scoped = (await preserveScanDraft(context, scoped, true, archived)).input;
   const destination = await artifactDestination(
     context,
     ["result.json"],
@@ -375,6 +435,46 @@ export async function saveScanDraftCheckpoint(
     );
     await replaceArtifactJson(head, { checkpoint: name });
   }
+}
+
+export function matchesSavedCoverageSource(
+  field: string,
+  item: Record<string, unknown>,
+  saved: unknown,
+  archivePrefix: string,
+  receiptDigests?: ReadonlyMap<string, string>,
+): boolean {
+  const original =
+    typeof saved === "string" ? { question: saved } : structuredClone(saved);
+  const normalized = structuredClone(item);
+  if (isObject(original) && original.id === undefined) delete normalized.id;
+  if (field === "surfaces" && isObject(original)) {
+    original.receiptRefs ??= [];
+    normalized.receiptRefs ??= [];
+    for (const row of [original, normalized]) {
+      const refs = row.receiptRefs as string[];
+      // Closing generic work can retain current and archived copies of one receipt.
+      row.receiptRefs = [
+        ...new Set(
+          refs.map((ref) => {
+            const digest = receiptDigests?.get(ref);
+            let path = ref;
+            // Unreadable receipts can only match their exact accepted reference.
+            if (
+              ref.startsWith(archivePrefix) &&
+              (!receiptDigests || digest !== undefined)
+            ) {
+              const saved = ref.slice(archivePrefix.length);
+              if (/^attempt-[0-9]+\//u.test(saved))
+                path = saved.slice(saved.indexOf("/") + 1);
+            }
+            return receiptDigests ? JSON.stringify([path, digest]) : path;
+          }),
+        ),
+      ];
+    }
+  }
+  return isDeepStrictEqual(original, normalized);
 }
 
 export function normalizeSavedScanCoverage(sources: ScanDraftInput[]): void {
@@ -448,7 +548,11 @@ export async function preserveScanDraft(
   input: ScanDraftInput,
   saveCheckpoint = true,
   archivedSources?: SavedScanDraft[],
-): Promise<{ input: ScanDraftInput; previousDigest: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest: string;
+  originalCurrentCoverage: ScanDraftInput["coverage"][];
+}> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
   if (saveCheckpoint && !requiresClosureValidation)
@@ -464,7 +568,7 @@ export async function preserveScanDraft(
     context,
     "current",
     currentCheckpointName,
-    archivedSources !== undefined,
+    archivedSources !== undefined && !saveCheckpoint,
   );
   const archived =
     context.layout === "worker"
@@ -477,6 +581,9 @@ export async function preserveScanDraft(
     (left, right) =>
       right.modifiedMs - left.modifiedMs ||
       Number(right.head ?? false) - Number(left.head ?? false),
+  );
+  const originalCurrentCoverage = current.map(({ input }) =>
+    structuredClone(input.coverage),
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
@@ -738,13 +845,17 @@ export async function preserveScanDraft(
   result.coverage.deferred = normalizeDeferred(
     result.coverage.deferred as JsonObject[],
   );
-  if (archivedSources === undefined)
+  if (archivedSources === undefined || saveCheckpoint)
     result.coverage.surfaces = normalizeSurfaces(
       result.coverage.surfaces as JsonObject[],
     );
   else normalizeSavedScanCoverage([result]);
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
-  return { input: result, previousDigest: previousState.digest };
+  return {
+    input: result,
+    previousDigest: previousState.digest,
+    originalCurrentCoverage,
+  };
 }
 
 function completedCandidateIds(

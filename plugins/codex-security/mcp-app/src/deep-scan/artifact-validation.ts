@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   parsePersistedScanDraft,
+  matchesSavedCoverageSource,
   parseScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
@@ -309,44 +310,7 @@ function unknownSourceCoverage(): ScanDraftInput["coverage"] {
   };
 }
 
-export function matchesSavedCoverageSource(
-  field: string,
-  item: Record<string, unknown>,
-  saved: unknown,
-  archivePrefix: string,
-  receiptDigests?: ReadonlyMap<string, string>,
-): boolean {
-  const original =
-    typeof saved === "string" ? { question: saved } : structuredClone(saved);
-  const normalized = structuredClone(item);
-  if (isRecord(original) && original.id === undefined) delete normalized.id;
-  if (field === "surfaces" && isRecord(original)) {
-    original.receiptRefs ??= [];
-    normalized.receiptRefs ??= [];
-    for (const row of [original, normalized]) {
-      const refs = row.receiptRefs as string[];
-      if (receiptDigests && refs.some((ref) => !receiptDigests.has(ref)))
-        return false;
-      // Closing generic work can retain both current and archived copies of a receipt.
-      row.receiptRefs = [
-        ...new Set(
-          refs.map((ref) => {
-            let path = ref;
-            if (ref.startsWith(archivePrefix)) {
-              const saved = ref.slice(archivePrefix.length);
-              if (/^attempt-[0-9]+\//u.test(saved))
-                path = saved.slice(saved.indexOf("/") + 1);
-            }
-            return receiptDigests
-              ? JSON.stringify([path, receiptDigests.get(ref)])
-              : path;
-          }),
-        ),
-      ];
-    }
-  }
-  return isDeepStrictEqual(original, normalized);
-}
+export { matchesSavedCoverageSource } from "../artifact-scan-draft.js";
 
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
 export function projectDiscoveryCoverage(
@@ -354,7 +318,8 @@ export function projectDiscoveryCoverage(
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
   archived: { attempt: number; coverage: ScanDraftInput["coverage"] }[] = [],
-  originalCoverage: ScanDraftInput["coverage"] = coverage,
+  originalCoverage:
+    ScanDraftInput["coverage"] | ScanDraftInput["coverage"][] = coverage,
   receiptDigests?: ReadonlyMap<string, string>,
 ): ScanDraftInput["coverage"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
@@ -366,10 +331,10 @@ export function projectDiscoveryCoverage(
   const history = [...archived].sort(
     (left, right) => left.attempt - right.attempt,
   );
-  // Each historical occurrence accounts for one current surface in that attempt.
-  const matchedHistoricalSurfaces = new Map<
+  // Each historical occurrence accounts for one current row in its collection.
+  const matchedHistoricalRows = new Map<
     (typeof history)[number],
-    Set<number>
+    Map<string, Set<number>>
   >();
   const surfaces = coverage.surfaces as Record<string, unknown>[];
   const prefix = (item: Record<string, unknown>) =>
@@ -386,25 +351,21 @@ export function projectDiscoveryCoverage(
     let original: (typeof history)[number] | undefined;
     for (const historical of history) {
       const rows = (historical.coverage[field] as unknown[] | undefined) ?? [];
-      if (field !== "surfaces") {
-        if (rows.some(matches)) {
-          original = historical;
-          break;
-        }
-        continue;
-      }
-      const matched =
-        matchedHistoricalSurfaces.get(historical) ?? new Set<number>();
+      const matchedFields =
+        matchedHistoricalRows.get(historical) ?? new Map<string, Set<number>>();
+      const matched = matchedFields.get(field) ?? new Set<number>();
       const index = rows.findIndex(
         (saved, index) => !matched.has(index) && matches(saved),
       );
       if (index < 0) continue;
       matched.add(index);
-      matchedHistoricalSurfaces.set(historical, matched);
+      matchedFields.set(field, matched);
+      matchedHistoricalRows.set(historical, matchedFields);
       original ??= historical;
     }
-    const currentSources =
-      (originalCoverage[field] as unknown[] | undefined) ?? [];
+    const currentSources = (
+      Array.isArray(originalCoverage) ? originalCoverage : [originalCoverage]
+    ).flatMap((source) => (source[field] as unknown[] | undefined) ?? []);
     const savedSource =
       currentSources.find(
         (saved) =>
@@ -497,7 +458,10 @@ export function projectDiscoveryCoverage(
             coverage.resolvedDeferred as Record<string, unknown>[]
           ).map((item) => {
             const projected = project("resolvedDeferred", item);
-            return { ...item, id: `${prefix(projected)}-resolved-${item.id}` };
+            return {
+              ...item,
+              id: `${prefix(projected)}-resolved-${item.id}`,
+            };
           }),
         }),
     ...(coverage.openQuestions === undefined

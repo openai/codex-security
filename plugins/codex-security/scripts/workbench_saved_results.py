@@ -1373,7 +1373,9 @@ def merge_saved_results(
                         record, worker["id"], path, path
                     )
                 if prior == value:
-                    if field == "surfaces":
+                    if field == "surfaces" and coverage_receipts(
+                        item, worker, relative
+                    ) != coverage_receipts(record, worker, path):
                         receipts = surface_receipt_digests(item, worker, relative)
                         if receipts is None or receipts != surface_receipt_digests(
                             record, worker, path
@@ -1740,7 +1742,7 @@ def merge_saved_results(
 
     accepted_projected_records: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
     for relative, draft, source_owner in sources:
-        if source_owner is None or relative not in current_results | selected_observations.keys():
+        if source_owner is None:
             continue
         worker = workers_by_id[source_owner]
         for field in ("surfaces", "explicitExclusions", "deferred"):
@@ -1749,7 +1751,7 @@ def merge_saved_results(
                 if not isinstance(item, dict) or not isinstance(item.get("candidateId"), str):
                     continue
                 retained = retained_coverage_record(field, item, worker, relative)
-                if retained is None:
+                if retained is None and draft.get("complete") is not False:
                     retained = project_missing_record(
                         field, item, index, worker, draft["coverage"], relative
                     )

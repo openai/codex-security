@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   unlink,
   writeFile,
@@ -31,7 +32,7 @@ for (const resume of [false, true]) {
   }
 }
 
-const { readDeepReductionSources } = await (
+const { readDeepReductionSources, recordCodexSecurityDeepReduction } = await (
   await import("./import-module.ts")
 ).importSource(
   fileURLToPath(new URL("../src/artifact-deep-reducer.ts", import.meta.url)),
@@ -41,7 +42,156 @@ const { recordCodexSecurityWorkerScanDraft } = await (
 ).importSource(
   fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
 );
+const { parseDeepReduction } = await (
+  await import("./import-module.ts")
+).importSource(
+  fileURLToPath(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+  ),
+);
 const { workerDraft, scanId } = await import("./scan-draft-fixture.ts");
+const { archiveDirectory } = await (
+  await import("./import-module.ts")
+).importSource(
+  fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
+);
+
+for (const mode of ["archived", "fresh", "reassessed"]) {
+  test(`resolved retry task retains its accepted origin (${mode})`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "retry-closure-"));
+    try {
+      const workerRoot = path.join(
+        root,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "discovery-0001",
+      );
+      const output = path.join(workerRoot, "output");
+      const archive = path.join(workerRoot, "attempts", "attempt-01");
+      await mkdir(output, { recursive: true });
+      const context = {
+        root: output,
+        repoRoot: root,
+        scanId,
+        layout: "worker",
+      };
+      const coverage = {
+        completeness: "complete",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      };
+      const closure = {
+        id: "review-task",
+        reason: "Synthetic source review completed.",
+      };
+      const pending = {
+        ...coverage,
+        completeness: "partial",
+        deferred: [
+          { id: closure.id, reason: "Synthetic source review pending." },
+        ],
+      };
+      const saved = new Map();
+      if (mode !== "fresh") {
+        await recordCodexSecurityWorkerScanDraft(
+          context,
+          workerDraft([], { complete: false, coverage: pending }),
+        );
+        await recordCodexSecurityWorkerScanDraft(
+          context,
+          workerDraft([], {
+            complete: true,
+            coverage: { ...coverage, resolvedDeferred: [closure] },
+          }),
+        );
+        await archiveDirectory(output, archive);
+        for (const relative of await readdir(archive, { recursive: true })) {
+          const file = path.join(archive, relative);
+          try {
+            saved.set(file, await readFile(file));
+          } catch (error) {
+            if (error.code !== "EISDIR") throw error;
+          }
+        }
+      }
+      await mkdir(output, { recursive: true });
+      if (mode !== "archived") {
+        await recordCodexSecurityWorkerScanDraft(
+          context,
+          workerDraft([], { complete: false, coverage: pending }),
+        );
+      }
+      const currentClosure =
+        mode === "reassessed"
+          ? { ...closure, reason: "Synthetic review reassessed during retry." }
+          : closure;
+      await recordCodexSecurityWorkerScanDraft(
+        context,
+        workerDraft([], {
+          complete: true,
+          coverage: {
+            ...coverage,
+            ...(mode === "archived"
+              ? {}
+              : { resolvedDeferred: [currentClosure] }),
+          },
+        }),
+      );
+      const resultPath = path.join(output, "result.json");
+      const persisted = JSON.parse(await readFile(resultPath, "utf8"));
+      assert.equal(persisted.coverage.resolvedDeferred.length, 1);
+      const reductionContext = {
+        root: path.join(
+          root,
+          "artifacts",
+          "deep_discovery",
+          "dedup",
+          "dedup-0001",
+          "output",
+        ),
+        repoRoot: root,
+        scanId,
+        layout: "reducer",
+        deepReducer: {
+          scanRoot: root,
+          persistSourceCoverage: true,
+          claimedWorkers: [{ id: "worker", attempt: 2, resultPath }],
+        },
+      };
+      const sources = await readDeepReductionSources(reductionContext);
+      const projected = sources.discoveries[0].coverage;
+      const expectedAttempt = mode === "archived" ? 1 : 2;
+      assert.equal(
+        projected.resolvedDeferred[0].id,
+        `worker-attempt-${expectedAttempt}-resolved-${closure.id}`,
+      );
+      assert.equal(projected.resolvedDeferred[0].reason, currentClosure.reason);
+      assert.ok(
+        projected.reviews.some((review) => review.attempt === expectedAttempt),
+      );
+      await mkdir(reductionContext.root, { recursive: true });
+      await recordCodexSecurityDeepReduction(reductionContext, {
+        scanId,
+        complete: true,
+        findings: [],
+      });
+      const reduced = JSON.parse(
+        await readFile(path.join(reductionContext.root, "result.json"), "utf8"),
+      );
+      const accepted = parseDeepReduction(reduced, true);
+      assert.deepEqual(
+        accepted.sourceCoverage.resolvedDeferred,
+        projected.resolvedDeferred,
+      );
+      for (const [file, bytes] of saved)
+        assert.deepEqual(await readFile(file), bytes);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const history of [
   "valid",
