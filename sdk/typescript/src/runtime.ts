@@ -1727,6 +1727,17 @@ export async function runWorkbench(
         const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
         const archiveDir = await planOutputArchive(scanDir);
         if (archiveDir !== null) {
+          const stateDirectory = codexSecurityStateDirectory(
+            options.environment,
+          );
+          for (let path = stateDirectory; ; path = dirname(path)) {
+            if (isWithin(scanDir, await canonicalConfigPath(path))) {
+              throw new Error(
+                "The scan artifact directory cannot contain the active workbench database.",
+              );
+            }
+            if (dirname(path) === path) break;
+          }
           const savedScans = await savedScanIdentities(scanDir);
           signal?.throwIfAborted();
           await rename(scanDir, archiveDir);

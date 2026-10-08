@@ -1215,7 +1215,7 @@ describe("CodexSecurity policy API", () => {
       sandbox_workspace_write: { network_access: false },
     });
     expect(f.configuration()?.config?.["responses_api_metadata"]).toMatchObject(
-      { codex_security_surface: "cli" },
+      { codex_security_surface: "cli", codex_security_command: "policy" },
     );
     expect(f.configuration()?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
       f.repository,

@@ -75,7 +75,7 @@ def apply_migrations(
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
             elif version in applied:
-                if version in (2, 12, 13, 26, 28, 31, 32):
+                if version in (2, 12, 13, 26, 28, 31, 32, 47):
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)

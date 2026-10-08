@@ -495,7 +495,7 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32])
+  for (const version of [27, 28, 31, 32, 47])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
@@ -506,13 +506,26 @@ test("recorded additive migrations restore missing columns and configured error 
       .get()?.stop_after_consecutive_errors,
     7,
   );
-  database.exec("UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2");
+  assert.equal(
+    database
+      .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+      .get()?.discovery_user_context_json,
+    null,
+  );
+  database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
+    discovery_user_context_json = '"Original discovery context"'`);
   applyMigrations(database);
   assert.equal(
     database
       .prepare("SELECT stop_after_consecutive_errors FROM deep_scan_runs")
       .get()?.stop_after_consecutive_errors,
     2,
+  );
+  assert.equal(
+    database
+      .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+      .get()?.discovery_user_context_json,
+    '"Original discovery context"',
   );
 });
 
