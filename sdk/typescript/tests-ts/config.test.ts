@@ -5,7 +5,8 @@ import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   type JsonObject,
-  codexWorkerConfig,
+  inlineToml,
+  modelProviderConfigOverride,
   resolveCodexProfile,
   scanModelConfiguration,
   scanModelProvider,
@@ -30,6 +31,32 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 
 afterEach(cleanup);
+
+test("inline Codex overrides omit optional null fields like the file writer", async () => {
+  for (const value of [null, { args: ["fixture", null] }]) {
+    expect(() => inlineToml(value)).toThrow(ConfigurationError);
+  }
+  expect(modelProviderConfigOverride({ model_providers: null })).toEqual([]);
+  const provider = {
+    fixture: {
+      auth: { command: "synthetic-helper", args: null },
+      enabled: true,
+    },
+  };
+  const root = await temporaryDirectory();
+  const config = await mergedCodexConfig({
+    codexOverrides: { model_providers: provider },
+  });
+  const path = join(root, "config.toml");
+  await writeCodexConfig(path, config);
+  const written = parse(await readFile(path, "utf8"));
+  expect(
+    parse(`model_providers = ${inlineToml(provider)}`)["model_providers"],
+  ).toEqual(written["model_providers"]);
+  expect(written["model_providers"]).toEqual({
+    fixture: { auth: { command: "synthetic-helper" }, enabled: true },
+  });
+});
 
 function runPinnedCodex(
   codexHome: string,
@@ -230,8 +257,13 @@ describe("Codex configuration", () => {
   test("rejects invalid model settings from the selected Codex profile", async () => {
     for (const [profile, message] of [
       [{ model: " " }, "model must be a nonempty string"],
+      [{ model: 12 }, "model must be a nonempty string"],
       [
         { model_reasoning_effort: " " },
+        "reasoning effort must be a nonempty string",
+      ],
+      [
+        { model_reasoning_effort: false },
         "reasoning effort must be a nonempty string",
       ],
     ] as const) {
@@ -240,6 +272,19 @@ describe("Codex configuration", () => {
       });
 
       expect(() => scanModelConfiguration(config)).toThrow(message);
+    }
+  });
+
+  test("still requires root model and effort when the profile omits them", async () => {
+    for (const field of ["model", "model_reasoning_effort"]) {
+      const config = await mergedCodexConfig({
+        codexOverrides: {
+          [field]: null,
+          profile: "review",
+          profiles: { review: { model: null, model_reasoning_effort: null } },
+        },
+      });
+      expect(() => scanModelConfiguration(config)).toThrow(ConfigurationError);
     }
   });
 
@@ -369,7 +414,7 @@ describe("Codex configuration", () => {
     });
 
     expect(merged).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       profiles: {
         elevated: {
           features: { elevated_windows_sandbox: true },
@@ -444,7 +489,7 @@ describe("Codex configuration", () => {
     const merged = await mergedCodexConfig({});
 
     expect(scanRuntimeCodexConfig(merged)).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       default_permissions: "codex_security_scan",
       permissions: {
         codex_security_scan: {
@@ -636,9 +681,12 @@ describe("Codex configuration", () => {
               details,
             )) ||
           (process.platform === "win32" &&
-            details.includes(
+            (details.includes(
               "Restricted read-only access requires the elevated Windows sandbox backend",
-            ))
+            ) ||
+              details.includes(
+                "elevated Windows sandbox requires effective `:root` read access",
+              )))
         ) {
           expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
             0,
@@ -692,7 +740,7 @@ describe("Codex configuration", () => {
     await writeCodexConfig(path, await mergedCodexConfig({}));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
     });
 
     const result = runPinnedCodex(root, ["features", "list"]);
@@ -779,7 +827,7 @@ describe("Codex configuration", () => {
       model_reasoning_summary: "detailed",
       show_raw_agent_reasoning: true,
       windows: {
-        sandbox: "unelevated",
+        sandbox: "elevated",
       },
     });
   });
@@ -917,85 +965,5 @@ describe("Codex configuration", () => {
     };
     await writeCodexConfig(path, { hooks });
     expect(parse(await readFile(path, "utf8"))).toEqual({ hooks });
-  });
-});
-
-describe("codexWorkerConfig", () => {
-  const cases: { name: string; selection: JsonObject; selected: string }[] = [
-    { name: "implicit OpenAI", selection: {}, selected: "openai" },
-    {
-      name: "explicit OpenAI",
-      selection: { model_provider: "openai" },
-      selected: "openai",
-    },
-    {
-      name: "custom provider",
-      selection: { model_provider: "custom.provider" },
-      selected: "custom.provider",
-    },
-    {
-      name: "selected profile",
-      selection: { model_provider: "openai", profile: "scan" },
-      selected: "custom.provider",
-    },
-  ];
-  test.each(cases)(
-    "preserves the full effective $name definition only",
-    async ({ selection, selected }) => {
-      const definition = {
-        name: "Synthetic selected provider",
-        base_url: "https://provider.example.invalid/v1",
-        env_key: "SYNTHETIC_PROVIDER_KEY",
-        http_headers: { Authorization: "synthetic-selected-header" },
-        env_http_headers: { "X-Token": "SYNTHETIC_HEADER_KEY" },
-        experimental_bearer_token: "synthetic-selected-token",
-        auth: { command: "synthetic-helper", args: ["synthetic-argument"] },
-        query_params: { "api-version": "synthetic-version" },
-        request_max_retries: 2,
-      };
-      const input = await mergedCodexConfig({
-        codexOverrides: {
-          ...selection,
-          model_providers: {
-            [selected]: definition,
-            unrelated: {
-              experimental_bearer_token: "synthetic-unrelated-token",
-            },
-          },
-          profiles: {
-            scan: {
-              model_provider: "custom.provider",
-              model_providers: {
-                "custom.provider": { stream_idle_timeout_ms: 1000 },
-              },
-            },
-            inactive: { model_provider: "unrelated" },
-          },
-        },
-      });
-      const before = structuredClone(input);
-      expect(codexWorkerConfig(input)).toMatchObject({
-        model_provider: selected,
-        model_providers: {
-          [selected]: {
-            ...definition,
-            ...(selection["profile"] ? { stream_idle_timeout_ms: 1000 } : {}),
-          },
-        },
-      });
-      expect(
-        Object.keys(codexWorkerConfig(input)["model_providers"] as JsonObject),
-      ).toEqual([selected]);
-      expect(codexWorkerConfig(input)).not.toHaveProperty("profiles");
-      expect(input).toEqual(before);
-    },
-  );
-
-  test("keeps built-in provider selection without inventing a definition", () => {
-    expect(
-      codexWorkerConfig({
-        model_providers: { unrelated: { env_key: "SYNTHETIC_KEY" } },
-      }),
-    ).toEqual({ model_provider: "openai" });
   });
 });

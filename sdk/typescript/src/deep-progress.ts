@@ -5,6 +5,8 @@ export interface DeepScanProgress {
   completed: number;
   active: number;
   maximum: number;
+  /** Whether the coordinator is reducing results or has finished. */
+  consolidating?: boolean;
 }
 
 interface DeepScanProgressTrackerOptions {
@@ -85,14 +87,20 @@ export function deepScanProgressFromWorkbench(
   const independentReviews = progress["independentReviews"];
   if (independentReviews === undefined) return null;
   if (isRecord(independentReviews)) {
-    const { completed, active, maximum } = independentReviews;
+    const { completed, active, maximum, consolidating } = independentReviews;
     if (
       isSafeNonNegativeInteger(completed) &&
       isSafeNonNegativeInteger(active) &&
       isSafeNonNegativeInteger(maximum) &&
-      maximum > 0
+      maximum > 0 &&
+      (consolidating === undefined || typeof consolidating === "boolean")
     ) {
-      return { completed, active, maximum };
+      return {
+        completed,
+        active,
+        maximum,
+        ...(typeof consolidating === "boolean" ? { consolidating } : {}),
+      };
     }
   }
   throw new Error(
@@ -108,6 +116,7 @@ function sameProgress(
     right !== null &&
     left.completed === right.completed &&
     left.active === right.active &&
-    left.maximum === right.maximum
+    left.maximum === right.maximum &&
+    left.consolidating === right.consolidating
   );
 }

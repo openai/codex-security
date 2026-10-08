@@ -2,17 +2,13 @@
 
 This Promptfoo lane measures how accurately the source version of `plugins/codex-security/skills/triage-finding/SKILL.md` triages supplied scanner findings from public SastBench v0.1. It does not measure repository-wide vulnerability discovery.
 
-SastBench contains 2,737 findings: 299 labeled true positive and 2,438 labeled false positive. The JavaScript test generator exposes the scanner claim and the exact affected checkout to Codex while keeping SastBench's label-bearing `finding_id` and ground-truth label out of the rendered prompt. The eval runner stages the skill in a throwaway working directory and uses a deny-by-default Codex permission profile so only that directory, hydrated target repos, and their label-free Git cache plus minimal Codex runtime paths are readable to the model.
+SastBench contains 2,737 findings: 299 labeled true positive and 2,438 labeled false positive. The JavaScript test generator exposes the scanner claim and the exact affected checkout to Codex while keeping SastBench's label-bearing `finding_id` and ground-truth label out of the rendered prompt. Codex reads the skill directly from the checkout's plugin directory. Its permission profile also allows the selected target, the label-free Git cache, and the Node runtime; the label-bearing eval harness remains outside those roots.
 
 Run commands from the repository root. The parent `evals/triage-finding/` directory owns the pinned Promptfoo and Codex SDK dependencies and the ignored `artifacts/` tree.
 
 ## Prepare the benchmark
 
-Install dependencies once:
-
-```bash
-pnpm --dir evals/triage-finding run setup
-```
+Follow the [parent setup instructions](../README.md) to install dependencies and build the checkout's policy helper before running model evals.
 
 Install the pinned SastBench checkout and hydrate all 275 repository revisions:
 

@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "@openai/codex-sdk": "0.162.0-alpha.16",
+    "@openai/codex-sdk": "0.162.0-alpha.18",
     "ajv": "8.20.0",
     "smol-toml": "1.9.0",
     "zod": "^4.6.5"

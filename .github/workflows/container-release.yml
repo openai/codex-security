@@ -143,7 +143,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Sign in to GitHub Container Registry
+      - &sign-in-to-github-container-registry
+        name: Sign in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -215,10 +216,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
-            echo 'The registry did not return a valid immutable platform digest.' >&2
-            exit 1
-          fi
           mkdir -p "$RUNNER_TEMP/codex-security-platform-digests"
           touch "$RUNNER_TEMP/codex-security-platform-digests/${IMAGE_DIGEST#sha256:}"
 
@@ -261,12 +258,7 @@ jobs:
           pattern: codex-security-image-digest-*
           merge-multiple: true
 
-      - name: Sign in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - *sign-in-to-github-container-registry
 
       - name: Publish provisional multiarchitecture candidate
         id: manifest
@@ -360,12 +352,7 @@ jobs:
       packages: write
 
     steps:
-      - name: Sign in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - *sign-in-to-github-container-registry
 
       - name: Sign verified multiarchitecture candidate provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -395,17 +382,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Sign in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - *sign-in-to-github-container-registry
 
-      - name: Promote the verified, attested, immutable image digest
+      - name: Recheck immutable version and select the latest tag
+        id: version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ${{ needs.authorize.outputs.image }}
           VERSION: ${{ needs.authorize.outputs.version }}
           MANIFEST_DIGEST: ${{ needs.manifest.outputs.digest }}
         shell: bash
@@ -418,12 +400,24 @@ jobs:
 
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           endpoint="orgs/$owner/packages/container/codex-security"
-          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION"
+          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION" "$MANIFEST_DIGEST"
+
+      - name: Promote the verified, attested, immutable image digest
+        env:
+          IMAGE: ${{ needs.authorize.outputs.image }}
+          VERSION: ${{ needs.authorize.outputs.version }}
+          PUBLISH_LATEST: ${{ steps.version.outputs.publish_latest }}
+          MANIFEST_DIGEST: ${{ needs.manifest.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tags=(--tag "$IMAGE:$VERSION" --tag "$IMAGE:sha-$GITHUB_SHA")
+          if [[ "$PUBLISH_LATEST" == true ]]; then
+            tags+=(--tag "$IMAGE:latest")
+          fi
 
           docker buildx imagetools create \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:sha-$GITHUB_SHA" \
-            --tag "$IMAGE:latest" \
+            "${tags[@]}" \
             "$IMAGE@$MANIFEST_DIGEST"
 
           actual_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE:$VERSION")"

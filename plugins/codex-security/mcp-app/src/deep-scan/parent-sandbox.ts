@@ -1,6 +1,5 @@
 import { asRecord as record, isNonEmptyString } from "../record.js";
 import { isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { DeepScanNonRetryableError } from "./errors.js";
 
@@ -9,11 +8,12 @@ export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 export type DeepWorkerParentSandbox = {
   /**
    * Validated path and glob keys copied into the worker's stricter root-read
-   * profile. Objects retain literal paths containing glob characters.
-   * Grants are intentionally not transported because Deep Scan
+   * profile. Grants are intentionally not transported because Deep Scan
    * workers never inherit parent write access.
    */
-  readonly filesystemDenies: readonly (string | { readonly path: string })[];
+  readonly filesystemDenies: readonly string[];
+  /** Literal paths with glob characters retain native point-deny semantics. */
+  readonly literalFilesystemDenies?: readonly string[];
   readonly globScanMaxDepth?: number;
 };
 
@@ -22,18 +22,11 @@ export function resolveDeepWorkerParentSandbox(
   extra: unknown,
 ): DeepWorkerParentSandbox {
   const state = trustedSandboxState(extra);
-  validateSandboxCwd(state.sandboxCwd);
 
   const profile = record(state.permissionProfile);
   if (!profile || profile.type !== "managed") {
     throw unsupportedParentSandbox(
       "the parent must provide a managed filesystem permission profile",
-    );
-  }
-
-  if (profile.network !== "enabled" && profile.network !== "restricted") {
-    throw unsupportedParentSandbox(
-      "the parent network permission is missing or invalid",
     );
   }
 
@@ -57,7 +50,8 @@ export function resolveDeepWorkerParentSandbox(
   const globScanMaxDepth = resolveGlobScanMaxDepth(filesystem);
 
   let hasRootRead = false;
-  const filesystemDenies: Array<string | { path: string }> = [];
+  const filesystemDenies: string[] = [];
+  const literalFilesystemDenies: string[] = [];
   for (const value of filesystem.entries) {
     const entry = record(value);
     if (!entry || !isKnownFilesystemAccess(entry.access)) {
@@ -103,9 +97,10 @@ export function resolveDeepWorkerParentSandbox(
             "a parent filesystem denial path cannot be preserved",
           );
         }
-        filesystemDenies.push(
-          hasGlobMetacharacters(path.path) ? { path: path.path } : path.path,
-        );
+        (hasGlobMetacharacters(path.path)
+          ? literalFilesystemDenies
+          : filesystemDenies
+        ).push(path.path);
       }
     } else if (path.type === "glob_pattern") {
       if (!isNonEmptyString(path.pattern)) {
@@ -136,6 +131,7 @@ export function resolveDeepWorkerParentSandbox(
     }
   }
 
+
   if (!hasRootRead) {
     throw unsupportedParentSandbox(
       "the parent restricts readable paths beyond the supported read-only worker sandbox",
@@ -144,6 +140,7 @@ export function resolveDeepWorkerParentSandbox(
 
   return {
     filesystemDenies,
+    ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),
   };
 }
@@ -173,29 +170,6 @@ function trustedSandboxState(extra: unknown): Record<string, unknown> {
     );
   }
   return state;
-}
-
-function validateSandboxCwd(value: unknown): void {
-  if (value === undefined) return;
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw unsupportedParentSandbox(
-      "the parent sandbox working directory is invalid",
-    );
-  }
-  if (value.startsWith("file:")) {
-    try {
-      if (isAbsolute(fileURLToPath(value))) return;
-    } catch {
-      throw unsupportedParentSandbox(
-        "the parent sandbox working directory is invalid",
-      );
-    }
-  }
-  if (!isAbsolute(value)) {
-    throw unsupportedParentSandbox(
-      "the parent sandbox working directory is invalid",
-    );
-  }
 }
 
 function resolveGlobScanMaxDepth(

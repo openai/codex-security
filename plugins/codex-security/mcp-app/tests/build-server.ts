@@ -6,7 +6,6 @@ export const applicationRoot = path.resolve(import.meta.dirname, "..");
 export function buildServer(outfile: string, options: BuildOptions = {}) {
   return build({
     bundle: true,
-    nodePaths: [path.join(applicationRoot, "node_modules")],
     define: { "import.meta.url": "__filename" },
     entryPoints: [path.join(applicationRoot, "main.ts")],
     external: ["fsevents"],

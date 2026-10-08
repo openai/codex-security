@@ -1,41 +1,10 @@
-import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-
-export interface CodexSessionEvent {
-  readonly type: string;
-  readonly [key: string]: unknown;
-}
-
-export interface CodexSessionThread {
-  readonly id: string | null;
-  runStreamed(
-    input: string,
-    options: TurnOptions,
-  ): Promise<{ events: AsyncGenerator<CodexSessionEvent> }>;
-}
-
-export interface CodexSessionClient {
-  startThread(options: ThreadOptions): CodexSessionThread;
-  resumeThread?(threadId: string, options: ThreadOptions): CodexSessionThread;
-}
-
 /** Reduce a single stream; callers retain error, retry and acceptance policy. */
-export async function readCodexSessionTurn(options: {
-  thread: Pick<CodexSessionThread, "id">;
-  events: AsyncGenerator<CodexSessionEvent>;
-  onEvent: (event: CodexSessionEvent) => Promise<void> | void;
-  stopOnCompletion?: boolean;
-}): Promise<{
-  threadId: string | null;
-  status: "in_progress" | "completed";
-  finalResponse: string;
-  usage: unknown;
-  lastStreamError: string | null;
-}> {
+export async function readCodexSessionTurn(options) {
   let threadId = options.thread.id;
-  let status: "in_progress" | "completed" = "in_progress";
+  let status = "in_progress";
   let finalResponse = "";
-  let usage: unknown = null;
-  let lastStreamError: string | null = null;
+  let usage = null;
+  let lastStreamError = null;
   for await (const event of eventsWithOptionalUsage(options.events)) {
     await options.onEvent(event);
     if (
@@ -61,9 +30,7 @@ export async function readCodexSessionTurn(options: {
   return { threadId, status, finalResponse, usage, lastStreamError };
 }
 
-async function* eventsWithOptionalUsage(
-  events: AsyncGenerator<CodexSessionEvent>,
-): AsyncGenerator<CodexSessionEvent> {
+async function* eventsWithOptionalUsage(events) {
   try {
     yield* events;
   } catch (error) {
@@ -81,6 +48,6 @@ async function* eventsWithOptionalUsage(
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value) {
   return typeof value === "object" && value !== null;
 }
