@@ -2247,9 +2247,12 @@ The extraction root is not enforced.
                     self.assertEqual(
                         FINALIZER.is_json_integer(copy.deepcopy(location)["startLine"]), accepted
                     )
-                    self.assertEqual(
-                        FINALIZER._json_bytes(loaded), FINALIZER._json_bytes(json.loads(raw))
+                    encoded = FINALIZER._json_bytes(loaded)
+                    self.assertTrue(
+                        FINALIZER._schema_values_equal(loaded, FINALIZER._loads_json(encoded))
                     )
+                    if accepted:
+                        self.assertEqual(encoded, FINALIZER._json_bytes(json.loads(raw)))
                 if accepted:
                     _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
                     self.assertEqual(
@@ -2258,6 +2261,36 @@ The extraction root is not enforced.
                 else:
                     with self.assertRaisesRegex(FINALIZER.ContractError, "positive integer"):
                         FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_json_writers_preserve_exact_numbers_and_literal_text(self) -> None:
+        # Build escaped text with the standard writer, leaving only numeric tokens raw.
+        literal = '123 "quoted" \\ -1e9 日本語'
+        source = json.dumps({"z": "RAW", "a": [True, 1, literal, False, 0.1]}).replace(
+            '"RAW"', "1.0000000000000001"
+        )
+        payload = FINALIZER._loads_json(source)
+        payload["tuple"] = (FINALIZER._loads_json("1e-" + "9" * 5001), False, literal)
+        for options in (
+            {},
+            {"sort_keys": True, "indent": 2},
+            {"ensure_ascii": False, "separators": (",", ":")},
+        ):
+            with self.subTest(options=options):
+                encoded = FINALIZER.dumps_json(payload, allow_nan=False, **options)
+                decoded = FINALIZER._loads_json(encoded)
+                self.assertTrue(FINALIZER._schema_values_equal(payload["z"], decoded["z"]))
+                self.assertTrue(
+                    FINALIZER._schema_values_equal(payload["tuple"][0], decoded["tuple"][0])
+                )
+                self.assertEqual(decoded["a"], [True, 1, literal, False, 0.1])
+                ordinary = {"z": 1.0, "a": [True, 1, literal, None, 0.1], "tuple": (1.0, False)}
+                self.assertEqual(
+                    FINALIZER.dumps_json(ordinary, allow_nan=False, **options),
+                    json.dumps(ordinary, allow_nan=False, **options),
+                )
+        for nonfinite in (float("inf"), float("nan")):
+            with self.assertRaises(ValueError):
+                FINALIZER.dumps_json({"value": nonfinite}, allow_nan=False)
 
     def test_raw_large_exponents_keep_nonfinite_rejection(self) -> None:
         for token in ("1e400", "1e9999999999999999999", "-1e9999999999999999999"):
