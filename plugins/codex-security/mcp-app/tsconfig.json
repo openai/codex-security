@@ -1,7 +1,5 @@
 {
   "compilerOptions": {
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
@@ -9,7 +7,9 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
-    "types": ["node"]
+    "types": ["node"],
+    "lib": ["ES2024"],
+    "allowImportingTsExtensions": true
   },
-  "include": ["main.ts", "artifact-writer-main.ts", "server.ts", "src"]
+  "include": ["*.ts", "src", "tests/**/*.ts", "scripts/*.mts"]
 }

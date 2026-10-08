@@ -5,6 +5,8 @@ description: Use when Codex is already in the attack-path-analysis phase of a se
 
 # Security Attack Path Analysis
 
+Before choosing paths or saving retained output, read `../../references/artifact-storage.md` and follow its storage policy.
+
 ## Objective
 
 Turn validated or still-plausible findings into explicit attacker stories, structured attack-path analysis facts, severity calibration, and a final reportability decision grounded in the threat model.
@@ -110,5 +112,6 @@ Render attack-path facts using `references/attack-path-facts.md`.
 - Outside compact diff mode, save a final visible report for each candidate finding using that finding's attack-path analysis report path from `../../references/scan-artifacts.md`.
 
 -- Considerations for attack path --
+
 - A bug matters if evidence shows an attacker could exploit it.
 - The attack surface should generally be one that is plausibly exposed to end users / external actors (or another actor explicitly in scope in the threat model).

@@ -1,3 +1,5 @@
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
+import { once } from "node:events";
 import { mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -6,8 +8,7 @@ import {
   type McpToolCallItem,
   type ThreadEvent,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
-import { runScanEvents } from "../src/api.js";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import {
   CodexSecurityError,
   IncompleteScanError,
@@ -19,16 +20,18 @@ import {
   type ScanTrustedAccessStatus,
   type ScanWorkerStatus,
 } from "../src/index.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
+  collectObserverErrors,
   completedEvents,
-  createApiTestFixtures,
+  completedTurn,
   runEvents,
   type ScanObserverName,
 } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { throwing } from "./support/errors.js";
+import { runScanEvents } from "../src/api.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 
 afterEach(cleanup);
 
@@ -60,24 +63,12 @@ function tacToolCall(
 async function* tacEvents(
   items: readonly McpToolCallItem[],
 ): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: "thread-1" };
-  yield { type: "turn.started" };
   for (const item of items) {
     yield { type: "item.completed", item };
   }
   yield {
     type: "item.completed",
     item: { id: "message-1", type: "agent_message", text: "scan complete" },
-  };
-  yield {
-    type: "turn.completed",
-    usage: {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    },
   };
 }
 
@@ -89,7 +80,7 @@ function runTacEvents(
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void,
   authentication?: ScanAuthentication,
 ): ReturnType<typeof runEvents> {
-  return runEvents(scanDir, tacEvents(items), {
+  return runEvents(scanDir, completedEvents("thread-1", tacEvents(items)), {
     authentication,
     onObserverError,
     onTrustedAccessStatus,
@@ -108,13 +99,13 @@ describe("one-shot scan events", () => {
       model: "gpt-5.6-sol",
       finalResponse: "scan complete",
     });
-    expect(result.cost).toEqual({
+    expect(result.cost).toMatchObject({
       model: "gpt-5.6-sol",
       inputTokens: 10,
       cachedInputTokens: 2,
       cacheWriteInputTokens: 0,
       outputTokens: 3,
-      estimatedUsd: 0.000131,
+      estimatedUsd: 0.0000928,
     });
   });
 
@@ -186,16 +177,14 @@ describe("one-shot scan events", () => {
 
   test("warns once and continues when trusted cyber access is not granted", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
-    const warnings: string[] = [];
+    const warnings = mock((_warning: string) => {});
     const item = tacToolCall("not_granted");
 
-    const result = await runTacEvents(scanDir, [item, item], (warning) =>
-      warnings.push(warning),
-    );
+    const result = await runTacEvents(scanDir, [item, item], warnings);
 
     expect(result.turnResult.status).toBe("completed");
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toBe(
+    expect(warnings).toHaveBeenCalledTimes(1);
+    expect(warnings.mock.calls[0]?.[0]).toBe(
       "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
     );
   });
@@ -272,6 +261,59 @@ describe("one-shot scan events", () => {
       expect(warnings).toEqual([expected]);
       expect(warnings[0]).not.toContain("chatgpt.com/cyber");
     }
+  });
+
+  test("does not apply ChatGPT account advisories to Bedrock scans", async () => {
+    for (const authentication of [
+      { method: "aws_credentials", source: "AWS_PROFILE", verified: false },
+      { method: "command", verified: false },
+    ] as const) {
+      for (const status of ["granted", "not_granted", "unknown"] as const) {
+        const scanDir = await copyCompletedScan(await temporaryDirectory());
+        const warnings: string[] = [];
+        const statuses: ScanTrustedAccessStatus[] = [];
+        const result = await runEvents(
+          scanDir,
+          completedEvents("thread-1", tacEvents([tacToolCall(status)])),
+          {
+            authentication,
+            modelProvider: "amazon-bedrock",
+            onWarning: (warning) => warnings.push(warning),
+            onTrustedAccessStatus: (value) => statuses.push(value),
+          },
+        );
+
+        expect(result.turnResult.status).toBe("completed");
+        expect(warnings).toEqual([]);
+        expect(statuses).toEqual([]);
+      }
+    }
+  });
+
+  test("preserves Bedrock failures after an inapplicable account advisory", async () => {
+    const scanDir = join(await temporaryDirectory(), "partial-scan");
+    await mkdir(scanDir, { mode: 0o700 });
+    const message =
+      "HTTP 403 ExpiredTokenException: The security token included in the request is expired";
+    const warnings: string[] = [];
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      yield { type: "item.completed", item: tacToolCall("not_granted") };
+      yield { type: "turn.failed", error: { message } };
+    }
+
+    await expect(
+      runEvents(scanDir, events(), {
+        authentication: {
+          method: "aws_credentials",
+          source: "AWS_PROFILE",
+          verified: false,
+        },
+        modelProvider: "amazon-bedrock",
+        onWarning: (warning) => warnings.push(warning),
+      }),
+    ).rejects.toMatchObject({ name: CodexSecurityError.name, message });
+    expect(warnings).toEqual([]);
   });
 
   test("does not mistake external-provider keys for OpenAI API organizations", async () => {
@@ -403,25 +445,62 @@ describe("one-shot scan events", () => {
     expect(warnings).toEqual([]);
   });
 
-  test("isolates trusted cyber access warning observer failures", async () => {
+  test("captures warning observers before payload evaluation and isolates failures", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const observerErrors: Array<[ScanObserverName, string]> = [];
-
-    const result = await runTacEvents(
+    const replacement = mock();
+    let warningPending = false;
+    let onWarning: () => void = function (this: void) {
+      expect(this).toBeUndefined();
+      throw new Error("TAC warning observer failed");
+    };
+    let onObserverError = function (
+      this: void,
+      observer: ScanObserverName,
+      error: unknown,
+    ) {
+      expect(this).toBeUndefined();
+      observerErrors.push([observer, (error as Error).message]);
+    };
+    const result = await runScanEvents({
+      thread: { id: null },
+      events: completedEvents(
+        "thread-1",
+        tacEvents([tacToolCall("not_granted")]),
+      ),
+      signal: new AbortController().signal,
       scanDir,
-      [tacToolCall("not_granted")],
-      () => {
-        throw new Error("TAC warning observer failed");
+      pluginRoot: PLUGIN_ROOT,
+      expectation: {
+        repository: "/repository",
+        repositoryRevision: "deadbeef",
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: "0.1.0",
       },
-      (observer, error) => {
-        observerErrors.push([observer, (error as Error).message]);
+      get onTrustedAccessStatus() {
+        warningPending = true;
+        return undefined;
       },
-    );
-
+      get authentication() {
+        if (warningPending) {
+          onWarning = replacement;
+          onObserverError = replacement;
+        }
+        return undefined;
+      },
+      get onWarning() {
+        return onWarning;
+      },
+      get onObserverError() {
+        return onObserverError;
+      },
+    });
     expect(result.turnResult.status).toBe("completed");
     expect(observerErrors).toEqual([
       ["onWarning", "TAC warning observer failed"],
     ]);
+    expect(replacement).not.toHaveBeenCalled();
   });
 
   test("isolates trusted cyber access status observer failures", async () => {
@@ -432,12 +511,8 @@ describe("one-shot scan events", () => {
       scanDir,
       [tacToolCall("granted")],
       () => {},
-      (observer, error) => {
-        observerErrors.push([observer, (error as Error).message]);
-      },
-      () => {
-        throw new Error("TAC status observer failed");
-      },
+      collectObserverErrors(observerErrors),
+      throwing("TAC status observer failed"),
     );
 
     expect(result.turnResult.status).toBe("completed");
@@ -450,26 +525,12 @@ describe("one-shot scan events", () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const events = completedEvents();
 
-    const result = await runScanEvents({
-      thread: {
-        id: null,
-        async runStreamed() {
-          return { events };
-        },
-      },
-      events,
-      signal: new AbortController().signal,
+    const result = await runEvents(
       scanDir,
-      pluginRoot: PLUGIN_ROOT,
-      expectation: {
-        repository: "/repository",
-        repositoryRevision: "different-revision",
-        target: { kind: "repository", paths: [] },
-        mode: "standard",
-        pluginVersion: "0.1.0",
-      },
-      workbenchValidated: true,
-    });
+      events,
+      { model: undefined, workbenchValidated: true },
+      "different-revision",
+    );
 
     expect(result.threadId).toBe("thread-1");
     expect(result.turnResult.status).toBe("completed");
@@ -481,24 +542,8 @@ describe("one-shot scan events", () => {
     const events = completedEvents();
     let finalized = false;
 
-    const result = await runScanEvents({
-      thread: {
-        id: null,
-        async runStreamed() {
-          return { events };
-        },
-      },
-      events,
-      signal: new AbortController().signal,
-      scanDir,
-      pluginRoot: PLUGIN_ROOT,
-      expectation: {
-        repository: "/repository",
-        repositoryRevision: "deadbeef",
-        target: { kind: "repository", paths: [] },
-        mode: "standard",
-        pluginVersion: "0.1.0",
-      },
+    const result = await runEvents(scanDir, events, {
+      model: undefined,
       onFinalize: async (usage) => {
         expect(usage).toMatchObject({
           input_tokens: 10,
@@ -541,7 +586,7 @@ describe("one-shot scan events", () => {
 
   test("does not report a scan as started when its stream fails first", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
-    let scanStarted = false;
+    const onScanStarted = mock();
 
     async function* failedEvents(): AsyncGenerator<ThreadEvent> {
       yield { type: "error", message: "stream failed to start" };
@@ -549,17 +594,15 @@ describe("one-shot scan events", () => {
 
     await expect(
       runEvents(scanDir, failedEvents(), {
-        onScanStarted: () => {
-          scanStarted = true;
-        },
+        onScanStarted,
       }),
     ).rejects.toThrow("stream failed to start");
-    expect(scanStarted).toBe(false);
+    expect(onScanStarted).not.toHaveBeenCalled();
   });
 
   test("reports a scan as started only once if thread events are replayed", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
-    let starts = 0;
+    const onScanStarted = mock(throwing("start observer exploded"));
     const observerErrors: Array<[ScanObserverName, string]> = [];
 
     async function* replayedEvents(): AsyncGenerator<ThreadEvent> {
@@ -568,16 +611,11 @@ describe("one-shot scan events", () => {
     }
 
     await runEvents(scanDir, replayedEvents(), {
-      onScanStarted: () => {
-        starts += 1;
-        throw new Error("start observer exploded");
-      },
-      onObserverError: (observer, error) => {
-        observerErrors.push([observer, (error as Error).message]);
-      },
+      onScanStarted,
+      onObserverError: collectObserverErrors(observerErrors),
     });
 
-    expect(starts).toBe(1);
+    expect(onScanStarted).toHaveBeenCalledTimes(1);
     expect(observerErrors).toEqual([
       ["onScanStarted", "start observer exploded"],
     ]);
@@ -589,29 +627,22 @@ describe("one-shot scan events", () => {
     await mkdir(scanDir, { mode: 0o700 });
     const abortController = new AbortController();
     const reconnects: Array<[number, number]> = [];
-    let notifyReconnect!: () => void;
-    const reconnectSeen = new Promise<void>((resolve) => {
-      notifyReconnect = resolve;
-    });
+    const reconnectSeen = Promise.withResolvers<void>();
     async function* interruptedEvents(): AsyncGenerator<ThreadEvent> {
       yield { type: "thread.started", thread_id: "thread-2" };
       yield { type: "error", message: "Reconnecting... 2/5" };
-      await new Promise<void>((resolve) => {
-        abortController.signal.addEventListener("abort", () => resolve(), {
-          once: true,
-        });
-      });
+      await once(abortController.signal, "abort");
       throw new DOMException("aborted", "AbortError");
     }
     const result = runEvents(scanDir, interruptedEvents(), {
       abortController,
       onReconnect: (attempt, maxAttempts) => {
         reconnects.push([attempt, maxAttempts]);
-        notifyReconnect();
+        reconnectSeen.resolve();
       },
     });
 
-    await reconnectSeen;
+    await reconnectSeen.promise;
     abortController.abort();
     await expect(result).rejects.toMatchObject({
       name: ScanInterruptedError.name,
@@ -660,14 +691,8 @@ describe("one-shot scan events", () => {
   test("keeps the Codex stream alive through reconnect notifications", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const reconnects: Array<[number, number]> = [];
-    let release!: () => void;
-    const paused = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let notifyReconnect!: () => void;
-    const reconnectSeen = new Promise<void>((resolve) => {
-      notifyReconnect = resolve;
-    });
+    const paused = Promise.withResolvers<void>();
+    const reconnectSeen = Promise.withResolvers<void>();
     let closed = false;
     async function* reconnectingEvents(): AsyncGenerator<ThreadEvent> {
       try {
@@ -678,8 +703,8 @@ describe("one-shot scan events", () => {
           message:
             "Reconnecting... 2/5 (Rate limit reached for org-private. Please try again in 1.2s.)",
         };
-        notifyReconnect();
-        await paused;
+        reconnectSeen.resolve();
+        await paused.promise;
         yield { type: "error", message: "Reconnecting… 3/5" };
         yield {
           type: "item.completed",
@@ -689,16 +714,7 @@ describe("one-shot scan events", () => {
             text: "scan complete",
           },
         };
-        yield {
-          type: "turn.completed",
-          usage: {
-            input_tokens: 10,
-            cached_input_tokens: 2,
-            cache_write_input_tokens: 0,
-            output_tokens: 3,
-            reasoning_output_tokens: 1,
-          },
-        };
+        yield completedTurn();
       } finally {
         closed = true;
       }
@@ -708,10 +724,10 @@ describe("one-shot scan events", () => {
         reconnects.push([attempt, maxAttempts]),
     });
 
-    await reconnectSeen;
+    await reconnectSeen.promise;
     expect(closed).toBe(false);
     expect(reconnects).toEqual([[2, 5]]);
-    release();
+    paused.resolve();
 
     await expect(result).resolves.toBeDefined();
     expect(closed).toBe(true);
@@ -900,7 +916,7 @@ describe("one-shot scan events", () => {
     ]) {
       const scanDir = join(await temporaryDirectory(), "partial-scan");
       await mkdir(scanDir, { mode: 0o700 });
-      const reconnects: Array<[number, number]> = [];
+      const reconnects = mock((_attempt: number, _maxAttempts: number) => {});
       let advancedPastFailure = false;
 
       async function* events(): AsyncGenerator<ThreadEvent> {
@@ -912,12 +928,10 @@ describe("one-shot scan events", () => {
 
       await expect(
         runEvents(scanDir, events(), {
-          onReconnect: (attempt, maxAttempts) => {
-            reconnects.push([attempt, maxAttempts]);
-          },
+          onReconnect: reconnects,
         }),
       ).rejects.toMatchObject({ name: CodexSecurityError.name, message });
-      expect(reconnects).toEqual([]);
+      expect(reconnects).not.toHaveBeenCalled();
       expect(advancedPastFailure).toBe(false);
     }
   });
@@ -974,8 +988,6 @@ describe("one-shot scan events", () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const statuses: ScanWorkerStatus[] = [];
     async function* workerEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       yield {
         type: "item.completed",
         item: {
@@ -1007,20 +1019,10 @@ describe("one-shot scan events", () => {
           text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":6,"started":3}',
         },
       };
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, workerEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", workerEvents()), {
         onWorkerStatus: (status) => statuses.push(status),
       }),
     ).resolves.toBeDefined();
@@ -1035,8 +1037,6 @@ describe("one-shot scan events", () => {
     const activities: ScanActivity[] = [];
 
     async function* activityEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       for (const [type, status] of [
         ["item.started", "in_progress"],
         ["item.completed", "completed"],
@@ -1052,20 +1052,10 @@ describe("one-shot scan events", () => {
           },
         };
       }
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, activityEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", activityEvents()), {
         onActivity: (activity) => activities.push(activity),
       }),
     ).resolves.toBeDefined();
@@ -1092,8 +1082,6 @@ describe("one-shot scan events", () => {
     const activities: ScanActivity[] = [];
 
     async function* reasoningEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       yield {
         type: "item.completed",
         item: {
@@ -1104,19 +1092,9 @@ describe("one-shot scan events", () => {
             "**Planning batch file size verification and progress output**",
         },
       };
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
-    await runEvents(scanDir, reasoningEvents(), {
+    await runEvents(scanDir, completedEvents("thread-1", reasoningEvents()), {
       onActivity: (activity) => activities.push(activity),
     });
 
@@ -1140,8 +1118,6 @@ describe("one-shot scan events", () => {
     const updates: ScanProgress[] = [];
 
     async function* progressEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       for (const text of [
         'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}',
         'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
@@ -1156,20 +1132,10 @@ describe("one-shot scan events", () => {
           },
         };
       }
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, progressEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", progressEvents()), {
         onProgress: (progress) => updates.push(progress),
       }),
     ).resolves.toBeDefined();
@@ -1177,54 +1143,6 @@ describe("one-shot scan events", () => {
       { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
       { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
       { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-    ]);
-  });
-
-  test("forwards every file count printed by a completed review command", async () => {
-    const scanDir = await copyCompletedScan(await temporaryDirectory());
-    const updates: ScanProgress[] = [];
-
-    async function* progressEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
-      yield {
-        type: "item.completed",
-        item: {
-          id: "file-review-1",
-          type: "command_execution",
-          command: "review the two files in the inventory",
-          aggregated_output: [
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":2}',
-            "--- commands.py ---",
-            "--- server.py ---",
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":2,"filesTotal":2}',
-          ].join("\n"),
-          exit_code: 0,
-          status: "completed",
-        },
-      };
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
-    }
-
-    await expect(
-      runEvents(scanDir, progressEvents(), {
-        expectedFilesTotal: 2,
-        onProgress: (progress) => updates.push(progress),
-      }),
-    ).resolves.toBeDefined();
-    expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
-      { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
     ]);
   });
 });

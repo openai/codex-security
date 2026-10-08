@@ -1,6 +1,9 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PassThrough, Writable } from "node:stream";
 import { setImmediate } from "node:timers/promises";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import { main } from "../src/cli.js";
 import { ConfigurationError } from "../src/errors.js";
@@ -13,6 +16,9 @@ import {
   FakeSignals,
 } from "./cli-fixtures.js";
 import { BUNDLED_PLUGIN_VERSION, VERSION } from "../src/version.js";
+
+const { temporaryDirectory, cleanup } = createApiTestFixtures("cli-mcp-");
+afterEach(cleanup);
 
 async function connect(
   deps = dependencies(),
@@ -224,6 +230,58 @@ describe("CLI MCP scans", () => {
           workflowId: "synthetic-workflow",
         }),
       ]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("shares project settings and per-call overrides with scan and info", async () => {
+    const root = await temporaryDirectory();
+    const config = join(root, "scan.json");
+    await writeFile(
+      config,
+      JSON.stringify({
+        auth: "chatgpt",
+        scan: { mode: "deep", scope: { paths: ["src"] }, deep: { workers: 2 } },
+        limits: { max_cost_usd_per_scan: 7 },
+        codex: { model: "gpt-5.6-terra" },
+      }),
+    );
+    const calls: ScanOptions[] = [];
+    const session = await connect(
+      dependencies({
+        currentDirectory: root,
+        onTurn: (_repository, options) => calls.push(options),
+      }),
+    );
+    try {
+      const info = await session.call("info", { config }).result;
+      expect(info.structuredContent).toMatchObject({
+        scanMcp: true,
+        model: "gpt-5.6-terra",
+        configuration: {
+          path: config,
+          settings: {
+            auth: "chatgpt",
+            mode: "deep",
+            workers: 2,
+            maxCostUsd: 7,
+          },
+        },
+      });
+      expect(
+        (await session.call("scan", { config, workers: 3 }).result).isError,
+      ).not.toBe(true);
+      expect(calls[0]).toMatchObject({
+        auth: "chatgpt",
+        mode: "deep",
+        target: ["src"],
+        workers: 3,
+        maxCostUsd: 7,
+      });
+      expect((await session.call("scan", {}).result).isError).not.toBe(true);
+      expect(calls[1]).toMatchObject({ mode: "standard" });
+      expect(calls[1]?.workers).toBeUndefined();
     } finally {
       await session.close();
     }
@@ -592,4 +650,55 @@ describe("CLI MCP scans", () => {
       expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     }
   });
+  test.each([
+    ["SIGINT", "SIGINT", 1_000, 130],
+    ["SIGTERM", "SIGTERM", 1_000, 143],
+    ["SIGINT", "SIGTERM", 100, 130],
+  ] as const)(
+    "a later %s/%s escapes blocked scan cleanup",
+    async (first, repeated, delay, exitCode) => {
+      const signals = new FakeSignals();
+      const started = Promise.withResolvers<void>();
+      const cleanupStarted = Promise.withResolvers<void>();
+      const finishCleanup = Promise.withResolvers<void>();
+      const forced: string[] = [];
+      let now = 0;
+      const deps = dependencies({ signals });
+      deps.now = () => now;
+      deps.forceExit = (signal) => forced.push(signal);
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          started.resolve();
+          await new Promise<void>((resolve) =>
+            options!.signal!.addEventListener("abort", () => resolve(), {
+              once: true,
+            }),
+          );
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {
+          cleanupStarted.resolve();
+          await finishCleanup.promise;
+        },
+      });
+      const session = await connect(deps);
+      try {
+        session.call("scan");
+        await started.promise;
+        signals.emit(first);
+        await cleanupStarted.promise;
+        signals.emit(first);
+        expect(forced).toEqual([]);
+        now = delay;
+        signals.emit(repeated);
+        expect(forced).toEqual([repeated]);
+        expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+        expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      } finally {
+        finishCleanup.resolve();
+        expect(await session.serving).toBe(exitCode);
+      }
+    },
+  );
 });

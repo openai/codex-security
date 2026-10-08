@@ -4,6 +4,8 @@ Apply this guidance once when a Standard or Deep Security Scan owns the top-leve
 
 ## Setup and Scan Ownership
 
+Read `artifact-storage.md` before choosing artifact paths and follow its scan-ownership and storage rules.
+
 Follow the active scan mode's existing direct-start, native-continuation, SDK-owned, or headless-launch path. Codex CLI, evaluation harnesses, automation, and other headless hosts never open or wait for a desktop workspace. An explicitly identified desktop host retains its documented app continuation and authoritative scan context.
 
 When an existing native continuation provides a `scanId`, load `get_codex_security_scan_context` once with its `handoffClaimToken` when present; preserve the returned scan identity, directory, target, scope, mode, exact `userContext`, and handoff token. If required context is missing, malformed, or belongs to another mode, follow the active entrypoint's existing error or routing behavior instead of inventing an identifier, creating a replacement scan, or widening the target. An SDK-owned scan preserves its SDK-provided scan identity and directory without creating or finalizing another scan.
@@ -21,6 +23,12 @@ Only a top-level Standard scan reads `config-preflight.md` and runs its existing
 For a blocked, incomplete, or failed Standard preflight, report the exact reason and preserve any durable running scan while recovery remains possible. In an interactive session, present the helper-reported configuration path and exact remediation, then use the existing native input, MCP input, or plain-chat fallback before editing persistent configuration. In a headless or otherwise non-interactive session, apply only helper-provided ordinary patches to its reported `user_config_path`, rerun once, and continue only if the result becomes `ready`. Never guess the active configuration path or conceal a higher-precedence conflict with a lower-precedence change.
 
 A Deep scan has no parent capability preflight: do not load either preflight reference, inspect runtime tools, run the helper, request remediation, or publish preflight checks. Its coordinator validates the real scan ownership, target, scope, and sandbox and owns the existing transition from the durable `preflight` phase into discovery.
+
+## Deep Worker Failures
+
+Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight does not require a particular parent delegation runtime, ownership, capacity, or depth. Discovery workers inherit the scan's model and use the reserved `codex_security_deep_scan_worker` permission profile with the parent's supported filesystem denials. The selected Codex executable must support permission-profile configuration and allowance checks. If that command fails to start or exits early, report its path and the tool's diagnostic; do not infer that its version is unsupported. If the tool identifies a missing API, ask the user to update the Codex installation at the reported path: the desktop app for an app-bundled executable, or the selected CLI otherwise. If Codex policy rejects the profile, report the tool's administrator guidance. Do not remove deny rules or select a broader sandbox to work around the error.
+
+Deep Scan workers use the selected Codex home's credentials and provider configuration. An existing `CODEX_API_KEY` remains selected. When the worker has no Codex account and its provider requires OpenAI authentication, it can use `OPENAI_API_KEY` through the SDK's API-key option. This does not replace a stored account, custom-provider authentication, or a forced ChatGPT login. The key must be present in the process that launched the plugin; setting it later in a separate shell does not update a running plugin.
 
 ## Cancellation and Recovery
 

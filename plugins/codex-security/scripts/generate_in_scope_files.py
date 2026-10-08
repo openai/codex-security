@@ -10,6 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_target import git_blob_samples, git_command
+
 
 class InventoryError(ValueError):
     """Raised when the repository, scope, or inventory cannot be used safely."""
@@ -86,11 +90,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     command = [
         "rg",
         "--files",
+        "--null",
         "--hidden",
         "--path-separator",
         "/",
+        # Prune Git metadata and its contents even when the scope starts inside .git.
         "--glob",
-        "!.git/**",
+        "!**/.git",
+        "--glob",
+        "!**/.git/**",
         "--",
         scope,
     ]
@@ -115,21 +123,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         if (repository / ".git").exists():
             try:
-                tracked = subprocess.run(
-                    [
-                        "git",
-                        "ls-files",
-                        "--cached",
-                        "--ignored",
-                        "--exclude-standard",
-                        "-z",
-                        "--",
-                        scope,
-                    ],
-                    cwd=repository,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
+                tracked = git_command(
+                    repository,
+                    "ls-files",
+                    "--cached",
+                    "--ignored",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                    scope,
+                    text=False,
                 )
             except OSError:
                 tracked = None
@@ -138,44 +141,20 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for path in tracked.stdout.split(b"\0"):
                     candidate = repository / os.fsdecode(path)
                     if path and candidate.is_file() and not candidate.is_symlink():
-                        inventory.write(prefix + path + b"\n")
+                        inventory.write(prefix + path + b"\0")
 
         inventory.seek(0)
-        rows = sorted(inventory)
+        rows: list[bytes] = []
+        for path in inventory.read().split(b"\0"):
+            if not path:
+                continue
+            if b"\n" in path or b"\r" in path:
+                raise InventoryError(
+                    "Repository contains a path that cannot fit in the file inventory"
+                )
+            rows.append(path + b"\n")
 
-    return write_inventory(output, rows)
-
-
-def committed_changed_paths(repository: Path, base: str, head: str) -> list[tuple[Path, str]]:
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "diff",
-            "--raw",
-            "-z",
-            "--diff-filter=ACMRD",
-            f"{base}..{head}",
-        ],
-        capture_output=True,
-        check=True,
-    )
-    fields = result.stdout.split(b"\0")
-    changed: list[tuple[Path, str]] = []
-    index = 0
-    while index < len(fields) - 1:
-        metadata = fields[index].split()
-        status = chr(metadata[-1][0])
-        index += 1
-        if status in {"C", "R"}:
-            index += 1
-        path = os.fsdecode(fields[index])
-        index += 1
-        selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
-        if selected_mode != b"120000":
-            changed.append((repository / path, status))
-    return changed
+    return write_inventory(output, sorted(set(rows)))
 
 
 def generate_diff_in_scope_files(
@@ -186,67 +165,48 @@ def generate_diff_in_scope_files(
     output: Path,
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from generate_rank_input import git_changed_paths, path_is_excluded
-    from rank_preview import (
-        DEFAULT_PREVIEW_BYTES,
-        TEXT_CODE_EXTENSIONS,
-        is_binary_sample,
-        preview_for,
-    )
-    from workbench_target import git_blob_bytes
+    from generate_rank_input import git_changed_paths
+    from rank_preview import is_binary_file
 
     rows: list[bytes] = []
     try:
-        changed = (
-            committed_changed_paths(repository, base, head)
-            if mode == "revisions"
-            else git_changed_paths(repository, base, head, mode)
-        )
-        eligible = [
-            (path, status)
-            for path, status in changed
-            if not path_is_excluded(path.relative_to(repository))
-            and path.suffix.lower() in TEXT_CODE_EXTENSIONS
-        ]
-        revision_paths = [
-            path.relative_to(repository)
-            for path, status in eligible
-            if mode == "revisions" and status != "D"
-        ]
-        revision_blobs = dict(
-            zip(
-                revision_paths,
-                git_blob_bytes(
-                    repository,
-                    [f"{head}:{path.as_posix()}" for path in revision_paths],
-                ),
+        changed = git_changed_paths(repository, base, head, mode)
+        revision_refs = {
+            path.relative_to(repository): (
+                f"{base if status == 'D' else head}:{path.relative_to(repository).as_posix()}"
             )
+            for path, status in changed
+            if mode == "revisions" or status == "D"
+        }
+        revision_samples = dict(
+            zip(revision_refs, git_blob_samples(repository, list(revision_refs.values())))
         )
 
-        for path, status in eligible:
+        for path, status in changed:
             relative = path.relative_to(repository)
-            if status != "D":
-                if mode == "revisions":
-                    contents = revision_blobs[relative]
-                    if contents is None:
-                        raise InventoryError(
-                            f"could not read committed diff blob: {head}:{relative.as_posix()}"
-                        )
-                    if is_binary_sample(contents):
-                        continue
-                elif (
-                    path.is_symlink()
-                    or not path.is_file()
-                    or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
-                ):
+            if mode == "revisions" or status == "D":
+                sample = revision_samples[relative]
+                if sample is None:
+                    revision = base if status == "D" else head
+                    raise InventoryError(
+                        f"could not read committed diff blob: {revision}:{relative.as_posix()}"
+                    )
+                _, is_binary = sample
+                if is_binary:
                     continue
-            relative_path = relative.as_posix()
-            if "\n" in relative_path or "\r" in relative_path:
+            elif path.is_symlink() or not path.is_file() or is_binary_file(path):
+                continue
+            try:
+                relative_path = relative.as_posix().encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise InventoryError(
+                    "Git changes contain a path that cannot be encoded as UTF-8 for the file inventory"
+                ) from error
+            if b"\n" in relative_path or b"\r" in relative_path:
                 raise InventoryError(
                     "Git changes contain a path that cannot fit in the file inventory"
                 )
-            rows.append(f"{relative_path}\n".encode())
+            rows.append(relative_path + b"\n")
     except (OSError, subprocess.CalledProcessError) as error:
         detail = getattr(error, "stderr", None)
         if isinstance(detail, bytes):
@@ -265,7 +225,8 @@ def write_inventory(output: Path, rows: list[bytes]) -> int:
         with tempfile.NamedTemporaryFile(
             mode="wb",
             dir=output.parent,
-            prefix=f".{output.name}.",
+            # Including the output name can exceed the filesystem's 255-byte name limit.
+            prefix=".",
             suffix=".tmp",
             delete=False,
         ) as handle:

@@ -1,0 +1,12 @@
+{
+  "name": "security-policy-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "run-command": "./bin/run-command.js"
+  },
+  "scripts": {
+    "start:service": "node launch-service.js"
+  }
+}

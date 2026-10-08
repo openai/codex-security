@@ -6,6 +6,41 @@ export PATH
 
 launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 server_path=$launcher_dir/../mcp/server.mjs
+if [ "${1:-}" = "--helper" ]; then
+  server_path=$launcher_dir/../mcp/helpers.mjs
+fi
+launch_node() {
+  node_command=$1
+  shift
+  if [ "${1:-}" = "--helper" ]; then
+    shift
+    # Preserve POSIX argv and HOME bytes without temporary files or consuming stdin.
+    helper_stdin=-
+    if (exec 4<&0) 2>&-; then
+      exec 4<&0
+      helper_stdin=4
+    fi
+    wait_helper() {
+      if wait "$!" 2>&-; then exit 0; else exit $?; fi
+    }
+    forward_signal() {
+      if [ -n "${!:-}" ]; then
+        kill -s "$1" "$!" 2>&- || :
+        wait_helper
+      fi
+      exit "$2"
+    }
+    trap 'forward_signal HUP 129' HUP
+    trap 'forward_signal INT 130' INT
+    trap 'forward_signal TERM 143' TERM
+    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n' |
+      "$node_command" "$server_path" --helper 3<&0 0<&"$helper_stdin" 4<&- &
+    exec 4<&-
+    wait_helper
+  fi
+  exec "$node_command" "$server_path" "$@"
+}
+
 cache_root=${XDG_CACHE_HOME:-${HOME:-}/.cache}
 codex_resources=
 case "${CODEX_CLI_PATH:-}" in
@@ -20,12 +55,12 @@ for candidate in \
   "$cache_root/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
 do
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    exec "$candidate" "$server_path" "$@"
+    launch_node "$candidate" "$@"
   fi
 done
 
-if command -v node >/dev/null 2>&1; then
-  exec node "$server_path" "$@"
+if node_path=$(command -v node); then
+  launch_node "$node_path" "$@"
 fi
 
 printf '%s\n' 'Codex Security could not find a Node runtime. Reinstall or update Codex, or set CODEX_MCP_NODE_PATH to an executable Node runtime.' >&2

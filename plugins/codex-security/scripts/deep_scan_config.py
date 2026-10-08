@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
-    import tomli as tomllib
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench.runtime_toml import tomllib
 
-DEFAULT_WORKERS = 4
-DEFAULT_SUBAGENTS = 3
-DEFAULT_STOP_AFTER_NO_NEW = 4
-DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = 3
-DEFAULT_MAX_DISCOVERY_RUNS = 40
-DEFAULT_MAX_TIME_HOURS = 96
+DEFAULTS = json.loads(
+    Path(__file__).with_name("deep_scan_defaults.json").read_text(encoding="utf-8")
+)
+DEFAULT_WORKERS = DEFAULTS["workers"]
+DEFAULT_SUBAGENTS = DEFAULTS["subagents"]
+DEFAULT_STOP_AFTER_NO_NEW = DEFAULTS["stopAfterNoNew"]
+DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = DEFAULTS["stopAfterConsecutiveErrors"]
+DEFAULT_MAX_DISCOVERY_RUNS = DEFAULTS["maxDiscoveryRuns"]
+DEFAULT_MAX_TIME_HOURS = DEFAULTS["maxTimeHours"]
 MAX_TIME_HOURS = 96
 CONFIG_KEYS = {
     "workers",
@@ -31,7 +34,9 @@ CONFIG_KEYS = {
 
 
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    return Path(
+        os.environ["CODEX_HOME"] if os.environ.get("CODEX_HOME", "").strip() else "~/.codex"
+    ).expanduser()
 
 
 def config_path() -> Path:
@@ -102,6 +107,8 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | floa
 
 
 def require_integer(value: object, label: str, *, minimum: int) -> int:
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         qualifier = (
             "a non-negative integer"
@@ -130,8 +137,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--available-parallelism", type=int, required=True)
     args = parser.parse_args()
-    import json
-
     print(json.dumps(resolve_deep_scan_config(args.available_parallelism), sort_keys=True))
 
 
