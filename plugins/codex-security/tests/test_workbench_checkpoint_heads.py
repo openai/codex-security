@@ -1625,3 +1625,81 @@ def test_recovered_sibling_ids_and_triage_survive_legacy_replay(
                 ).fetchall()
                 == decisions
             )
+
+
+@pytest.mark.parametrize("reverse_source", [False, True])
+@pytest.mark.parametrize("add_later", [False, True])
+def test_distinct_decimal_siblings_keep_ids_when_sources_grow(
+    tmp_path: Path, reverse_source: bool, add_later: bool
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    tokens = ["1.0", "1.00000000000000001", "1.00000000000000002"]
+
+    def source(selected):
+        document = saved_draft(scan_id, complete=False)
+        for token in selected:
+            row = copy.deepcopy(finding)
+            row["provenance"]["preservedIdentity"] = {
+                "anchor": "opaque-anchor",
+                "instance": f"RAW_{token}",
+            }
+            row["extensions"] = {"variant": token}
+            document["findings"].append(row)
+        raw = json.dumps(document)
+        for token in tokens:
+            raw = raw.replace(f'"RAW_{token}"', token)
+        return raw.encode()
+
+    initial = tokens[:2] if add_later else list(reversed(tokens)) if reverse_source else tokens
+    result.write_bytes(source(initial))
+    original = result.read_bytes()
+    fail_deep_scan(state, codex_home, scan_id)
+
+    def published():
+        return {
+            row["extensions"]["variant"]: (row["findingId"], row["occurrenceId"])
+            for row in json.loads((scan_dir / "findings.json").read_text())["findings"]
+        }
+
+    before = published()
+    assert len(before) == len(initial)
+    assert len({ids[1] for ids in before.values()}) == len(initial)
+    for _, occurrence_id in before.values():
+        set_triage(
+            state,
+            occurrence_id,
+            "closed",
+            "--close-reason",
+            "false_positive",
+            "--note",
+            "Synthetic prior review.",
+        )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        decisions = connection.execute(
+            "SELECT occurrence_id, status, close_reason, note FROM finding_decisions ORDER BY occurrence_id, rowid"
+        ).fetchall()
+    if add_later:
+        raw = source(list(reversed(tokens)) if reverse_source else tokens)
+        checkpoint_dir = result.parent / "checkpoints"
+        checkpoint_dir.mkdir(exist_ok=True)
+        (checkpoint_dir / f"{hashlib.sha256(raw).hexdigest()}.json").write_bytes(raw)
+    scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    after = published()
+    assert len(after) == 3
+    assert len({ids[1] for ids in after.values()}) == 3
+    assert all(after[token] == ids for token, ids in before.items())
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT occurrence_id, status, close_reason, note FROM finding_decisions ORDER BY occurrence_id, rowid"
+            ).fetchall()
+            == decisions
+        )
+    assert result.read_bytes() == original

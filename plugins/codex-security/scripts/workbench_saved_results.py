@@ -607,24 +607,29 @@ def _finding_key(finding: dict[str, Any], *, persisted: bool = False) -> str:
     locations = finding.get("locations", [])
     if not isinstance(locations, list):
         locations = []
-    return (_digest if persisted else _semantic_digest)(
-        [
-            finding.get("ruleId"),
-            identity,
-            sorted(
+    components = [
+        finding.get("ruleId"),
+        identity,
+        sorted(
+            (
                 (
-                    (
-                        location.get("path"),
-                        normalize_json_integer(location.get("startLine")),
-                        normalize_json_integer(location.get("endLine", location.get("startLine"))),
-                    )
-                    for location in locations
-                    if isinstance(location, dict)
-                ),
-                key=_encoded,
+                    location.get("path"),
+                    normalize_json_integer(location.get("startLine")),
+                    normalize_json_integer(location.get("endLine", location.get("startLine"))),
+                )
+                for location in locations
+                if isinstance(location, dict)
             ),
-        ]
-    )
+            key=_encoded,
+        ),
+    ]
+    key = _semantic_digest(components)
+    if persisted:
+        encoded = _encoded(components)
+        # Keep legacy IDs when their encoded view retains the exact identity.
+        if _semantic_digest(json.loads(encoded)) == key:
+            return hashlib.sha256(encoded).hexdigest()
+    return key
 
 
 def _worker_candidate_key(
