@@ -395,6 +395,7 @@ test("CLI creates, reimports unchanged, and updates the same canonical finding",
   expect(await first.runCli([...f.command, "--yes"], f.cliDeps)).toBe(0);
   const canonical = f.reports.get("vendor-1")!.canonical_finding_id;
   expect(JSON.parse(first.stdout.text()).counts.created).toBe(1);
+  expect(first.stderr.text()).not.toContain("Selected findings and evidence:");
   const again = await prepareExternalPublication(f.file, options, f.deps);
   expect((await again.publish()).counts.unchanged).toBe(1);
   await writeFile(f.file, JSON.stringify([normalized("vendor-1", "critical")]));
@@ -434,35 +435,58 @@ test("normalized input accepts server-materialized optional evidence defaults", 
   expect(stateFiles.some((name) => name.endsWith(".pending.json"))).toBe(false);
 });
 
-test("interactive JSON publication shows the destination and exclusions before confirmation", async () => {
-  const f = await fixture([normalized(), normalized("unsupported", "unknown")]);
-  const cli = createCliTest(main);
-  let prompted = false;
-  expect(
-    await cli.runCli(f.command, {
-      ...f.cliDeps,
-      externalPublicationPrompt: {
-        isInteractive: () => true,
-        confirm: async (_question, defaultValue) => {
-          prompted = true;
-          expect(defaultValue).toBe(false);
-          expect(cli.stderr.text()).toContain(
-            "https://github.com/example/project",
-          );
-          expect(cli.stderr.text()).toContain(options.sourceKey);
-          expect(cli.stderr.text()).toContain("synthetic-account");
-          expect(cli.stderr.text()).toContain("environment-example");
-          expect(cli.stderr.text()).toContain("Excluded: 1");
-          expect(cli.stderr.text()).not.toContain("synthetic-token");
-          expect(f.posts).toHaveLength(0);
-          return true;
-        },
+test.each(["human", "json"])(
+  "interactive %s publication shows selected evidence before confirmation",
+  async (format) => {
+    const selected = {
+      ...normalized("vendor-selected"),
+      evidence: {
+        ...normalized("vendor-selected").evidence,
+        title: "Selected \u001b[31m evidence",
+        description: "Description to approve",
+        source_data: { id: "vendor-selected", note: "Original vendor detail" },
       },
-    }),
-  ).toBe(0);
-  expect(prompted).toBe(true);
-  expect(JSON.parse(cli.stdout.text()).counts.created).toBe(1);
-});
+    };
+    const f = await fixture([selected, normalized("unsupported", "unknown")]);
+    const expected = (await readVendorFindings(f.file)).findings;
+    const cli = createCliTest(main);
+    let prompted = false;
+    expect(
+      await cli.runCli(format === "json" ? f.command : f.command.slice(0, -2), {
+        ...f.cliDeps,
+        externalPublicationPrompt: {
+          isInteractive: () => true,
+          confirm: async (_question, defaultValue) => {
+            prompted = true;
+            expect(defaultValue).toBe(false);
+            expect(cli.stderr.text()).toContain(
+              "https://github.com/example/project",
+            );
+            expect(cli.stderr.text()).toContain(options.sourceKey);
+            expect(cli.stderr.text()).toContain("synthetic-account");
+            expect(cli.stderr.text()).toContain("environment-example");
+            expect(cli.stderr.text()).toContain("Excluded: 1");
+            expect(cli.stderr.text()).toContain(
+              "Selected findings and evidence:",
+            );
+            expect(cli.stderr.text()).toContain(
+              JSON.stringify(expected, null, 2),
+            );
+            expect(cli.stderr.text()).not.toContain("\u001b");
+            expect(cli.stderr.text()).not.toContain("synthetic-token");
+            expect(cli.stdout.text()).toBe("");
+            expect(f.posts).toHaveLength(0);
+            return true;
+          },
+        },
+      }),
+    ).toBe(0);
+    expect(prompted).toBe(true);
+    expect(f.reports.has("vendor-selected")).toBe(true);
+    if (format === "json")
+      expect(JSON.parse(cli.stdout.text()).counts.created).toBe(1);
+  },
+);
 
 test.each([false, true])(
   "saved request survives a publisher process restart (abrupt: %p)",
@@ -944,5 +968,80 @@ test.each([1, 101])(
     );
     f.state.postBudget = Infinity;
     expect((await fresh.publish()).counts.unchanged).toBe(count);
+  },
+);
+
+test.each([
+  ["initial", "write"],
+  ["initial", "sync"],
+  ["result", "write"],
+  ["result", "sync"],
+  ["result", "rename"],
+])(
+  "failed %s staging cleans temporary data and remains retryable (%s)",
+  async (stage, fault) => {
+    const f = await fixture();
+    const prepared = await prepareExternalPublication(f.file, options, f.deps);
+    const originalOpen = fs.open;
+    const originalRename = fs.rename;
+    let temporaryOpens = 0;
+    let injected = false;
+    const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      // A fresh publication stages the pending body, its checkpoint, then its result.
+      if (
+        String(args[0]).endsWith(".tmp") &&
+        ++temporaryOpens === (stage === "initial" ? 1 : 3)
+      ) {
+        if (fault === "write") {
+          const originalWrite = handle.writeFile.bind(handle);
+          handle.writeFile = async (data) => {
+            const serialized = String(data);
+            await originalWrite(
+              serialized.slice(0, Math.ceil(serialized.length / 2)),
+            );
+            injected = true;
+            throw new Error("Synthetic disk write failed");
+          };
+        } else if (fault === "sync") {
+          handle.sync = async () => {
+            injected = true;
+            throw new Error("Synthetic file sync failed");
+          };
+        }
+      }
+      return handle;
+    });
+    const renameSpy = spyOn(fs, "rename").mockImplementation(
+      async (from, to) => {
+        if (fault === "rename" && String(to).endsWith(".result.json")) {
+          injected = true;
+          throw new Error("Synthetic result rename failed");
+        }
+        return originalRename(from, to);
+      },
+    );
+    try {
+      await expect(prepared.publish()).rejects.toThrow("Synthetic");
+    } finally {
+      openSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+    expect(injected).toBe(true);
+    const directory = join(f.root, "state", "external-finding-publications");
+    const files = await readdir(directory);
+    expect(files.filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(files.some((name) => name.endsWith(".pending.json"))).toBe(
+      stage === "result",
+    );
+    expect(f.posts).toHaveLength(stage === "initial" ? 0 : 1);
+    const retry = await prepareExternalPublication(f.file, options, f.deps);
+    expect(retry.preview.resumed).toBe(stage === "result");
+    expect((await retry.publish()).counts.created).toBe(1);
+    expect(f.posts).toHaveLength(1);
+    expect(f.receipts.size).toBe(1);
+    expect(
+      (await readdir(directory)).some((name) => name.endsWith(".tmp")),
+    ).toBe(false);
   },
 );
