@@ -31,6 +31,16 @@ import type {
 } from "../src/deep-scan/types.js";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
+const { bundledCodexSdkEnvironment } = await importModule({
+  entryPoints: [
+    fileURLToPath(
+      new URL(
+        "../../../../sdk/typescript/src/codex-sdk-environment.ts",
+        import.meta.url,
+      ),
+    ),
+  ],
+});
 
 const {
   CodexSdkWorkerExecutor,
@@ -803,6 +813,13 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
   await mkdir(nonExecutableDirectory);
   await mkdir(path.join(directoryShadow, "codex"), { recursive: true });
   await mkdir(binaryDirectory);
+  const bundledTools = path.join(fixture.root, "codex-path");
+  await mkdir(bundledTools);
+  await writeFile(
+    path.join(bundledTools, "rg"),
+    "#!/bin/sh\nprintf 'synthetic bundled search\\n'\n",
+    { mode: 0o755 },
+  );
   await mkdir(homeTargetChild, { recursive: true });
   await mkdir(codexHome, { recursive: true });
   assert.notEqual(workingDirectory, originalCwd);
@@ -846,6 +863,7 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
         fixture.executablePath,
       ],
       [undefined, codexPath],
+      [`${binaryDirectory}/./codex`, codexPath],
       ["codex", codexPath],
       [`${executableLink}/../codex`, codexPath],
       [`${path.relative(originalCwd, executableLink)}/../codex`, codexPath],
@@ -871,6 +889,18 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
       process.env.PATH = searchPath ?? defaultSearchPath;
       if (configured === undefined) delete process.env.CODEX_CLI_PATH;
       else process.env.CODEX_CLI_PATH = configured;
+      const hasBundledTools = expectedExecutable === codexPath;
+      if (hasBundledTools) {
+        process.env.PATH = bundledCodexSdkEnvironment(resolveCodexPath(), {
+          PATH: process.env.PATH,
+        }).PATH;
+      }
+      await writeFile(
+        promptPath,
+        hasBundledTools
+          ? "CAPTURE_SYNTHETIC_RG"
+          : "fixture bound worker executable and home",
+      );
       assert.equal(
         await realpath(resolveCodexPath()),
         await realpath(expectedExecutable),
@@ -889,6 +919,17 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
           assert.equal(invocation.cwd, originalCwd);
           assert.equal(preflight.codexHome, expectedHome);
           assert.equal(invocation.codexHome, expectedHome);
+          if (hasBundledTools) {
+            assert.equal(
+              invocation.runtimeEnvironment.PATH.split(path.delimiter)[0],
+              bundledTools,
+            );
+            assert.equal(invocation.bundledTool, "synthetic bundled search");
+            assert.equal(
+              preflight.gitEnvironment.PATH,
+              invocation.runtimeEnvironment.PATH,
+            );
+          }
           assert.equal(process.env.CODEX_HOME, relativeHome);
           assert.deepEqual(preflight.requests, [
             { method: "config/read", cwd: workingDirectory },
@@ -2966,12 +3007,14 @@ const profileContents = profileIndex === -1 ? undefined : readFileSync(join(proc
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
 const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const toolProbe = stdin.includes('CAPTURE_SYNTHETIC_RG') ? spawnSync('rg', ['--version'], { encoding: 'utf8' }) : undefined;
+if (toolProbe && toolProbe.status !== 0) throw toolProbe.error ?? new Error(toolProbe.stderr);
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
 if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }
