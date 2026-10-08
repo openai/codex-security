@@ -176,6 +176,7 @@ export interface PluginPythonOptions {
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
   protectedRoot?: string | readonly string[];
+  currentDirectory?: string;
   signal?: AbortSignal;
 }
 
@@ -185,6 +186,7 @@ export interface WorkbenchCommandOptions {
   environment: ProcessEnvironment;
   stateDirectory?: string;
   protectedRoot?: string | readonly string[];
+  currentDirectory?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1594,11 +1596,13 @@ export async function runWorkbench(
     ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
-        ? await resolveTrustedExecutable(
-            "node",
-            options.environment,
-            options.protectedRoot ?? process.cwd(),
-          )
+        ? await resolveTrustedExecutable("node", options.environment, [
+            process.cwd(),
+            options.currentDirectory ?? process.cwd(),
+            ...(typeof options.protectedRoot === "string"
+              ? [options.protectedRoot]
+              : (options.protectedRoot ?? [])),
+          ])
         : undefined;
     if (node === null) {
       throw new Error("Node.js is not available on a trusted PATH.");
@@ -1608,6 +1612,7 @@ export async function runWorkbench(
       : (options.python ??= await resolvePluginPython({
           environment: options.environment,
           protectedRoot: options.protectedRoot,
+          currentDirectory: options.currentDirectory,
           signal: options.signal,
         }));
     const stateDirectory = native
@@ -3083,18 +3088,26 @@ export async function resolvePluginPython(
   const requestedRoots = options.protectedRoot ?? process.cwd();
   const protectedRoot =
     typeof requestedRoots === "string" ? [requestedRoots] : [...requestedRoots];
-  // A saved target may be a subdirectory of an untrusted checkout. Protect its
-  // enclosing checkout as well as the caller's, without excluding an arbitrary cwd.
-  for (const directory of new Set([process.cwd(), ...protectedRoot])) {
+  const callerDirectories = [
+    process.cwd(),
+    options.currentDirectory ?? process.cwd(),
+  ];
+  // Preserve target and enclosing-checkout protection for every interpreter.
+  for (const directory of new Set([...callerDirectories, ...protectedRoot])) {
     for (const checkout of await gitProtectionRoots(directory, options.signal))
       if (!protectedRoot.includes(checkout)) protectedRoot.push(checkout);
   }
+  // Named interpreters are ambient PATH discovery, even when PYTHON names one.
+  // Explicit trusted paths and managed runtimes retain their existing precedence.
+  const discoveryRoots = [...protectedRoot, ...callerDirectories];
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,
       "configured plugin Python",
       environment,
-      protectedRoot,
+      isPythonPathCandidate(options.configuredPath)
+        ? protectedRoot
+        : discoveryRoots,
       options.signal,
     );
   }
@@ -3104,7 +3117,7 @@ export async function resolvePluginPython(
       inherited,
       "PYTHON",
       environment,
-      protectedRoot,
+      isPythonPathCandidate(inherited) ? protectedRoot : discoveryRoots,
       options.signal,
     );
   }
@@ -3146,7 +3159,7 @@ export async function resolvePluginPython(
     const resolved = await usablePython(
       candidate,
       environment,
-      protectedRoot,
+      discoveryRoots,
       options.signal,
     );
     if (resolved !== null) return resolved;
@@ -3504,11 +3517,7 @@ async function usablePython(
 }
 
 export function isPythonPathCandidate(candidate: string): boolean {
-  return (
-    candidate.includes("/") ||
-    candidate.includes("\\") ||
-    candidate.startsWith(".")
-  );
+  return candidate.includes("/") || candidate.includes("\\");
 }
 
 async function hasPluginManifest(root: string): Promise<boolean> {
