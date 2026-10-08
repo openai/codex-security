@@ -5,6 +5,7 @@ import { assertNoError } from "./assertions.ts";
 import { consumeStreamLines, writeMessage } from "./support/streams.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { hash, randomUUID } from "node:crypto";
 import {
@@ -982,7 +983,12 @@ try {
     elicitation: { form: {} },
   });
   assertNoError(initialized);
-  assert.equal(initialized.result.capabilities.resources, undefined);
+  assert.deepEqual(
+    initialized.result.capabilities.resources,
+    existsSync(path.join(pluginRoot, "mcp", "local.html"))
+      ? { listChanged: true }
+      : undefined,
+  );
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
     {},
@@ -1381,7 +1387,14 @@ try {
   for (const tool of toolList.result.tools) {
     assert.equal(tool._meta?.["openai/outputTemplate"], undefined);
     assert.equal(tool._meta?.["ui/resourceUri"], undefined);
-    assert.equal(tool._meta?.ui?.resourceUri, undefined);
+    if (tool.name === "open_codex_security_local") {
+      assert.deepEqual(tool._meta.ui, {
+        resourceUri: "ui://codex-security/local.html",
+        visibility: ["app"],
+      });
+    } else {
+      assert.equal(tool._meta?.ui?.resourceUri, undefined);
+    }
   }
   await assert.rejects(readFile(path.join(stateDir, "workbench.sqlite3")), {
     code: "ENOENT",
