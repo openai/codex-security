@@ -69,7 +69,12 @@ export function storeFindings(
         requireFiniteNumbers([finding, entry.embedding.vector]);
         let details = stringifyJson(finding, 0);
         const previous = stored.get(finding.findingId)?.details_json;
-        if (typeof previous === "string" && equalFindingJson(previous, details))
+        if (
+          typeof previous === "string" &&
+          equalFindingJson(previous, details) &&
+          // Keep old spelling only when existing readers preserve its numbers.
+          equalFindingJson(stringifyJson(parseJson(previous), 0), details)
+        )
           details = previous;
         const { changes } = upsert.run(
           finding.findingId,
