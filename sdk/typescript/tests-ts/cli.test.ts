@@ -2091,7 +2091,7 @@ describe("CLI", () => {
   });
 
   test.each([false, true])(
-    "shows durable Deep progress without changing stdout or TUI layout (interactive=%s)",
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=%j)",
     async (interactive) => {
       const { stdout, stderr, runCli } = createCliTest(main, {
         stderr: interactive,
