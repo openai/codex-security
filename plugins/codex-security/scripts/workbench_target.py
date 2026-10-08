@@ -303,7 +303,11 @@ def git_command(
 
 
 def candidate_source_lines(
-    target: Path, diff_target: dict[str, str], paths: list[str], locations: list[str]
+    target: Path,
+    diff_target: dict[str, str],
+    paths: list[str],
+    locations: list[str],
+    case_insensitive: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Resolve candidate sources in the same selected view as the diff inventory."""
     from generate_rank_input import git_changed_paths
@@ -316,6 +320,16 @@ def candidate_source_lines(
             target, base, head, "local-patch" if local else "revisions"
         )
     }
+    selected_names = set(changed)
+    aliases: dict[str, str | None] = {}
+    if case_insensitive:
+        if not local:
+            tree = git_command(target, "ls-tree", "-r", "-t", "-z", "--name-only", head, text=False)
+            tree.check_returncode()
+            selected_names.update(os.fsdecode(name) for name in tree.stdout.split(b"\0") if name)
+        for name in selected_names:
+            key = name.lower()
+            aliases[key] = None if key in aliases and aliases[key] != name else name
     location_set = set(locations)
     result: dict[str, dict[str, Any]] = {}
     counts: dict[str, int] = {}
@@ -324,8 +338,14 @@ def candidate_source_lines(
         if not raw or path.is_absolute() or ".." in path.parts or "\0" in raw:
             raise ValueError("path: expected a repository-relative path without traversal")
         name = path.as_posix()
+        if case_insensitive and name not in selected_names:
+            selected = aliases.get(name.lower(), name)
+            if selected is None:
+                result[raw] = {"error": "missing"}
+                continue
+            name = selected
         deleted = changed.get(name) == "D"
-        if local and (not deleted or (target / name).exists() or (target / name).is_symlink()):
+        if local and not deleted:
             continue
         revision = base if deleted else head
         if name not in changed:

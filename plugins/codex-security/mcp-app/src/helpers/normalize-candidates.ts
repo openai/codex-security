@@ -102,11 +102,7 @@ function inside(path: string, root: string, allowMissing = false): string {
 export type CandidateSource =
   { path: string; lineCount?: number } | { error: "missing" | "not_file" };
 
-export function relativeFile(
-  value: unknown,
-  root: string,
-  sources?: ReadonlyMap<string, CandidateSource>,
-): [string, string, number?] {
+export function candidateRelativePath(value: unknown): string {
   if (typeof value !== "string" || value === "" || value.includes("\0"))
     throw new Error("path: expected a non-empty repository-relative path");
   const raw = windows ? value.replaceAll("\\", "/") : value;
@@ -118,6 +114,15 @@ export function relativeFile(
     throw new Error(
       "path: expected a repository-relative path without traversal",
     );
+  return raw;
+}
+
+export function relativeFile(
+  value: unknown,
+  root: string,
+  sources?: ReadonlyMap<string, CandidateSource>,
+): [string, string, number?] {
+  const raw = candidateRelativePath(value);
   const source = sources?.get(raw);
   if (source) {
     if ("error" in source)
