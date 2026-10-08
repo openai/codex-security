@@ -5,16 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-from decimal import Decimal
 from typing import Any
 
-from workbench.json_numbers import dumps_json
+from finalize_scan_contract import _schema_values_equal
+from workbench.json_numbers import JsonFloat, dumps_json
 
-# Tag numbers so 10 and 10.0 compare equally without treating true as 1.
-_finding_json = json.JSONDecoder(
-    parse_int=lambda value: (Decimal(value),),
-    parse_float=lambda value: (Decimal(value),),
-)
+_finding_json = json.JSONDecoder(parse_float=JsonFloat)
 
 
 def upsert_finding(
@@ -31,7 +27,9 @@ def upsert_finding(
     if (
         current is not None
         and current["details_json"] is not None
-        and _finding_json.decode(current["details_json"]) == _finding_json.decode(details)
+        and _schema_values_equal(
+            _finding_json.decode(current["details_json"]), _finding_json.decode(details)
+        )
     ):
         details = current["details_json"]
     connection.execute(

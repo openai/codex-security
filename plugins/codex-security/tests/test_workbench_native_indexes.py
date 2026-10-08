@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -274,38 +273,47 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["scanCount"] == 1
 
 
-@pytest.mark.parametrize("token", ["9007199254740991.1", "1.0000000000000001", "1e-400"])
+@pytest.mark.parametrize(
+    "token", ["9007199254740991.1", "1.0000000000000001", "1e-400", "1e-10000000000000000000"]
+)
 def test_completion_preserves_exact_numeric_values_in_finding_indexes(tmp_path: Path, token: str):
     state_dir = tmp_path / "state"
     target = tmp_path / "repo"
     target.mkdir()
     workspace = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
-    write_completed_contract(scan_dir, scan_id, target)
-    findings_path = scan_dir / "findings.json"
-    document = json.loads(findings_path.read_text())
-    document["findings"][0]["extensions"] = {"observation": "EXACT_NUMBER"}
-    findings_path.write_text(json.dumps(document).replace('"EXACT_NUMBER"', token))
-    scan_command(state_dir, "complete-scan", scan_id)
-    finding = json.loads(findings_path.read_text(), parse_float=Decimal)["findings"][0]
-    assert finding["extensions"]["observation"] == Decimal(token)
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        for table in ("findings", "finding_occurrences"):
+    for _ in range(2):
+        started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
+        scan_id = str(started["results"]["scanId"])
+        scan_dir = Path(str(started["results"]["scanDir"]))
+        write_completed_contract(scan_dir, scan_id, target)
+        findings_path = scan_dir / "findings.json"
+        document = json.loads(findings_path.read_text())
+        document["findings"][0]["extensions"] = {"observation": "EXACT_NUMBER"}
+        findings_path.write_text(json.dumps(document).replace('"EXACT_NUMBER"', token))
+        scan_command(state_dir, "complete-scan", scan_id)
+        finding = json.loads(findings_path.read_text(), parse_float=str)["findings"][0]
+        assert finding["extensions"]["observation"] == token
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            for table, identity in (
+                ("findings", "findingId"),
+                ("finding_occurrences", "occurrenceId"),
+            ):
+                stored = json.loads(
+                    connection.execute(
+                        f"SELECT details_json FROM {table} WHERE id = ?", (finding[identity],)
+                    ).fetchone()[0],
+                    parse_float=str,
+                )
+                assert stored == finding
+            connection.execute(
+                "UPDATE finding_occurrences SET details_json = '{}' WHERE scan_id = ?", (scan_id,)
+            )
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
             stored = json.loads(
-                connection.execute(f"SELECT details_json FROM {table}").fetchone()[0],
-                parse_float=Decimal,
+                connection.execute(
+                    "SELECT details_json FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
+                ).fetchone()[0],
+                parse_float=str,
             )
             assert stored == finding
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE finding_occurrences SET details_json = '{}' WHERE scan_id = ?", (scan_id,)
-        )
-    run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        stored = json.loads(
-            connection.execute("SELECT details_json FROM finding_occurrences").fetchone()[0],
-            parse_float=Decimal,
-        )
-        assert stored == finding
