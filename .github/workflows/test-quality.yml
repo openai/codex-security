@@ -39,17 +39,21 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        mode: [baseline, isolated, parallel]
-        exclude:
-          - os: windows-latest
-            mode: isolated
+        mode: [baseline, parallel]
         include:
           - mode: baseline
             args: ""
-          - mode: isolated
-            args: --isolate
           - mode: parallel
             args: --parallel=2
+          - os: ubuntu-latest
+            mode: isolated-1
+            args: --isolate --shard=1/3
+          - os: ubuntu-latest
+            mode: isolated-2
+            args: --isolate --shard=2/3
+          - os: ubuntu-latest
+            mode: isolated-3
+            args: --isolate --shard=3/3
           - os: windows-latest
             mode: isolated-1
             args: --isolate --shard=1/7
