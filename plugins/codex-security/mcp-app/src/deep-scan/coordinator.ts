@@ -629,7 +629,6 @@ export class DeepScanCoordinator {
         .map((worker) => worker.id),
     );
     const omittedWorkerIds: string[] = [];
-    await this.readPersistedExecutionPrompts();
     const recoveredReducers = await this.recoverCompletedReducers(recovered);
     let latestResult = recoveredReducers.result;
     let buffer: AcceptedDiscovery[] = recovered.filter(
@@ -972,7 +971,6 @@ export class DeepScanCoordinator {
         worker.resultManifestPath,
         this.state.scanId,
       );
-      await fs.readFile(worker.promptPath, "utf8");
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
@@ -1059,24 +1057,9 @@ export class DeepScanCoordinator {
         );
       }
       latestResult = result;
-      await fs.readFile(worker.promptPath, "utf8");
       resultPath = worker.resultManifestPath;
     }
     return { resultPath, result: latestResult };
-  }
-
-  private async readPersistedExecutionPrompts(): Promise<void> {
-    for (const worker of this.state.persistedWorkers ?? []) {
-      if (
-        worker.kind === "setup" ||
-        worker.status === "queued" ||
-        worker.status === "running" ||
-        (worker.status === "canceled" && worker.attempt === 0)
-      ) {
-        continue;
-      }
-      await fs.readFile(worker.promptPath, "utf8");
-    }
   }
 
   private reducerReady(
