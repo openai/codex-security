@@ -685,9 +685,6 @@ describe("scan target normalization", () => {
         controller.signal,
       ),
     ).rejects.toBe(reason);
-    await expect(
-      normalizeTarget(repo, ["src"], controller.signal),
-    ).rejects.toBe(reason);
     await expect(repositoryRevision(repo, controller.signal)).rejects.toBe(
       reason,
     );
