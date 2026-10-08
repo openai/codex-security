@@ -132,6 +132,11 @@
 - honor cancellation during PDF knowledge-base extraction ([#1529](https://github.com/openai/codex-security/pull/1529))
 - ignore status markers inside Markdown fences ([#1525](https://github.com/openai/codex-security/pull/1525))
 - explain pull request labels in agent instructions ([#1521](https://github.com/openai/codex-security/pull/1521))
+- filter model schema composition while parsing ([#1461](https://github.com/openai/codex-security/pull/1461))
+- compare Deep Scan progress fields directly ([#1458](https://github.com/openai/codex-security/pull/1458))
+- load scan contract documents in one sequence ([#1481](https://github.com/openai/codex-security/pull/1481))
+- reuse native equality for contract lists ([#1457](https://github.com/openai/codex-security/pull/1457))
+- simplify artifact export metadata transport ([#1462](https://github.com/openai/codex-security/pull/1462))
 
 <!-- release-section: highlights:end -->
 
