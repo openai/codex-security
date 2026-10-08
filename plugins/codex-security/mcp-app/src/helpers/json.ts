@@ -49,10 +49,27 @@ export function stringifyJson(value: unknown, space = 2): string {
   );
 }
 
-export function equalFindingJson(left: unknown, right: unknown): boolean {
-  // Compare signed zeros equally without changing saved text or integer precision.
-  return isDeepStrictEqual(
-    parseJson(stringifyJson(left, 0)),
-    parseJson(stringifyJson(right, 0)),
-  );
+export function equalFindingJson(left: string, right: string): boolean {
+  // Compare decimal tokens before JSON.parse rounds them to binary numbers.
+  const parse = (source: string) =>
+    JSON.parse(source, (_key, value: unknown, context?: { source: string }) => {
+      if (typeof value !== "number") return value;
+      const [, sign, whole, fraction = "", power = "0"] =
+        /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/u.exec(context!.source)!;
+      const digits = (whole! + fraction).replace(/^0+/u, "");
+      const significant = digits.replace(/0+$/u, "");
+      const exponent =
+        BigInt(power) +
+        BigInt(digits.length - significant.length - fraction.length);
+      return (JSON as typeof JSON & { rawJSON(text: string): unknown }).rawJSON(
+        significant ? `${sign}${significant}e${exponent}` : "0",
+      );
+    });
+  try {
+    return isDeepStrictEqual(parse(left), parse(right));
+  } catch (error) {
+    if (error instanceof SyntaxError)
+      error.message = escapeControls(error.message);
+    throw error;
+  }
 }
