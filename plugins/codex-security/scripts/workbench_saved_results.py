@@ -2126,6 +2126,7 @@ def merge_saved_results(
         items = coverage.setdefault(field, [])
         rows = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
         published_rows = (published_coverage or {}).get(field, [])
+        explicit_ids = {item["id"] for item in rows if isinstance(item.get("id"), str)}
         for item in rows:
             if id(item) in canonical_rows:
                 continue
@@ -2134,8 +2135,8 @@ def merge_saved_results(
                 _schema_values_equal(item, published) for published in published_rows
             ):
                 canonical_rows.add(id(item))
-        # Explicit IDs can look like derived suffixes. Reserve all surviving
-        # exact bindings before recovering suffixes or allocating new collisions.
+        # Explicit IDs can look like derived suffixes. Keep their allocation
+        # priority even when an accepted update changes the content.
         used = {
             item["id"]
             for item in rows
@@ -2146,7 +2147,7 @@ def merge_saved_results(
                 continue
             for published in published_rows:
                 identity = published.get("id")
-                if not isinstance(identity, str) or identity in used:
+                if not isinstance(identity, str) or identity in used or identity in explicit_ids:
                     continue
                 candidate = {**published, "id": item["id"]}
                 if _schema_values_equal(item, candidate) and identity in {

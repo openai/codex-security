@@ -2141,3 +2141,55 @@ def test_recovery_reserves_explicit_ids_before_matching_derived_ids(
     assert coverage_path.read_bytes() == frozen
     assert result.read_bytes() == original
     assert checkpoint.read_bytes() == raw
+
+
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_recovery_preserves_updated_explicit_ids_before_matching_derived_ids(
+    tmp_path: Path, field: str, reverse: bool
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    row = (
+        {
+            "id": "review",
+            "label": "Synthetic review",
+            "disposition": "no_issue_found",
+            "receiptRefs": [],
+        }
+        if field == "surfaces"
+        else {"id": "review", "pattern": "vendor/**", "reason": "Synthetic review."}
+    )
+    named = {**row, "id": f"review-{saved._digest(row)[:16]}"}
+    first = saved_draft(scan_id, complete=True)
+    first["coverage"][field] = [named]
+    original = json.dumps(first).encode()
+    result.write_bytes(original)
+    os.utime(result, ns=(100, 100))
+    fail_deep_scan(state, codex_home, scan_id)
+    _, _, coverage = finalize_scan_contract.finalize_scan(scan_dir)
+    assert coverage[field] == [named]
+
+    updated = {**named, "label" if field == "surfaces" else "reason": "Updated synthetic review"}
+    incoming = [updated, row]
+    if reverse:
+        incoming.reverse()
+    worker = saved_draft(scan_id, complete=True)
+    worker["coverage"][field] = incoming
+    checkpoint = write_checkpoint(result.parent / "checkpoints", worker)
+    raw = checkpoint.read_bytes()
+    os.utime(checkpoint, ns=(200, 200))
+    select(result.parent, checkpoint, 300)
+    response = scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    _, _, coverage = finalize_scan_contract.finalize_scan(scan_dir)
+    assert coverage[field] == incoming
+    assert not response["scan"]["warnings"]
+    frozen = (scan_dir / "coverage.json").read_bytes()
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert (scan_dir / "coverage.json").read_bytes() == frozen
+    assert result.read_bytes() == original
+    assert checkpoint.read_bytes() == raw
