@@ -2256,13 +2256,13 @@ describe("live scan cost tracking", () => {
 
 describe("recorded Deep worker homes", () => {
   test.each([
-    [false, false],
-    [false, true],
-    [true, false],
-    [true, true],
-  ])(
-    "retains archived worker usage: recorded=%s archived=%s",
-    async (recorded, archived) => {
+    ["recorded=false archived=false", false, false],
+    ["recorded=false archived=true", false, true],
+    ["recorded=true archived=false", true, false],
+    ["recorded=true archived=true", true, true],
+  ] as const)(
+    "retains archived worker usage: %s",
+    async (_label, recorded, archived) => {
       const home = await codexHome();
       const workerHome = recorded ? await codexHome() : home;
       const at = "2026-09-01T00:00:02Z";
@@ -2864,23 +2864,23 @@ describe("recorded Deep worker homes", () => {
   });
 
   test.each([
-    ["identical", false],
-    ["identical", true],
-    ["prefix-first", false],
-    ["prefix-first", true],
-    ["prefix-last", false],
-    ["prefix-last", true],
-    ["truncated-first", false],
-    ["truncated-first", true],
-    ["truncated-last", false],
-    ["truncated-last", true],
-    ["tail-first", false],
-    ["tail-first", true],
-    ["tail-last", false],
-    ["tail-last", true],
+    ["identical, attribution: false", "identical", false],
+    ["identical, attribution: true", "identical", true],
+    ["prefix-first, attribution: false", "prefix-first", false],
+    ["prefix-first, attribution: true", "prefix-first", true],
+    ["prefix-last, attribution: false", "prefix-last", false],
+    ["prefix-last, attribution: true", "prefix-last", true],
+    ["truncated-first, attribution: false", "truncated-first", false],
+    ["truncated-first, attribution: true", "truncated-first", true],
+    ["truncated-last, attribution: false", "truncated-last", false],
+    ["truncated-last, attribution: true", "truncated-last", true],
+    ["tail-first, attribution: false", "tail-first", false],
+    ["tail-first, attribution: true", "tail-first", true],
+    ["tail-last, attribution: false", "tail-last", false],
+    ["tail-last, attribution: true", "tail-last", true],
   ] as const)(
-    "prices copied response records (%s, attribution: %s)",
-    async (copy, attributed) => {
+    "prices copied response records (%s)",
+    async (_label, copy, attributed) => {
       const home = await codexHome();
       const recordedHome = await codexHome();
       const scanDirectory = join(home, "scan");
@@ -2973,14 +2973,14 @@ describe("recorded Deep worker homes", () => {
 });
 
 test.each([
-  [150_000, 15_000, 100_000, 200_000],
-  [150_000, 15_000, 100_000, 20_000],
-  [100_000, 50_000, 110_000, 10_000],
-  [100_000, 50_000, 200_000, 10_000],
-  [100_000, 10_000, 100_000, 10_000],
+  ["150000/15000 vs 100000/200000", 150_000, 15_000, 100_000, 200_000],
+  ["150000/15000 vs 100000/20000", 150_000, 15_000, 100_000, 20_000],
+  ["100000/50000 vs 110000/10000", 100_000, 50_000, 110_000, 10_000],
+  ["100000/50000 vs 200000/10000", 100_000, 50_000, 200_000, 10_000],
+  ["100000/10000 vs 100000/10000", 100_000, 10_000, 100_000, 10_000],
 ] as const)(
-  "preserves receipt pricing across divergent counters %s/%s vs %s/%s",
-  async (input, output, counterInput, counterOutput) => {
+  "preserves receipt pricing across divergent counters %s",
+  async (_label, input, output, counterInput, counterOutput) => {
     const home = await codexHome();
     const path = await writeSession(home, "worker", {});
     const counts = (input: number, output: number) => ({
