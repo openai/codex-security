@@ -129,9 +129,9 @@ describe("scan target normalization", () => {
     });
   });
 
-  test.skipIf(process.platform === "win32")(
-    "rejects socket path targets and their symlinks in Node preflight",
-    async () => {
+  test.skipIf(process.platform === "win32").each(["node", "bun"])(
+    "rejects socket path targets and their symlinks in %s preflight",
+    async (runtime) => {
       const root = await temporaryDirectory("cs-target-");
       const built = await Bun.build({
         entrypoints: [
@@ -143,7 +143,7 @@ describe("scan target normalization", () => {
       expect(built.success).toBe(true);
       const module = join(root, "targets.mjs");
       await writeFile(module, await built.outputs[0]!.text());
-      const result = await runCommand("node", [
+      const result = await runCommand(runtime, [
         "--input-type=module",
         "--eval",
         `
