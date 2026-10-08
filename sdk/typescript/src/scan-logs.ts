@@ -175,9 +175,8 @@ export async function readScanLogs(options: ScanLogOptions) {
     sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
-  // A post-scan prompt runs on the same thread after completion, so bound the
-  // events of an included session by the same completion time used to select
-  // the sessions themselves.
+  // Artifact completion can precede the scan turn's final response. Keep that
+  // turn's remaining events, then stop before a post-completion turn starts.
   const completionBoundary = sessionStartedAt(options.completedAt);
   for (const session of sessions) {
     let replaying = false;
@@ -197,9 +196,14 @@ export async function readScanLogs(options: ScanLogOptions) {
         }
         replaying = false;
       }
-      if (completionBoundary !== null) {
+      if (
+        completionBoundary !== null &&
+        event["type"] === "event_msg" &&
+        isRecord(payload) &&
+        payload["type"] === "task_started"
+      ) {
         const timestamp = sessionStartedAt(event["timestamp"]);
-        if (timestamp !== null && timestamp >= completionBoundary) continue;
+        if (timestamp !== null && timestamp >= completionBoundary) break;
       }
       events.push({ threadId: session.threadId, event });
     }

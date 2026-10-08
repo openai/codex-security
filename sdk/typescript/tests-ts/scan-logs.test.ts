@@ -655,33 +655,82 @@ describe("saved scan logs", () => {
     );
   });
 
-  test.each(["2026-08-11T12:02:00.000Z", undefined, null, "invalid"])(
-    "bounds same-thread events by a valid completion time: %p",
-    async (completedAt) => {
+  test.each([
+    ["without a follow-up", "2026-08-11T12:02:00.000Z", null, false],
+    [
+      "with a follow-up",
+      "2026-08-11T12:02:00.000Z",
+      "2026-08-11T12:03:00.000Z",
+      true,
+    ],
+    [
+      "with a follow-up at completion",
+      "2026-08-11T12:03:00.000Z",
+      "2026-08-11T12:03:00.000Z",
+      true,
+    ],
+    ["while running", null, "2026-08-11T12:03:00.000Z", false],
+    ["without completion", undefined, "2026-08-11T12:03:00.000Z", false],
+    ["with invalid completion", "invalid", "2026-08-11T12:03:00.000Z", false],
+    ["without a turn timestamp", "2026-08-11T12:02:00.000Z", undefined, false],
+    [
+      "with an invalid turn timestamp",
+      "2026-08-11T12:02:00.000Z",
+      "invalid",
+      false,
+    ],
+  ] as const)(
+    "preserves the finishing scan turn %s",
+    async (_label, completedAt, followupAt, excludeFollowup) => {
       const home = await temporaryHome();
-      const before = commandEvent(
-        "scan work",
-        "scan-call",
-        "2026-08-11T12:01:59.999Z",
-      );
-      const at = commandEvent(
-        "at completion",
-        "boundary-call",
-        "2026-08-11T12:02:00.000Z",
-      );
-      const after = commandEvent(
-        "post-scan followup",
-        "post-call",
-        "2026-08-11T12:02:00.001Z",
-      );
-      const undated = commandEvent("undated", "undated-call");
-      const invalid = commandEvent(
-        "invalid timestamp",
-        "invalid-call",
-        "invalid",
-      );
-      const events = [before, at, after, undated, invalid];
-      await writeSession(home, "parent", events);
+      const scanEvents = [
+        {
+          timestamp: "2026-08-11T12:00:00.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "scan-turn" },
+        },
+        {
+          timestamp: "2026-08-11T12:01:59.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "mcp__codex_security__complete_codex_security_scan",
+            call_id: "completion-call",
+            arguments: "{}",
+          },
+        },
+        {
+          timestamp: "2026-08-11T12:02:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "completion-call",
+            output: "Scan completed.",
+          },
+        },
+        {
+          timestamp: "2026-08-11T12:02:02.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "Scan report is ready." },
+        },
+        {
+          timestamp: "2026-08-11T12:02:03.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "scan-turn" },
+        },
+      ];
+      const followup =
+        followupAt === null
+          ? []
+          : [
+              {
+                ...(followupAt === undefined ? {} : { timestamp: followupAt }),
+                type: "event_msg",
+                payload: { type: "task_started", turn_id: "followup-turn" },
+              },
+              commandEvent("post-scan followup", "post-call"),
+            ];
+      await writeSession(home, "parent", [...scanEvents, ...followup]);
 
       const result = await readScanLogs({
         scanId: "scan-555",
@@ -690,10 +739,9 @@ describe("saved scan logs", () => {
         completedAt,
       });
 
-      const expected =
-        completedAt === "2026-08-11T12:02:00.000Z"
-          ? [before, undated, invalid]
-          : events;
+      const expected = excludeFollowup
+        ? scanEvents
+        : [...scanEvents, ...followup];
       expect(result.events.slice(1)).toEqual(
         expected.map((event) => ({ threadId: "parent", event })),
       );
