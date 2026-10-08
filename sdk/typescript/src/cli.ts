@@ -21,6 +21,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  opendir,
   mkdtemp,
   readFile,
   readdir,
@@ -8027,6 +8028,25 @@ function incurErrorMessage(output: string): string {
   return typeof parsed === "string" ? parsed : message;
 }
 
+async function hasPartialOutput(path: string): Promise<boolean> {
+  let directory: Awaited<ReturnType<typeof opendir>> | undefined;
+  try {
+    directory = await opendir(path);
+    return (await directory.read()) !== null;
+  } catch (error: unknown) {
+    return !(
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    );
+  } finally {
+    try {
+      await directory?.close();
+    } catch {}
+  }
+}
+
 async function runExport(
   arguments_: ExportArguments,
   output: Writable,
@@ -8739,12 +8759,17 @@ async function executeScan(
   }
 
   if (requestedSignal !== null) {
+    const partialOutput = scanDir !== null && (await hasPartialOutput(scanDir));
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
-      partial_output: scanDir !== null,
+      partial_output: partialOutput,
     });
     return {
-      exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
+      exitCode: interruptedExit(
+        requestedSignal,
+        partialOutput ? scanDir : null,
+        errorOutput,
+      ),
       error:
         requestedSignal === "SIGINT"
           ? "Scan canceled by Ctrl-C."
@@ -8752,16 +8777,19 @@ async function executeScan(
     };
   }
   if (failed) {
+    const partialOutput = scanDir !== null && (await hasPartialOutput(scanDir));
     const costLimitFailure =
       failure instanceof ScanCostLimitExceededError ? failure : undefined;
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
-        : scanFailureMessage(
-            failure,
-            selectedAuthentication,
-            providerOptions.provider,
-          );
+        : costLimitFailure !== undefined
+          ? scanCostLimitFailureMessage(costLimitFailure, partialOutput)
+          : scanFailureMessage(
+              failure,
+              selectedAuthentication,
+              providerOptions.provider,
+            );
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -8769,7 +8797,7 @@ async function executeScan(
           : isLocalScanFailure(failure)
             ? "local"
             : classifyConnectionFailure(failure),
-      partial_output: scanDir !== null,
+      partial_output: partialOutput,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
       cost_estimate:
@@ -8781,7 +8809,7 @@ async function executeScan(
     if (failure instanceof ScanInterruptedError) {
       return { exitCode: 2, error: message };
     }
-    if (scanDir !== null) {
+    if (partialOutput && scanDir !== null) {
       errorOutput.write(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
@@ -9170,6 +9198,16 @@ function scanFailureMessage(
     case "unknown":
       return diagnosticValue(error);
   }
+}
+
+function scanCostLimitFailureMessage(
+  failure: ScanCostLimitExceededError,
+  partialOutput: boolean,
+): string {
+  const output = partialOutput
+    ? `partial output remains at ${errorMessage(failure.scanDir)}`
+    : "no partial output was kept";
+  return `Scan stopped: short-context budget baseline ${formatUsd(failure.cost.estimatedUsd)} exceeded the ${formatUsd(failure.maxCostUsd)} limit; estimated cost ${formatScanCost(failure.cost)}; ${output}.`;
 }
 
 function scanScope(arguments_: ScanArguments): string | null {

@@ -4545,39 +4545,44 @@ describe("CLI", () => {
   });
 
   test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
+    const scanDir = await temporaryDirectory("codex-security-cost-limit-");
     const { stdout, stderr, runCli } = createCliTest(main);
+    await writeFile(join(scanDir, "progress.log"), "partial\n");
+    try {
+      const cost = fakeResult([], "complete", {
+        input_tokens: 1_250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      }).cost!;
 
-    const cost = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    }).cost!;
-
-    expect(
-      await runCli(
-        ["scan", ".", "--verbose", "--json", "--max-cost", "0.004"],
-        dependencies({
-          onTurn: (_repository, options) => {
-            options.onOutputDirReady?.("/tmp/scan");
-            throw new ScanCostLimitExceededError(0.004, cost, "/tmp/scan");
-          },
-        }),
-      ),
-    ).toBe(2);
-    expect(JSON.parse(stdout.text())).toMatchObject({
-      status: "failed",
-      code: "SCAN_FAILED",
-      message: expect.stringContaining("estimated cost"),
-    });
-    expect(stderr.text()).toContain(
-      "Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at /tmp/scan.",
-    );
-    expect(stderr.text()).toMatch(
-      /scan\.configuration[^\n]*max_cost_usd=0\.004/u,
-    );
-    expect(stderr.text()).toContain(
-      'scan.failed classification="cost_limit_exceeded" partial_output=true max_cost_usd=0.004 estimated_usd=0.00488',
-    );
+      expect(
+        await runCli(
+          ["scan", ".", "--verbose", "--json", "--max-cost", "0.004"],
+          dependencies({
+            onTurn: (_repository, options) => {
+              options.onOutputDirReady?.(scanDir);
+              throw new ScanCostLimitExceededError(0.004, cost, scanDir);
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message: expect.stringContaining("estimated cost"),
+      });
+      expect(stderr.text()).toContain(
+        `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+      );
+      expect(stderr.text()).toMatch(
+        /scan\.configuration[^\n]*max_cost_usd=0\.004/u,
+      );
+      expect(stderr.text()).toContain(
+        'scan.failed classification="cost_limit_exceeded" partial_output=true max_cost_usd=0.004 estimated_usd=0.00488',
+      );
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
   });
 
   test("accepts a scan at its estimated cost limit", async () => {
@@ -4989,25 +4994,30 @@ describe("CLI", () => {
   test("preserves partial-output guidance for a late protected-root failure", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const partial = "/tmp/codex-security-partial";
-    const failing = dependencies();
-    failing.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        options?.onOutputDirReady?.(partial);
-        throw new OutputInsideProtectedRootError(
-          "/tmp/worktree/runtime",
-          "/tmp/worktree",
-          "runtime",
-        );
-      });
+    const partial = await temporaryDirectory("codex-security-partial-");
+    await writeFile(join(partial, "progress.log"), "partial\n");
+    try {
+      const failing = dependencies();
+      failing.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
+          options?.onOutputDirReady?.(partial);
+          throw new OutputInsideProtectedRootError(
+            "/tmp/worktree/runtime",
+            "/tmp/worktree",
+            "runtime",
+          );
+        });
 
-    expect(await runCli(["scan", "."], failing)).toBe(2);
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain(
-      "Isolated Codex runtime directory must be outside the scanned directory and any enclosing Git worktree.",
-    );
-    expect(stderr.text()).toContain(`Partial output was kept at ${partial}.`);
-    expect(stderr.text()).not.toContain("codex-security:");
+      expect(await runCli(["scan", "."], failing)).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Isolated Codex runtime directory must be outside the scanned directory and any enclosing Git worktree.",
+      );
+      expect(stderr.text()).toContain(`Partial output was kept at ${partial}.`);
+      expect(stderr.text()).not.toContain("codex-security:");
+    } finally {
+      await rm(partial, { recursive: true, force: true });
+    }
   });
 
   test("preserves complete protected-root diagnostics", async () => {
@@ -5053,58 +5063,136 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves retained partial-output paths", async () => {
-    const path = "/private/tmp/scan_sk-proj-SYNTHETIC_PATH_KEY_123/results";
-    for (const [signal, expectedExit] of [
-      [null, 2],
-      ["SIGINT", 130],
-      ["SIGTERM", 143],
-    ] as const) {
-      const signals = new FakeSignals();
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      const deps = dependencies({
-        signals,
-        onTurn: (_repository, options) => {
-          (
-            options as { onOutputDirReady?: (scanDir: string) => void }
-          ).onOutputDirReady?.(path);
-        },
-        onRun: () => {
-          if (signal !== null) signals.emit(signal);
-          throw new Error("runtime failed");
-        },
-      });
-
-      expect(await runCli(["scan", "."], deps)).toBe(expectedExit);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(`Partial output was kept at ${path}.`);
-    }
-  }, 30_000);
+  test.each(["empty", "missing", "nonempty"] as const)(
+    "reports retained output accurately for %s directories across scan failures",
+    async (state) => {
+      const root = await temporaryDirectory("codex-security-partial-output-");
+      try {
+        for (const failureKind of [
+          "ordinary",
+          "SIGINT",
+          "SIGTERM",
+          "cost",
+        ] as const) {
+          const scanDir = join(
+            root,
+            failureKind,
+            "scan_sk-proj-SYNTHETIC_PATH_KEY_123",
+          );
+          await mkdir(scanDir, { recursive: true });
+          if (state === "nonempty")
+            await writeFile(join(scanDir, "progress.log"), "partial\n");
+          const cost = fakeResult([], "complete", {
+            input_tokens: 1_250,
+            cached_input_tokens: 200,
+            output_tokens: 30,
+          }).cost!;
+          const signals = new FakeSignals();
+          const { stdout, stderr, runCli } = createCliTest(main);
+          const deps = dependencies({ signals });
+          deps.createSecurity = () =>
+            fakeSecurity(async (_repository, options) => {
+              options?.onOutputDirReady?.(scanDir);
+              if (state === "missing") await rm(scanDir, { recursive: true });
+              if (failureKind === "SIGINT" || failureKind === "SIGTERM")
+                signals.emit(failureKind);
+              throw failureKind === "cost"
+                ? new ScanCostLimitExceededError(0.004, cost, scanDir)
+                : new Error("SYNTHETIC_SCAN_FAILURE");
+            });
+          const exit = await runCli(
+            [
+              "scan",
+              ".",
+              "--verbose",
+              ...(failureKind === "cost"
+                ? ["--json", "--max-cost", "0.004"]
+                : []),
+            ],
+            deps,
+          );
+          expect(exit).toBe(
+            failureKind === "SIGINT"
+              ? 130
+              : failureKind === "SIGTERM"
+                ? 143
+                : 2,
+          );
+          const partial = state === "nonempty";
+          expect(stderr.text()).toContain(`partial_output=${partial}`);
+          if (failureKind === "cost") {
+            const message = JSON.parse(stdout.text()).message;
+            expect(message).toContain("estimated cost");
+            expect(message).toContain(
+              partial
+                ? `partial output remains at ${scanDir}`
+                : "no partial output was kept",
+            );
+            expect(stderr.text()).toContain(message);
+          } else {
+            expect(stdout.text()).toBe("");
+            if (failureKind === "ordinary")
+              expect(stderr.text()).toContain("SYNTHETIC_SCAN_FAILURE");
+            else {
+              expect(stderr.text()).toContain(
+                failureKind === "SIGINT"
+                  ? "Scan canceled by Ctrl-C."
+                  : "Scan terminated by SIGTERM.",
+              );
+              expect(signals.listeners.get(failureKind)?.size).toBe(0);
+            }
+            if (partial)
+              expect(stderr.text()).toContain(
+                `Partial output was kept at ${scanDir}.`,
+              );
+            else
+              expect(stderr.text()).not.toContain("Partial output was kept at");
+          }
+          if (partial)
+            expect(await readFile(join(scanDir, "progress.log"), "utf8")).toBe(
+              "partial\n",
+            );
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("does not report success when SDK cleanup fails", async () => {
-    for (const json of [false, true]) {
-      const { stdout, stderr, runCli } = createCliTest(main);
+    const scanDir = await temporaryDirectory("codex-security-cleanup-output-");
+    const result = fakeResult();
+    Object.defineProperty(result, "scanDir", { value: scanDir });
+    await writeFile(join(scanDir, "progress.log"), "partial\n");
+    try {
+      for (const json of [false, true]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
 
-      expect(
-        await runCli(
-          json ? ["scan", ".", "--json"] : ["scan", "."],
-          dependencies({
-            onClose: () => fail("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED"),
-          }),
-        ),
-      ).toBe(2);
-      if (json) {
-        expect(JSON.parse(stdout.text())).toEqual({
-          status: "failed",
-          code: "SCAN_FAILED",
-          message: "SYNTHETIC_AUTH_HOME_CLEANUP_FAILED",
-        });
-      } else {
-        expect(stdout.text()).toBe("");
+        expect(
+          await runCli(
+            json ? ["scan", ".", "--json"] : ["scan", "."],
+            dependencies({
+              result,
+              onClose: () => fail("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED"),
+            }),
+          ),
+        ).toBe(2);
+        if (json) {
+          expect(JSON.parse(stdout.text())).toEqual({
+            status: "failed",
+            code: "SCAN_FAILED",
+            message: "SYNTHETIC_AUTH_HOME_CLEANUP_FAILED",
+          });
+        } else {
+          expect(stdout.text()).toBe("");
+        }
+        expect(stderr.text()).toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
+        expect(stderr.text()).toContain(
+          `Partial output was kept at ${scanDir}.`,
+        );
       }
-      expect(stderr.text()).toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
-      expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
     }
   });
 
