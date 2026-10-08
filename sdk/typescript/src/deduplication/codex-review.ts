@@ -54,9 +54,7 @@ import {
   type DeduplicationDiagnosticObserver,
 } from "./diagnostics.js";
 
-const reviewErrorSchema = z
-  .object({ reason: z.string().trim().min(1) })
-  .strict();
+const reviewErrorSchema = z.strictObject({ reason: z.string().trim().min(1) });
 
 export interface CodexReview<T> extends Pick<
   DeduplicationReviewRequest,

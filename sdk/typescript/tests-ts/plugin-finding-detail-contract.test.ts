@@ -1,13 +1,12 @@
 import { runPython } from "./support/python-probe.js";
 import { readFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import Ajv, { type ValidateFunction } from "ajv";
 import Ajv2020 from "ajv/dist/2020.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { readJson as readJsonFile } from "./support/json.js";
-import { initializeMcpClient } from "./support/mcp-client.js";
+import { startMcpClient } from "../../../plugins/codex-security/mcp-app/tests/support/mcp-client.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -124,12 +123,14 @@ function schemaProperties(schema: JsonObject): Record<string, JsonObject> {
 }
 
 async function startMcp() {
-  const child = spawn(
-    process.execPath,
-    [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
-    { stdio: ["pipe", "pipe", "pipe"] },
+  return startMcpClient(
+    {
+      command: process.execPath,
+      args: [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+      env: process.env as Record<string, string>,
+    },
+    "finding-detail-contract-test",
   );
-  return initializeMcpClient(child, "finding-detail-contract-test", false);
 }
 
 function expectScanDraftDetails(validate: ValidateFunction) {
@@ -203,7 +204,11 @@ describe("bundled plugin finding detail contracts", () => {
   test("publishes the strict scan-draft contract through MCP", async () => {
     const client = await startMcp();
     try {
-      const result = await client.request("tools/list", {});
+      const [result, concurrentResult] = await Promise.all([
+        client.request("tools/list", {}),
+        client.request("tools/list", {}),
+      ]);
+      expect(concurrentResult).toEqual(result);
       const tools = result["tools"] as Array<JsonObject>;
       const tool = tools.find(
         (candidate) => candidate["name"] === "record_codex_security_scan_draft",
