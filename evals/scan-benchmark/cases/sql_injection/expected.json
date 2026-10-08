@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "caseId": "sql_injection",
+  "runtime": "Python >=3.10, standard library only",
+  "mode": "deep_repository",
+  "findings": [
+    {
+      "id": "unsafe",
+      "presence": "required",
+      "cwe": [
+        "CWE-89"
+      ],
+      "regions": [
+        {
+          "path": "service.py",
+          "startLine": 5,
+          "endLine": 5
+        }
+      ],
+      "evidenceRegions": [
+        {
+          "path": "service.py",
+          "startLine": 5,
+          "endLine": 5
+        }
+      ],
+      "severity": [
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    {
+      "id": "safe-control",
+      "presence": "absent",
+      "cwe": [
+        "CWE-89"
+      ],
+      "regions": [
+        {
+          "path": "service.py",
+          "startLine": 8,
+          "endLine": 9
+        }
+      ],
+      "severity": [
+        "informational",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    }
+  ]
+}

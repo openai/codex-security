@@ -11,7 +11,9 @@ being embedded in its source tree or shipped npm runtime.
 - [Secret discovery](secret-discovery/README.md): checks whether the production
   core audit finds synthetic credentials in source and keeps them in its final
   findings, with deterministic grading and harness checks.
+- [Scan benchmark](scan-benchmark/README.md): versioned synthetic repositories and
+  deterministic scoring of canonical scan artifacts across vulnerability classes.
 
 Model runs are opt-in. CI runs the deterministic triage and secret-discovery
-helper checks and the real-IPC reducer regression through the normal MCP test
-suite.
+helper checks, scan benchmark scorer checks, and the real-IPC reducer regression
+through the normal MCP test suite.
