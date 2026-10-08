@@ -10,13 +10,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
 import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
 
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const temporaryDirectories = createTemporaryDirectories(false);
@@ -62,6 +63,25 @@ async function snapshot(root: string) {
 afterEach(temporaryDirectories.cleanup);
 
 describe("bundled plugin build", () => {
+  test("copies Python contracts and completed examples unchanged from source", async () => {
+    const source = fileURLToPath(
+      new URL("../../../plugins/codex-security/", import.meta.url),
+    );
+    const contract = JSON.parse(
+      await readFile(join(source, "plugin-files.json"), "utf8"),
+    ) as { shippedExact: string[] };
+    for (const path of contract.shippedExact.filter(
+      (path) =>
+        (path.startsWith("scripts/") && path.endsWith(".py")) ||
+        path.startsWith("schemas/") ||
+        path.startsWith("examples/completed-scan/"),
+    )) {
+      expect(await readFile(join(PLUGIN_ROOT, path)), path).toEqual(
+        await readFile(join(source, path)),
+      );
+    }
+  });
+
   test.each(["missing", "stale"])(
     "builds the MCP runtime from source with %s native wrappers and no npm launcher",
     async (emitted) => {
@@ -75,17 +95,22 @@ describe("bundled plugin build", () => {
         filter: (path) =>
           !["node_modules", ".preview"].includes(basename(path)),
       });
-      await cp(join(plugin, "schemas"), join(source, "schemas"), {
-        recursive: true,
-      });
-      await writeFixture(
-        source,
-        "scripts/reserved_artifact_paths.json",
-        await readFile(
-          join(plugin, "scripts", "reserved_artifact_paths.json"),
-          "utf8",
-        ),
-      );
+      for (const directory of ["schemas", "shared"]) {
+        await cp(join(plugin, directory), join(source, directory), {
+          recursive: true,
+        });
+      }
+      for (const file of [
+        "reserved_artifact_paths.json",
+        "codex_profile.mjs",
+        "codex_profile.d.mts",
+      ]) {
+        await writeFixture(
+          source,
+          `scripts/${file}`,
+          await readFile(join(plugin, "scripts", file), "utf8"),
+        );
+      }
       await symlink(
         join(plugin, "mcp-app", "node_modules"),
         join(source, "mcp-app", "node_modules"),
@@ -110,6 +135,13 @@ describe("bundled plugin build", () => {
         "plugin-files.json",
         await readFile(join(plugin, "plugin-files.json"), "utf8"),
       );
+      for (const name of ["codex_profile.mjs", "codex_profile.d.mts"]) {
+        await writeFixture(
+          source,
+          `scripts/${name}`,
+          await readFile(join(plugin, "scripts", name), "utf8"),
+        );
+      }
       const platformSource = join(source, "native", "platform.mts");
       await writeFile(
         platformSource,
@@ -185,6 +217,26 @@ describe("bundled plugin build", () => {
       ]);
       expect(helper.stdout).toBe("[]\n");
       expect(helper.stderr).toBe("");
+      const preflight = await execFileAsync(
+        "node",
+        [
+          "--input-type=module",
+          "--eval",
+          `const runtime = await import(process.argv[1]);
+         console.log(JSON.stringify({
+           preflight: typeof runtime.preflightDeepScanWorkerPermissionProfile,
+           profileId: runtime.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+         }));`,
+          pathToFileURL(join(destination, "permission-profile-preflight.mjs"))
+            .href,
+        ],
+        { cwd: root },
+      );
+      expect(JSON.parse(preflight.stdout)).toEqual({
+        preflight: "function",
+        profileId: "codex_security_deep_scan_worker",
+      });
+      expect(preflight.stderr).toBe("");
     },
   );
 
@@ -310,13 +362,6 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
     await writeFixture(source, "schemas/scan.json", "{}\n");
     await writeFixture(
       source,
-      "mcp-app/package.json",
-      `${JSON.stringify({
-        scripts: { build: "node scripts/build_mcp_app.mjs" },
-      })}\n`,
-    );
-    await writeFixture(
-      source,
       "mcp-app/scripts/build_mcp_app.mjs",
       `import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -436,4 +481,43 @@ describe("generated plugin ownership", () => {
       "Generated plugin payload must not be tracked: _bundled_plugin/mcp/server.mjs",
     );
   });
+});
+
+test("failed compiler preserves the previous bundle and its diagnostics", async () => {
+  const root = await temporaryDirectory();
+  const source = join(root, "source");
+  const destination = join(root, "bundle");
+  const contractPath = join(source, "plugin-files.json");
+  await writeFixture(
+    source,
+    "plugin-files.json",
+    JSON.stringify({
+      externalOwnedExact: [".codex-plugin/plugin.json"],
+      shippedExact: ["mcp/server.mjs"],
+    }),
+  );
+  await writeFixture(source, ".codex-plugin/plugin.json", "{}");
+  await writeFixture(
+    source,
+    "mcp-app/scripts/build_mcp_app.mjs",
+    'console.log("synthetic compiler diagnostic"); process.exit(1);',
+  );
+  await writeFixture(destination, "previous.txt", "previous valid bundle");
+  const driver = join(root, "driver.mjs");
+  await writeFile(
+    driver,
+    `import { buildBundledPlugin } from ${JSON.stringify(new URL("../scripts/build-plugin.mjs", import.meta.url).href)};
+try { await buildBundledPlugin(${JSON.stringify({ contractPath, destination, source })}); }
+catch (error) { console.error(error.message); process.exitCode = 1; }`,
+  );
+  const result = await execFileAsync(process.execPath, [driver]).then(
+    () => {
+      throw new Error("synthetic compiler unexpectedly succeeded");
+    },
+    (error: { stdout: string; stderr: string }) => error,
+  );
+  expect(result.stdout).toContain("synthetic compiler diagnostic");
+  expect(await readFile(join(destination, "previous.txt"), "utf8")).toBe(
+    "previous valid bundle",
+  );
 });

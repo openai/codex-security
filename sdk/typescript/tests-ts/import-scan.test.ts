@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -132,6 +133,30 @@ async function fixture(format: "csv" | "json" = "csv") {
   };
 }
 
+async function legacyArchivePlugin(
+  context: Awaited<ReturnType<typeof fixture>>,
+) {
+  const plugin = join(context.root, "legacy-plugin");
+  await cp(PLUGIN_ROOT, plugin, { recursive: true });
+  await writeFile(
+    join(plugin, "scripts", "workbench_db.py"),
+    [
+      "import runpy, sys",
+      "from pathlib import Path",
+      "args = sys.argv[1:]",
+      'if args[:2] == ["register-cli-scan", "--help"]:',
+      '    print("--archive-existing --archived-scan-dir")',
+      "    raise SystemExit(0)",
+      'if args and args[0] == "register-cli-scan":',
+      '    scan_dir = Path(args[args.index("--scan-dir") + 1])',
+      "    if next(scan_dir.iterdir(), None) is not None:",
+      '        raise SystemExit("The scan artifact directory must be empty before the scan starts.")',
+      `runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))}, run_name="__main__")`,
+    ].join("\n"),
+  );
+  return plugin;
+}
+
 function completed(result: Awaited<ReturnType<typeof importScan>>): ScanResult {
   expect(result).toBeInstanceOf(ScanResult);
   if (!(result instanceof ScanResult)) throw new Error("Expected a saved scan");
@@ -164,6 +189,27 @@ async function storedScans(context: Awaited<ReturnType<typeof fixture>>) {
     summaries: string[];
   }>;
 }
+
+test("a rejected import registration keeps existing output in place", async () => {
+  const context = await fixture();
+  const outputDir = join(context.root, "scan");
+  await mkdir(outputDir, { mode: 0o700 });
+  await writeFile(join(outputDir, "previous.txt"), "previous scan\n");
+  await expect(
+    importScan(
+      { ...context.options, outputDir, archiveExisting: true },
+      {
+        ...context.dependencies,
+        runWorkbench: async () => {
+          throw new Error("fixture registration rejected");
+        },
+      },
+    ),
+  ).rejects.toThrow("fixture registration rejected");
+  expect(await readFile(join(outputDir, "previous.txt"), "utf8")).toBe(
+    "previous scan\n",
+  );
+});
 
 test.each(["csv", "json"] as const)(
   "%s import seals every source occurrence and indexes a separate dataset scan",
@@ -466,35 +512,145 @@ test("dry run validates source rows without creating database state or invoking 
   });
 });
 
-test("imports archive prior output without replacing its saved findings", async () => {
-  const context = await fixture();
-  const options = {
-    ...context.options,
-    outputDir: join(context.root, "results"),
-  };
-  const first = completed(await importScan(options, context.dependencies));
-  const originalManifest = await readFile(first.manifestPath, "utf8");
-  await expect(importScan(options, context.dependencies)).rejects.toThrow();
-  expect(await readFile(first.manifestPath, "utf8")).toBe(originalManifest);
-  const second = completed(
-    await importScan(
-      { ...options, archiveExisting: true },
-      context.dependencies,
-    ),
-  );
-  const scans = await storedScans(context);
-  expect(scans).toHaveLength(2);
-  const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
-  expect(archived.scan_dir).not.toBe(second.scanDir);
-  expect(archived.occurrence_count).toBe(2);
-  expect(
-    await readFile(join(archived.scan_dir, "scan-manifest.json"), "utf8"),
-  ).toBe(originalManifest);
-  expect(
-    (await loadContract(archived.scan_dir, { pluginRoot: PLUGIN_ROOT }))
-      .findings.findings,
-  ).toHaveLength(2);
-});
+test.each(["bundled", "legacy"])(
+  "imports with %s helpers archive prior output without replacing its saved findings",
+  async (helper) => {
+    const context = await fixture();
+    const options = {
+      ...context.options,
+      ...(helper === "legacy"
+        ? {
+            config: {
+              ...context.options.config,
+              pluginPath: await legacyArchivePlugin(context),
+            },
+          }
+        : {}),
+      outputDir: join(context.root, "results"),
+    };
+    const first = completed(await importScan(options, context.dependencies));
+    const originalManifest = await readFile(first.manifestPath, "utf8");
+    await expect(importScan(options, context.dependencies)).rejects.toThrow();
+    expect(await readFile(first.manifestPath, "utf8")).toBe(originalManifest);
+    const second = completed(
+      await importScan(
+        { ...options, archiveExisting: true },
+        context.dependencies,
+      ),
+    );
+    const scans = await storedScans(context);
+    expect(scans).toHaveLength(2);
+    const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
+    expect(archived.scan_dir).not.toBe(second.scanDir);
+    expect(archived.occurrence_count).toBe(2);
+    expect(
+      await readFile(join(archived.scan_dir, "scan-manifest.json"), "utf8"),
+    ).toBe(originalManifest);
+    expect(
+      (await loadContract(archived.scan_dir, { pluginRoot: PLUGIN_ROOT }))
+        .findings.findings,
+    ).toHaveLength(2);
+  },
+);
+
+test.each(["active scan", "missing parent"])(
+  "legacy registration restores output after rejecting %s",
+  async (reason) => {
+    const context = await fixture();
+    const options = {
+      ...context.options,
+      config: {
+        ...context.options.config,
+        pluginPath: await legacyArchivePlugin(context),
+      },
+      outputDir: join(context.root, "results"),
+    };
+    const first = completed(await importScan(options, context.dependencies));
+    const manifest = await readFile(first.manifestPath, "utf8");
+    if (reason === "active scan") {
+      const update = await runCommand(
+        context.python,
+        [
+          "-c",
+          "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE scans SET status='running'\"); c.commit()",
+          join(context.stateDirectory, "workbench.sqlite3"),
+        ],
+        { timeout: 30_000 },
+      );
+      expect(update.status, update.stderr).toBe(0);
+    }
+    await expect(
+      importScan(
+        {
+          ...options,
+          archiveExisting: true,
+          ...(reason === "missing parent"
+            ? { parentScanId: "00000000-0000-4000-8000-000000000001" }
+            : {}),
+        },
+        context.dependencies,
+      ),
+    ).rejects.toThrow(
+      reason === "active scan" ? "running scan" : "scan not found",
+    );
+    expect(await readFile(first.manifestPath, "utf8")).toBe(manifest);
+    expect(await storedScans(context)).toHaveLength(1);
+    expect((await storedScans(context))[0]?.scan_dir).toBe(first.scanDir);
+  },
+);
+
+test.each(["response lost", "state unreadable"])(
+  "legacy registration preserves its archive when %s after commit",
+  async (failure) => {
+    const context = await fixture();
+    const pluginPath = await legacyArchivePlugin(context);
+    const options = {
+      ...context.options,
+      config: { ...context.options.config, pluginPath },
+      outputDir: join(context.root, "results"),
+    };
+    const first = completed(await importScan(options, context.dependencies));
+    const manifest = await readFile(first.manifestPath, "utf8");
+    const helper = join(pluginPath, "scripts", "workbench_db.py");
+    const original = await readFile(helper, "utf8");
+    await writeFile(
+      helper,
+      original
+        .replace(
+          "import runpy, sys",
+          [
+            "import contextlib, io, runpy, sys",
+            "from pathlib import Path",
+            "args = sys.argv[1:]",
+            ...(failure === "state unreadable"
+              ? [
+                  'if args and args[0] == "list-scans" and Path(__file__).with_suffix(".committed").exists():',
+                  '    raise SystemExit("Synthetic state read failure")',
+                ]
+              : []),
+          ].join("\n"),
+        )
+        .replace(
+          "runpy.run_path(",
+          'lost_response = args and args[0] == "register-cli-scan"\nwith contextlib.redirect_stdout(io.StringIO()) if lost_response else contextlib.nullcontext():\n    runpy.run_path(',
+        ) +
+        '\nif lost_response:\n    Path(__file__).with_suffix(".committed").touch()\n    raise SystemExit("Synthetic response lost after commit")\n',
+    );
+    await expect(
+      importScan({ ...options, archiveExisting: true }, context.dependencies),
+    ).rejects.toThrow("Synthetic response lost after commit");
+    const scans = await storedScans(context);
+    expect(scans).toHaveLength(2);
+    const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
+    expect(archived.scan_dir).not.toBe(first.scanDir);
+    expect(
+      await readFile(join(archived.scan_dir, "scan-manifest.json"), "utf8"),
+    ).toBe(manifest);
+    expect(
+      await stat(join(first.scanDir, "scan-manifest.json")).catch(() => null),
+    ).toBeNull();
+  },
+);
 
 test.each(["failure", "abort"] as const)(
   "an import %s after registration leaves a terminal saved scan",

@@ -4,6 +4,7 @@ import { runGit } from "../sastbench/scripts/hydrate-sastbench-repos.mts";
 import {
   DEFAULT_DATASET,
   selectedVariants,
+  variantCaseId,
 } from "./generate-calibration-tests.mts";
 
 import fs from "node:fs";
@@ -53,7 +54,7 @@ function gitOutput(args: string[], cwd: string) {
   }
 }
 
-function ensureGitCheckout(job: (typeof jobs)[number]) {
+function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
   fs.mkdirSync(path.dirname(job.targetDir), { recursive: true });
 
   if (!fs.existsSync(job.targetDir)) {
@@ -81,6 +82,13 @@ function ensureGitCheckout(job: (typeof jobs)[number]) {
     }
   }
 
+  if (fs.lstatSync(path.join(job.targetDir, ".git")).isDirectory()) {
+    runGit(
+      ["init", "--separate-git-dir", `${job.targetDir}.git`],
+      job.targetDir,
+    );
+  }
+
   const currentHead = gitOutput(["rev-parse", "HEAD"], job.targetDir);
   if (currentHead === job.checkoutRef) {
     return "already current";
@@ -91,24 +99,33 @@ function ensureGitCheckout(job: (typeof jobs)[number]) {
   return "hydrated";
 }
 
-const args = parseArgs(process.argv.slice(2));
-const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
-const jobs = selectedVariants(dataset, args).map(({ testCase, variant }) => ({
-  repoUrl: testCase.repo.url,
-  checkoutRef: variant.checkout_ref,
-  targetDir: path.join(args.repoRoot, testCase.case_id, variant.variant_id),
-  label: `${testCase.case_id}/${variant.variant_id}`,
-}));
-const variantWord = jobs.length === 1 ? "variant" : "variants";
-console.log(
-  `${args.dryRun ? "would hydrate" : "hydrating"} ${jobs.length} calibration ${variantWord}`,
-);
-for (const job of jobs) {
-  if (args.dryRun) {
-    console.log(`${job.label} <- ${job.repoUrl} @ ${job.checkoutRef}`);
-    console.log(`  ${job.targetDir}`);
-  } else {
-    const status = ensureGitCheckout(job);
-    console.log(`${status}: ${job.label} @ ${job.checkoutRef}`);
+export function plannedJobs(
+  dataset: Parameters<typeof selectedVariants>[0],
+  args: Parameters<typeof selectedVariants>[1] & { repoRoot: string },
+) {
+  return selectedVariants(dataset, args).map(({ testCase, variant }) => ({
+    repoUrl: testCase.repo.url,
+    checkoutRef: variant.checkout_ref,
+    targetDir: path.join(args.repoRoot, variantCaseId(testCase, variant)),
+    label: `${testCase.case_id}/${variant.variant_id}`,
+  }));
+}
+
+if (import.meta.filename === fs.realpathSync(process.argv[1])) {
+  const args = parseArgs(process.argv.slice(2));
+  const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
+  const jobs = plannedJobs(dataset, args);
+  const variantWord = jobs.length === 1 ? "variant" : "variants";
+  console.log(
+    `${args.dryRun ? "would hydrate" : "hydrating"} ${jobs.length} calibration ${variantWord}`,
+  );
+  for (const job of jobs) {
+    if (args.dryRun) {
+      console.log(`${job.label} <- ${job.repoUrl} @ ${job.checkoutRef}`);
+      console.log(`  ${job.targetDir}`);
+    } else {
+      const status = ensureGitCheckout(job);
+      console.log(`${status}: ${job.label} @ ${job.checkoutRef}`);
+    }
   }
 }

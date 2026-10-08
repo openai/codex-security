@@ -138,7 +138,7 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 
 | Inventory strategy | Meaning                                                   |
 | ------------------ | --------------------------------------------------------- |
-| `repository`       | Repository-wide tracked source-like file inventory        |
+| `repository`       | Repository-wide file inventory                            |
 | `scoped_path`      | Repository inventory constrained to requested paths       |
 | `diff`             | Files selected from the reviewed Git change set           |
 | `directory`        | Deterministic non-Git directory inventory                 |

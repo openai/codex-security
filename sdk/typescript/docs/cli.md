@@ -82,8 +82,15 @@ with `requires_openai_auth = true`.
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
-If the home has no credentials, it imports an existing file-based Codex login.
-Logout disables imports until the next login.
+Without an overriding environment API key, scans and status checks import
+existing file-based Codex credentials when this home is empty. Import errors make
+`login status` exit with code 2 and SDK `account()` reject its promise. Logout
+disables imports until you log in again. Status imports and logout share the
+credential-home lock so a concurrent status check cannot restore credentials
+after logout completes.
+
+Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
+`HOME` or `USERPROFILE` environment setting.
 
 If credentials cannot refresh, run `login status`. Retry if the sign-in recently
 changed; otherwise run `logout`, then `login`.
@@ -286,14 +293,22 @@ SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
 
 Scans are report-only by default. `--fail-on-severity high` exits with `1` for
 high or critical findings. Incomplete scans exit with `2`, returning available
-results and a coverage warning. Runtime failures with JSON or JSONL output produce:
+results and a coverage warning. `scan`, `scans rerun`, and `scans resume`
+execution failures with `--json`, JSON, or JSONL output produce:
 
 ```json
 { "status": "failed", "code": "SCAN_FAILED", "message": "..." }
 ```
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
-Diagnostics stay on stderr. `scan --schema --format json` describes the output.
+Saved-scan setup failures use the same output shape with
+`SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
+available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
+scan uses `SCAN_IMPORT_FAILED` if the import fails. Other output formats retain
+stderr-only failures, including when `--full-output` is selected.
+
+Diagnostics stay on stderr. Each command's `--schema --format json` describes
+its successful output and failure codes.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
 
 ### Project files
@@ -553,7 +568,8 @@ Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
 command shims such as `codex.cmd` fall back to the bundled executable.
 
-Python lookup: `--python` (scan, bulk scan, export) or SDK `pythonPath`, then
+Python lookup: `--python` on commands that expose interpreter selection or SDK
+`pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
 works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
 
@@ -650,7 +666,11 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
-Changed project configuration requires a new output directory.
+Changes to project configuration, extracted knowledge-base text, staged document
+filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` selections
+require a new output directory. Version 1 manifests also require a new directory
+because their original knowledge inputs and direct overrides cannot be verified.
+Worker and retry counts can change when resuming.
 
 ### Recovering failed or interrupted bulk scans
 

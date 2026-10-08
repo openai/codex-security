@@ -69,6 +69,19 @@ validateDataset([positive, negative], {
   labelCounts: { true_positive: 1, false_positive: 1 },
 });
 
+assert.throws(
+  () => validateDataset([positive, negative]),
+  /case count mismatch/,
+);
+assert.throws(
+  () =>
+    validateDataset([positive, negative], {
+      caseCount: 2,
+      labelCounts: { true_positive: 2, false_positive: 0 },
+    }),
+  /true_positive count mismatch/,
+);
+
 const sparseScannerRecord = benchmarkRecord({
   to_analyzer: {
     ...positive.to_analyzer,

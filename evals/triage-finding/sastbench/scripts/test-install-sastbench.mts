@@ -42,19 +42,5 @@ assert.throws(
   () => verifyInstallation(validInspection({ datasetSha256: "0".repeat(64) })),
   /dataset SHA-256 mismatch/,
 );
-assert.throws(
-  () =>
-    verifyInstallation(validInspection({ caseCount: EXPECTED_CASE_COUNT - 1 })),
-  /case count mismatch/,
-);
-assert.throws(
-  () =>
-    verifyInstallation(
-      validInspection({
-        labelCounts: { true_positive: 300, false_positive: 2437 },
-      }),
-    ),
-  /true_positive count mismatch/,
-);
 
 console.log("sastbench installer verification tests passed");

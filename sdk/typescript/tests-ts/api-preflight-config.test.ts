@@ -71,6 +71,46 @@ function runPreflight(
 
 describe("CodexSecurity preflight configuration", () => {
   test.each([
+    ["model", { model: null }, true],
+    ["reasoning effort", { model_reasoning_effort: null }, true],
+    ["both", { model: null, model_reasoning_effort: null }, true],
+    ["defaults", { model: null, model_reasoning_effort: null }, false],
+  ] as const)(
+    "inherits %s when selected profile settings are null",
+    async (_name, profile, explicitRoot) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            ...(explicitRoot
+              ? { model: "gpt-5.6-terra", model_reasoning_effort: "low" }
+              : {}),
+            profile: "review",
+            profiles: { review: profile },
+          },
+        },
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+          prepareRuntime: async () => {
+            throw new Error("Local preflight must not start the runtime");
+          },
+        },
+      );
+      for (const mode of ["standard", "deep"] as const) {
+        await expect(
+          client.preflight(repository, { mode }),
+        ).resolves.toMatchObject({
+          mode,
+          model: explicitRoot ? "gpt-5.6-terra" : "gpt-5.6-sol",
+          reasoningEffort: explicitRoot ? "low" : "xhigh",
+        });
+      }
+    },
+  );
+
+  test.each([
     ["standard", "openai.gpt-daybreak-blue-5.6-sol"],
     ["deep", "openai.gpt-daybreak-blue-5.6-sol"],
     ["standard", "openai.gpt-5.6-cyber"],
@@ -442,7 +482,7 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test("keeps persistent credentials and their ancestry read-only", () => {
+  test("denies model commands access to the persistent credential home", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const credentialHome = join(stateDirectory, "codex-home");
     const config = scanRuntimeCodexConfig({}, credentialHome);
@@ -452,7 +492,7 @@ describe("CodexSecurity preflight configuration", () => {
         filesystem: {
           ":root": "read",
           ":workspace_roots": "write",
-          [credentialHome]: "read",
+          [credentialHome]: { ".": "deny" },
         },
       },
       codex_security_policy: {
@@ -575,6 +615,8 @@ describe("CodexSecurity preflight configuration", () => {
     const sanitized = scanPreflightCodexConfig({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "high",
+      openai_base_url:
+        "https://synthetic-user:synthetic-password@gateway.example.test/v1?token=synthetic-root-token",
       features: {
         plugins: true,
         goals: true,
@@ -586,6 +628,8 @@ describe("CodexSecurity preflight configuration", () => {
       profiles: {
         review: {
           model: "profile-model",
+          openai_base_url:
+            "https://synthetic-user:synthetic-password@profile.example.test/v1?token=synthetic-profile-token",
           features: { goals: true, secret: "PROFILE_SECRET" },
           agents: { max_threads: 4, token: "PROFILE_AGENT_TOKEN" },
           shell_environment_policy: { set: { SECRET: "PROFILE_ENV_SECRET" } },
