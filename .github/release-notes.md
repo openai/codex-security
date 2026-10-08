@@ -126,6 +126,8 @@
 - report incomplete results as errors and deduplicate log warnings ([#977](https://github.com/openai/codex-security/pull/977))
 - preserve request attribution across CLI, SDK, and Deep Scan ([#1424](https://github.com/openai/codex-security/pull/1424))
 - manage the findings service lifecycle ([#700](https://github.com/openai/codex-security/pull/700))
+- reject control characters in remote targets during finalization ([#1523](https://github.com/openai/codex-security/pull/1523))
+- validate canonical code-evidence and deferred paths ([#1522](https://github.com/openai/codex-security/pull/1522))
 
 <!-- release-section: highlights:end -->
 
