@@ -193,9 +193,21 @@ async function diffCandidateSources(
   );
   const aliases = new Map<string, string>();
   if (process.platform === "win32") {
+    // Prefer an unambiguous spelling from the selected inventory.
+    const selectedPaths = new Map<string, string | null>();
+    for (const value of paths) {
+      const key = pathKey(value);
+      selectedPaths.set(
+        key,
+        selectedPaths.has(key) && selectedPaths.get(key) !== value
+          ? null
+          : value,
+      );
+    }
     for (const value of new Set([...paths, ...locations])) {
       try {
-        const [name] = relativeFile(value, context.repoRoot);
+        const [currentName] = relativeFile(value, context.repoRoot);
+        const name = selectedPaths.get(pathKey(currentName)) ?? currentName;
         if (value !== name && pathKey(value) === pathKey(name))
           aliases.set(value, name);
       } catch {
