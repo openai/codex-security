@@ -521,14 +521,12 @@ export class ScanCostTracker {
         incomplete = true;
     }
     let usage: ScanTokenUsage | null = null;
+    let missingUsage = false;
     for (const value of usages.values()) {
       if (value === null) {
-        if (this.#attribution) {
-          incomplete = true;
-          continue;
-        }
-        this.#snapshot = { usage: null, cost: null };
-        return;
+        incomplete = true;
+        if (!this.#attribution) missingUsage = true;
+        continue;
       }
       usage = addTokenUsage(usage, value);
     }
@@ -600,14 +598,21 @@ export class ScanCostTracker {
       ? { ...reconciled, coverage: "partial" }
       : reconciled;
     const cost = estimateScanCost(this.#options.model, measured);
-    this.#snapshot = { usage: measured, cost };
-    this.#reportCost(cost, measured, {
-      ...usage,
-      modelUsage: [...liveModelUsage].map(([model, tokens]) => ({
-        model,
-        ...tokens,
-      })),
-    });
+    this.#snapshot = missingUsage
+      ? { usage: null, cost: null }
+      : { usage: measured, cost };
+    this.#reportCost(
+      cost,
+      measured,
+      {
+        ...usage,
+        modelUsage: [...liveModelUsage].map(([model, tokens]) => ({
+          model,
+          ...tokens,
+        })),
+      },
+      missingUsage,
+    );
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -654,13 +659,13 @@ export class ScanCostTracker {
     cost: ScanCost | null,
     usage: unknown,
     liveUsage?: unknown,
+    lowerBoundOnly = false,
   ): void {
-    if (cost === null) {
+    if (cost === null || lowerBoundOnly) {
       if (this.#options.onCostLowerBound === undefined) return;
-      const receiptCost = estimateScanCostLowerBound(
-        this.#options.model,
-        usage,
-      );
+      const receiptCost = cost
+        ? { ...cost, coverage: "partial" as const }
+        : estimateScanCostLowerBound(this.#options.model, usage);
       const liveCost = estimateScanCostLowerBound(
         this.#options.model,
         liveUsage,

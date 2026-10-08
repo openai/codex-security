@@ -5299,6 +5299,75 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test("enforces known Standard cost while a delegated child has only metadata", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+    ]);
+    const commands: string[] = [];
+    const runStreamed = mock(
+      async (_input: string, options: { signal: AbortSignal }) => {
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await writeUsageSession(codexHome, "scan-thread", {
+            input_tokens: 1_250,
+            cached_input_tokens: 200,
+            output_tokens: 30,
+          });
+          const child = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            {
+              parent: "scan-thread",
+              parentField: "source",
+            },
+          );
+          // Native session metadata is persisted before the first usage record.
+          const metadata = (await readFile(child, "utf8")).split("\n")[0]!;
+          await writeFile(child, metadata + "\n");
+          yield { type: "thread.started", thread_id: "scan-thread" };
+          await (options.signal.aborted
+            ? undefined
+            : once(options.signal, "abort"));
+          throw new DOMException("aborted", "AbortError");
+        }
+        return { events: events() };
+      },
+    );
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: async (_options, args, input) => {
+        commands.push(args[0]!);
+        return mockWorkbench(args, input);
+      },
+      createCodex: codexFactory(runStreamed),
+    });
+    const keepEventLoopAlive = setTimeout(() => {}, 10_000);
+    try {
+      const failure = await client
+        .run(repository, {
+          mode: "standard",
+          maxCostUsd: 0.004,
+          signal: AbortSignal.timeout(5_000),
+        })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ScanCostLimitExceededError);
+      expect(failure).toMatchObject({
+        cost: { estimatedUsd: 0.00488, coverage: "partial" },
+      });
+      expect(commands).not.toContain("complete-scan");
+      expect(runStreamed).toHaveBeenCalledTimes(1);
+    } finally {
+      clearTimeout(keepEventLoopAlive);
+      await client.close();
+    }
+  });
+
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();
     const commands: Array<readonly string[]> = [];

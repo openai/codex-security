@@ -660,6 +660,113 @@ describe("live scan cost tracking", () => {
     expect(resumed).toEqual([{ kind: "observed", worker: 1 }]);
   });
 
+  test("retains unknown Standard usage while reporting known cost and later child usage", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      {},
+      {
+        parent: "scan-thread",
+      },
+    );
+    await writeFile(
+      worker,
+      (await readFile(worker, "utf8")).split("\n")[0]! + "\n",
+    );
+    const publicCosts: Readonly<ScanCost>[] = [];
+    const lowerBounds: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onCost: (cost) => publicCosts.push(cost),
+      onCostLowerBound: (cost) => lowerBounds.push(cost),
+    });
+    tracker.start("scan-thread");
+    try {
+      expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+      expect(publicCosts).toEqual([]);
+      expect(lowerBounds.at(-1)).toMatchObject({
+        inputTokens: 1_250,
+        estimatedUsd: 0.00488,
+        coverage: "partial",
+      });
+      await writeSession(
+        home,
+        "worker-thread",
+        {
+          input_tokens: 100,
+          output_tokens: 0,
+        },
+        { parent: "scan-thread" },
+      );
+      expect(await tracker.refresh()).toMatchObject({
+        usage: { input_tokens: 1_350 },
+        cost: { inputTokens: 1_350, estimatedUsd: 0.00528 },
+      });
+      expect(publicCosts.at(-1)?.estimatedUsd).toBe(0.00528);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("prices known Standard receipts by their recorded model while child usage is missing", async () => {
+    const home = await codexHome();
+    const parent = await writeSession(home, "scan-thread", {});
+    await appendFile(
+      parent,
+      jsonLines([
+        {
+          type: "token_usage_record",
+          payload: {
+            thread_id: "scan-thread",
+            response_id: "known-response",
+            model: "gpt-5.6-luna",
+            usage: { input_tokens: 1_000, output_tokens: 0 },
+          },
+        },
+      ]) + "\n",
+    );
+    const child = await writeSession(
+      home,
+      "worker-thread",
+      {},
+      { parent: "scan-thread" },
+    );
+    await writeFile(
+      child,
+      (await readFile(child, "utf8")).split("\n")[0]! + "\n",
+    );
+    const lowerBounds: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onCostLowerBound: (cost) => lowerBounds.push(cost),
+    });
+    tracker.start("scan-thread");
+    try {
+      expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+      expect(lowerBounds).toHaveLength(1);
+      expect(lowerBounds[0]).toMatchObject({
+        estimatedUsd: estimateScanCost("gpt-5.6-luna", {
+          input_tokens: 1_000,
+          output_tokens: 0,
+        })!.estimatedUsd,
+        coverage: "partial",
+        modelCosts: [{ model: "gpt-5.6-luna", inputTokens: 1_000 }],
+      });
+      await tracker.refresh();
+      expect(lowerBounds).toHaveLength(1);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
   test("counts the scan and delegated workers without including other scans", async () => {
     const home = await codexHome();
     const parent = await writeSession(home, "scan-thread", {
