@@ -47,6 +47,8 @@ from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
     RecoverableContractError,
+    _json_bytes,
+    _loads_json,
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
     finalize_scan,
@@ -1093,7 +1095,7 @@ def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
 
 
 def published_manifest_digest(scan_dir: Path, manifest: dict[str, Any]) -> str:
-    canonical = (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n").encode()
+    canonical = _json_bytes(manifest)
     expected = f"sha256:{hashlib.sha256(canonical).hexdigest()}"
     actual = scan_local_file_digest(scan_dir, ARTIFACTS["manifest"])
     if actual != expected:
@@ -1420,7 +1422,7 @@ def budget_exhausted_draft(
             write_scan_local_bytes(
                 scan_dir,
                 name,
-                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
+                _json_bytes(payload),
             )
         except (ContractError, OSError, TypeError, ValueError) as exc:
             raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
@@ -3275,10 +3277,7 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
 
 def read_json_object(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(
-            path.read_text(encoding="utf-8"),
-            parse_constant=reject_non_finite_json,
-        )
+        payload = _loads_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise SystemExit(f"{path.name}: invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):
