@@ -311,7 +311,9 @@ dispatch status does not mean delegation was skipped. `onSessionEvent` receives
 saved events with thread IDs and worker numbers and can contain source code or
 credentials. Deep scans additionally expose durable independent-review counts
 through `onDeepProgress`: `completed`, `active`, and `maximum`. The maximum is a
-configured cap, not a percentage denominator. `ScanOptions` lists all callbacks.
+configured cap, not a percentage denominator. The optional `consolidating` flag
+reports when results are being combined or the coordinator has finished.
+`ScanOptions` lists all callbacks.
 
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription
 allowance. Use `cost.estimatedUsdRange` for reporting. `maxCostUsd` uses the

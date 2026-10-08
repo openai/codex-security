@@ -373,7 +373,7 @@ test("saved-scan bootstrap supports IDs, prefixes and latest and persists one du
 });
 
 test.skipIf(process.platform === "win32").each([true, false])(
-  "local native helpers protect a different caller (Git marker: %s)",
+  "local native helpers protect a different caller (Git marker: %p)",
   async (git) => {
     const f = await fixture();
     const seeded = await deduplicateScanInternal(

@@ -653,12 +653,17 @@ describe("CLI", () => {
 
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await temporaryDirectory("codex-security-cli-multiscan-");
-    const architecturePath = resolve(root, "/shared/architecture.pdf");
-    const threatModelsPath = resolve(root, "/shared/threat-models");
+    const architecturePath = join(root, "architecture.md");
+    const threatModelsPath = join(root, "threat-models");
     try {
       await multiscanInventory(root);
+      await writeFile(architecturePath, "Synthetic architecture context.");
+      await mkdir(threatModelsPath);
+      await writeFile(
+        join(threatModelsPath, "model.md"),
+        "Synthetic threat model.",
+      );
       const { stdout, stderr, runCli } = createCliTest(main);
-
       let config: CodexSecurityConfig | undefined;
       let scanOptions: unknown;
       expect(
@@ -2041,6 +2046,111 @@ describe("CLI", () => {
     expect(text).not.toContain("Running scan: preflight");
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
+
+  test.each([false, true])(
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=%s)",
+    async (interactive) => {
+      const { stdout, stderr, runCli } = createCliTest(main, {
+        stderr: interactive,
+      });
+      const deps = dependencies({ environment: { NO_COLOR: "1" } });
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
+          options?.onProgress?.({
+            phase: "preflight",
+            filesCompleted: 0,
+            filesTotal: 128,
+          });
+          expect(options?.onDeepProgress).toBeFunction();
+          const initial = stderr.text();
+          options?.onDeepProgress?.({
+            completed: 0,
+            active: 0,
+            maximum: 16,
+            consolidating: false,
+          });
+          expect(stderr.text()).toBe(initial);
+          options?.onDeepProgress?.({
+            completed: 0,
+            active: 4,
+            maximum: 16,
+            consolidating: false,
+          });
+          expect(stripVTControlCharacters(stderr.text())).toContain(
+            "discovery",
+          );
+          options?.onDeepProgress?.({
+            completed: 2,
+            active: 2,
+            maximum: 16,
+            consolidating: true,
+          });
+          expect(stripVTControlCharacters(stderr.text())).toContain(
+            "consolidating results",
+          );
+          const beforeTerminal = stderr.text().length;
+          options?.onDeepProgress?.({
+            completed: 4,
+            active: 0,
+            maximum: 16,
+            consolidating: false,
+          });
+          const terminal = stripVTControlCharacters(
+            stderr.text().slice(beforeTerminal),
+          );
+          expect(terminal).toContain("consolidating results");
+          expect(terminal).not.toContain("discovery");
+          const beforeDiscovery = stderr.text().length;
+          options?.onDeepProgress?.({
+            completed: 4,
+            active: 2,
+            maximum: 16,
+            consolidating: false,
+          });
+          const resumedDiscovery = stripVTControlCharacters(
+            stderr.text().slice(beforeDiscovery),
+          );
+          expect(resumedDiscovery).toContain("discovery");
+          expect(resumedDiscovery).not.toContain("consolidating results");
+          options?.onDeepProgress?.({
+            completed: 6,
+            active: 0,
+            maximum: 16,
+            consolidating: true,
+          });
+          return fakeResult();
+        });
+
+      expect(
+        await runCli(
+          [
+            "scan",
+            ".",
+            "--mode",
+            "deep",
+            ...(interactive ? [] : ["--headless"]),
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const text = stripVTControlCharacters(stderr.text());
+      expect(text).toContain("Reviews: 0 completed, 4 active, cap 16");
+      expect(text).toContain("Reviews: 2 completed, 2 active, cap 16");
+      if (interactive) {
+        expect(text).not.toContain("STAGE");
+        expect(text).not.toContain("FILES");
+      } else {
+        const running = text
+          .split("\n")
+          .filter((line) => line.includes("Running scan:"))
+          .at(-1);
+        expect(running).toContain("consolidating results");
+        expect(running).not.toContain("Files:");
+      }
+    },
+  );
 
   test("omits stage and file counts from interactive Deep scan dashboards", async () => {
     const { stderr, runCli } = createCliTest(main, { stderr: true });

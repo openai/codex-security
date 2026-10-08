@@ -567,6 +567,7 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
                 try:
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
                 except FileExistsError:
+                    # The open below verifies that an existing entry is a real directory.
                     pass
             next_descriptor = os.open(
                 part,
@@ -823,6 +824,7 @@ def write_scan_local_bytes(
                                 ):
                                     return
                         except OSError:
+                            # A failed content comparison still allows an atomic replacement.
                             pass
                 finally:
                     if existing_fd >= 0:
@@ -843,6 +845,7 @@ def write_scan_local_bytes(
             try:
                 os.unlink(temp_name, dir_fd=parent_fd)
             except FileNotFoundError:
+                # The temporary file is already gone, so cleanup is complete.
                 pass
         if parent_fd is not None:
             os.close(parent_fd)

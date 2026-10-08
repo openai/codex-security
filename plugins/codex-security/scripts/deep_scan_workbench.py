@@ -437,7 +437,7 @@ def independent_review_progress(
         "active": int(active),
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": run["phase"] == "reducing",
+        "consolidating": run["phase"] in {"reducing", "terminal"},
         "updatedAt": str(run["updated_at"]),
     }
 
@@ -847,6 +847,7 @@ def coordinator_lease_is_live(
         if heartbeat["coordinatorGeneration"] == run["coordinator_generation"]:
             heartbeat_time = max(heartbeat_time, _parse_timestamp(heartbeat["updatedAt"]))
     except (OSError, KeyError, TypeError, ValueError):
+        # Missing or invalid heartbeat files leave the persisted lease timestamp in effect.
         pass
     current_time = _parse_timestamp(timestamp)
     return heartbeat_time > current_time - timedelta(seconds=DEEP_SCAN_COORDINATOR_LEASE_SECONDS)

@@ -400,7 +400,7 @@ jobs:
 
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           endpoint="orgs/$owner/packages/container/codex-security"
-          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION"
+          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION" "$MANIFEST_DIGEST"
 
           docker buildx imagetools create \
             --tag "$IMAGE:$VERSION" \

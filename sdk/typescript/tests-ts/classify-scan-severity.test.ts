@@ -29,7 +29,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 const destination = { destination: "linear", teamId: "team-example" } as const;
 afterEach(cleanup);
 
-async function fixture() {
+async function fixture(scanId?: string) {
   const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
   await copyCompletedScanFixture(scanDirectory);
@@ -44,6 +44,16 @@ async function fixture() {
   other.identity.instance = "second-instance";
   setFindingIdentity(manifest.scan, other);
   document.findings.push(other);
+  if (scanId) {
+    manifest.scan.id = scanId;
+    document.scanId = scanId;
+    for (const finding of document.findings)
+      setFindingIdentity(manifest.scan, finding);
+    const coveragePath = join(scanDirectory, "coverage.json");
+    const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+    coverage.scanId = scanId;
+    await writeFile(coveragePath, JSON.stringify(coverage));
+  }
   await writeFile(
     join(scanDirectory, "findings.json"),
     JSON.stringify(document),
@@ -219,6 +229,121 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
       "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
     ),
   ).toEqual(revisedRows);
+});
+
+test.each(["same", "different"])(
+  "preserves concurrent scan assessments with %s rubrics",
+  async (rubric) => {
+    const first = await fixture();
+    const second = await fixture("scan_example_002");
+    const environment = first.environment;
+    if (rubric === "different")
+      await writeFile(second.rubricPath, "Exclude administrative findings.");
+    const firstModel = recordingClassifier();
+    const secondModel = recordingClassifier();
+    secondModel.control.excluded = true;
+    const [firstResult, secondResult] = await Promise.all([
+      classifyScanDirectorySeverity(first.scanDirectory, {
+        environment,
+        rubricPath: first.rubricPath,
+        codex: firstModel.codex,
+      }),
+      classifyScanDirectorySeverity(second.scanDirectory, {
+        environment,
+        rubricPath: second.rubricPath,
+        codex: secondModel.codex,
+      }),
+    ]);
+    for (const [scan, result] of [
+      [first, firstResult],
+      [second, secondResult],
+    ] as const) {
+      const { scanId, ...classification } = result;
+      expect(
+        await readScanSeverityClassification(
+          scan.scanDirectory,
+          scanId,
+          scan.findings,
+          undefined,
+          environment,
+        ),
+      ).toEqual(classification);
+    }
+    expect(
+      (
+        await prepareScanPublication(first.scanDirectory, {
+          ...destination,
+          environment,
+        })
+      ).issues.map((issue) => issue.priority),
+    ).toEqual([3, 3]);
+    expect(
+      (
+        await prepareScanPublication(second.scanDirectory, {
+          ...destination,
+          environment,
+        })
+      ).issues,
+    ).toEqual([]);
+    firstModel.calls.length = 0;
+    expect(
+      (
+        await classifyScanDirectorySeverity(first.scanDirectory, {
+          environment,
+          rubricPath: first.rubricPath,
+          codex: firstModel.codex,
+        })
+      ).assessments,
+    ).toEqual(firstResult.assessments);
+    expect(firstModel.calls).toEqual([]);
+  },
+);
+
+test("migration leaves unindexed legacy assessments incomplete until reclassified", async () => {
+  const first = await fixture();
+  const second = await fixture("scan_example_002");
+  const environment = first.environment;
+  const { scanId, ...classification } = await classifyScanDirectorySeverity(
+    first.scanDirectory,
+    { environment },
+  );
+  await query(environment, "DROP TABLE scan_severity_assessments");
+  await query(environment, "DELETE FROM schema_migrations WHERE version = 43");
+  expect(
+    await readScanSeverityClassification(
+      first.scanDirectory,
+      scanId,
+      first.findings,
+      undefined,
+      environment,
+    ),
+  ).toEqual(classification);
+  expect(
+    await query(
+      environment,
+      "SELECT version FROM schema_migrations WHERE version = 43",
+    ),
+  ).toEqual([]);
+  await classifyScanDirectorySeverity(second.scanDirectory, { environment });
+  await expect(
+    readScanSeverityClassification(
+      first.scanDirectory,
+      scanId,
+      first.findings,
+      undefined,
+      environment,
+    ),
+  ).rejects.toThrow("incomplete");
+  expect(
+    (await classifyScanDirectorySeverity(first.scanDirectory, { environment }))
+      .assessments,
+  ).toEqual(classification.assessments);
+  expect(
+    await query(
+      environment,
+      "SELECT version FROM schema_migrations WHERE version = 43",
+    ),
+  ).toEqual([{ version: 43 }]);
 });
 
 test("changed rubric, context, or evidence invalidates matching checkpoints", async () => {
@@ -513,9 +638,13 @@ test("migrates existing databases without changing findings and reads older stat
     environment,
     "SELECT * FROM findings ORDER BY id",
   );
+  await query(environment, "DROP TABLE scan_severity_assessments");
   await query(environment, "DROP TABLE finding_severity_assessments");
   await query(environment, "DROP TABLE scan_severity_classifications");
-  await query(environment, "DELETE FROM schema_migrations WHERE version = 41");
+  await query(
+    environment,
+    "DELETE FROM schema_migrations WHERE version IN (41, 43)",
+  );
   expect(
     (
       await prepareScanPublication(scanDirectory, {

@@ -119,7 +119,7 @@ def test_embedding_cache_migration_preserves_existing_vectors(workbench_api, tmp
         connection.row_factory = sqlite3.Row
         workbench_api["apply_schema_migrations"](
             connection,
-            tuple(m for m in workbench_api["MIGRATIONS"] if m[0] < 43),
+            tuple(m for m in workbench_api["MIGRATIONS"] if m[0] < 44),
             lambda: TIMESTAMP,
             workbench_api["backfill_security_targets"],
         )
@@ -147,7 +147,7 @@ def test_local_cache_migration_keeps_service_and_local_rows_separate(workbench_a
         connection.row_factory = sqlite3.Row
         workbench_api["apply_schema_migrations"](
             connection,
-            tuple(m for m in workbench_api["MIGRATIONS"] if m[0] < 44),
+            tuple(m for m in workbench_api["MIGRATIONS"] if m[0] < 45),
             lambda: TIMESTAMP,
             workbench_api["backfill_security_targets"],
         )

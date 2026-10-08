@@ -82,8 +82,15 @@ with `requires_openai_auth = true`.
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
-If the home has no credentials, it imports an existing file-based Codex login.
-Logout disables imports until the next login.
+Without an overriding environment API key, scans and status checks import
+existing file-based Codex credentials when this home is empty. Import errors make
+`login status` exit with code 2 and SDK `account()` reject its promise. Logout
+disables imports until you log in again. Status imports and logout share the
+credential-home lock so a concurrent status check cannot restore credentials
+after logout completes.
+
+Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
+`HOME` or `USERPROFILE` environment setting.
 
 If credentials cannot refresh, run `login status`. Retry if the sign-in recently
 changed; otherwise run `logout`, then `login`.
@@ -673,7 +680,11 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
-Changed project configuration requires a new output directory.
+Changes to project configuration, extracted knowledge-base text, staged document
+filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` selections
+require a new output directory. Version 1 manifests also require a new directory
+because their original knowledge inputs and direct overrides cannot be verified.
+Worker and retry counts can change when resuming.
 
 ### Recovering failed or interrupted bulk scans
 

@@ -2,11 +2,13 @@ import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
+import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
   cp,
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
   writeFile,
@@ -17,6 +19,8 @@ import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import type { ScanOptions } from "../src/api.js";
 import { runWorkbench } from "../src/runtime.js";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
+import { workflowDigest } from "../src/finding-workflow.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
@@ -33,7 +37,11 @@ async function interruptedScan(
   bulk = false,
   settings: Pick<
     ScanOptions,
-    "safetyIdentifier" | "postScanPrompt" | "auth" | "cyberAccessProgram"
+    | "safetyIdentifier"
+    | "postScanPrompt"
+    | "auth"
+    | "knowledgeBasePaths"
+    | "cyberAccessProgram"
   > = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -79,7 +87,27 @@ async function interruptedScan(
     );
     await writeFile(
       join(root, "manifest.json"),
-      JSON.stringify({ version: 1, tasks: [task] }, null, 2) + "\n",
+      JSON.stringify(
+        {
+          version: 2,
+          tasks: [task],
+          ...(settings.knowledgeBasePaths?.length
+            ? {
+                knowledgeBaseDigests: {
+                  [mode]: workflowDigest(
+                    (
+                      await readKnowledgeBaseSnapshot(
+                        settings.knowledgeBasePaths,
+                      )
+                    ).documents,
+                  ),
+                },
+              }
+            : {}),
+        },
+        null,
+        2,
+      ) + "\n",
     );
     await writeFile(
       join(root, "results.jsonl"),
@@ -520,6 +548,54 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   ]);
 }
 
+test.each([false, true])(
+  "resumed CLI starts with terminal Deep progress (interactive=%p)",
+  async (interactive) => {
+    const f = await interruptedScan();
+    await finishDiscovery(f);
+    const { stderr, runCli } = createCliTest(main, { stderr: interactive });
+    const progress = Promise.withResolvers<void>();
+    const deps = resumeDependencies(f, () => ({
+      startThread: () => fail("Unexpected new session"),
+      resumeThread(threadId) {
+        expect(threadId).toBe(f.threadId);
+        return {
+          id: threadId,
+          async runStreamed() {
+            await progress.promise;
+            const text = stripVTControlCharacters(stderr.text()).replace(
+              /\s+/gu,
+              " ",
+            );
+            expect(text).toContain("consolidating results");
+            expect(text).toContain("Reviews: 0 completed, 0 active, cap 40");
+            expect(text).not.toContain("Scan phase: discovery");
+            throw new Error("Terminal progress captured");
+          },
+        };
+      },
+    }));
+    const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+      ...deps,
+      createSecurity: (config) => {
+        const security = deps.createSecurity(config);
+        const run = security.run.bind(security);
+        security.run = (repository, options = {}) =>
+          run(repository, {
+            ...options,
+            onDeepProgress(update) {
+              options.onDeepProgress?.(update);
+              progress.resolve();
+            },
+          });
+        return security;
+      },
+    });
+    expect(code).toBe(2);
+    expect(stderr.text()).toContain("Terminal progress captured");
+  },
+);
+
 test.each([
   [false, false],
   [true, false],
@@ -945,6 +1021,70 @@ test.each([
     });
   },
 );
+
+test("bulk Deep resume stages campaign knowledge after its source is removed", async () => {
+  const documentRoot = await temporaryDirectory();
+  const document = join(documentRoot, "architecture.md");
+  await writeFile(document, "Original architecture.");
+  const f = await interruptedScan("deep", true, {
+    knowledgeBasePaths: [document],
+  });
+  const stdout = capture();
+  const stderr = capture();
+  let resumed = false;
+  const code = await main(
+    [
+      "bulk-scan",
+      f.input,
+      "--output-dir",
+      f.root,
+      "--recover",
+      "--knowledge-base",
+      document,
+      "--json",
+    ],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...resumeDependencies(f, (codex) => ({
+        startThread() {
+          throw new Error("Expected original session");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+              expect(await readdir(directory)).toEqual([
+                "0-architecture.md.txt",
+              ]);
+              expect(
+                await readFile(
+                  join(directory, "0-architecture.md.txt"),
+                  "utf8",
+                ),
+              ).toBe("Original architecture.");
+              resumed = true;
+              await finishDiscovery(f);
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
+      runWorkbench: async (args, input) => {
+        if (args[0] === "get-cli-scan-resume") await rm(document);
+        return f.command(args, input);
+      },
+    },
+  );
+  expect(resumed, stderr.text()).toBe(true);
+  expect(code, stderr.text()).toBe(2);
+  expect(JSON.parse(stdout.text())).toMatchObject({ incomplete: 1, failed: 0 });
+  expect(
+    (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
+  ).toMatchObject({ knowledgeBasePaths: [document] });
+});
 
 test("missing session logs do not create another session or fail the original scan", async () => {
   const f = await interruptedScan();
