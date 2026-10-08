@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
-import type { ScanAuthMode } from "./api.js";
+import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import {
   runReadOnlyCodex,
@@ -42,6 +42,8 @@ export interface ComponentPlan {
 }
 
 export interface ComponentPlanningOptions {
+  /** @internal Calling surface, inherited from the component scan. */
+  surface?: CodexSecuritySurface;
   /** @internal Authentication already selected by the calling scan. */
   auth?: ScanAuthMode;
   /** @internal Cyber access program already selected by the calling scan. */
@@ -83,7 +85,8 @@ export async function planComponents(
       z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
       { ...options, config: options.config ?? {}, workingDirectory: tmpdir() },
       {
-        surface: "cli",
+        surface: options.surface ?? "sdk",
+        command: "scan-components",
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
       },
     );
