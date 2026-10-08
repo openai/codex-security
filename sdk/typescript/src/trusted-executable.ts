@@ -25,7 +25,7 @@ export interface InspectedExecutable {
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
 ): Promise<TrustedExecutable | null> {
   const inspected = await inspectTrustedExecutable(
     candidate,
@@ -40,11 +40,15 @@ export async function resolveTrustedExecutable(
 export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
 ): Promise<InspectedExecutable> {
-  const root = await realpath(protectedRoot).catch(() =>
-    resolve(protectedRoot),
+  const roots = await Promise.all(
+    (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
+      (root) => realpath(root).catch(() => resolve(root)),
+    ),
   );
+  const isProtected = (path: string) =>
+    roots.some((root) => isWithin(root, path));
   const path =
     environment["PATH"] ??
     Object.entries(environment).find(
@@ -61,7 +65,7 @@ export async function inspectTrustedExecutable(
     }
     if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
-    if (canonical === null || isWithin(root, canonical)) continue;
+    if (canonical === null || isProtected(canonical)) continue;
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
@@ -103,7 +107,7 @@ export async function inspectTrustedExecutable(
   for (const current of candidates) {
     const canonical = await realpath(current.path).catch(() => null);
     if (canonical === null) continue;
-    if (isWithin(root, canonical)) {
+    if (isProtected(canonical)) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
@@ -123,8 +127,7 @@ export async function inspectTrustedExecutable(
         ? join(await realpath(dirname(current.path)), basename(current.path))
         : current.path;
       executable ??=
-        pathLike &&
-        (isWithin(root, current.path) || isWithin(root, invocationPath))
+        pathLike && (isProtected(current.path) || isProtected(invocationPath))
           ? canonical
           : invocationPath;
     } catch {

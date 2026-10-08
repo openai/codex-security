@@ -365,5 +365,26 @@
       "CREATE TABLE scan_severity_assessments (\n            scan_id TEXT NOT NULL REFERENCES scan_severity_classifications(scan_id) ON DELETE CASCADE,\n            finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,\n            occurrence_id TEXT,\n            input_sha256 TEXT NOT NULL,\n            rubric_sha256 TEXT,\n            knowledge_base_sha256 TEXT,\n            assessed_at TEXT NOT NULL,\n            source TEXT NOT NULL CHECK (source IN ('existing-severity', 'rubric')),\n            decision TEXT NOT NULL CHECK (decision IN ('assessed', 'excluded')),\n            level TEXT CHECK (level IN ('critical', 'high', 'medium', 'low', 'informational')),\n            rubric_label TEXT,\n            rationale TEXT NOT NULL,\n            confidence TEXT CHECK (confidence IN ('high', 'medium', 'low')),\n            review_trigger TEXT,\n            PRIMARY KEY (scan_id, finding_id),\n            CHECK ((decision = 'assessed' AND level IS NOT NULL)\n                OR (decision = 'excluded' AND level IS NULL AND rubric_label IS NULL))\n        );",
       "INSERT INTO scan_severity_assessments\n        SELECT classification.scan_id, assessment.*\n        FROM scan_severity_classifications AS classification\n        CROSS JOIN json_each(classification.finding_ids_json) AS selected\n        CROSS JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value\n        WHERE assessment.rubric_sha256 IS classification.rubric_sha256\n          AND assessment.knowledge_base_sha256 IS classification.knowledge_base_sha256\n          AND EXISTS (\n              SELECT 1 FROM finding_occurrences AS occurrence\n              WHERE occurrence.id = assessment.occurrence_id\n                AND occurrence.scan_id = classification.scan_id\n          );"
     ]
+  },
+  {
+    "version": 44,
+    "name": "version local finding embedding inputs",
+    "statements": ["ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"]
+  },
+  {
+    "version": 45,
+    "name": "separate local and service embedding caches",
+    "statements": [
+      "CREATE TABLE local_finding_embeddings (\n    finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,\n    model TEXT NOT NULL,\n    vector_json TEXT NOT NULL,\n    cache_key TEXT NOT NULL\n);",
+      "INSERT INTO local_finding_embeddings\n    SELECT finding_id, model, vector_json, cache_key FROM finding_embeddings\n    WHERE cache_key IS NOT NULL;",
+      "DELETE FROM finding_embeddings WHERE cache_key IS NOT NULL;"
+    ]
+  },
+  {
+    "version": 46,
+    "name": "invalidate local embeddings when finding bodies change",
+    "statements": [
+      "CREATE TRIGGER invalidate_local_finding_embedding\nAFTER UPDATE OF details_json ON findings\nWHEN OLD.details_json IS NOT NEW.details_json\nBEGIN\n    DELETE FROM local_finding_embeddings WHERE finding_id = NEW.id;\nEND;"
+    ]
   }
 ]

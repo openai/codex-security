@@ -6655,6 +6655,7 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(isPythonPathCandidate("runtime\\python.exe")).toBe(true);
     expect(isPythonPathCandidate("./python3")).toBe(true);
     expect(isPythonPathCandidate("python3")).toBe(false);
+    expect(isPythonPathCandidate(".python")).toBe(false);
   });
 
   test("returns a targeted plugin diagnostic when Python is unavailable", async () => {

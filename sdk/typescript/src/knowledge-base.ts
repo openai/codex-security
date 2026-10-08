@@ -291,6 +291,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     return decodeXml(
       xml
         .replace(/<\/(?:\w+:)?p\s*>/gu, "\n")
+        .replace(/<(?:\w+:)?(?:br|cr)\b[^>]*>/gu, "\n")
         .replace(/<(?:\w+:)?tab\b[^>]*\/>/gu, "\t")
         .replace(/<[^>]+>/gu, ""),
     );
@@ -314,9 +315,17 @@ function decodeXml(value: string): string {
     (entity, name: string) => {
       if (!name.startsWith("#")) return entities[name.toLowerCase()] ?? entity;
       const hexadecimal = name[1]?.toLowerCase() === "x";
-      return String.fromCodePoint(
-        Number.parseInt(name.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10),
+      const codePoint = Number.parseInt(
+        name.slice(hexadecimal ? 2 : 1),
+        hexadecimal ? 16 : 10,
       );
+      if (
+        codePoint > 0x10ffff ||
+        (codePoint >= 0xd800 && codePoint <= 0xdfff)
+      ) {
+        return entity;
+      }
+      return String.fromCodePoint(codePoint);
     },
   );
 }

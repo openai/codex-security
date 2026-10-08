@@ -1,3 +1,4 @@
+import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -174,7 +175,8 @@ export interface PluginPythonOptions {
   environment?: ProcessEnvironment;
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
-  protectedRoot?: string;
+  protectedRoot?: string | readonly string[];
+  currentDirectory?: string;
   signal?: AbortSignal;
 }
 
@@ -183,7 +185,8 @@ export interface WorkbenchCommandOptions {
   pluginRoot: string;
   environment: ProcessEnvironment;
   stateDirectory?: string;
-  protectedRoot?: string;
+  protectedRoot?: string | readonly string[];
+  currentDirectory?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1609,11 +1612,13 @@ export async function runWorkbench(
     ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
-        ? await resolveTrustedExecutable(
-            "node",
-            options.environment,
-            options.protectedRoot ?? process.cwd(),
-          )
+        ? await resolveTrustedExecutable("node", options.environment, [
+            process.cwd(),
+            options.currentDirectory ?? process.cwd(),
+            ...(typeof options.protectedRoot === "string"
+              ? [options.protectedRoot]
+              : (options.protectedRoot ?? [])),
+          ])
         : undefined;
     if (node === null) {
       throw new Error("Node.js is not available on a trusted PATH.");
@@ -1623,6 +1628,7 @@ export async function runWorkbench(
       : (options.python ??= await resolvePluginPython({
           environment: options.environment,
           protectedRoot: options.protectedRoot,
+          currentDirectory: options.currentDirectory,
           signal: options.signal,
         }));
     const stateDirectory = native
@@ -3095,13 +3101,29 @@ export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
   const environment = options.environment ?? process.env;
-  const protectedRoot = options.protectedRoot ?? process.cwd();
+  const requestedRoots = options.protectedRoot ?? process.cwd();
+  const protectedRoot =
+    typeof requestedRoots === "string" ? [requestedRoots] : [...requestedRoots];
+  const callerDirectories = [
+    process.cwd(),
+    options.currentDirectory ?? process.cwd(),
+  ];
+  // Preserve target and enclosing-checkout protection for every interpreter.
+  for (const directory of new Set([...callerDirectories, ...protectedRoot])) {
+    for (const checkout of await gitProtectionRoots(directory, options.signal))
+      if (!protectedRoot.includes(checkout)) protectedRoot.push(checkout);
+  }
+  // Named interpreters are ambient PATH discovery, even when PYTHON names one.
+  // Explicit trusted paths and managed runtimes retain their existing precedence.
+  const discoveryRoots = [...protectedRoot, ...callerDirectories];
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,
       "configured plugin Python",
       environment,
-      protectedRoot,
+      isPythonPathCandidate(options.configuredPath)
+        ? protectedRoot
+        : discoveryRoots,
       options.signal,
     );
   }
@@ -3111,7 +3133,7 @@ export async function resolvePluginPython(
       inherited,
       "PYTHON",
       environment,
-      protectedRoot,
+      isPythonPathCandidate(inherited) ? protectedRoot : discoveryRoots,
       options.signal,
     );
   }
@@ -3153,7 +3175,7 @@ export async function resolvePluginPython(
     const resolved = await usablePython(
       candidate,
       environment,
-      protectedRoot,
+      discoveryRoots,
       options.signal,
     );
     if (resolved !== null) return resolved;
@@ -3455,7 +3477,7 @@ async function requirePython(
   candidate: string,
   source: string,
   environment: ProcessEnvironment,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
   signal?: AbortSignal,
 ): Promise<string> {
   const resolved = await usablePython(
@@ -3474,7 +3496,7 @@ async function requirePython(
 async function usablePython(
   candidate: string,
   environment: ProcessEnvironment = process.env,
-  protectedRoot: string = process.cwd(),
+  protectedRoot: string | readonly string[] = process.cwd(),
   signal?: AbortSignal,
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
@@ -3511,11 +3533,7 @@ async function usablePython(
 }
 
 export function isPythonPathCandidate(candidate: string): boolean {
-  return (
-    candidate.includes("/") ||
-    candidate.includes("\\") ||
-    candidate.startsWith(".")
-  );
+  return candidate.includes("/") || candidate.includes("\\");
 }
 
 async function hasPluginManifest(root: string): Promise<boolean> {

@@ -84,6 +84,9 @@ EXPECTED_MIGRATIONS = [
     (41, "checkpoint finding severity assessments"),
     (42, "editable scan names"),
     (43, "preserve severity assessments per scan"),
+    (44, "version local finding embedding inputs"),
+    (45, "separate local and service embedding caches"),
+    (46, "invalidate local embeddings when finding bodies change"),
 ]
 
 

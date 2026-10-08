@@ -30,10 +30,14 @@ async function extractedDocuments(path: string): Promise<string[]> {
   );
 }
 
-function docx(text: string): Uint8Array {
+function docx(
+  text: string,
+  secondLine?: string,
+  breakElement = "<w:br/>",
+): Uint8Array {
   return zipSync({
     "word/document.xml": strToU8(
-      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`,
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r>${secondLine === undefined ? "" : `${breakElement}<w:r><w:t>${secondLine}</w:t></w:r>`}</w:p></w:body></w:document>`,
     ),
   });
 }
@@ -462,14 +466,70 @@ describe("scan knowledge bases", () => {
       join(root, "architecture.pdf"),
       pdf("Payment service boundary"),
     );
-    await writeFile(join(root, "threat-model.docx"), docx("SSRF &amp; IDOR"));
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("SSRF &amp; IDOR", "Review authentication"),
+    );
+    await writeFile(
+      join(root, "paired-break.docx"),
+      docx("Authorization", "Review permissions", "<w:br></w:br>"),
+    );
+    await writeFile(
+      join(root, "carriage-return.docx"),
+      docx("Authentication", "Review sessions", "<w:cr/>"),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.track(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
     expect(documents).toContain("Payment service boundary");
-    expect(documents).toContain("SSRF & IDOR\n");
+    expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
+    expect(documents).toContain("Authorization\nReview permissions\n");
+    expect(documents).toContain("Authentication\nReview sessions\n");
+  });
+
+  test.each([
+    ["&#x110000;", "&#x110000;"],
+    ["&#1114112;", "&#1114112;"],
+    ["&#99999999999999;", "&#99999999999999;"],
+    ["&#xD800;", "&#xD800;"],
+    ["&#xDFFF;", "&#xDFFF;"],
+    ["&#55296;", "&#55296;"],
+    ["&#xD7FF;", "\uD7FF"],
+    ["&#xE000;", "\uE000"],
+    ["&#65;", "A"],
+    ["&#128512;", "\u{1F600}"],
+    ["&#x10FFFF;", "\u{10FFFF}"],
+    ["&#0;", "\0"],
+    ["&#x1;", "\x01"],
+  ])(
+    "decodes DOCX Unicode scalar references and preserves unusable ones: %s",
+    async (reference, expected) => {
+      const root = await temporaryDirectory();
+      await writeFile(join(root, "reference.docx"), docx(`Text ${reference}.`));
+      const knowledgeBase = await prepareKnowledgeBase([root]);
+      temporaryDirectories.track(knowledgeBase.path);
+      const documents = await extractedDocuments(knowledgeBase.path);
+      expect(documents).toEqual([`Text ${expected}.\n`]);
+    },
+  );
+
+  test("keeps one unusable reference from failing the other knowledge-base documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "notes.md"), "Authentication boundary notes");
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("Boundary &#x110000; case."),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+    const documents = await extractedDocuments(knowledgeBase.path);
+
+    expect(documents).toHaveLength(2);
+    expect(documents).toContain("Authentication boundary notes");
+    expect(documents).toContain("Boundary &#x110000; case.\n");
   });
 
   test("cleans up documents and rediscovers directory contents on later runs", async () => {

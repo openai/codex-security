@@ -385,6 +385,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
+    subparsers.add_parser("local-dedupe")
     subparsers.add_parser("severity-classification")
     severity = subparsers.add_parser("read-severity-classification")
     severity.add_argument("--scan-id", required=True)
