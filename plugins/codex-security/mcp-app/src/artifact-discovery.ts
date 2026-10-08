@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { decodeUtf8 } from "./helpers/utf8.js";
+import { parsedPath } from "./helpers/resolve-security-md.js";
 import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
 import {
   createCandidateNormalizer,
@@ -196,23 +197,22 @@ async function diffCandidateSources(
     // Prefer an unambiguous spelling from the selected inventory.
     const selectedPaths = new Map<string, string | null>();
     for (const value of paths) {
-      const key = pathKey(value);
+      const name = nativePath(parsedPath(value));
+      const key = pathKey(name);
       selectedPaths.set(
         key,
-        selectedPaths.has(key) && selectedPaths.get(key) !== value
-          ? null
-          : value,
+        selectedPaths.has(key) && selectedPaths.get(key) !== name ? null : name,
       );
     }
     for (const value of new Set([...paths, ...locations])) {
       try {
-        let name = selectedPaths.get(pathKey(value));
+        const key = pathKey(nativePath(parsedPath(value)));
+        let name = selectedPaths.get(key);
         if (!name) {
           const [currentName] = relativeFile(value, context.repoRoot);
           name = selectedPaths.get(pathKey(currentName)) ?? currentName;
         }
-        if (value !== name && pathKey(value) === pathKey(name))
-          aliases.set(value, name);
+        if (value !== name && key === pathKey(name)) aliases.set(value, name);
       } catch {
         // The selected revision may contain a file absent from this checkout.
       }

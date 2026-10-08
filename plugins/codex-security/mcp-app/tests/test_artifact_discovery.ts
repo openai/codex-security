@@ -577,23 +577,26 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
       await assert.rejects(record(scan, [["changed.ts", 2]]), /line range/);
     }
     if (process.platform === "win32") {
-      await record(scan, [
-        ["SUPPORT.TS", 1],
-        ["DELETED.TS", 4],
-        ["CHANGED.ts", kind === "working_tree" ? 1 : 3],
-      ]);
-      const candidate = JSON.parse(await readFile(destination, "utf8"));
-      assert.ok(
-        candidate.locations.some(
-          (location: { path: string }) => location.path === "deleted.ts",
-        ),
-      );
-      if (kind !== "working_tree") {
+      for (const prefix of ["", "./", ".\\", ".//./"]) {
+        await record(scan, [
+          [`${prefix}SUPPORT.TS`, 1],
+          [`${prefix}DELETED.TS`, 4],
+          [`${prefix}CHANGED.ts`, kind === "working_tree" ? 1 : 3],
+        ]);
+        const candidate = JSON.parse(await readFile(destination, "utf8"));
         assert.ok(
           candidate.locations.some(
-            (location: { path: string }) => location.path === "changed.ts",
+            (location: { path: string }) => location.path === "deleted.ts",
           ),
         );
+        if (kind !== "working_tree")
+          assert.ok(
+            candidate.locations.some(
+              (location: { path: string }) => location.path === "changed.ts",
+            ),
+          );
+      }
+      if (kind !== "working_tree") {
         await assert.rejects(
           record(scan, [["UNRELATED.TS", 1]]),
           /no selected source/,
