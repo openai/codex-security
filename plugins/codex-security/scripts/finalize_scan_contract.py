@@ -567,6 +567,7 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
                 try:
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
                 except FileExistsError:
+                    # The open below verifies that an existing entry is a real directory.
                     pass
             next_descriptor = os.open(
                 part,
@@ -823,6 +824,7 @@ def write_scan_local_bytes(
                                 ):
                                     return
                         except OSError:
+                            # A failed content comparison still allows an atomic replacement.
                             pass
                 finally:
                     if existing_fd >= 0:
@@ -843,6 +845,7 @@ def write_scan_local_bytes(
             try:
                 os.unlink(temp_name, dir_fd=parent_fd)
             except FileNotFoundError:
+                # The temporary file is already gone, so cleanup is complete.
                 pass
         if parent_fd is not None:
             os.close(parent_fd)
@@ -1589,6 +1592,11 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
                 raise ContractError(f"{evidence_context}.id: duplicate code-evidence id")
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
+            if "path" in evidence:
+                _require_safe_relative_path(
+                    _require_str(evidence, "path", evidence_context),
+                    f"{evidence_context}.path",
+                )
 
     referenced_sections = [
         (section_name, finding.get(section_name))
@@ -1697,6 +1705,19 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    for index, deferred in enumerate(coverage.get("deferred", [])):
+        if not isinstance(deferred, dict):
+            continue
+        context = f"coverage.deferred[{index}]"
+        paths = deferred.get("paths")
+        if paths is None:
+            continue
+        if not isinstance(paths, list):
+            raise ContractError(f"{context}.paths: expected an array")
+        for path_index, path in enumerate(paths):
+            if not isinstance(path, str):
+                raise ContractError(f"{context}.paths[{path_index}]: expected a string")
+            _require_safe_relative_path(path, f"{context}.paths[{path_index}]")
     _validate_resolved_deferred(coverage)
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
