@@ -85,17 +85,71 @@ export function scanProgressUpdatesFromEvent(
 
 export function scanProgressUpdatesFromText(output: string): ScanProgress[] {
   const updates: ScanProgress[] = [];
-  let codeFence = false;
+  let fence: FenceState | null = null;
   for (const line of output.split(/\r?\n/u)) {
-    if (/^\s*```/u.test(line)) {
-      codeFence = !codeFence;
+    const delimiter = fenceDelimiter(line);
+    if (delimiter !== null) {
+      fence = nextFenceState(fence, delimiter);
       continue;
     }
-    if (codeFence || !line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
+    if (fence !== null || !line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
     const progress = scanProgressFromMarker(line);
     if (progress !== null) updates.push(progress);
   }
   return updates;
+}
+
+interface FenceDelimiter {
+  marker: string;
+  length: number;
+  rest: string;
+}
+
+interface FenceState {
+  marker: string;
+  length: number;
+}
+
+function fenceDelimiter(line: string): FenceDelimiter | null {
+  const match = /^\s*(`{3,}|~{3,})(.*)$/u.exec(line);
+  if (match === null) return null;
+  const run = match[1]!;
+  return { marker: run[0]!, length: run.length, rest: match[2]! };
+}
+
+/** Track Markdown fenced code blocks so quoted markers are not read as live. */
+function nextFenceState(
+  fence: FenceState | null,
+  delimiter: FenceDelimiter,
+): FenceState | null {
+  if (fence === null) {
+    return { marker: delimiter.marker, length: delimiter.length };
+  }
+  // A closing fence uses the same marker character, is at least as long as the
+  // opening fence, and carries no trailing content.
+  if (
+    delimiter.marker === fence.marker &&
+    delimiter.length >= fence.length &&
+    delimiter.rest.trim() === ""
+  ) {
+    return null;
+  }
+  return fence;
+}
+
+/** Return only the lines that are not inside a Markdown fenced code block. */
+function linesOutsideFences(text: string): string[] {
+  const lines: string[] = [];
+  let fence: FenceState | null = null;
+  for (const line of text.split(/\r?\n/u)) {
+    const delimiter = fenceDelimiter(line);
+    if (delimiter !== null) {
+      fence = nextFenceState(fence, delimiter);
+      continue;
+    }
+    if (fence === null) lines.push(line);
+  }
+  return lines;
 }
 
 function scanProgressFromMarker(marker: string): ScanProgress | null {
@@ -171,9 +225,9 @@ function dispatchStatus(
   item: Readonly<Record<string, unknown>>,
 ): ScanWorkerStatus | null {
   if (typeof item["text"] !== "string") return null;
-  const markers = item["text"]
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith(WORKER_STATUS_PREFIX));
+  const markers = linesOutsideFences(item["text"]).filter((line) =>
+    line.startsWith(WORKER_STATUS_PREFIX),
+  );
   const marker = markers[0];
   if (markers.length !== 1 || marker === undefined) return null;
   const payload = parseJson(() => marker.slice(WORKER_STATUS_PREFIX.length));

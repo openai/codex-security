@@ -341,6 +341,53 @@ describe("worker progress events", () => {
     ).toEqual([progress]);
   });
 
+  test("ignores progress and dispatch markers inside nested or tilde fences", () => {
+    const progress = {
+      phase: "discovery" as const,
+      filesCompleted: 8,
+      filesTotal: 8,
+    };
+    const progressMarker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(progress)}`;
+    const dispatchMarker = `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify({
+      phase: "file_review",
+      planned: 6,
+      started: 3,
+    })}`;
+    // A four-backtick fence is not closed by an inner three-backtick line.
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          ["````markdown", "```text", progressMarker, "```", "````"].join("\n"),
+        ),
+      ),
+    ).toEqual([]);
+    // A tilde fence is not closed by a backtick fence.
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          ["~~~text", progressMarker, "```", progressMarker, "~~~"].join("\n"),
+        ),
+      ),
+    ).toEqual([]);
+    // Dispatch markers inside a fenced block are not live worker status.
+    expect(
+      workerStatusFromEvent(
+        messageEvent(["Example:", "```text", dispatchMarker, "```"].join("\n")),
+      ),
+    ).toBeNull();
+    // A real marker after the fence closes is still read.
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          ["```text", progressMarker, "```", progressMarker].join("\n"),
+        ),
+      ),
+    ).toEqual([progress]);
+  });
+
   test("rejects malformed or overstated file progress", () => {
     for (const text of [
       'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":9,"filesTotal":8}',
