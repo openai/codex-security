@@ -1558,6 +1558,10 @@ def merge_saved_results(
             and not source_superseded(relative, None)
         ],
     ]
+    # A selected parent checkpoint can also be its frozen projection.
+    projected_coverages = list(
+        {id(projection): projection for projection in projected_coverages}.values()
+    )
     # V1 persists the review projection in the parent, without reducer sourceCoverage.
     reviewed_attempts = {
         (review.get("workerId"), review.get("attempt"))

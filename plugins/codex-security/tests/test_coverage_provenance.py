@@ -1900,3 +1900,56 @@ def test_recovery_counts_occurrences_with_borrowed_checkpoint_ids(
     assert len(recovered) == 2
     assert [row["provenance"]["attempt"] for row in recovered] == [1, 1]
     assert all(path.read_bytes() == original for path, original in originals.items())
+
+
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_selected_parent_projection_consumes_each_occurrence_once(
+    workbench_api, workbench_db, publication_scan, monkeypatch, complete, retry
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
+            ("deep-scan-mcp/v1", scan.scan_id),
+        )
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    task = {"reason": "Synthetic repeated accepted review."}
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "completeness": "partial", "deferred": [task, task]},
+            }
+        )
+    )
+    original = result.read_bytes()
+    projected = [
+        {
+            **task,
+            "id": identity,
+            "provenance": {"workerId": worker_id, "attempt": 1},
+        }
+        for identity in ("retained-first", "retained-second")
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "deferred": copy.deepcopy(projected),
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+        },
+        complete=complete,
+    )
+    accepted = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert accepted["deferred"] == projected
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    retained = [row for row in coverage["deferred"] if row.get("id") != "scan-stopped"]
+    assert result.read_bytes() == original
+    assert retained == projected
