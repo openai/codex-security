@@ -1299,6 +1299,10 @@ describe("live scan cost tracking", () => {
 
   test.each([
     [
+      "keeps an earlier-millisecond UUIDv7 turn in inherited history",
+      ["019f9e4d-b3b9-7000-8000-000000000001"],
+    ],
+    [
       "keeps a same-millisecond lower UUIDv7 turn in inherited history",
       [lowerUuid7Turn],
     ],
@@ -1351,6 +1355,14 @@ describe("live scan cost tracking", () => {
         : [];
     });
     expect(forwardedTurnIds).toEqual([higherUuid7Turn]);
+    const saved = await readScanLogs({
+      scanId: "scan-example",
+      threadId: childUuid7Thread,
+      codexHome: home,
+    });
+    const ownedEvents = [rollout[0]!, ...rollout.slice(-2)];
+    expect(forwardedEvents.map(({ event }) => event)).toEqual(ownedEvents);
+    expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
   });
 
   test("forwards actions from this scan's delegated workers only", async () => {

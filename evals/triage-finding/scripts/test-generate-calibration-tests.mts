@@ -5,6 +5,9 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { findingInput, variantCaseId } from "./generate-calibration-tests.mts";
+import type { CalibrationCase } from "../types.ts";
+import { plannedJobs } from "./hydrate-calibration-repos.mts";
 
 const evalDir = path.resolve(import.meta.dirname, "..");
 const generator = path.join(
@@ -15,8 +18,8 @@ const generator = path.join(
 const dataset = path.join(evalDir, "datasets", "triage-calibration-seed.json");
 const trackedTests = path.join(evalDir, "tests", "calibration-oss.yaml");
 
-const tmpDir = fs.mkdtempSync(
-  path.join(os.tmpdir(), "triage-calibration-tests-"),
+const tmpDir = fs.realpathSync(
+  fs.mkdtempSync(path.join(os.tmpdir(), "triage-calibration-tests-")),
 );
 const generated = path.join(tmpDir, "calibration-oss.yaml");
 const generatedSmoke = path.join(tmpDir, "calibration-smoke.yaml");
@@ -45,17 +48,40 @@ assert.equal(
   trackedYaml,
   "tracked calibration tests are stale; run calibration:generate",
 );
-assert.match(
-  generatedYaml,
-  /case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-vulnerable/,
-);
-assert.match(generatedYaml, /case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-fixed/);
+const cases: CalibrationCase[] = JSON.parse(
+  fs.readFileSync(dataset, "utf8"),
+).cases;
+const identities = new Set();
+for (const testCase of cases) {
+  for (const variant of testCase.variants) {
+    const caseId = variantCaseId(testCase, variant);
+    assert.match(caseId, /^calibration-[a-f0-9]{16}$/);
+    assert.ok(!identities.has(caseId));
+    identities.add(caseId);
+    assert.equal(
+      variantCaseId(testCase, {
+        ...variant,
+        variant_id: "renamed",
+        expected_verdict: "needs_review",
+      }),
+      caseId,
+    );
+    const input = findingInput(testCase, variant);
+    assert.ok(!input.includes(variant.checkout_ref));
+    assert.ok(!input.includes(testCase.finding.fix_patch_ref!));
+    assert.doesNotMatch(input, /-(?:vulnerable|fixed)\b/);
+    const repoRoot = path.join(tmpDir, "targets");
+    const [job] = plannedJobs(
+      { cases: [{ ...testCase, variants: [variant] }] },
+      { repoRoot },
+    );
+    assert.equal(job.targetDir, path.join(repoRoot, caseId));
+    assert.ok(generatedYaml.includes(`    calibration_repo: ${caseId}`));
+  }
+}
 assert.match(generatedYaml, /expected_verdicts: confirmed/);
 assert.match(generatedYaml, /expected_verdicts: not_actionable/);
-assert.match(
-  generatedYaml,
-  /target_repo: evals\/triage-finding\/artifacts\/calibration-repos\//,
-);
+assert.match(generatedYaml, /calibration_repo_root: ""/);
 assert.doesNotMatch(
   generatedYaml,
   /expected_evidence_terms:\n\s+- /,
@@ -75,23 +101,44 @@ execFileSync(
     "oss-dompurify-ghsa-v8jm-5vwx-cfxm",
     "--variant",
     "vulnerable",
+    "--repo-root",
+    "custom targets # space",
   ],
   {
-    cwd: evalDir,
+    cwd: tmpDir,
     stdio: "pipe",
   },
 );
 
 const smokeYaml = fs.readFileSync(generatedSmoke, "utf8");
 assert.equal((smokeYaml.match(/^- description:/gm) || []).length, 1);
-assert.match(
-  smokeYaml,
-  /case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm-vulnerable/,
+assert.ok(
+  smokeYaml.includes(
+    `calibration_repo_root: ${JSON.stringify(path.join(tmpDir, "custom targets # space"))}`,
+  ),
 );
-assert.doesNotMatch(
-  smokeYaml,
-  /case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm-fixed/,
+const smokeCase = cases.find(
+  (testCase) => testCase.case_id === "oss-dompurify-ghsa-v8jm-5vwx-cfxm",
+)!;
+assert.ok(
+  smokeYaml.includes(
+    `case_id: ${variantCaseId(
+      smokeCase,
+      smokeCase.variants.find(
+        (variant) => variant.variant_id === "vulnerable",
+      )!,
+    )}`,
+  ),
 );
+assert.ok(
+  !smokeYaml.includes(
+    `case_id: ${variantCaseId(
+      smokeCase,
+      smokeCase.variants.find((variant) => variant.variant_id === "fixed")!,
+    )}`,
+  ),
+);
+fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(
   "calibration test generation matches tracked YAML and supports filtered smoke output",

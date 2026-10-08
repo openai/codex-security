@@ -89,7 +89,8 @@ version or run `container-release` manually on `main`. Releases require a commit
 on protected `main`; pull requests only build and test.
 
 If a release fails, fix the cause and rerun only failed jobs; do not overwrite
-an existing stable version. `bootstrap` and
+an existing stable version. Promotion retries accept an existing version only
+when it already points to the same verified image digest. `bootstrap` and
 `release-candidate-<commit>` tags are not consumer releases.
 
 See the [findings service guide](../sdk/typescript/README.md#findings-service-preview)

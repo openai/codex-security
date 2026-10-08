@@ -1,5 +1,7 @@
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   mkdir,
   mkdtemp,
@@ -57,6 +59,7 @@ try {
   await testScanContext();
   await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
+  await testAtomicReplacementAfterInterruptedWriter();
   await testAtomicReplacement();
   await testBoundedPagination();
   await testUnsafeArtifacts();
@@ -327,6 +330,29 @@ async function testWorkerStandardLayout() {
     });
   assert.equal(reducer.layout, "reducer");
   assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
+}
+
+async function testAtomicReplacementAfterInterruptedWriter() {
+  const destination = await io.artifactDestination(
+    context,
+    ["interrupted.json"],
+    "interrupted artifact",
+  );
+  const child = spawn(process.execPath, [
+    "-e",
+    'require("node:fs").openSync(process.argv[1], "wx", 0o600); process.stdout.write("locked"); setInterval(() => {}, 1000);',
+    destination + ".lock",
+  ]);
+  await once(child.stdout, "data");
+  child.kill("SIGKILL");
+  await once(child, "close");
+  await io.replaceArtifactText(destination, "recovered\n");
+  assert.equal(await readFile(destination, "utf8"), "recovered\n");
+  const values = ["a", "b", "c"].map((value) => value.repeat(32_000));
+  await Promise.all(
+    values.map((value) => io.replaceArtifactText(destination, value)),
+  );
+  assert.ok(values.includes(await readFile(destination, "utf8")));
 }
 
 async function testSafeJsonAndJsonl() {

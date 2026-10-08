@@ -80,6 +80,7 @@ import {
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
+  prepareScanRegistrationOutput,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -4678,9 +4679,52 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "creates credential homes with a verified managed-compatible Windows ACL",
+    "initializes the workbench in an explicitly configured Windows drive root",
     async () => {
-      const { home } = await credentialHome(true);
+      const directory = await temporaryDirectory();
+      const drive = [..."ZYXWVUTSRQPONMLKJIHGFED"].find(
+        (letter) => !existsSync(`${letter}:\\`),
+      );
+      expect(drive).toBeDefined();
+      const volume = `${drive}:`;
+      const subst = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+        "subst.exe",
+      );
+      expect(spawnSync(subst, [volume, directory]).status).toBe(0);
+      try {
+        await runWorkbench(
+          {
+            pluginRoot: PLUGIN_ROOT,
+            environment: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: `${volume}\\`,
+            },
+          },
+          ["database-info"],
+        );
+        expect(
+          (await stat(join(directory, "workbench.sqlite3"))).isFile(),
+        ).toBe(true);
+      } finally {
+        expect(spawnSync(subst, [volume, "/d"]).status).toBe(0);
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "creates credential homes after database initialization with a verified Windows ACL",
+    async () => {
+      const root = await temporaryDirectory();
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      };
+      await runWorkbench({ pluginRoot: PLUGIN_ROOT, environment }, [
+        "database-info",
+      ]);
+      const home = await prepareCodexSecurityCredentialHome(environment);
       const powershell = join(
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",
@@ -5823,7 +5867,8 @@ describe("runtime directories and plugin Python boundary", () => {
           "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
           "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
           "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
-          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
+          "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
+          "    pass",
           "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
           "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
           "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
@@ -5874,7 +5919,8 @@ describe("runtime directories and plugin Python boundary", () => {
           "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
           "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
           "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
-          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
+          "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
+          "    pass",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
         scanDir,
@@ -6021,7 +6067,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).not.toThrow();
   });
 
-  test("archives a non-empty private output directory", async () => {
+  test("prepares a private output directory without moving prior results", async () => {
     const root = await temporaryDirectory();
     const output = join(root, "scan");
     await mkdir(output, { mode: 0o700 });
@@ -6038,7 +6084,45 @@ describe("runtime directories and plugin Python boundary", () => {
     );
     await expect(stat(preview!)).rejects.toThrow();
 
-    const onOutputArchived = mock((_archiveDir: string) => {});
+    expect(
+      await prepareScanRegistrationOutput(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+      ),
+    ).toBe(output);
+    expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+      "previous scan\n",
+    );
+    expect(await readdir(root)).toEqual(["scan"]);
+    if (process.platform !== "win32") {
+      expect((await stat(output)).mode & 0o777).toBe(0o700);
+
+      const linkedOutput = join(root, "linked-scan");
+      await symlink(output, linkedOutput);
+      await expect(validateOutputDir(linkedOutput, true)).rejects.toThrow(
+        "not a directory",
+      );
+
+      await chmod(output, 0o770);
+      await expect(validateOutputDir(output, true)).rejects.toThrow(
+        "must not be accessible to other users",
+      );
+      await chmod(output, 0o700);
+    }
+
+    expect(await planOutputArchive(output)).not.toBeNull();
+  });
+
+  test("archives prior output through the exported preparation helper", async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "scan");
+    await mkdir(output, { mode: 0o700 });
+    await writeFile(join(output, "previous.txt"), "previous scan\n");
+    const archived: string[] = [];
+
     expect(
       await prepareOutputDir(
         output,
@@ -6046,32 +6130,29 @@ describe("runtime directories and plugin Python boundary", () => {
         undefined,
         undefined,
         true,
-        onOutputArchived,
+        (path) => {
+          archived.push(path);
+        },
       ),
     ).toBe(output);
-    const archived = onOutputArchived.mock.lastCall?.[0];
-    expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
-    expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
+    expect(archived).toHaveLength(1);
+    expect(await readFile(join(archived[0]!, "previous.txt"), "utf8")).toBe(
       "previous scan\n",
     );
     expect(await readdir(output)).toEqual([]);
-    if (process.platform !== "win32") {
-      expect((await stat(output)).mode & 0o777).toBe(0o700);
-
-      const linkedOutput = join(root, "linked-scan");
-      await symlink(archived!, linkedOutput);
-      await expect(validateOutputDir(linkedOutput, true)).rejects.toThrow(
-        "not a directory",
-      );
-
-      await chmod(archived!, 0o770);
-      await expect(validateOutputDir(archived!, true)).rejects.toThrow(
-        "must not be accessible to other users",
-      );
-      await chmod(archived!, 0o700);
-    }
-
-    expect(await planOutputArchive(output)).toBeNull();
+    expect(
+      await prepareOutputDir(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+        (path) => {
+          archived.push(path);
+        },
+      ),
+    ).toBe(output);
+    expect(archived).toHaveLength(1);
   });
 
   test("validates explicit output directories and creates private temporary paths", async () => {
@@ -6668,6 +6749,20 @@ describe("runtime directories and plugin Python boundary", () => {
           protectedRoot: repository,
         }),
       ).rejects.toThrow(PluginPythonUnavailableError);
+      expect(existsSync(marker)).toBe(false);
+
+      await expect(
+        runWorkbench(
+          {
+            pluginRoot: PLUGIN_ROOT,
+            environment: { PATH: trustedBin, PYTHON: unsafePython },
+            protectedRoot: repository,
+          },
+          ["list-scans"],
+        ),
+      ).rejects.toMatchObject({
+        cause: expect.any(PluginPythonUnavailableError),
+      });
       expect(existsSync(marker)).toBe(false);
     },
   );

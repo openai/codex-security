@@ -9,7 +9,6 @@ from pathlib import Path
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
-from deep_scan_workbench import non_negative_int
 from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
@@ -146,7 +145,7 @@ def parse_args(description: str) -> argparse.Namespace:
     list_scans.add_argument("--mode", choices=MODES)
     list_scans.add_argument("--repository")
     list_scans.add_argument("--scan-root")
-    list_scans.add_argument("--offset", type=non_negative_int, default=0)
+    list_scans.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
     list_scans.add_argument("--limit", type=positive_int)
 
     list_unmatched_scan_pairs = subparsers.add_parser("list-unmatched-scan-pairs")
@@ -161,7 +160,11 @@ def parse_args(description: str) -> argparse.Namespace:
     recipe.add_argument("--recipe-json-stdin", action="store_true")
     recipe.add_argument("--registration-json-stdin", action="store_true")
     register_cli_scan.add_argument("--parent-scan-id")
-    register_cli_scan.add_argument("--archive-existing", action="store_true")
+    register_cli_scan.add_argument(
+        "--archive-existing",
+        action="store_true",
+        help="Archive output in the registration transaction. Supports cancellable archival preparation.",
+    )
     register_cli_scan.add_argument("--archived-scan-dir")
 
     set_scan_thread = subparsers.add_parser("set-scan-thread")
@@ -200,13 +203,13 @@ def parse_args(description: str) -> argparse.Namespace:
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
     list_global_findings.add_argument("--target-id")
-    list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
+    list_global_findings.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
     list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
     list_repositories = subparsers.add_parser("list-repositories")
     list_repositories.add_argument("--query")
     list_repositories.add_argument("--target-id")
     list_repositories.add_argument("--status", choices=("scanned", "not_scanned", "open_findings"))
-    list_repositories.add_argument("--offset", type=non_negative_int, default=0)
+    list_repositories.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
     list_repositories.add_argument("--limit", type=positive_int)
 
     list_findings = subparsers.add_parser("list-findings")
@@ -214,21 +217,21 @@ def parse_args(description: str) -> argparse.Namespace:
     list_findings.add_argument("--query")
     list_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_findings.add_argument("--status", choices=FINDING_STATUSES)
-    list_findings.add_argument("--offset", type=non_negative_int, default=0)
+    list_findings.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
     list_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
 
     update_progress = subparsers.add_parser("update-progress")
     update_progress.add_argument("--scan-id", required=True)
     update_progress.add_argument("--phase", choices=PHASES)
-    update_progress.add_argument("--phase-items-total", type=non_negative_int)
-    update_progress.add_argument("--phase-items-completed", type=non_negative_int)
+    update_progress.add_argument("--phase-items-total", type=deep_scan.non_negative_int)
+    update_progress.add_argument("--phase-items-completed", type=deep_scan.non_negative_int)
     update_progress.add_argument("--phase-progress-unit", choices=PHASE_PROGRESS_UNITS)
     preflight_issues = update_progress.add_mutually_exclusive_group()
     preflight_issues.add_argument("--preflight-issues-json")
     preflight_issues.add_argument("--preflight-issues-json-stdin", action="store_true")
-    update_progress.add_argument("--review-items-total", type=non_negative_int)
-    update_progress.add_argument("--review-items-completed", type=non_negative_int)
-    update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
+    update_progress.add_argument("--review-items-total", type=deep_scan.non_negative_int)
+    update_progress.add_argument("--review-items-completed", type=deep_scan.non_negative_int)
+    update_progress.add_argument("--reportable-findings-count", type=deep_scan.non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
     update_progress.add_argument("--coordinator-generation", type=positive_int)
@@ -381,23 +384,10 @@ def parse_args(description: str) -> argparse.Namespace:
         publication.add_argument("--input-file", required=True)
 
     subparsers.add_parser("database-info")
-    subparsers.add_parser("dashboard")
     subparsers.add_parser("finding-workflow")
     subparsers.add_parser("severity-classification")
     severity = subparsers.add_parser("read-severity-classification")
     severity.add_argument("--scan-id", required=True)
-    subparsers.add_parser("store-findings")
-    subparsers.add_parser("store-dedupe-groups")
-    dedupe_groups = subparsers.add_parser("list-dedupe-groups")
-    dedupe_groups.add_argument("--finding-id", required=True)
-    potential_duplicates = subparsers.add_parser("find-potential-duplicates")
-    potential_duplicates.add_argument("--finding-id", required=True)
-    scope = potential_duplicates.add_mutually_exclusive_group(required=True)
-    scope.add_argument("--repository-id")
-    scope.add_argument("--all-repositories", action="store_true")
-    stored_findings = subparsers.add_parser("list-stored-findings")
-    stored_findings.add_argument("--limit", type=positive_int, required=True)
-    stored_findings.add_argument("--offset", type=non_negative_int, required=True)
     arguments = sys.argv[1:]
     if "--user-context-stdin" in arguments:
         if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:
