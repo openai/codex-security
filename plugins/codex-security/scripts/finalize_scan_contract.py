@@ -25,7 +25,13 @@ from urllib.parse import quote, urlsplit
 
 # Some hosts load this script with Python's safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench.json_numbers import JsonFloat, dumps_json, is_json_integer, json_number_key
+from workbench.json_numbers import (
+    JsonFloat,
+    compare_json_numbers,
+    dumps_json,
+    is_json_integer,
+    json_number_key,
+)
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -1554,7 +1560,12 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
         raise ContractError(f"{context}.severity.level: unsupported severity: {level}")
     score = severity.get("score")
     if score is not None:
-        if not isinstance(score, (int, float)) or isinstance(score, bool) or not 0 <= score <= 10:
+        if (
+            not isinstance(score, (int, float))
+            or isinstance(score, bool)
+            or compare_json_numbers(score, 0) < 0
+            or compare_json_numbers(score, 10) > 0
+        ):
             raise ContractError(f"{context}.severity.score: expected a number from 0 through 10")
         _require_str(severity, "scoringSystem", f"{context}.severity")
 
@@ -1895,9 +1906,9 @@ def _validate_schema_node(
         if schema.get("format") == "date-time":
             _validate_date_time(value, context)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in schema and value < schema["minimum"]:
+        if "minimum" in schema and compare_json_numbers(value, schema["minimum"]) < 0:
             raise ContractError(f"{context}: value is below schema minimum")
-        if "maximum" in schema and value > schema["maximum"]:
+        if "maximum" in schema and compare_json_numbers(value, schema["maximum"]) > 0:
             raise ContractError(f"{context}: value is above schema maximum")
     if isinstance(value, list):
         if "minItems" in schema and len(value) < schema["minItems"]:
