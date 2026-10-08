@@ -78,7 +78,6 @@ async function runPromptfoo(
   const artifacts = path.join(EVAL_ROOT, "artifacts");
   const env = {
     TRIAGE_CALIBRATION_ROOT: path.join(artifacts, "calibration-repos"),
-    SASTBENCH_TARGET_ROOT: path.join(artifacts, "sastbench-targets"),
     SASTBENCH_GIT_CACHE_ROOT: path.join(artifacts, "sastbench-git-cache"),
     ...process.env,
     ...environment,
