@@ -129,41 +129,50 @@ export async function readDeepReductionSources(
         const archivePrefix =
           artifactPrefix.slice(0, artifactPrefix.lastIndexOf("/")) +
           "/attempts/";
-        const receiptRefs = new Set(
-          [originalCoverage, ...originalArchivedCoverage].flatMap((source) =>
-            (source.surfaces as JsonObject[]).flatMap(
-              (surface) => (surface.receiptRefs as string[] | undefined) ?? [],
-            ),
-          ),
-        );
         const receiptDigests = new Map<string, string>();
-        await Promise.all(
-          [...receiptRefs].map(async (ref) => {
-            try {
-              const bytes = await readArtifactBytes(
-                {
-                  ...context,
-                  root: ref.startsWith(archivePrefix)
-                    ? bound.artifacts.scanDir
-                    : dirname(worker.resultPath),
-                },
-                ref
-                  .split("/")
-                  .filter(
-                    (component, index) =>
-                      component !== "." && (component !== "" || index === 0),
-                  ),
-                "Saved discovery receipt",
-              );
-              receiptDigests.set(
-                ref,
-                createHash("sha256").update(bytes).digest("hex"),
-              );
-            } catch {
-              // Unreadable evidence cannot establish an earlier receipt origin.
-            }
-          }),
-        );
+        const collectReceiptDigests = async (
+          sources: (typeof originalCoverage)[],
+        ) => {
+          const receiptRefs = new Set(
+            sources.flatMap((source) =>
+              (source.surfaces as JsonObject[]).flatMap(
+                (surface) =>
+                  (surface.receiptRefs as string[] | undefined) ?? [],
+              ),
+            ),
+          );
+          await Promise.all(
+            [...receiptRefs].map(async (ref) => {
+              try {
+                const bytes = await readArtifactBytes(
+                  {
+                    ...context,
+                    root: ref.startsWith(archivePrefix)
+                      ? bound.artifacts.scanDir
+                      : dirname(worker.resultPath),
+                  },
+                  ref
+                    .split("/")
+                    .filter(
+                      (component, index) =>
+                        component !== "." && (component !== "" || index === 0),
+                    ),
+                  "Saved discovery receipt",
+                );
+                receiptDigests.set(
+                  ref,
+                  createHash("sha256").update(bytes).digest("hex"),
+                );
+              } catch {
+                // Unreadable evidence cannot establish an earlier receipt origin.
+              }
+            }),
+          );
+        };
+        await collectReceiptDigests([
+          originalCoverage,
+          ...originalArchivedCoverage,
+        ]);
         const normalizedCurrent = structuredClone(result);
         normalizeSavedScanCoverage([normalizedCurrent]);
         for (const { input } of archived) {
@@ -210,6 +219,7 @@ export async function readDeepReductionSources(
           );
           result = preserved.input;
           currentCheckpointCoverage = preserved.originalCurrentCoverage;
+          await collectReceiptDigests(currentCheckpointCoverage);
         }
         result.findings = result.findings.map((finding, index) => ({
           ...finding,

@@ -1181,32 +1181,35 @@ def merge_saved_results(
 
     retained_surface_ids: dict[tuple[str, str, int], dict[str, Any]] = {}
     # Each saved occurrence gets one projection; repeated lookups reuse its assignment.
-    retained_surfaces: dict[tuple[str, str, int], dict[str, Any] | None] = {}
-    matched_surfaces: dict[tuple[str, str], set[str | int]] = {}
+    retained_records: dict[tuple[str, str, str, int], dict[str, Any] | None] = {}
+    matched_records: dict[tuple[str, str, str, int], set[int]] = {}
 
     def retained_coverage_record(
         field: str, item: Any, worker: Any, relative: str
     ) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
-        surface_key = (worker["id"], relative, id(item))
-        if field == "surfaces":
-            if surface_key in retained_surfaces:
-                return retained_surfaces[surface_key]
-            rows = drafts_by_path.get(relative, {}).get("coverage", {}).get("surfaces", [])
-            if isinstance(rows, list) and any(row is item for row in rows):
-                for row in rows:
-                    if row is item:
-                        break
-                    retained_coverage_record("surfaces", row, worker, relative)
+        record_key = (worker["id"], relative, field, id(item))
+        if record_key in retained_records:
+            return retained_records[record_key]
+        rows = drafts_by_path.get(relative, {}).get("coverage", {}).get(field, [])
+        if isinstance(rows, list) and any(row is item for row in rows):
+            for row in rows:
+                if row is item:
+                    break
+                retained_coverage_record(field, row, worker, relative)
         item = original_coverage_rows.get(id(item), item)
         source = dict(item)
         if field == "surfaces":
             source["receiptRefs"] = coverage_receipts(item, worker, relative)
+        retained_record = None
         for projection in projected_coverages:
             records = projection.get(field, [])
-            for record in records if isinstance(records, list) else []:
-                if not isinstance(record, dict):
+            matched = matched_records.setdefault(
+                (worker["id"], relative, field, id(projection)), set()
+            )
+            for index, record in enumerate(records if isinstance(records, list) else []):
+                if index in matched or not isinstance(record, dict):
                     continue
                 provenance = record.get("provenance")
                 if (
@@ -1270,19 +1273,12 @@ def merge_saved_results(
                         if isinstance(value.get("question"), str):
                             value["question"] = value["question"].strip()
                 if original == source:
-                    if field == "surfaces":
-                        matched = matched_surfaces.setdefault((worker["id"], relative), set())
-                        identity = record.get("id")
-                        if not isinstance(identity, str):
-                            identity = id(record)
-                        if identity in matched:
-                            continue
-                        matched.add(identity)
-                        retained_surfaces[surface_key] = record
-                    return record
-        if field == "surfaces":
-            retained_surfaces[surface_key] = None
-        return None
+                    matched.add(index)
+                    if retained_record is None:
+                        retained_record = record
+                    break
+        retained_records[record_key] = retained_record
+        return retained_record
 
     def coverage_source_attempt(relative: str, worker: Any) -> int:
         directory = Path(relative).parent
@@ -1335,9 +1331,7 @@ def merge_saved_results(
         attempt = coverage_source_attempt(relative, worker)
         rows = drafts_by_path[relative]["coverage"].get(field, [])
         occurrence = (
-            sum(row == rows[index - 1] for row in rows[:index])
-            if field == "surfaces" and isinstance(rows, list)
-            else 1
+            sum(row == rows[index - 1] for row in rows[:index]) if isinstance(rows, list) else 1
         )
         value = dict(item)
         for path, draft, owner in sources:
@@ -1576,6 +1570,13 @@ def merge_saved_results(
     }
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
+    # Normalize legacy questions once so repeated lookups keep the same row identity.
+    for _, draft, _ in all_sources:
+        questions = draft["coverage"].get("openQuestions")
+        if isinstance(questions, list):
+            draft["coverage"]["openQuestions"] = [
+                {"question": item.strip()} if isinstance(item, str) else item for item in questions
+            ]
     # Retained projections describe raw saved rows, while reconciliation needs their aliases.
     original_coverage_rows: dict[int, dict[str, Any]] = {}
     # Older checkpoints can omit IDs already assigned in their published output.
@@ -1699,11 +1700,6 @@ def merge_saved_results(
             "deferred": [],
             **coverage,
         }
-    if isinstance(coverage.get("openQuestions"), list):
-        coverage["openQuestions"] = [
-            {"question": item.strip()} if isinstance(item, str) else item
-            for item in coverage["openQuestions"]
-        ]
     canonical_rows = (
         {
             id(item)
@@ -2586,8 +2582,6 @@ def merge_saved_results(
                     and (worker_id, item["id"]) in closed_deferred
                 ):
                     continue
-                if field == "openQuestions" and isinstance(item, str):
-                    item = {"question": item.strip()}
                 if reviewed and retained_coverage_record(field, item, worker, relative):
                     continue
                 if (

@@ -1742,3 +1742,161 @@ def test_legacy_occurrences_survive_supported_parent_projection(
     )
     for path, saved in originals.items():
         assert path.read_bytes() == saved
+
+
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+@pytest.mark.parametrize(
+    ("field", "archived", "projection"),
+    [
+        (field, True, projection)
+        for field in ("deferred", "explicitExclusions", "openQuestions", "openQuestionStrings")
+        for projection in ("partial", "none")
+    ]
+    + [("deferred", False, projection) for projection in ("full", "partial", "none")],
+)
+def test_recovery_preserves_non_surface_occurrence_origins(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, field, archived, projection
+):
+    string_questions = field == "openQuestionStrings"
+    if string_questions:
+        field = "openQuestions"
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    if archived:
+        output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+        output.mkdir(parents=True)
+        result = output / "result.json"
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET attempt = 2, artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+                (str(output), str(result), worker_id),
+            )
+    row = {
+        "deferred": {"reason": "Synthetic repeated remaining review."},
+        "explicitExclusions": {"pattern": "vendor/**", "reason": "Review separately."},
+        "openQuestions": {"question": "Which synthetic deployment controls apply?"},
+    }[field]
+    saved_row = row["question"] if string_questions else row
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {**scan.coverage, "completeness": "partial", field: [saved_row, saved_row]},
+    }
+    result.write_text(json.dumps(draft))
+    originals = {result: result.read_bytes()}
+    if archived:
+        archive = result.parent.parent / "attempts/attempt-1/result.json"
+        archive.parent.mkdir(parents=True)
+        prior = copy.deepcopy(draft)
+        prior["coverage"][field] = prior["coverage"][field][:1]
+        archive.write_text(json.dumps(prior))
+        originals[archive] = archive.read_bytes()
+    projected = []
+    for index in (1, 2):
+        attempt = index if archived else 1
+        projected.append(
+            {
+                **row,
+                **(
+                    {"id": f"{worker_id}-attempt-{attempt}-deferred-{index}"}
+                    if field == "deferred"
+                    else {}
+                ),
+                "provenance": {"workerId": worker_id, "attempt": attempt},
+            }
+        )
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            field: projected
+            if projection == "full"
+            else projected[:1]
+            if projection == "partial"
+            else [],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in ((1, 2) if archived else (1,))
+            ],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    rows = [row for row in coverage[field] if row.get("id") != "scan-stopped"]
+    assert len(rows) == 2
+    assert [row["provenance"]["attempt"] for row in rows] == ([1, 2] if archived else [1, 1])
+    if field == "deferred":
+        assert len({row["id"] for row in rows}) == 2
+    assert all(path.read_bytes() == original for path, original in originals.items())
+
+
+@pytest.mark.parametrize("field", ["surfaces", "deferred"])
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+def test_recovery_counts_occurrences_with_borrowed_checkpoint_ids(
+    workbench_api, workbench_db, publication_scan, monkeypatch, field, retry
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET attempt = 2, artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    row = (
+        {"label": "Synthetic repeated review", "disposition": "needs_follow_up", "receiptRefs": []}
+        if field == "surfaces"
+        else {"reason": "Synthetic repeated remaining review."}
+    )
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {**scan.coverage, "completeness": "partial", field: [row, row]},
+    }
+    result.write_text(json.dumps(draft))
+    archive = output.parent / "attempts/attempt-1/result.json"
+    archive.parent.mkdir(parents=True)
+    prior = copy.deepcopy(draft)
+    prior["coverage"][field] = [{**row, "id": "first-review"}, {**row, "id": "second-review"}]
+    archive.write_text(json.dumps(prior))
+    originals = {path: path.read_bytes() for path in (result, archive)}
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2)
+            ],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    recovered = [
+        row
+        for row in coverage[field]
+        if row.get("id") != "scan-stopped" and "sourceId" not in row.get("provenance", {})
+    ]
+    assert len(recovered) == 2
+    assert [row["provenance"]["attempt"] for row in recovered] == [1, 1]
+    assert all(path.read_bytes() == original for path, original in originals.items())

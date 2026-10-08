@@ -1534,3 +1534,95 @@ for (const changed of [false, true]) {
     }
   });
 }
+
+for (const interrupted of [false, true]) {
+  for (const changed of [false, true]) {
+    test(`current checkpoint receipt preserves retry origin interrupted=${interrupted} changed=${changed}`, async (t) => {
+      const f = await fixture();
+      try {
+        f.context.deepReducer.claimedWorkers[0].attempt = 2;
+        const worker = {
+          root: f.output,
+          repoRoot: f.root,
+          scanId,
+          layout: "worker",
+        };
+        const surface = {
+          id: "accepted-review",
+          label: "Synthetic retained checkpoint evidence",
+          disposition: "needs_follow_up",
+          receiptRefs: ["artifacts/review.txt"],
+        };
+        const draft = workerDraft([], {
+          complete: true,
+          coverage: {
+            completeness: "partial",
+            surfaces: [surface],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        });
+        await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+        await writeFile(
+          path.join(f.output, "artifacts/review.txt"),
+          "Accepted evidence.\n",
+        );
+        await recordCodexSecurityWorkerScanDraft(worker, draft);
+        const archive = path.join(f.workerRoot, "attempts/attempt-01");
+        await archiveDirectory(f.output, archive);
+        const archivedBytes = await readFile(path.join(archive, "result.json"));
+        await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+        await writeFile(
+          path.join(f.output, "artifacts/review.txt"),
+          changed ? "Different evidence.\n" : "Accepted evidence.\n",
+        );
+        // A direct-file retry result may lag the accepted current checkpoint.
+        await writeFile(
+          f.resultPath,
+          JSON.stringify(workerDraft([], { complete: true })),
+        );
+        const prior = await readFile(f.resultPath);
+        if (interrupted) {
+          const rename = fs.rename;
+          t.mock.method(
+            fs,
+            "rename",
+            async (...args: Parameters<typeof rename>) => {
+              if (args[1] === f.resultPath)
+                throw Object.assign(
+                  new Error("Synthetic result publication interruption."),
+                  { code: "EIO" },
+                );
+              return rename(...args);
+            },
+          );
+          await assert.rejects(
+            recordCodexSecurityWorkerScanDraft(worker, draft),
+            /Synthetic result publication interruption/,
+          );
+          t.mock.restoreAll();
+          assert.deepEqual(await readFile(f.resultPath), prior);
+        } else await recordCodexSecurityWorkerScanDraft(worker, draft);
+        const head = JSON.parse(
+          await readFile(path.join(f.output, "checkpoint-head.json"), "utf8"),
+        );
+        const checkpoint = path.join(f.output, "checkpoints", head.checkpoint);
+        const acceptedBytes = await readFile(checkpoint);
+        const currentBytes = await readFile(f.resultPath);
+        const coverage = (await readDeepReductionSources(f.context))
+          .discoveries[0].coverage;
+        assert.equal(coverage.surfaces.length, 1);
+        assert.equal(coverage.surfaces[0].provenance.attempt, changed ? 2 : 1);
+        assert.deepEqual(
+          await readFile(path.join(archive, "result.json")),
+          archivedBytes,
+        );
+        assert.deepEqual(await readFile(checkpoint), acceptedBytes);
+        assert.deepEqual(await readFile(f.resultPath), currentBytes);
+      } finally {
+        t.mock.restoreAll();
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}
