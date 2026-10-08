@@ -1,10 +1,23 @@
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
-import type { CheckScanPublicationResult } from "../src/publish.js";
+import {
+  checkScanPublicationInternal,
+  type CheckScanPublicationResult,
+} from "../src/publish.js";
+import { ContractValidationError } from "../src/errors.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
@@ -242,6 +255,86 @@ describe("publish scan to custom", () => {
 });
 
 describe("publish check", () => {
+  test("escapes contract property controls at the CLI boundary without changing the SDK error", async () => {
+    const scanDir = join(await publicationDirectory(), "scan");
+    await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+      recursive: true,
+    });
+    if (process.platform !== "win32") await chmod(scanDir, 0o700);
+    const file = join(scanDir, "findings.json");
+    const finding = JSON.parse(await readFile(file, "utf8"));
+    const key =
+      "source\u009b2J\u009dtitle\u009c\u0085\u2028\u2029 café token=SYNTHETIC_VALUE";
+    finding.extensions = { [key]: Number.MAX_SAFE_INTEGER + 1 };
+    await writeFile(file, JSON.stringify(finding));
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    let sdkError: unknown;
+    deps.checkScanPublication = async (directory, options) => {
+      try {
+        return await checkScanPublicationInternal(directory, options, {
+          environment: { CODEX_SECURITY_LINEAR_API_KEY: "" },
+          inspectPublicationStore: async () =>
+            fail("Invalid artifacts must not reach history."),
+          linearClient: () => fail("Invalid artifacts must not reach Linear."),
+        });
+      } catch (error) {
+        sdkError = error;
+        throw error;
+      }
+    };
+    deps.publishScan = async () => fail("Check must not publish.");
+    expect(
+      await runCli(
+        ["publish", "check", scanDir, ...DESTINATION_OPTIONS, "--json"],
+        deps,
+      ),
+    ).toBe(2);
+    expect(sdkError).toBeInstanceOf(ContractValidationError);
+    expect((sdkError as Error).message).toContain(key);
+    expect((sdkError as Error).message).toContain(
+      "unsafe integer-valued JSON numbers",
+    );
+    expect(stderr.text()).not.toMatch(
+      /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/u,
+    );
+    expect(stderr.text()).toContain("source 2J title");
+    expect(stderr.text()).toContain("café token=SYNTHETIC_VALUE");
+    expect(stderr.text()).toContain("unsafe integer-valued JSON numbers");
+    expect(stdout.text().trim()).toBe("");
+  });
+
+  test("preserves multiline publication-check diagnostics and their original cause", async () => {
+    const cause = new Error("Synthetic original cause.");
+    const message =
+      "First café token=SYNTHETIC_VALUE\u001b[2J\r\nSecond 日本語\u009b2J\tend";
+    const failure = new Error(message, { cause });
+    const deps = dependencies();
+    deps.checkScanPublication = async () => {
+      throw failure;
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        [
+          "publish",
+          "check",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--json",
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "First café token=SYNTHETIC_VALUE [2J \nSecond 日本語 2J end\n",
+    );
+    expect(stderr.text()).not.toMatch(/[\u001b\u009b\r\t]/u);
+    expect(failure.message).toBe(message);
+    expect(failure.cause).toBe(cause);
+    expect(stdout.text().trim()).toBe("");
+  });
+
   test.each(["completed-scan", "~/completed-scan"])(
     "resolves %s and shared options without invoking publication",
     async (scanDir) => {

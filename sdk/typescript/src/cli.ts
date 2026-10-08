@@ -2560,7 +2560,7 @@ export async function main(
       errorOutput.write(`codex-security: ${reason}${recovery}\n`);
       exitCode = signal === "SIGINT" ? 130 : 143;
     } else {
-      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
       exitCode = 2;
     }
   };
