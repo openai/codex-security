@@ -68,8 +68,8 @@ describe("CLI launcher", () => {
           join(packageRoot, "bin", "codex-security.mjs"),
           launcher,
         );
-        const detail = `EACCES: failed ${SYNTHETIC_CREDENTIALS}\u001b[31m\rnext\nline café 🔒\u001b]52;c;U1lOVEhFVElD\u0007`;
-        const display = `EACCES: failed ${SYNTHETIC_CREDENTIALS} [31m next\nline café 🔒 ]52;c;U1lOVEhFVElD `;
+        const detail = `EACCES: failed ${SYNTHETIC_CREDENTIALS}\u001b[31m\rnext\nline café 🔒\u001b]52;c;U1lOVEhFVElD\u0007 C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end`;
+        const display = `EACCES: failed ${SYNTHETIC_CREDENTIALS} [31m next\nline café 🔒 ]52;c;U1lOVEhFVElD  C1   2J H 52;c;U1lOVEhFVElD   end`;
         if (scenario !== "missing")
           await writeFile(
             join(root, "dist", "cli.js"),

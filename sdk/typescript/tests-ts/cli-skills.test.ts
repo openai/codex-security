@@ -1262,7 +1262,7 @@ process.stdout.write(JSON.stringify({
       "ENOTFOUND /synthetic/repository",
       "EACCES: permission denied, open /synthetic/output/report.json",
       "Unsupported provider setting: synthetic_option",
-      "raw detail \u001b[31m\rnext\nline sk-proj-SYNTHETIC_SECRET",
+      "raw detail \u001b[31m\rnext\nline sk-proj-SYNTHETIC_SECRET C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end",
     ])
       expect(skillCommandFailure("validate", 7, detail)).toBe(detail);
     const authentication = "401 sk-proj-SYNTHETIC_SECRET";
@@ -1370,7 +1370,7 @@ process.stdout.write(JSON.stringify({
       },
       ...["stderr", "turn.failed"].map((transport) => {
         const detail =
-          "EACCES: permission denied, open /synthetic/output/report.json\u001b[31m\rnext\nline café 🔒 sk-proj-SYNTHETIC_SECRET\u001b]52;c;U1lOVEhFVElD\u0007";
+          "EACCES: permission denied, open /synthetic/output/report.json\u001b[31m\rnext\nline café 🔒 sk-proj-SYNTHETIC_SECRET\u001b]52;c;U1lOVEhFVElD\u0007 C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end";
         return {
           source:
             transport === "stderr"
@@ -1379,7 +1379,7 @@ process.stdout.write(JSON.stringify({
           status: 7,
           stdout: "",
           stderr:
-            "EACCES: permission denied, open /synthetic/output/report.json [31m next\nline café 🔒 sk-proj-SYNTHETIC_SECRET ]52;c;U1lOVEhFVElD",
+            "EACCES: permission denied, open /synthetic/output/report.json [31m next\nline café 🔒 sk-proj-SYNTHETIC_SECRET ]52;c;U1lOVEhFVElD  C1   2J H 52;c;U1lOVEhFVElD   end",
         };
       }),
       {

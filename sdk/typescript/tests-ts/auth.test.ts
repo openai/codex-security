@@ -100,7 +100,7 @@ describe("Codex authentication process boundary", () => {
     ).rejects.toBe(canceled);
   });
 
-  test.skipIf(process.platform === "win32")(
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "preserves native configuration permission failures",
     async () => {
       const home = await temporaryDirectory();
