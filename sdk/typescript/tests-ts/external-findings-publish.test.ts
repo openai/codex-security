@@ -322,6 +322,7 @@ test("Wiz occurrence mapping preserves original evidence without inventing repos
     locationPath: "/usr/lib/example",
     lastDetectedAt: "2026-10-01T00:00:00Z",
     projects: [{ id: "project-a" }, { id: "project-b" }],
+    packageManager: "legacy-manager",
     vulnerableAsset: { id: "image-resource", imageDigest: "sha256:example" },
   };
   const f = await fixture([record]);
@@ -336,6 +337,7 @@ test("Wiz occurrence mapping preserves original evidence without inventing repos
       source_updated_at: null,
       source_data: record,
       image_digests: ["sha256:example"],
+      packages: [{ name: "example-lib", ecosystem: "legacy-manager" }],
     },
   });
 });
@@ -1276,5 +1278,142 @@ test.each(["JSON", "JSONL"])(
     expect(stderr).not.toContain("\u001b");
     expect(f.posts).toHaveLength(0);
     expect(await readdir(join(f.root, "state")).catch(() => [])).toEqual([]);
+  },
+);
+
+test.each([
+  {
+    kind: "OS package container image",
+    artifactType: { group: "OS_PACKAGE", osPackageManager: "RPM" },
+    vulnerableAsset: { id: "image-os", imageId: "sha256:os-image" },
+    ecosystem: "RPM",
+    digest: "sha256:os-image",
+  },
+  {
+    kind: "code library container image",
+    artifactType: { group: "CODE_LIBRARY", codeLibraryLanguage: "PYTHON" },
+    vulnerableAsset: { id: "image-library", imageId: "sha256:library-image" },
+    ecosystem: "PYTHON",
+    digest: "sha256:library-image",
+  },
+  {
+    kind: "running container",
+    artifactType: { group: "CODE_LIBRARY", codeLibraryLanguage: "JAVA" },
+    vulnerableAsset: {
+      id: "container-library",
+      ImageExternalId: "sha256:running-image",
+    },
+    ecosystem: "JAVA",
+    digest: "sha256:running-image",
+  },
+])(
+  "Wiz GraphQL nodes retain $kind metadata",
+  async ({ artifactType, vulnerableAsset, ecosystem, digest }) => {
+    const record = {
+      id: "synthetic-occurrence",
+      name: "CVE-2099-0002",
+      detailedName: "example-lib",
+      version: "1.0.0",
+      vendorSeverity: "HIGH",
+      artifactType,
+      vulnerableAsset,
+    };
+    const f = await fixture({
+      data: {
+        vulnerabilityFindings: {
+          nodes: [record],
+          pageInfo: { hasNextPage: false },
+        },
+      },
+    });
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.findings[0]).toMatchObject({
+      source_finding_id: record.id,
+      evidence: {
+        packages: [
+          { name: "example-lib", ecosystem, installed_version: "1.0.0" },
+        ],
+        image_digests: [digest],
+        source_data: record,
+      },
+    });
+  },
+);
+
+test.each([false, true])(
+  "receipt client IDs correlate reordered results (cached: %p)",
+  async (cached) => {
+    const f = await fixture([
+      normalized("vendor-first", "high"),
+      normalized("vendor-second", "low"),
+    ]);
+    const deps = {
+      ...f.deps,
+      fetch: async (url: string, init: RequestInit) => {
+        const response = await f.deps.fetch(url, init);
+        if (init.method !== "POST" || !response.ok) return response;
+        const receipt = (await response.json()) as FindingImportReceipt;
+        receipt.results.reverse();
+        return new Response(JSON.stringify(receipt), {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    };
+    let prepared = await prepareExternalPublication(f.file, options, deps);
+    if (cached) {
+      f.state.brokenReadback = true;
+      await expect(prepared.publish()).rejects.toThrow("Readback unavailable");
+      f.state.brokenReadback = false;
+      f.state.postBudget = 0;
+      prepared = await prepareExternalPublication(f.file, options, deps);
+      expect(prepared.preview.resumed).toBe(true);
+    }
+    const result = await prepared.publish();
+    expect(result.counts.created).toBe(2);
+    expect(result.receipts[0]!.results.map((item) => item.client_id)).toEqual([
+      "item-2",
+      "item-1",
+    ]);
+    expect(f.posts).toHaveLength(1);
+    expect(f.receipts.size).toBe(1);
+  },
+);
+
+test.each(["duplicate", "missing", "unexpected"])(
+  "receipt client IDs reject %s results before checkpointing",
+  async (invalid) => {
+    const f = await fixture([
+      normalized("vendor-first"),
+      normalized("vendor-second"),
+    ]);
+    const deps = {
+      ...f.deps,
+      fetch: async (url: string, init: RequestInit) => {
+        const response = await f.deps.fetch(url, init);
+        if (init.method !== "POST" || !response.ok) return response;
+        const receipt = (await response.json()) as FindingImportReceipt;
+        if (invalid === "duplicate")
+          receipt.results[1]!.client_id = receipt.results[0]!.client_id;
+        if (invalid === "missing") receipt.results.pop();
+        if (invalid === "unexpected")
+          receipt.results[0]!.client_id = "unexpected-client";
+        return new Response(JSON.stringify(receipt), {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    };
+    await expect(
+      (await prepareExternalPublication(f.file, options, deps)).publish(),
+    ).rejects.toThrow("Cloud returned a receipt for a different publication");
+    const directory = join(f.root, "state", "external-finding-publications");
+    const pending = (await readdir(directory)).find((name) =>
+      name.endsWith(".pending.json"),
+    )!;
+    expect(
+      JSON.parse(await readFile(join(directory, pending), "utf8")).receipts ??
+        [],
+    ).toEqual([]);
+    expect(f.posts).toHaveLength(1);
   },
 );
