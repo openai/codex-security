@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -12,50 +12,49 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { ThreadEvent } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import type { ThreadEvent, TurnOptions } from "@openai/codex-sdk";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+
 import {
   prepareScanArtifactRestorer,
   type ScanArtifactRestorer,
 } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import * as runtime from "../src/runtime.js";
+import { writeThreatModel } from "../src/artifact-export.js";
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
+  codexFactory,
   completedEvents,
-  createApiTestFixtures,
+  failedPostScanEvents,
   preparedRuntime,
 } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 
 afterEach(cleanup);
 
-interface FailedPostScanContext {
+interface PostScanContext {
   artifactPath: string;
   outside: string;
   scanDir: string;
 }
 
-interface FailedPostScanScenario {
+interface PostScanScenario {
   artifact: string;
   initialContents?: string | Uint8Array;
+  threatModel?: { summary: string };
   selectedPluginFinalizer?: string;
-  mutate(context: FailedPostScanContext): Promise<void>;
+  mutate(context: PostScanContext): Promise<void>;
+  followUpEvents?(): AsyncGenerator<ThreadEvent>;
   wrapRestorer?(
     restorer: ScanArtifactRestorer,
-    context: FailedPostScanContext,
+    context: PostScanContext,
   ): ScanArtifactRestorer;
 }
 
-async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-  yield {
-    type: "turn.failed",
-    error: { message: "Could not draft fixes." },
-  };
-}
-
-async function startFailedPostScan(scenario: FailedPostScanScenario) {
+async function startPostScan(scenario: PostScanScenario) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const codexHome = join(root, "codex-home");
@@ -84,62 +83,66 @@ async function startFailedPostScan(scenario: FailedPostScanScenario) {
   }
   let turns = 0;
   let original = Buffer.alloc(0);
-  const client = new TestClient(
-    {},
-    {
-      environment: {},
-      prepareRuntime: async () => runtime,
-      resolvePluginPython: async () => python!,
-      prepareOutputDir: async () => scanDir,
-      repositoryRevision: async () => "deadbeef",
-      prepareScanArtifactRestorer: async (...args) => {
-        const restorer = await prepareScanArtifactRestorer(...args);
-        return scenario.wrapRestorer?.(restorer, context) ?? restorer;
-      },
-      createCodex: () => ({
-        startThread: () => ({
-          id: "thread-1",
-          async runStreamed() {
-            turns += 1;
-            if (turns === 1) {
-              await copyCompletedScan(root);
-              if (scenario.initialContents !== undefined) {
-                await mkdir(dirname(artifactPath), { recursive: true });
-                await writeFile(artifactPath, scenario.initialContents);
-                const manifestPath = join(scanDir, "scan-manifest.json");
-                const manifest = JSON.parse(
-                  await readFile(manifestPath, "utf8"),
-                );
-                manifest.scan.artifacts.push({
-                  path: scenario.artifact,
-                  sha256: createHash("sha256")
-                    .update(await readFile(artifactPath))
-                    .digest("hex"),
-                  mediaType: scenario.artifact.endsWith(".bin")
-                    ? "application/octet-stream"
-                    : "application/json",
-                });
-                await writeFile(manifestPath, JSON.stringify(manifest));
-              }
-              original = await readFile(artifactPath);
-              return { events: completedEvents() };
-            }
-            await scenario.mutate(context);
-            return { events: failedEvents() };
-          },
-        }),
-      }),
+  const client = TestClient.withDependencies({
+    prepareRuntime: async () => runtime,
+    resolvePluginPython: async () => python!,
+    prepareOutputDir: async () => scanDir,
+    repositoryRevision: async () => "deadbeef",
+    prepareScanArtifactRestorer: async (...args) => {
+      const restorer = await prepareScanArtifactRestorer(...args);
+      return scenario.wrapRestorer?.(restorer, context) ?? restorer;
     },
-  );
+    createCodex: codexFactory(async (_input: string, options: TurnOptions) => {
+      expect(options.cyberAccessProgram).toBe("daybreak_blue");
+      turns += 1;
+      if (turns === 1) {
+        await copyCompletedScan(root);
+        if (scenario.initialContents !== undefined) {
+          await mkdir(dirname(artifactPath), { recursive: true });
+          await writeFile(artifactPath, scenario.initialContents);
+          const manifestPath = join(scanDir, "scan-manifest.json");
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          if (scenario.threatModel !== undefined)
+            manifest.scan.threatModel = scenario.threatModel;
+          if (scenario.artifact !== "threatmodel.md")
+            manifest.scan.artifacts.push({
+              path: scenario.artifact,
+              sha256: hash("sha256", await readFile(artifactPath)),
+              mediaType: scenario.artifact.endsWith(".bin")
+                ? "application/octet-stream"
+                : "application/json",
+            });
+          await writeFile(manifestPath, JSON.stringify(manifest));
+          if (scenario.threatModel !== undefined)
+            await writeThreatModel(scanDir, {
+              pluginRoot: runtime.plugin.installedRoot,
+              pythonPath: python!,
+              protectedRoot: repository,
+            });
+        }
+        original = await readFile(artifactPath);
+        return { events: completedEvents() };
+      }
+      if (scenario.artifact === "threatmodel.md")
+        original = await readFile(artifactPath);
+      await scenario.mutate(context);
+      return {
+        events: scenario.followUpEvents?.() ?? failedPostScanEvents(),
+      };
+    }, "thread-1"),
+  });
   const scan = client.run(repository, {
     postScanPrompt: "Draft confirmed fixes.",
+    cyberAccessProgram: "daybreak_blue",
   });
   return {
     client,
     scan,
     scanDir,
+    repository,
     artifactPath,
     outside,
+    python: python!,
     get turns() {
       return turns;
     },
@@ -150,11 +153,21 @@ async function startFailedPostScan(scenario: FailedPostScanScenario) {
 }
 
 const ordinaryRestorationCases: ReadonlyArray<
-  readonly [string, FailedPostScanScenario]
+  readonly [string, PostScanScenario]
 > = [
   [
     "missing report",
     { artifact: "report.md", mutate: ({ artifactPath }) => rm(artifactPath) },
+  ],
+  [
+    "derived threat model",
+    {
+      artifact: "threatmodel.md",
+      initialContents: "# Saved model\n",
+      threatModel: { summary: "Saved model." },
+      mutate: ({ artifactPath }) =>
+        writeFile(artifactPath, "# Incorrect replacement\n"),
+    },
   ],
   [
     "partial report",
@@ -226,20 +239,97 @@ const ordinaryRestorationCases: ReadonlyArray<
 ];
 
 describe("completed scan follow-up instructions", () => {
+  test.each(["removed", "rewritten", "updated model", "unchanged"])(
+    "refreshes the model path after a successful follow-up leaves the document %s",
+    async (change) => {
+      const fixture = await startPostScan({
+        artifact: "threatmodel.md",
+        initialContents: "# Saved model\n",
+        threatModel: { summary: "Saved component boundaries." },
+        mutate: async ({ artifactPath, scanDir }) => {
+          if (change === "removed") await rm(artifactPath);
+          else if (change === "rewritten")
+            await writeFile(artifactPath, "# Unrelated replacement\n");
+          else if (change === "updated model") {
+            const manifestPath = join(scanDir, "scan-manifest.json");
+            const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+            manifest.scan.threatModel = {
+              summary: "Updated component boundaries.",
+            };
+            await writeFile(manifestPath, JSON.stringify(manifest));
+            await writeThreatModel(scanDir, { pluginRoot: PLUGIN_ROOT });
+            expect(await readFile(artifactPath, "utf8")).toContain(
+              "Updated component boundaries.",
+            );
+          }
+        },
+        async *followUpEvents() {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "follow-up-message",
+              type: "agent_message",
+              text: "Follow-up complete.",
+            },
+          };
+          yield {
+            type: "turn.completed",
+            usage: {
+              input_tokens: 1000,
+              cached_input_tokens: 0,
+              cache_write_input_tokens: 0,
+              output_tokens: 100,
+              reasoning_output_tokens: 0,
+            },
+          };
+        },
+      });
+      try {
+        const result = await fixture.scan;
+        expect(fixture.turns).toBe(2);
+        expect(result.threatModelPath).toBe(
+          change === "unchanged" ? fixture.artifactPath : null,
+        );
+        expect(result.threatModel).toEqual({
+          summary: "Saved component boundaries.",
+        });
+        expect(result.turnResult.finalResponse).toBe("scan complete");
+        expect(result.turnResult.usage).toMatchObject({ input_tokens: 10 });
+        expect(result.cost?.inputTokens).toBe(10);
+      } finally {
+        await fixture.client.close();
+      }
+    },
+  );
+
   test.each(ordinaryRestorationCases)(
     "restores completed scan artifacts after failed post-scan instructions: %s",
     async (_name, scenario) => {
-      const fixture = await startFailedPostScan(scenario);
-      expect(await fixture.scan).toMatchObject({ scanDir: fixture.scanDir });
-      expect(fixture.turns).toBe(2);
-      expect(await readFile(fixture.artifactPath)).toEqual(fixture.original);
-      await fixture.client.close();
+      const python = spyOn(runtime, "resolvePluginPython");
+      try {
+        const fixture = await startPostScan(scenario);
+        const result = await fixture.scan;
+        expect(result).toMatchObject({ scanDir: fixture.scanDir });
+        if (scenario.artifact === "threatmodel.md")
+          expect(result.threatModelPath).toBe(fixture.artifactPath);
+        expect(fixture.turns).toBe(2);
+        expect(await readFile(fixture.artifactPath)).toEqual(fixture.original);
+        await fixture.client.close();
+        expect(python).toHaveBeenCalled();
+        for (const [options] of python.mock.calls)
+          expect(options).toMatchObject({
+            configuredPath: fixture.python,
+            protectedRoot: fixture.repository,
+          });
+      } finally {
+        python.mockRestore();
+      }
     },
   );
 
   test("does not rewrite artifacts unchanged by a failed follow-up", async () => {
     let before: { dev: number; ino: number; mtimeMs: number } | null = null;
-    const fixture = await startFailedPostScan({
+    const fixture = await startPostScan({
       artifact: "report.md",
       mutate: async ({ artifactPath }) => {
         const metadata = await stat(artifactPath);
@@ -364,7 +454,7 @@ describe("completed scan follow-up instructions", () => {
   test.skipIf(process.platform === "win32")(
     "restores a changed artifact that cannot be read for comparison",
     async () => {
-      const fixture = await startFailedPostScan({
+      const fixture = await startPostScan({
         artifact: "report.md",
         mutate: async ({ artifactPath }) => {
           await writeFile(artifactPath, "# Incomplete draft\n");
@@ -379,7 +469,7 @@ describe("completed scan follow-up instructions", () => {
   );
 
   test("rejects a replaced artifact parent without writing through it", async () => {
-    const fixture = await startFailedPostScan({
+    const fixture = await startPostScan({
       artifact: "artifacts/worker.json",
       initialContents: '{"complete":true}\n',
       mutate: async ({ artifactPath, outside }) => {
@@ -404,7 +494,7 @@ describe("completed scan follow-up instructions", () => {
   test("rejects an artifact parent swapped immediately before the bound write", async () => {
     let swapped = false;
     const artifact = "artifacts/worker.json";
-    const fixture = await startFailedPostScan({
+    const fixture = await startPostScan({
       artifact,
       initialContents: '{"complete":true}\n',
       mutate: async ({ artifactPath, outside }) => {
@@ -438,7 +528,7 @@ describe("completed scan follow-up instructions", () => {
   });
 
   test("rejects a scan root replaced after restoration setup", async () => {
-    const fixture = await startFailedPostScan({
+    const fixture = await startPostScan({
       artifact: "report.md",
       mutate: async ({ scanDir }) => {
         await rename(scanDir, `${scanDir}.original`);

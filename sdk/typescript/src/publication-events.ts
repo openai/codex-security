@@ -1,4 +1,6 @@
+import { parseJson } from "./value.js";
 import { isLinearIssueIdentifier, linearIssueReference } from "./linear.js";
+import { isRecord } from "./record.js";
 import {
   linearPublicationArguments,
   type PreparedPublicationIssue,
@@ -54,12 +56,7 @@ export function collectPublicationEvents(
 
   for (const rawLine of output.split(/\r?\n/)) {
     if (rawLine.trim().length === 0) continue;
-    let event: unknown;
-    try {
-      event = JSON.parse(rawLine) as unknown;
-    } catch {
-      continue;
-    }
+    const event = parseJson(() => rawLine);
     if (!isRecord(event) || event["type"] !== "item.completed") continue;
     const item = event["item"];
     if (!isLinearCreateCall(item)) continue;
@@ -145,48 +142,27 @@ export function resolvePublicationClaims(value: unknown): ClaimResolution {
 export function resolveClaims(
   claims: readonly PublicationClaim[],
 ): ClaimResolution {
-  const seen = new Set<string>();
-  const normalized = claims.flatMap<PublicationClaim>((claim) => {
+  const normalized = new Map<string, PublicationClaim>();
+  claims.forEach((claim) => {
     const trimmed = claim.value.trim();
-    if (trimmed.length === 0) return [];
+    if (trimmed.length === 0) return;
     const value = isCanonicalUuid(trimmed) ? trimmed.toLowerCase() : trimmed;
-    return [{ kind: claim.kind, value }];
+    const kind = claim.kind;
+    normalized.set(`${kind}\0${value}`, { kind, value });
   });
-  const retained = normalized
-    .filter((claim) => {
-      const key = `${claim.kind}\0${claim.value}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort(compareClaims);
-  const identifiers = new Set(
-    retained
-      .filter((claim) => claim.kind === "identifier")
-      .map((claim) => claim.value),
-  );
-  const entityIds = new Set(
-    retained
-      .filter((claim) => claim.kind === "entityId")
-      .map((claim) => claim.value),
-  );
-  const urls = new Set(
-    retained
-      .filter((claim) => claim.kind === "url")
-      .map((claim) => claim.value),
-  );
+  const retained = [...normalized.values()].sort(compareClaims);
+  const identifiers = new Set<string>();
+  const entityIds = new Set<string>();
+  const urls = new Set<string>();
+  const byKind = { identifier: identifiers, entityId: entityIds, url: urls };
+  for (const { kind, value } of retained) byKind[kind]?.add?.(value);
   const canonicalUrls = new Set([...urls].map(canonicalPublicationUrlClaim));
   const urlContradictsIdentifier =
     identifiers.size > 0 &&
-    [...urls]
-      .map(linearIssueReferenceFromUrl)
-      .some(
-        (reference) =>
-          reference !== undefined && !identifiers.has(reference.id),
-      );
-  const overlappingIdentity = [...identifiers].some((identifier) =>
-    entityIds.has(identifier),
-  );
+    Array.from(urls, linearIssueReferenceFromUrl).some(
+      (reference) => reference !== undefined && !identifiers.has(reference.id),
+    );
+  const overlappingIdentity = !identifiers.isDisjointFrom(entityIds);
   if (
     identifiers.size > 1 ||
     entityIds.size > 1 ||
@@ -224,12 +200,9 @@ function collectPublicationClaims(
   value: unknown,
   claims: PublicationClaim[],
 ): void {
-  const visited = new Set<Record<string, unknown>>();
-  const pending: unknown[] = [value];
+  const pending = isRecord(value) ? [value] : [];
   while (pending.length > 0) {
-    const candidate = pending.pop();
-    if (!isRecord(candidate) || visited.has(candidate)) continue;
-    visited.add(candidate);
+    const candidate = pending.pop()!;
     collectDirectClaims(candidate, claims);
 
     const data = candidate["data"];
@@ -244,15 +217,12 @@ function collectPublicationClaims(
         if (!isRecord(content) || typeof content["text"] !== "string") {
           continue;
         }
-        try {
-          nested.push(JSON.parse(content["text"]) as unknown);
-        } catch {
-          continue;
-        }
+        const parsed = parseJson(() => content["text"] as string);
+        if (isRecord(parsed)) nested.push(parsed);
       }
     }
-    for (let index = nested.length - 1; index >= 0; index -= 1) {
-      if (isRecord(nested[index])) pending.push(nested[index]);
+    for (const child of nested.reverse()) {
+      if (isRecord(child)) pending.push(child);
     }
   }
 }
@@ -360,8 +330,4 @@ function normalizeNonemptyString(value: unknown): string | undefined {
 function containsIdentifier(value: string, identifier: string): boolean {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`, "u").test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

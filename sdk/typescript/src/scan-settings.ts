@@ -100,6 +100,12 @@ const inputPath = z.string().min(1);
 
 export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
   auth: z.enum(SCAN_AUTH_MODES).optional().meta({ default: DEFAULT_SCAN_AUTH }),
+  cyberAccessProgram: z
+    .enum(["standard", "daybreak_blue", "daybreak_red"])
+    .optional()
+    .describe(
+      "Experimental Cyber access program for scan turns (OpenAI provider only). Omit to preserve Codex defaults.",
+    ),
   mode: z.enum(SCAN_MODES).optional().meta({ default: DEFAULT_SCAN_MODE }),
   knowledgeBasePaths: z.array(inputPath).optional(),
   scanPrompt: z.string().optional(),

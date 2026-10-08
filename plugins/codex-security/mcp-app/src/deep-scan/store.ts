@@ -8,7 +8,6 @@ import {
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
-  BeginDeepScanResult,
   DedupCommit,
   DeepScanCoordinatorClaim,
   DeepScanCoordinatorLeaseInput,
@@ -16,7 +15,6 @@ import type {
   DeepScanMergeState,
   DeepScanRunState,
   DeepScanRunStatus,
-  DeepScanStore,
   DeepScanTerminalReason,
   DeepScanWorkerKind,
   DeepScanWorkerMutation,
@@ -111,7 +109,7 @@ class DeepScanPersistenceError extends Error {
   }
 }
 
-export class WorkbenchDeepScanStore implements DeepScanStore {
+export class WorkbenchDeepScanStore {
   private writeTail: Promise<void> = Promise.resolve();
   private readonly coordinatorLeases = new Map<
     string,
@@ -133,7 +131,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
     reasoningEffort?: string;
     threadId: string;
     scanRoot: string;
-  }): Promise<BeginDeepScanResult> {
+  }): Promise<DeepScanRunState> {
     const userContext = input.userContext;
     const result = await this.enqueueWrite(
       [
@@ -168,7 +166,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
     }
-    return { run, shouldStart: startDisposition === "created" };
+    return run;
   }
 
   async get(scanId: string, threadId: string): Promise<DeepScanRunState> {
@@ -259,16 +257,6 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
       { coordinatorGeneration: lease.run.coordinatorGeneration, updatedAt },
     );
     return { ...lease.run, updatedAt };
-  }
-
-  async cancel(scanId: string, threadId: string): Promise<JsonObject> {
-    return this.enqueueWrite([
-      "cancel-scan",
-      "--scan-id",
-      scanId,
-      "--thread-id",
-      threadId,
-    ]);
   }
 
   async updateWorker(
@@ -476,7 +464,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
   /**
    * Run mutations in call order. Callers receive their own operation's result
    * or error, while the stored tail always resolves so one failed write cannot
-   * prevent later cancellation or cleanup from reaching the workbench.
+   * prevent later persistence or cleanup from reaching the workbench.
    *
    * This orders one Node store instance; SQLite still provides transactions for
    * other workbench processes. Reads remain concurrent and observe a committed
@@ -518,11 +506,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
   /** Replay only existing, same-identity workbench mutations after transient failures. */
   private async runIdempotentPersistence(args: string[]): Promise<JsonObject> {
     const startedAt = Date.now();
-    for (
-      let attempt = 1;
-      attempt <= MAX_IDEMPOTENT_PERSISTENCE_ATTEMPTS;
-      attempt += 1
-    ) {
+    for (let attempt = 1; ; attempt += 1) {
       try {
         return await this.runWorkbench(args);
       } catch (error) {
@@ -569,7 +553,6 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
         await delay(delayMs);
       }
     }
-    throw new Error("Deep Scan persistence retry loop exited unexpectedly.");
   }
 }
 
@@ -707,7 +690,6 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
   return {
     scanId: requiredString(value.scanId, "deepScan.scanId"),
     status,
-    phase: deepScanPhase(value.phase),
     coordinatorGeneration: optionalPositiveInteger(value.coordinatorGeneration),
     createdAt: optionalString(value.createdAt),
     updatedAt: optionalString(value.updatedAt),
@@ -725,7 +707,6 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
       value.consecutiveErrors ?? 0,
       "deepScan.consecutiveErrors",
     ),
-    canonicalArtifacts: parseCanonicalArtifacts(value.canonicalArtifacts),
     manifestPath: optionalString(value.manifestPath),
     terminalReason:
       value.terminalReason === "saturated" || value.terminalReason === "capped"
@@ -765,19 +746,6 @@ function parsePersistedDedupInputs(
   });
 }
 
-function deepScanPhase(value: unknown): DeepScanRunState["phase"] {
-  if (value === undefined || value === null) return undefined;
-  if (
-    value === "setup" ||
-    value === "discovery" ||
-    value === "reducing" ||
-    value === "terminal"
-  ) {
-    return value;
-  }
-  throw new Error("Codex Security workbench returned invalid deepScan.phase.");
-}
-
 function parsePersistedWorkers(value: unknown): PersistedDeepScanWorker[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
@@ -788,23 +756,6 @@ function parsePersistedWorkers(value: unknown): PersistedDeepScanWorker[] {
   return value.map((candidate) =>
     parsePersistedWorker(objectValue(candidate, "deepScan.worker")),
   );
-}
-
-function parseCanonicalArtifacts(
-  value: unknown,
-): DeepScanRunState["canonicalArtifacts"] {
-  if (value === null || value === undefined) return undefined;
-  const artifacts = objectValue(value, "deepScan.canonicalArtifacts");
-  return {
-    inScopeFilesPath: requiredString(
-      artifacts.inScopeFilesPath,
-      "deepScan.canonicalArtifacts.inScopeFilesPath",
-    ),
-    candidateLedgerPath: requiredString(
-      artifacts.candidateLedgerPath,
-      "deepScan.canonicalArtifacts.candidateLedgerPath",
-    ),
-  };
 }
 
 function parseWorker(

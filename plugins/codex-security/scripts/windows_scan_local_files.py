@@ -453,6 +453,12 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
     """Open a verified regular file and return an owned binary read descriptor."""
 
+    return open_read_fd_with_path(scan_dir, relative_path, context)[0]
+
+
+def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> tuple[int, str]:
+    """Return the descriptor and its filename while the verified parents are held."""
+
     try:
         with _locked_parent(scan_dir, relative_path, create=False) as (parent_path, leaf_name):
             path = parent_path / leaf_name
@@ -467,10 +473,13 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
             assert handle is not None and handle.value is not None
             with handle:
                 _verify_regular_file(handle.value, path)
+                filename = Path(_final_path(handle.value)).name
+                resolved_path = PurePosixPath(relative_path).with_name(filename).as_posix()
                 raw_handle = handle.detach()
                 try:
                     assert _msvcrt is not None
-                    return _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
+                    descriptor = _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
+                    return descriptor, resolved_path
                 except BaseException:
                     _close_handle(raw_handle)
                     raise
@@ -654,6 +663,7 @@ def atomic_write(
                 try:
                     _mark_handle_for_deletion(temp_handle.value)
                 except OSError:
+                    # Cleanup must not replace the original write or rename failure.
                     pass
                 raise
 
@@ -686,9 +696,5 @@ def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
             _mark_handle_for_deletion(handle.value)
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

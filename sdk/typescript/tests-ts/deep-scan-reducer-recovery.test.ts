@@ -1,3 +1,4 @@
+import { parseJsonLines } from "./support/json.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,7 +47,6 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
           modelSettings: {
             artifactContext: {
               pluginRoot: PLUGIN_ROOT,
-              scanRoot,
               repoRoot,
               scanId: "test-scan",
             },
@@ -86,11 +86,9 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
         new Response(child.stderr).text(),
       ]);
       expect(status, stderr).toBe(0);
-      const response = stdout
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as { id?: number; result?: unknown })
-        .find((message) => message.id === 2)?.result as
+      const response = parseJsonLines<{ id?: number; result?: unknown }>(
+        stdout,
+      ).find((message) => message.id === 2)?.result as
         | {
             tools: Array<{
               name: string;

@@ -62,6 +62,13 @@ dependencies, including transitive packages, with `openai` and `@openai/*` exemp
 Committed lockfiles remain installable. The existing Socket release checks remain
 in place.
 
+The production dependency audit is a blocking step in CI package builds and npm
+release validation. `pnpm --dir sdk/typescript run audit:prod` checks the locked
+production graph at the existing high-severity threshold. High or critical
+advisories and audit service failures stop publication. Resolve dependency
+advisories with dependency and lockfile updates; retry service failures once
+the audit service is available.
+
 ## Version policy before 1.0
 
 While the package is on `0.x`, ordinary changes, including features, use a
@@ -224,6 +231,11 @@ for that exact commit:
    archive before publishing the GitHub release. It prepends the reviewed
    summary to GitHub's categorized notes.
 
+After npm accepts a publication, its registry can take several minutes to expose
+the version. GitHub publication waits up to ten minutes for that version to
+become available before verifying its archive and signed provenance. Other
+registry errors fail immediately.
+
 `node-release` generates the npm plugin payload from the canonical source under
 `plugins/codex-security/` during `prepack`. The generated
 `sdk/typescript/_bundled_plugin/` directory is not a committed release input;
@@ -247,6 +259,20 @@ Check the published state before announcing the release:
   Historical releases may have generated notes only.
 - Every merged pull request is included or has an intentional
   `skip-release-notes` label.
+
+The `published-install-smoke` workflow checks npm's current `latest` daily,
+on pull requests changing its smoke checks, and on manual dispatch. It installs
+into a temporary consumer, checks the npm CLI shim and public SDK, starts the
+bundled Codex executable with `--version`,
+and initializes the bundled MCP server. Linux covers supported Node majors
+22, 24, and 26; macOS and Windows cover Node 24. These checks use temporary
+configuration directories and do not run scans or call model APIs.
+
+The smoke test uses the installed version, so it can run while `main` contains
+unreleased changes. A failure reports the installed version or failing startup
+command in the Actions log; inspect that job before treating it as a release
+regression. To reproduce locally, run
+`node sdk/typescript/scripts/smoke-published-package.mjs` from the repository.
 
 ## Recover or repair a release
 

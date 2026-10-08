@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -13,7 +14,7 @@ import {
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { importScan, type ImportScanOptions } from "../src/import-scan.js";
@@ -23,13 +24,11 @@ import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting } from "./support/errors.js";
 
-const roots: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
+afterEach(cleanup);
 
 const description =
   'An imported report with a comma, a "quoted value", and Unicode: café.\n\n' +
@@ -84,7 +83,7 @@ async function fixture(format: "csv" | "json" = "csv") {
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "import-scan-test-"),
   );
-  roots.push(root);
+  roots.track(root);
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
   const stateDirectory = join(root, "state");
@@ -122,12 +121,40 @@ async function fixture(format: "csv" | "json" = "csv") {
   return {
     root,
     stateDirectory,
-    environment,
+    dependencies: {
+      environment,
+      // Import persistence uses real Python; runtime tests cover interpreter discovery.
+      resolvePluginPython: async () => python!,
+    },
     python: python!,
     source,
     options,
     workbenchOptions: { python: python!, pluginRoot: PLUGIN_ROOT, environment },
   };
+}
+
+async function legacyArchivePlugin(
+  context: Awaited<ReturnType<typeof fixture>>,
+) {
+  const plugin = join(context.root, "legacy-plugin");
+  await cp(PLUGIN_ROOT, plugin, { recursive: true });
+  await writeFile(
+    join(plugin, "scripts", "workbench_db.py"),
+    [
+      "import runpy, sys",
+      "from pathlib import Path",
+      "args = sys.argv[1:]",
+      'if args[:2] == ["register-cli-scan", "--help"]:',
+      '    print("--archive-existing --archived-scan-dir")',
+      "    raise SystemExit(0)",
+      'if args and args[0] == "register-cli-scan":',
+      '    scan_dir = Path(args[args.index("--scan-dir") + 1])',
+      "    if next(scan_dir.iterdir(), None) is not None:",
+      '        raise SystemExit("The scan artifact directory must be empty before the scan starts.")',
+      `runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))}, run_name="__main__")`,
+    ].join("\n"),
+  );
+  return plugin;
 }
 
 function completed(result: Awaited<ReturnType<typeof importScan>>): ScanResult {
@@ -163,12 +190,33 @@ async function storedScans(context: Awaited<ReturnType<typeof fixture>>) {
   }>;
 }
 
+test("a rejected import registration keeps existing output in place", async () => {
+  const context = await fixture();
+  const outputDir = join(context.root, "scan");
+  await mkdir(outputDir, { mode: 0o700 });
+  await writeFile(join(outputDir, "previous.txt"), "previous scan\n");
+  await expect(
+    importScan(
+      { ...context.options, outputDir, archiveExisting: true },
+      {
+        ...context.dependencies,
+        runWorkbench: async () => {
+          throw new Error("fixture registration rejected");
+        },
+      },
+    ),
+  ).rejects.toThrow("fixture registration rejected");
+  expect(await readFile(join(outputDir, "previous.txt"), "utf8")).toBe(
+    "previous scan\n",
+  );
+});
+
 test.each(["csv", "json"] as const)(
   "%s import seals every source occurrence and indexes a separate dataset scan",
   async (format) => {
     const context = await fixture(format);
     const result = completed(
-      await importScan(context.options, { environment: context.environment }),
+      await importScan(context.options, context.dependencies),
     );
     expect(result.findings.findings).toHaveLength(2);
     expect(
@@ -279,7 +327,7 @@ test.each(["csv", "json"] as const)(
       await expect(
         importScan(
           { ...context.options, sourcePath: linked, dryRun },
-          { environment: context.environment },
+          context.dependencies,
         ),
       ).rejects.toThrow("Import source must be a regular file");
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
@@ -309,7 +357,7 @@ test.each(["csv", "json"] as const)(
             sourcePath: join(linked, `findings.${format}`),
             dryRun,
           },
-          { environment: context.environment },
+          context.dependencies,
         ),
       ).rejects.toThrow("Import source must not traverse directory links");
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
@@ -327,7 +375,7 @@ test.each(process.platform === "win32" ? ["directory"] : ["directory", "FIFO"])(
     if (kind === "directory") await mkdir(context.options.sourcePath);
     else execFileSync("mkfifo", [context.options.sourcePath]);
     await expect(
-      importScan(context.options, { environment: context.environment }),
+      importScan(context.options, context.dependencies),
     ).rejects.toThrow("Import source must be a regular file");
     await expect(stat(context.stateDirectory)).rejects.toMatchObject({
       code: "ENOENT",
@@ -348,7 +396,7 @@ test.each(["regular file", "symbolic link"])(
     const context = await fixture("json");
     const originalOpen = filesystem.open;
     let replaced = false;
-    let read = false;
+    const observeRead = mock(rejecting("Read a replaced source"));
     let restoreRead: (() => void) | undefined;
     const opening = spyOn(filesystem, "open").mockImplementation(
       async (...args: Parameters<typeof filesystem.open>) => {
@@ -365,20 +413,17 @@ test.each(["regular file", "symbolic link"])(
         }
         replaced = true;
         const file = await originalOpen(...args);
-        const reading = spyOn(file, "readFile").mockImplementation(async () => {
-          read = true;
-          throw new Error("Read a replaced source");
-        });
+        const reading = spyOn(file, "readFile").mockImplementation(observeRead);
         restoreRead = () => reading.mockRestore();
         return file;
       },
     );
     try {
       await expect(
-        importScan(context.options, { environment: context.environment }),
+        importScan(context.options, context.dependencies),
       ).rejects.toThrow();
       expect(replaced).toBe(true);
-      expect(read).toBe(false);
+      expect(observeRead).not.toHaveBeenCalled();
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -392,7 +437,7 @@ test.each(["regular file", "symbolic link"])(
 test("reimporting the retained source preserves finding identities with new scan occurrences", async () => {
   const context = await fixture();
   const first = completed(
-    await importScan(context.options, { environment: context.environment }),
+    await importScan(context.options, context.dependencies),
   );
   const recipe = await runWorkbench(context.workbenchOptions, [
     "get-scan-recipe",
@@ -409,7 +454,7 @@ test("reimporting the retained source preserves finding identities with new scan
         sourcePath: imported.sourcePath,
         parentScanId: first.manifest.scan.id,
       },
-      { environment: context.environment },
+      context.dependencies,
     ),
   );
   expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
@@ -434,13 +479,11 @@ test("reimporting the retained source preserves finding identities with new scan
 
 test("dry run validates source rows without creating database state or invoking the workbench", async () => {
   const context = await fixture();
-  const unexpected = async () => {
-    throw new Error("Dry run invoked scan persistence");
-  };
+  const unexpected = rejecting("Dry run invoked scan persistence");
   const result = await importScan(
     { ...context.options, dryRun: true },
     {
-      environment: context.environment,
+      ...context.dependencies,
       runWorkbench: unexpected,
       resolvePluginPython: unexpected,
     },
@@ -459,7 +502,7 @@ test("dry run validates source rows without creating database state or invoking 
     importScan(
       { ...context.options, dryRun: true },
       {
-        environment: context.environment,
+        ...context.dependencies,
         runWorkbench: unexpected,
       },
     ),
@@ -469,41 +512,145 @@ test("dry run validates source rows without creating database state or invoking 
   });
 });
 
-test("imports archive prior output without replacing its saved findings", async () => {
-  const context = await fixture();
-  const options = {
-    ...context.options,
-    outputDir: join(context.root, "results"),
-  };
-  const first = completed(
-    await importScan(options, { environment: context.environment }),
-  );
-  const originalManifest = await readFile(first.manifestPath, "utf8");
-  await expect(
-    importScan(options, { environment: context.environment }),
-  ).rejects.toThrow();
-  expect(await readFile(first.manifestPath, "utf8")).toBe(originalManifest);
-  const second = completed(
-    await importScan(
-      { ...options, archiveExisting: true },
-      {
-        environment: context.environment,
+test.each(["bundled", "legacy"])(
+  "imports with %s helpers archive prior output without replacing its saved findings",
+  async (helper) => {
+    const context = await fixture();
+    const options = {
+      ...context.options,
+      ...(helper === "legacy"
+        ? {
+            config: {
+              ...context.options.config,
+              pluginPath: await legacyArchivePlugin(context),
+            },
+          }
+        : {}),
+      outputDir: join(context.root, "results"),
+    };
+    const first = completed(await importScan(options, context.dependencies));
+    const originalManifest = await readFile(first.manifestPath, "utf8");
+    await expect(importScan(options, context.dependencies)).rejects.toThrow();
+    expect(await readFile(first.manifestPath, "utf8")).toBe(originalManifest);
+    const second = completed(
+      await importScan(
+        { ...options, archiveExisting: true },
+        context.dependencies,
+      ),
+    );
+    const scans = await storedScans(context);
+    expect(scans).toHaveLength(2);
+    const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
+    expect(archived.scan_dir).not.toBe(second.scanDir);
+    expect(archived.occurrence_count).toBe(2);
+    expect(
+      await readFile(join(archived.scan_dir, "scan-manifest.json"), "utf8"),
+    ).toBe(originalManifest);
+    expect(
+      (await loadContract(archived.scan_dir, { pluginRoot: PLUGIN_ROOT }))
+        .findings.findings,
+    ).toHaveLength(2);
+  },
+);
+
+test.each(["active scan", "missing parent"])(
+  "legacy registration restores output after rejecting %s",
+  async (reason) => {
+    const context = await fixture();
+    const options = {
+      ...context.options,
+      config: {
+        ...context.options.config,
+        pluginPath: await legacyArchivePlugin(context),
       },
-    ),
-  );
-  const scans = await storedScans(context);
-  expect(scans).toHaveLength(2);
-  const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
-  expect(archived.scan_dir).not.toBe(second.scanDir);
-  expect(archived.occurrence_count).toBe(2);
-  expect(
-    await readFile(join(archived.scan_dir, "scan-manifest.json"), "utf8"),
-  ).toBe(originalManifest);
-  expect(
-    (await loadContract(archived.scan_dir, { pluginRoot: PLUGIN_ROOT }))
-      .findings.findings,
-  ).toHaveLength(2);
-});
+      outputDir: join(context.root, "results"),
+    };
+    const first = completed(await importScan(options, context.dependencies));
+    const manifest = await readFile(first.manifestPath, "utf8");
+    if (reason === "active scan") {
+      const update = await runCommand(
+        context.python,
+        [
+          "-c",
+          "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE scans SET status='running'\"); c.commit()",
+          join(context.stateDirectory, "workbench.sqlite3"),
+        ],
+        { timeout: 30_000 },
+      );
+      expect(update.status, update.stderr).toBe(0);
+    }
+    await expect(
+      importScan(
+        {
+          ...options,
+          archiveExisting: true,
+          ...(reason === "missing parent"
+            ? { parentScanId: "00000000-0000-4000-8000-000000000001" }
+            : {}),
+        },
+        context.dependencies,
+      ),
+    ).rejects.toThrow(
+      reason === "active scan" ? "running scan" : "scan not found",
+    );
+    expect(await readFile(first.manifestPath, "utf8")).toBe(manifest);
+    expect(await storedScans(context)).toHaveLength(1);
+    expect((await storedScans(context))[0]?.scan_dir).toBe(first.scanDir);
+  },
+);
+
+test.each(["response lost", "state unreadable"])(
+  "legacy registration preserves its archive when %s after commit",
+  async (failure) => {
+    const context = await fixture();
+    const pluginPath = await legacyArchivePlugin(context);
+    const options = {
+      ...context.options,
+      config: { ...context.options.config, pluginPath },
+      outputDir: join(context.root, "results"),
+    };
+    const first = completed(await importScan(options, context.dependencies));
+    const manifest = await readFile(first.manifestPath, "utf8");
+    const helper = join(pluginPath, "scripts", "workbench_db.py");
+    const original = await readFile(helper, "utf8");
+    await writeFile(
+      helper,
+      original
+        .replace(
+          "import runpy, sys",
+          [
+            "import contextlib, io, runpy, sys",
+            "from pathlib import Path",
+            "args = sys.argv[1:]",
+            ...(failure === "state unreadable"
+              ? [
+                  'if args and args[0] == "list-scans" and Path(__file__).with_suffix(".committed").exists():',
+                  '    raise SystemExit("Synthetic state read failure")',
+                ]
+              : []),
+          ].join("\n"),
+        )
+        .replace(
+          "runpy.run_path(",
+          'lost_response = args and args[0] == "register-cli-scan"\nwith contextlib.redirect_stdout(io.StringIO()) if lost_response else contextlib.nullcontext():\n    runpy.run_path(',
+        ) +
+        '\nif lost_response:\n    Path(__file__).with_suffix(".committed").touch()\n    raise SystemExit("Synthetic response lost after commit")\n',
+    );
+    await expect(
+      importScan({ ...options, archiveExisting: true }, context.dependencies),
+    ).rejects.toThrow("Synthetic response lost after commit");
+    const scans = await storedScans(context);
+    expect(scans).toHaveLength(2);
+    const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
+    expect(archived.scan_dir).not.toBe(first.scanDir);
+    expect(
+      await readFile(join(archived.scan_dir, "scan-manifest.json"), "utf8"),
+    ).toBe(manifest);
+    expect(
+      await stat(join(first.scanDir, "scan-manifest.json")).catch(() => null),
+    ).toBeNull();
+  },
+);
 
 test.each(["failure", "abort"] as const)(
   "an import %s after registration leaves a terminal saved scan",
@@ -522,7 +669,7 @@ test.each(["failure", "abort"] as const)(
     const operation = importScan(
       { ...context.options, signal: controller.signal },
       {
-        environment: context.environment,
+        ...context.dependencies,
         runWorkbench: run,
       },
     );
