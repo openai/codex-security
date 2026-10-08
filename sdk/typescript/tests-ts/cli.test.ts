@@ -22,6 +22,8 @@ import type {
 import {
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
+  LocalPluginBootstrapError,
+  PluginBootstrapError,
   DiffTarget,
   InvalidTargetError,
   OutputDirectoryError,
@@ -139,6 +141,45 @@ async function multiscanInventory(root: string): Promise<void> {
 }
 
 describe("CLI", () => {
+  test("preserves typed local plugin failure origin and diagnostic details", async () => {
+    const cause = new Error("Synthetic plugin preparation detail.");
+    const localFailure = new LocalPluginBootstrapError(
+      "Synthetic plugin preparation failed.",
+      { cause },
+    );
+    const installerFailure = new PluginBootstrapError(
+      "Synthetic plugin connection failed.",
+    );
+    expect(localFailure).toBeInstanceOf(PluginBootstrapError);
+    expect(localFailure.cause).toBe(cause);
+    expect(installerFailure).not.toBeInstanceOf(LocalPluginBootstrapError);
+    for (const [failure, classification] of [
+      [localFailure, "local"],
+      [installerFailure, "network_error"],
+    ] as const) {
+      for (const format of ["json", "jsonl"] as const) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const deps = dependencies({
+          onRun: () => {
+            throw failure;
+          },
+        });
+        expect(
+          await runCli(["scan", ".", "--verbose", "--format", format], deps),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          status: "failed",
+          code: "SCAN_FAILED",
+        });
+        expect(stderr.text()).toContain(failure.message);
+        expect(stderr.text()).toContain(
+          `scan.failed classification="${classification}"`,
+        );
+        expect(JSON.parse(stdout.text()).message).toContain(failure.message);
+      }
+    }
+  });
+
   test("passes the safety identifier as a per-scan option", async () => {
     const onTurn = mock<(repository: string, options: unknown) => void>();
     const stderr = captureCli(main, "stderr");
@@ -653,12 +694,17 @@ describe("CLI", () => {
 
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await temporaryDirectory("codex-security-cli-multiscan-");
-    const architecturePath = resolve(root, "/shared/architecture.pdf");
-    const threatModelsPath = resolve(root, "/shared/threat-models");
+    const architecturePath = join(root, "architecture.md");
+    const threatModelsPath = join(root, "threat-models");
     try {
       await multiscanInventory(root);
+      await writeFile(architecturePath, "Synthetic architecture context.");
+      await mkdir(threatModelsPath);
+      await writeFile(
+        join(threatModelsPath, "model.md"),
+        "Synthetic threat model.",
+      );
       const { stdout, stderr, runCli } = createCliTest(main);
-
       let config: CodexSecurityConfig | undefined;
       let scanOptions: unknown;
       expect(
@@ -2041,6 +2087,111 @@ describe("CLI", () => {
     expect(text).not.toContain("Running scan: preflight");
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
+
+  test.each([false, true])(
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=%s)",
+    async (interactive) => {
+      const { stdout, stderr, runCli } = createCliTest(main, {
+        stderr: interactive,
+      });
+      const deps = dependencies({ environment: { NO_COLOR: "1" } });
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
+          options?.onProgress?.({
+            phase: "preflight",
+            filesCompleted: 0,
+            filesTotal: 128,
+          });
+          expect(options?.onDeepProgress).toBeFunction();
+          const initial = stderr.text();
+          options?.onDeepProgress?.({
+            completed: 0,
+            active: 0,
+            maximum: 16,
+            consolidating: false,
+          });
+          expect(stderr.text()).toBe(initial);
+          options?.onDeepProgress?.({
+            completed: 0,
+            active: 4,
+            maximum: 16,
+            consolidating: false,
+          });
+          expect(stripVTControlCharacters(stderr.text())).toContain(
+            "discovery",
+          );
+          options?.onDeepProgress?.({
+            completed: 2,
+            active: 2,
+            maximum: 16,
+            consolidating: true,
+          });
+          expect(stripVTControlCharacters(stderr.text())).toContain(
+            "consolidating results",
+          );
+          const beforeTerminal = stderr.text().length;
+          options?.onDeepProgress?.({
+            completed: 4,
+            active: 0,
+            maximum: 16,
+            consolidating: false,
+          });
+          const terminal = stripVTControlCharacters(
+            stderr.text().slice(beforeTerminal),
+          );
+          expect(terminal).toContain("consolidating results");
+          expect(terminal).not.toContain("discovery");
+          const beforeDiscovery = stderr.text().length;
+          options?.onDeepProgress?.({
+            completed: 4,
+            active: 2,
+            maximum: 16,
+            consolidating: false,
+          });
+          const resumedDiscovery = stripVTControlCharacters(
+            stderr.text().slice(beforeDiscovery),
+          );
+          expect(resumedDiscovery).toContain("discovery");
+          expect(resumedDiscovery).not.toContain("consolidating results");
+          options?.onDeepProgress?.({
+            completed: 6,
+            active: 0,
+            maximum: 16,
+            consolidating: true,
+          });
+          return fakeResult();
+        });
+
+      expect(
+        await runCli(
+          [
+            "scan",
+            ".",
+            "--mode",
+            "deep",
+            ...(interactive ? [] : ["--headless"]),
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const text = stripVTControlCharacters(stderr.text());
+      expect(text).toContain("Reviews: 0 completed, 4 active, cap 16");
+      expect(text).toContain("Reviews: 2 completed, 2 active, cap 16");
+      if (interactive) {
+        expect(text).not.toContain("STAGE");
+        expect(text).not.toContain("FILES");
+      } else {
+        const running = text
+          .split("\n")
+          .filter((line) => line.includes("Running scan:"))
+          .at(-1);
+        expect(running).toContain("consolidating results");
+        expect(running).not.toContain("Files:");
+      }
+    },
+  );
 
   test("omits stage and file counts from interactive Deep scan dashboards", async () => {
     const { stderr, runCli } = createCliTest(main, { stderr: true });
@@ -4001,6 +4152,58 @@ describe("CLI", () => {
     }
   });
 
+  test("reports a changed target before incomplete coverage in full-output errors", async () => {
+    const warning =
+      "Completed findings no longer describe the selected source tree.";
+    const message =
+      "Scan target changed during execution; results do not represent the current checkout.";
+    for (const completeness of ["partial", "unknown"] as const) {
+      for (const format of ["json", "jsonl"]) {
+        for (const paginated of [false, true]) {
+          const result = fakeResult(["high"], completeness);
+          const stdout = capture();
+          const stderr = capture();
+          const deps = dependencies();
+          deps.createSecurity = () => ({
+            run: async (_repository, options) => {
+              options?.onWarning?.(warning, { kind: "target_changed" });
+              return result;
+            },
+            close: async () => {},
+            preflight: async () => fakePreflight(),
+          });
+          expect(
+            await main(
+              [
+                "scan",
+                "--format",
+                format,
+                "--full-output",
+                "--fail-on-severity",
+                "high",
+                ...(paginated ? ["--token-limit", "1"] : []),
+              ],
+              stdout.stream,
+              stderr.stream,
+              deps,
+            ),
+          ).toBe(2);
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: paginated
+              ? expect.any(String)
+              : {
+                  coverage: { completeness },
+                  warnings: [warning],
+                },
+          });
+          expect(stderr.text()).toContain(message);
+        }
+      }
+    }
+  });
+
   test("preserves non-target warnings without failing the scan", async () => {
     for (const warning of [
       "Recovered finding: normalized its semantic anchor.",
@@ -4752,6 +4955,227 @@ describe("CLI", () => {
         `Scan coverage is ${completeness}; results may be incomplete.`,
       );
     }
+  });
+
+  test.each(["partial", "unknown"] as const)(
+    "marks %s coverage as a full-output error and keeps the scan results",
+    async (completeness) => {
+      const result = fakeResult(["high"], completeness);
+      for (const format of [
+        ["--json"],
+        ["--format", "json"],
+        ["--format", "jsonl"],
+      ]) {
+        for (const policy of [false, true]) {
+          const stdout = capture();
+          const stderr = capture();
+          expect(
+            await main(
+              [
+                "scan",
+                ".",
+                ...format,
+                "--full-output",
+                ...(policy ? ["--fail-on-severity", "critical"] : []),
+              ],
+              stdout.stream,
+              stderr.stream,
+              dependencies({ result }),
+            ),
+          ).toBe(2);
+          const envelope = JSON.parse(stdout.text());
+          const message = policy
+            ? `Cannot evaluate the failure policy: coverage is ${completeness}.`
+            : `Scan coverage is ${completeness}; results may be incomplete.`;
+          expect(envelope).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: JSON.parse(JSON.stringify(result.toJSON())),
+            meta: { command: "scan" },
+          });
+          expect(stderr.text()).toContain(message);
+          if (format.includes("jsonl"))
+            expect(stdout.text().trim().split("\n")).toHaveLength(1);
+        }
+      }
+    },
+  );
+
+  test.each(["rerun", "resume"] as const)(
+    "reports incomplete %s coverage in the full-output error envelope",
+    async (command) => {
+      for (const completeness of ["partial", "unknown"] as const) {
+        for (const format of ["json", "jsonl"]) {
+          const result = fakeResult(["high"], completeness);
+          const stdout = capture();
+          const stderr = capture();
+          const recipe = {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: command === "resume" ? "deep" : "standard",
+            config: {},
+          };
+          expect(
+            await main(
+              [
+                "scans",
+                command,
+                "scan-original",
+                "--format",
+                format,
+                "--full-output",
+              ],
+              stdout.stream,
+              stderr.stream,
+              dependencies({
+                result,
+                onWorkbench: (args): JsonObject =>
+                  args[0] === "get-cli-scan-resume"
+                    ? {
+                        scanId: "scan-original",
+                        scanDir: "/tmp/saved-scan",
+                        recipe,
+                      }
+                    : args[0] === "get-scan-recipe"
+                      ? { recipe }
+                      : {},
+              }),
+            ),
+          ).toBe(2);
+          const message = `Scan coverage is ${completeness}; results may be incomplete.`;
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: JSON.parse(JSON.stringify(result.toJSON())),
+          });
+          expect(stderr.text()).toContain(message);
+          if (format === "jsonl")
+            expect(stdout.text().trim().split("\n")).toHaveLength(1);
+        }
+      }
+    },
+  );
+
+  test.each(["rerun", "resume"] as const)(
+    "matches the %s full-output error schema to filtered data",
+    async (command) => {
+      const schemaOutput = capture();
+      expect(
+        await main(
+          ["scans", command, "--schema", "--format", "json"],
+          schemaOutput.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      const schema = JSON.parse(schemaOutput.text()).output.anyOf.find(
+        (variant: { properties?: { ok?: { const?: boolean } } }) =>
+          variant.properties?.ok?.const === false,
+      );
+      expect(schema.properties.data).toEqual({});
+      expect(schema.required).toEqual(["ok", "error", "meta"]);
+
+      const result = fakeResult(["high"], "partial");
+      const recipe = {
+        repository: "/original/repository",
+        target: { kind: "repository", paths: [] },
+        mode: command === "resume" ? "deep" : "standard",
+        config: {},
+      };
+      for (const format of ["json", "jsonl"]) {
+        for (const [filter, expected] of [
+          ["cost", null],
+          ["sarifPath", null],
+          ["warnings", undefined],
+          ["threadId", result.threadId],
+          [
+            "findings",
+            {
+              findings: JSON.parse(JSON.stringify(result.toJSON()["findings"])),
+            },
+          ],
+        ] as const) {
+          const output = capture();
+          expect(
+            await main(
+              [
+                "scans",
+                command,
+                "scan-original",
+                "--format",
+                format,
+                "--full-output",
+                "--filter-output",
+                filter,
+              ],
+              output.stream,
+              capture().stream,
+              dependencies({
+                result,
+                onWorkbench: () => ({
+                  scanId: "scan-original",
+                  scanDir: "/tmp/saved-scan",
+                  recipe,
+                }),
+              }),
+            ),
+          ).toBe(2);
+          const envelope = JSON.parse(output.text());
+          expect(envelope).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED" },
+            meta: expect.any(Object),
+          });
+          if (expected === undefined)
+            expect(envelope).not.toHaveProperty("data");
+          else expect(envelope.data).toEqual(expected);
+        }
+      }
+    },
+  );
+
+  test("preserves full-output token controls and the completed findings-policy envelope", async () => {
+    const partial = fakeResult(["high"], "partial");
+    const page = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--full-output", "--token-limit", "1"],
+        page.stream,
+        capture().stream,
+        dependencies({ result: partial }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(page.text())).toMatchObject({
+      ok: false,
+      error: { code: "SCAN_FAILED" },
+      data: expect.any(String),
+      meta: { nextOffset: 1 },
+    });
+    const count = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--full-output", "--token-count"],
+        count.stream,
+        capture().stream,
+        dependencies({ result: partial }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(count.text())).toBeNumber();
+    const complete = fakeResult(["high"]);
+    const blocked = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--full-output", "--fail-on-severity", "high"],
+        blocked.stream,
+        capture().stream,
+        dependencies({ result: complete }),
+      ),
+    ).toBe(1);
+    expect(JSON.parse(blocked.text())).toMatchObject({
+      ok: true,
+      data: JSON.parse(JSON.stringify(complete.toJSON())),
+    });
+    expect(JSON.parse(blocked.text())).not.toHaveProperty("error");
   });
 
   test("reports SDK errors without a stack trace", async () => {

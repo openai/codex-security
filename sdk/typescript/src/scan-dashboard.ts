@@ -564,7 +564,9 @@ export class ScanDashboard {
     const files =
       this.#files === null
         ? "waiting for inventory"
-        : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
+        : this.#files.filesCompleted > 0
+          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
+          : `${formatCount(this.#files.filesTotal)} in scope`;
     const history = this.#activityLines(width);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);

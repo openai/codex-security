@@ -90,7 +90,7 @@ export function generateNoteSections(changes) {
             "",
             ...breaking.map(changeLine),
           ].join("\n")
-        : "Review compatibility and document any required migration steps before releasing.",
+        : "No additional migration steps are documented for this release.",
     ].join("\n"),
   };
 }

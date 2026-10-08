@@ -3,6 +3,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   writeFile,
 } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -70,8 +71,12 @@ for (const output of Object.values(built.metafile.outputs)) {
   }
 }
 const notices = [];
-for (const directory of [...packages].sort()) {
-  const path = join(root, directory);
+const packagePaths = new Set(
+  await Promise.all(
+    [...packages].map((directory) => realpath(join(root, directory))),
+  ),
+);
+for (const path of [...packagePaths].sort()) {
   const manifest = JSON.parse(
     await readFile(join(path, "package.json"), "utf8"),
   );

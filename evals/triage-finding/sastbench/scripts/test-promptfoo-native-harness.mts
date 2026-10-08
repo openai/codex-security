@@ -17,7 +17,7 @@ const packageJson = JSON.parse(
   fs.readFileSync(path.join(evalRoot, "package.json"), "utf8"),
 );
 
-assert.match(config, /working_dir:\s+"\{\{env\.SASTBENCH_RUNTIME_ROOT\}\}"/);
+assert.match(config, /working_dir:\s+"\{\{triage_runtime_root\}\}"/);
 assert.match(config, /skip_git_repo_check:\s+true/);
 assert.doesNotMatch(
   config,
@@ -25,7 +25,7 @@ assert.doesNotMatch(
 );
 assert.match(
   config,
-  /additional_directories:\n\s+- "\{\{env\.SASTBENCH_TARGET_ROOT\}\}"\n\s+- "\{\{env\.SASTBENCH_GIT_CACHE_ROOT\}\}"/,
+  /additional_directories:\n\s+- "\{\{target_repo\}\}"\n\s+- "\{\{sastbench_git_cache_root\}\}"/,
 );
 assert.doesNotMatch(config, /sandbox_mode:/);
 assert.doesNotMatch(config, /network_access_enabled:/);
@@ -86,10 +86,7 @@ assert.match(
 assert.doesNotMatch(sampleConfig, /providers:/);
 assert.doesNotMatch(sampleConfig, /derivedMetrics:/);
 
-assert.match(
-  packageJson.scripts["eval:sastbench"],
-  /run-sastbench-promptfoo\.mts eval/,
-);
+assert.match(packageJson.scripts["eval:sastbench"], /promptfoo eval/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-share/);
 assert.doesNotMatch(packageJson.scripts["eval:sastbench"], /--filter-range/);
@@ -102,11 +99,11 @@ assert.doesNotMatch(
 );
 assert.match(
   packageJson.scripts["validate:sastbench:sample"],
-  /run-sastbench-promptfoo\.mts validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /promptfoo validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
 );
 assert.match(
   packageJson.scripts["eval:sastbench:sample"],
-  /run-sastbench-promptfoo\.mts eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /promptfoo eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
 );
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-share/);
@@ -117,7 +114,7 @@ assert.match(
 assert.equal("sastbench:generate" in packageJson.scripts, false);
 assert.equal(
   fs.existsSync(path.join(import.meta.dirname, "run-sastbench-promptfoo.mts")),
-  true,
+  false,
 );
 assert.equal(
   fs.existsSync(
