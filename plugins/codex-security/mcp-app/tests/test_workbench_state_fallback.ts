@@ -1,4 +1,5 @@
 import { readJsonLines } from "./support/json.ts";
+import { assertNoError } from "./assertions.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -16,7 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
-import * as streams from "./support/streams.ts";
+import { startRpcServer } from "./support/rpc-server.ts";
 
 if (process.platform !== "win32") {
   await testWorkbenchStateFallback();
@@ -490,14 +491,15 @@ async function writeFakePython(executablePath: string) {
 }
 
 function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
-  return streams.startServer(
-    serverPath,
-    { ...process.env, ...env },
+  return startRpcServer(
     {
+      command: process.execPath,
+      args: [serverPath, "--stdio"],
       cwd: path.dirname(path.dirname(serverPath)),
-      component: "codex_security_workbench",
-      timeoutMessage: (id) => `Timed out waiting for response ${id}`,
+      env: { ...process.env, ...env },
+      stderr: "pipe",
     },
+    { component: "codex_security_workbench", timeoutMs: 15_000 },
   );
 }
 
@@ -580,18 +582,6 @@ function reopenWorkspace(
     arguments: { sessionId },
     _meta: { "openai/threadId": threadId },
   });
-}
-
-function assertNoError(response: {
-  error?: { message?: string };
-  result?: { isError?: boolean; content?: { text?: string }[] };
-}) {
-  assert.equal(response.error, undefined, response.error?.message!);
-  assert.equal(
-    response.result?.isError,
-    undefined,
-    response.result?.content?.[0]?.text!,
-  );
 }
 
 function assertToolError(
