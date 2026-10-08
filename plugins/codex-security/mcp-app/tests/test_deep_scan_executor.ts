@@ -2539,12 +2539,7 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
     await mkdir(workingDirectory);
-    await writeFile(
-      promptPath,
-      kind === undefined
-        ? "COMPLETE_THEN_HANG\n"
-        : "COMPLETE_THEN_HANG_IGNORE_TERMINATION\n",
-    );
+    await writeFile(promptPath, "COMPLETE_THEN_HANG\n");
     execution = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
     }).run({
@@ -2583,9 +2578,7 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     assert.deepEqual(unexpectedErrors, []);
-    if (kind === undefined) {
-      assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
-    }
+    assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
   } finally {
     clearTimeout(timeout);
     controller.abort("completed worker fixture cleanup");

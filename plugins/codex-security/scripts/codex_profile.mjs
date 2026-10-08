@@ -78,7 +78,6 @@ class ProfileThread {
 
   async *events(input, turnOptions) {
     let schemaDirectory;
-    let completed = false;
     try {
       let schemaPath;
       if (turnOptions.outputSchema !== undefined) {
@@ -106,7 +105,6 @@ class ProfileThread {
         args,
         input,
         turnOptions.signal,
-        () => completed,
       )) {
         let event;
         try {
@@ -130,7 +128,6 @@ class ProfileThread {
         }
         if (event.type === "thread.started") this.id = event.thread_id;
         if (event.type === "turn.completed") {
-          completed = true;
           if (event.usage != null) event.usage.cache_write_input_tokens ??= 0;
         }
         yield event;
@@ -201,7 +198,7 @@ function toml(value) {
   throw new Error("Codex config overrides must contain finite TOML values");
 }
 
-async function* execute(options, args, input, signal, isCompleted) {
+async function* execute(options, args, input, signal) {
   const env = { ...(options.env ?? process.env) };
   env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE ||= "codex_sdk_ts";
   if (options.apiKey) env.CODEX_API_KEY = options.apiKey;
@@ -238,8 +235,7 @@ async function* execute(options, args, input, signal, isCompleted) {
     if (inputError) throw inputError;
   } finally {
     lines.close();
-    if (child.exitCode === null && child.signalCode === null)
-      child.kill(isCompleted() ? "SIGKILL" : undefined);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
     child.stdout.destroy();
     child.stderr.destroy();
     await closed;

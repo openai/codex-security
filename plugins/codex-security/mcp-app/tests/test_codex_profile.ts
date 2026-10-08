@@ -562,7 +562,7 @@ for (const resumed of [false, true]) {
         assert.equal(record.args.includes("resume"), resumed);
         assert.equal(record.environment.CODEX_HOME, f.options.env.CODEX_HOME);
         assert.equal(record.environment.CODEX_API_KEY, "synthetic-api-key");
-        assert.doesNotThrow(() => process.kill(record.pid, 0));
+        assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
         await assert.rejects(readFile(record.schemaPath), { code: "ENOENT" });
       } finally {
         clearTimeout(timeout);
