@@ -16,7 +16,11 @@ import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { prepareExternalPublication } from "../src/external-findings-publish.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
-import { validateImportRequest } from "../src/external-import-contract.js";
+import {
+  validateExternalEvidence,
+  validateImportRequest,
+  validateRepositories,
+} from "../src/external-import-contract.js";
 import type {
   FindingImportReceipt,
   FindingImportRequest,
@@ -355,6 +359,142 @@ test("unsupported records are visible exclusions; duplicate identities and unfin
     }),
   );
   await expect(readVendorFindings(f.file)).rejects.toThrow("another page");
+});
+
+test("Cloud evidence constraints exclude invalid normalized records before approval", async () => {
+  let nested: unknown = "leaf";
+  for (let index = 0; index < 20; index++) nested = { child: nested };
+  const invalid = [
+    { title: "é".repeat(300) },
+    { description: "" },
+    { packages: [{ name: "example", installed_version: "1.0\0" }] },
+    { advisory_ids: ["é".repeat(300)] },
+    { locations: [{ path: "../outside.ts" }] },
+    { url: "https://user@example.test/finding" },
+    { source_data: { content: "x".repeat(6 * 1024 * 1024) } },
+    { source_data: { nested } },
+    { url: "https://[example.test" },
+  ].map((evidence, index) => ({
+    source_finding_id: `invalid-${index}`,
+    evidence: { ...normalized().evidence, ...evidence },
+  }));
+  const f = await fixture([normalized(), ...invalid]);
+  const cli = createCliTest(main);
+  expect(await cli.runCli([...f.command, "--dry-run"], f.cliDeps)).toBe(0);
+  const preview = JSON.parse(cli.stdout.text());
+  expect(preview.findings).toHaveLength(1);
+  expect(preview.excluded).toHaveLength(invalid.length);
+  expect(preview.excluded[6].reason).toContain("256 KiB");
+  expect(f.posts).toHaveLength(0);
+  await writeFile(f.file, JSON.stringify(invalid));
+  const rejected = createCliTest(main);
+  expect(await rejected.runCli([...f.command, "--yes"], f.cliDeps)).toBe(2);
+  expect(rejected.stderr.text()).toContain("No supported findings");
+  expect(f.posts).toHaveLength(0);
+  expect(await readdir(join(f.root, "state")).catch(() => [])).toEqual([]);
+});
+
+test("raw Wiz records apply Cloud string and URL constraints before approval", async () => {
+  const wiz = {
+    id: "wiz-valid",
+    name: "CVE-2099-0001",
+    detailedName: "example-package",
+    vendorSeverity: "HIGH",
+    vulnerableAsset: { id: "example-image" },
+  };
+  const f = await fixture([
+    wiz,
+    { ...wiz, id: "wiz-title", title: "é".repeat(300) },
+    { ...wiz, id: "é".repeat(300) },
+    { ...wiz, id: "wiz\0id" },
+    { ...wiz, id: "wiz-url", portalUrl: "https://@example.test" },
+  ]);
+  const cli = createCliTest(main);
+  expect(await cli.runCli([...f.command, "--dry-run"], f.cliDeps)).toBe(0);
+  const preview = JSON.parse(cli.stdout.text());
+  expect(preview.findings).toHaveLength(1);
+  expect(preview.excluded).toHaveLength(4);
+  expect(f.posts).toHaveLength(0);
+});
+
+test("Cloud validation preserves allowed evidence boundaries and raw vendor strings", () => {
+  let nested: unknown = "leaf";
+  for (let index = 0; index < 18; index++) nested = { child: nested };
+  const evidence = {
+    title: "é".repeat(256),
+    severity: "high" as const,
+    description: "é".repeat(32768),
+    url: "https://example.test:non-numeric/finding",
+    advisory_ids: [" ", "\0", "é".repeat(256)],
+    packages: [{ name: "example", manifest_path: "../vendor-manifest" }],
+    locations: [{ path: "src\\example.ts" }],
+    source_data: { nested, title: "", path: "\0", content: "x".repeat(4096) },
+  };
+  expect(validateExternalEvidence(evidence)).toEqual(evidence);
+  for (const url of [
+    "ftp://example.test",
+    "https:///finding",
+    "https:\\example.test",
+    "http://@example.test",
+  ]) {
+    expect(() => validateExternalEvidence({ ...evidence, url })).toThrow(
+      "HTTP(S)",
+    );
+  }
+  for (const path of ["/absolute.ts", "C:\\source.ts", "src\\..\\outside.ts"]) {
+    expect(() =>
+      validateExternalEvidence({ ...evidence, locations: [{ path }] }),
+    ).toThrow("repository-relative");
+  }
+  expect(() =>
+    validateExternalEvidence({ ...evidence, source_data: { value: Infinity } }),
+  ).toThrow("finite JSON");
+});
+
+test("request and pagination metadata retain Cloud byte limits and distinct identities", async () => {
+  const f = await fixture();
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const request = prepared.preview.requests[0]!;
+  expect(() =>
+    validateImportRequest({
+      ...request,
+      source: { ...request.source, source_key: "tenant\0" },
+    }),
+  ).toThrow("NUL");
+  expect(() =>
+    validateImportRequest({
+      ...request,
+      repository: { ...request.repository, id: "é".repeat(300) },
+    }),
+  ).toThrow("UTF-8");
+  const item = request.items[0]!;
+  expect(() =>
+    validateImportRequest({
+      ...request,
+      items: [{ ...item, client_id: "é".repeat(100) }],
+    }),
+  ).toThrow("128 UTF-8");
+  expect(() =>
+    validateImportRequest({
+      ...request,
+      items: [item, { ...item, source_finding_id: "another" }],
+    }),
+  ).toThrow("duplicate client");
+  expect(() =>
+    validateImportRequest({
+      ...request,
+      items: [item, { ...item, client_id: "another" }],
+    }),
+  ).toThrow("duplicate source");
+  const page = {
+    data: [f.destination()],
+    has_more: true,
+    next: "é".repeat(2048),
+  };
+  expect(validateRepositories(page).next).toBe(page.next);
+  expect(() =>
+    validateRepositories({ ...page, next: `${page.next}é` }),
+  ).toThrow("4096 UTF-8");
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {
@@ -876,7 +1016,7 @@ test("a failed checkpoint leaves the original pending request recoverable", asyn
   const rename = fs.rename;
   const checkpoint = spyOn(fs, "rename").mockImplementation(
     async (source, destination) => {
-      if (String(destination).endsWith(".pending.json"))
+      if (String(destination).endsWith(".pending.json") && f.posts.length > 0)
         throw new Error("Checkpoint interrupted");
       return rename(source, destination);
     },
@@ -907,6 +1047,43 @@ test("a failed checkpoint leaves the original pending request recoverable", asyn
   expect(f.posts[1]).toBe(f.posts[0]);
   expect(f.receipts.size).toBe(1);
 });
+
+test.each(["pending", "result"])(
+  "a failed %s file installation cleans up temporary files and can be retried",
+  async (stage) => {
+    const f = await fixture();
+    const rename = fs.rename;
+    const installation = spyOn(fs, "rename").mockImplementation(
+      async (source, destination) => {
+        if (String(destination).endsWith(`.${stage}.json`))
+          throw new Error("File installation interrupted");
+        return rename(source, destination);
+      },
+    );
+    try {
+      await expect(
+        (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+      ).rejects.toThrow("File installation interrupted");
+    } finally {
+      installation.mockRestore();
+    }
+    const directory = join(f.root, "state", "external-finding-publications");
+    const files = await readdir(directory);
+    expect(files.filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(files.some((name) => name.endsWith(".pending.json"))).toBe(
+      stage === "result",
+    );
+    expect(f.posts).toHaveLength(stage === "result" ? 1 : 0);
+    expect(
+      (
+        await (
+          await prepareExternalPublication(f.file, options, f.deps)
+        ).publish()
+      ).counts.created,
+    ).toBe(1);
+    expect(f.posts).toHaveLength(1);
+  },
+);
 
 test.each(["request", "counts", "length", "schema"])(
   "cached receipts retain publication validation (%s)",

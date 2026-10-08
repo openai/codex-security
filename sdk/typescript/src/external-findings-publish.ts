@@ -1,14 +1,6 @@
 import { hash, randomUUID } from "node:crypto";
 import { chmodSync } from "node:fs";
-import {
-  link,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  rm,
-} from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -94,15 +86,12 @@ function sameSubmission(
   );
 }
 
-async function checkpointSubmission(
-  path: string,
-  submission: SavedSubmission,
-): Promise<void> {
+async function writeAtomicJson(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, "wx", 0o600);
     try {
-      await file.writeFile(JSON.stringify(submission));
+      await file.writeFile(JSON.stringify(value));
       await file.sync();
     } finally {
       await file.close();
@@ -419,40 +408,28 @@ export async function prepareExternalPublication(
     preview,
     async publish() {
       return await withImportLock(state, key, dependencies.signal, async () => {
-        // Install a fully written file atomically. A crash during serialization
-        // must not leave a partial request that cannot be resumed.
-        const pendingTemporary = `${pendingPath}.${randomUUID()}.tmp`;
-        let receipts: FindingImportReceipt[] = [];
-        try {
-          const pendingFile = await open(pendingTemporary, "wx", 0o600);
-          try {
-            await pendingFile.writeFile(JSON.stringify(submission));
-            await pendingFile.sync();
-          } finally {
-            await pendingFile.close();
-          }
-          try {
-            receipts = (submission.receipts ?? []).map(validateImportReceipt);
-            await link(pendingTemporary, pendingPath);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-            const other = JSON.parse(
-              await readFile(pendingPath, "utf8"),
-            ) as SavedSubmission;
-            if (!sameSubmission(other, submission)) {
-              throw new CodexSecurityError(
-                "Another publication prepared this input. Run the command again to review and resume that saved request.",
-              );
-            }
-            receipts = (other.receipts ?? []).map(validateImportReceipt);
-          }
-        } finally {
-          await rm(pendingTemporary, { force: true });
-        }
+        // Re-read under the lock to keep checkpoints from another publisher.
+        const pending = await readFile(pendingPath, "utf8").catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return undefined;
+            throw error;
+          },
+        );
+        const current =
+          pending === undefined
+            ? submission
+            : (JSON.parse(pending) as SavedSubmission);
+        if (!sameSubmission(current, submission))
+          throw new CodexSecurityError(
+            "Another publication prepared this input. Run the command again to review and resume that saved request.",
+          );
+        const receipts = (current.receipts ?? []).map(validateImportReceipt);
         if (receipts.length > requests.length)
           throw new CodexSecurityError(
             "Saved publication has more receipts than requests.",
           );
+        if (pending === undefined)
+          await writeAtomicJson(pendingPath, submission);
         try {
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validateImportReceipt(
@@ -507,7 +484,7 @@ export async function prepareExternalPublication(
               receipts.push(receipt);
               // Acknowledged batches must not consume another POST quota on retry.
               // Readback can still resume after this checkpoint without replaying writes.
-              await checkpointSubmission(pendingPath, {
+              await writeAtomicJson(pendingPath, {
                 ...submission,
                 receipts,
               });
@@ -560,19 +537,7 @@ export async function prepareExternalPublication(
           counts,
           cloudUrl: `https://chatgpt.com/codex/cloud/security/findings?repo=${encodeURIComponent(destination.url)}&source=imported&provider=${source.provider}`,
         };
-        const temporary = `${pendingPath}.${randomUUID()}.tmp`;
-        try {
-          const file = await open(temporary, "wx", 0o600);
-          try {
-            await file.writeFile(JSON.stringify(result));
-            await file.sync();
-          } finally {
-            await file.close();
-          }
-          await rename(temporary, join(state, `${key}.result.json`));
-        } finally {
-          await rm(temporary, { force: true });
-        }
+        await writeAtomicJson(join(state, `${key}.result.json`), result);
         await rm(pendingPath, { force: true });
         return result;
       });
