@@ -18,6 +18,7 @@ import secrets
 import stat
 import struct
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
@@ -1462,6 +1463,14 @@ def _populate_unsealed_artifact_envelope(
         coverage["excludePaths"] = copy.deepcopy(scope["excludePaths"])
 
 
+def _completion_warning_strings(warnings: list[str] | None) -> list[str]:
+    recorded: list[str] = []
+    for warning in warnings or []:
+        if isinstance(warning, str) and warning.strip() and warning not in recorded:
+            recorded.append(warning)
+    return recorded
+
+
 def _normalize_unsealed_open_questions(coverage: dict[str, Any]) -> None:
     """Keep only schema-valid optional open-question rows without inventing content."""
 
@@ -2655,16 +2664,24 @@ def build_sarif_projection(
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
     execution_successful = manifest["scan"]["status"] == "completed"
-    if not execution_successful or coverage["completeness"] != "complete":
+    run_warnings = _completion_warning_strings(coverage.get("warnings"))
+    if not execution_successful or coverage["completeness"] != "complete" or run_warnings:
         run = sarif["runs"][0]
         run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
+        deferred_reasons = {item["reason"] for item in coverage["deferred"]}
+        notifications = [
+            {"level": "warning", "message": {"text": warning}}
+            for warning in run_warnings
+            if warning not in deferred_reasons
+        ]
+        notifications.extend(
+            {"level": "warning", "message": {"text": item["reason"]}}
+            for item in coverage["deferred"]
+        )
         run["invocations"] = [
             {
                 "executionSuccessful": execution_successful,
-                "toolExecutionNotifications": [
-                    {"level": "warning", "message": {"text": item["reason"]}}
-                    for item in coverage["deferred"]
-                ],
+                "toolExecutionNotifications": notifications,
             }
         ]
     return sarif
@@ -2895,6 +2912,8 @@ def _prepare_scan_finalization(
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
+    recover_drafts: bool = True,
+    refresh_completion_warnings: Callable[[], None] | None = None,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
@@ -2958,7 +2977,7 @@ def _prepare_scan_finalization(
     findings_for_validation = (
         _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
     )
-    if not was_sealed and completion_warnings is not None:
+    if not was_sealed and completion_warnings is not None and recover_drafts:
         discarded_findings = _recover_unsealed_findings(
             manifest, findings, schema_dir, scan_dir, completion_warnings
         )
@@ -2977,28 +2996,56 @@ def _prepare_scan_finalization(
     )
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
+    if refresh_completion_warnings is not None:
+        refresh_completion_warnings()
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-        report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
-        _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
+        validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
+        validate_against_schema(coverage, schema_dir / "coverage.schema.json")
+        if not any(
+            warning not in coverage.get("warnings", [])
+            for warning in _completion_warning_strings(completion_warnings)
+        ):
+            report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
+            _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
+            return (
+                scan_dir,
+                schema_dir,
+                manifest,
+                findings,
+                coverage,
+                was_sealed,
+                report_markdown_bytes,
+            )
+        was_sealed = False
+
+    warnings = _completion_warning_strings(
+        [*coverage.get("warnings", []), *(completion_warnings or [])]
+    )
+    if warnings:
+        coverage["warnings"] = warnings
     else:
-        findings_bytes = _contract_json_bytes("findings.json", findings)
-        coverage_bytes = _contract_json_bytes("coverage.json", coverage)
-        report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
-        _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
-        scan["artifacts"] = [
-            _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
-            _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
-            *[
-                _artifact_record(scan_dir, ref, "application/octet-stream")
-                for ref in _coverage_receipt_refs(coverage)
-            ],
-        ]
-        _validate_manifest(manifest)
-        validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-        _contract_json_bytes("scan-manifest.json", manifest)
+        coverage.pop("warnings", None)
+    findings_bytes = _contract_json_bytes("findings.json", findings)
+    coverage_bytes = _contract_json_bytes("coverage.json", coverage)
+    report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
+    _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
+    scan["artifacts"] = [
+        _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
+        _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
+        *[
+            _artifact_record(scan_dir, ref, "application/octet-stream")
+            for ref in _coverage_receipt_refs(coverage)
+        ],
+    ]
+    _validate_sealed_coverage_receipts(scan, coverage)
+    _validate_manifest(manifest)
+    validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
+    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
+    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
+    _contract_json_bytes("scan-manifest.json", manifest)
     return (
         scan_dir,
         schema_dir,

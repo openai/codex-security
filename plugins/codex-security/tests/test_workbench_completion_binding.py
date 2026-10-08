@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,76 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     return state_dir, scan_id, scan_dir
+
+
+def test_deep_completion_seals_target_drift_warning(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
+    (tmp_path / "target" / "changed.txt").write_text("changed after snapshot")
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    warning = completed["warnings"][0]
+    assert "changed while the scan was running" in warning
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    sarif = json.loads((scan_dir / "exports" / "results.sarif").read_text())
+    assert coverage["completeness"] == "complete"
+    assert coverage["warnings"] == [warning]
+    assert sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"] == [
+        {"level": "warning", "message": {"text": warning}}
+    ]
+
+
+def test_deep_completion_reseals_warning_after_preparation(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
+    run_workbench(state_dir, "prepare-scan-completion", "--scan-id", scan_id)
+    manifest_path = scan_dir / "scan-manifest.json"
+    prepared_manifest = manifest_path.read_bytes()
+    (tmp_path / "target" / "changed.txt").write_text("changed after preparation")
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    warning = completed["warnings"][0]
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    sarif = json.loads((scan_dir / "exports" / "results.sarif").read_text())
+    assert prepared_manifest != manifest_path.read_bytes()
+    assert coverage["warnings"] == [warning]
+    assert sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"] == [
+        {"level": "warning", "message": {"text": warning}}
+    ]
+
+
+def test_warning_detected_after_preparation_reaches_sarif(
+    tmp_path: Path, workbench_api: dict[str, Any], monkeypatch: Any
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
+    warning = "Synthetic late target warning"
+    checks = 0
+
+    def target_warning(_scan: Any) -> str | None:
+        nonlocal checks
+        checks += 1
+        return warning if checks == 2 else None
+
+    monkeypatch.setitem(
+        workbench_api["complete_scan_locked"].__globals__, "scan_target_warning", target_warning
+    )
+    with closing(workbench_api["connect"]()) as connection:
+        workbench_api["complete_scan_locked"](connection, scan_id, None, None)
+        stored = json.loads(
+            connection.execute(
+                "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()[0]
+        )
+
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    sarif = json.loads((scan_dir / "exports" / "results.sarif").read_text())
+    assert checks == 2
+    assert stored == [warning]
+    assert coverage["warnings"] == [warning]
+    assert sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"] == [
+        {"level": "warning", "message": {"text": warning}}
+    ]
 
 
 def register_cli_scan(
@@ -1411,3 +1482,30 @@ def test_completion_recovers_malformed_hardening_portfolios(tmp_path: Path) -> N
         assert "../outside.md" not in warnings[0], case
         assert "hardening" not in json.loads(manifest_path.read_text())["scan"], case
         assert (scan_dir / "report.md").is_file(), case
+
+
+def test_failed_warning_reseal_preserves_prepared_artifacts(
+    tmp_path: Path, workbench_api: dict[str, Any], monkeypatch: Any
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    run_workbench(state_dir, "prepare-scan-completion", "--scan-id", scan_id)
+    before = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
+    namespace = workbench_api["complete_scan_locked"].__globals__
+    monkeypatch.setitem(namespace, "scan_target_warning", lambda scan: "Synthetic late warning")
+    finalizer = namespace["_write_prepared_scan_finalization"].__globals__
+    original_write = finalizer["_write_scan_local_json"]
+
+    def fail_manifest_write(directory: Path, name: str, payload: Any) -> None:
+        if name == "scan-manifest.json":
+            raise finalizer["ContractError"]("Synthetic reseal write failure")
+        original_write(directory, name, payload)
+
+    monkeypatch.setitem(finalizer, "_write_scan_local_json", fail_manifest_write)
+    with closing(workbench_api["connect"]()) as connection:
+        with pytest.raises(SystemExit, match="Synthetic reseal write failure"):
+            workbench_api["complete_scan_locked"](connection, scan_id, None, None)
+    assert {name: (scan_dir / name).read_bytes() for name in before} == before
