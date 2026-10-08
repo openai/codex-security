@@ -109,11 +109,7 @@ export async function parseImportedFindings(
   pluginRoot: string,
 ): Promise<Finding[]> {
   if (format === "csv") {
-    return parseFindingsCsv(source).map((row) => ({
-      ...csvRowFinding(row, "import"),
-      findingId: row.finding_id,
-      occurrenceId: row.occurrence_id,
-    }));
+    return parseFindingsCsv(source).map(csvRowFinding);
   }
 
   let payload: unknown;
@@ -276,18 +272,15 @@ function decodeExportedCsvCell(value: string): string {
   return EXPORTED_CSV_ESCAPE.test(value) ? value.slice(1) : value;
 }
 
-export function csvRowFinding(row: CsvFindingRow, scanId: string): Finding {
+export function csvRowFinding(row: CsvFindingRow): Finding {
   const ruleId = "import.csv";
   const anchor = row.occurrence_id;
   const fingerprint = `codex-security/v1:sha256:${sha256(
     ["codex-security/v1", CSV_TARGET_ID, ruleId, anchor, ""].join("\0"),
   )}`;
   return {
-    findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
-    occurrenceId: `occ_${sha256([scanId, fingerprint].join("\0")).slice(
-      0,
-      24,
-    )}`,
+    findingId: row.finding_id,
+    occurrenceId: row.occurrence_id,
     ruleId,
     identity: { anchor },
     fingerprints: {

@@ -87,7 +87,13 @@ export async function createAuthenticatedGitHub(
   }
   return new Octokit({
     auth: token,
-    ...(host === "github.com" ? {} : { baseUrl: `https://${host}/api/v3` }),
+    ...(host === "github.com"
+      ? {}
+      : {
+          baseUrl: host.toLowerCase().endsWith(".ghe.com")
+            ? `https://api.${host}`
+            : `https://${host}/api/v3`,
+        }),
   });
 }
 
