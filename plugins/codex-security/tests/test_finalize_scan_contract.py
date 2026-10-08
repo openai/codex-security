@@ -2217,6 +2217,61 @@ The extraction root is not enforced.
                         self.assertIs(type(region["endLine"]), int)
 
     @pytest.mark.cross_platform
+    def test_raw_numeric_line_tokens_preserve_integer_semantics(self) -> None:
+        for token, accepted in (
+            ("1", True),
+            ("1.0", True),
+            ("1e0", True),
+            ("4.1e1", True),
+            ("1.0000000000000001", False),
+            ("9007199254740991.1", False),
+            ("1.0000000000000000000000000000000000000001", False),
+            ("1e-400", False),
+            ("1e-9999999999999999999", False),
+            ("true", False),
+        ):
+            with self.subTest(token=token):
+                self.findings["findings"][0]["locations"][0].update(
+                    startLine="RAW_NUMBER", endLine="RAW_NUMBER"
+                )
+                self.write_scan()
+                path = self.scan_dir / "findings.json"
+                raw = path.read_text().replace('"RAW_NUMBER"', token)
+                path.write_text(raw)
+                for loaded in (
+                    FINALIZER._read_json(path),
+                    FINALIZER._read_scan_local_json(self.scan_dir, "findings.json", "findings"),
+                ):
+                    location = loaded["findings"][0]["locations"][0]
+                    self.assertEqual(FINALIZER.is_json_integer(location["startLine"]), accepted)
+                    self.assertEqual(
+                        FINALIZER.is_json_integer(copy.deepcopy(location)["startLine"]), accepted
+                    )
+                    self.assertEqual(
+                        FINALIZER._json_bytes(loaded), FINALIZER._json_bytes(json.loads(raw))
+                    )
+                if accepted:
+                    _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertEqual(
+                        findings["findings"][0]["locations"][0]["startLine"], float(token)
+                    )
+                else:
+                    with self.assertRaisesRegex(FINALIZER.ContractError, "positive integer"):
+                        FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_raw_large_exponents_keep_nonfinite_rejection(self) -> None:
+        for token in ("1e400", "1e9999999999999999999", "-1e9999999999999999999"):
+            with self.subTest(token=token):
+                self.write_scan()
+                path = self.scan_dir / "findings.json"
+                path.write_text(
+                    path.read_text().replace(
+                        '"extensions": {}', '"extensions": {"number": ' + token + "}"
+                    )
+                )
+                with self.assertRaisesRegex(FINALIZER.ContractError, "non-finite JSON numbers"):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
     def test_integer_line_compatibility_keeps_invalid_values_rejected(self) -> None:
         finding = self.findings["findings"][0]
         finding["codeEvidence"] = [
