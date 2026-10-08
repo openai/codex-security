@@ -591,6 +591,7 @@ test("overlapping retries cannot delete a newer pending submission or roll back 
     expect(f.posts).toHaveLength(1);
     release.resolve();
     await Promise.all([first, second]);
+    expect(f.posts).toHaveLength(1);
   } finally {
     release.resolve();
     observer.restore();
@@ -883,7 +884,7 @@ test("a failed checkpoint leaves the original pending request recoverable", asyn
   expect(f.receipts.size).toBe(1);
 });
 
-test.each(["request", "counts", "length"])(
+test.each(["request", "counts", "length", "schema"])(
   "cached receipts retain publication validation (%s)",
   async (invalid) => {
     const f = await fixture();
@@ -901,11 +902,47 @@ test.each(["request", "counts", "length"])(
       saved.receipts[0].id = "00000000-0000-4000-8000-000000000000";
     if (invalid === "counts") saved.receipts[0].counts.error = 1;
     if (invalid === "length") saved.receipts.push(saved.receipts[0]);
+    if (invalid === "schema") saved.receipts[0].source.provider = "unsupported";
     await writeFile(pending, JSON.stringify(saved));
     f.state.brokenReadback = false;
     await expect(
       (await prepareExternalPublication(f.file, options, f.deps)).publish(),
     ).rejects.toThrow();
     expect(f.posts).toHaveLength(1);
+    expect(
+      (await readdir(directory)).filter((name) => name.endsWith(".tmp")),
+    ).toEqual([]);
+  },
+);
+
+test.each([1, 101])(
+  "a prepared retry keeps its receipts after another resumer completes (%i items)",
+  async (count) => {
+    const f = await fixture(
+      Array.from({ length: count }, (_, index) => normalized(`item-${index}`)),
+    );
+    f.state.postBudget = 1;
+    f.state.brokenReadback = true;
+    await expect(
+      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+    ).rejects.toThrow("resume the saved request");
+    f.state.brokenReadback = false;
+    const first = await prepareExternalPublication(f.file, options, f.deps);
+    const second = await prepareExternalPublication(f.file, options, f.deps);
+    f.state.postBudget = Infinity;
+    expect((await first.publish()).counts.created).toBe(count);
+    const completedPosts = f.posts.length;
+    f.state.postBudget = count === 1 ? 0 : 1;
+    expect((await second.publish()).counts.created).toBe(count);
+    expect(f.posts.slice(completedPosts)).toEqual(
+      count === 1 ? [] : [JSON.stringify(second.preview.requests[1])],
+    );
+    const fresh = await prepareExternalPublication(f.file, options, f.deps);
+    expect(fresh.preview.resumed).toBe(false);
+    expect(fresh.preview.requests[0]!.request_id).not.toBe(
+      first.preview.requests[0]!.request_id,
+    );
+    f.state.postBudget = Infinity;
+    expect((await fresh.publish()).counts.unchanged).toBe(count);
   },
 );
