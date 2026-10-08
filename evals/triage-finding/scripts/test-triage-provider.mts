@@ -773,17 +773,13 @@ for (const suite of ["SAST", "calibration"] as const) {
         fs.mkdtempSync(path.join(os.tmpdir(), "sast-provider-replay-")),
       );
       t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-      const targetRepository = fs.realpathSync(
+      const targetRoot = fs.realpathSync(
         fs.mkdtempSync(path.join(os.tmpdir(), "sast-custom-target-")),
       );
-      t.after(() =>
-        fs.rmSync(targetRepository, { recursive: true, force: true }),
-      );
-      const targetRoot = fs.realpathSync(
-        fs.mkdtempSync(path.join(os.tmpdir(), "sast-other-targets-")),
-      );
       t.after(() => fs.rmSync(targetRoot, { recursive: true, force: true }));
+      const targetRepository = path.join(targetRoot, "selected-case");
       const siblingRepository = path.join(targetRoot, "other-case");
+      fs.mkdirSync(targetRepository);
       fs.mkdirSync(siblingRepository);
       const capture = path.join(root, "captures.jsonl");
       const failure = path.join(root, "failure");
@@ -811,7 +807,6 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         PROMPTFOO_DISABLE_WAL_MODE: "true",
         PROMPTFOO_DISABLE_TELEMETRY: "1",
         PROMPTFOO_DISABLE_UPDATE: "1",
-        SASTBENCH_TARGET_ROOT: targetRoot,
       };
       const template = parse(
         fs.readFileSync(
