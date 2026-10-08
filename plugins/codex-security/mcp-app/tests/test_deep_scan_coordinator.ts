@@ -2445,82 +2445,206 @@ async function testStaleMutationObservesReplacement() {
 }
 
 async function testStoreConfirmedReplacementSurvivesReadFailure() {
-  for (const replaced of [false, true]) {
-    const fixture = await fixtureRun();
-    const run = { ...fixture.run, coordinatorGeneration: 2 };
-    let current: DeepScanRunState = run;
-    const diagnostic = replaced
-      ? "Deep Scan coordinator lease belongs to a newer generation."
-      : "Permission denied: /fixture/Deep Scan coordinator lease belongs to a newer generation./lock";
-    let reads = 0;
-    const failures: string[][] = [];
-    const store = new WorkbenchDeepScanStore(async (args: string[]) => {
-      switch (args[0]) {
-        case "claim-deep-scan-coordinator":
-          return { deepScan: current, coordinatorDisposition: "claimed" };
-        case "update-progress":
-          if (replaced) current = { ...current, coordinatorGeneration: 3 };
-          throw new Error(diagnostic);
-        case "get-deep-scan":
-          reads += 1;
-          if (reads === 2 || (!replaced && reads === 1))
-            throw new Error("sqlite3.OperationalError: database is locked");
-          if (replaced && reads >= 3)
+  for (const confirmation of ["mutation", "failure-write"])
+    for (const replaced of [false, true]) {
+      const fixture = await fixtureRun();
+      const run = { ...fixture.run, coordinatorGeneration: 2 };
+      let current: DeepScanRunState = run;
+      const stale =
+        "Deep Scan coordinator lease belongs to a newer generation.";
+      const diagnostic = replaced
+        ? stale
+        : `Permission denied: /fixture/${stale}/lock`;
+      let reads = 0;
+      const failures: string[][] = [];
+      const store = new WorkbenchDeepScanStore(async (args: string[]) => {
+        switch (args[0]) {
+          case "claim-deep-scan-coordinator":
+            return { deepScan: current, coordinatorDisposition: "claimed" };
+          case "update-progress":
+            if (replaced) current = { ...current, coordinatorGeneration: 3 };
+            throw new Error(diagnostic);
+          case "get-deep-scan": {
+            reads += 1;
+            if (
+              reads === 2 ||
+              (reads === 1 && (!replaced || confirmation === "failure-write"))
+            )
+              throw new Error("sqlite3.OperationalError: database is locked");
+            const snapshot = current;
+            if (replaced)
+              current = {
+                ...current,
+                status: "succeeded",
+                terminalReason: "capped",
+              };
+            return { deepScan: snapshot };
+          }
+          case "fail-deep-scan":
+            failures.push(args);
+            if (replaced)
+              throw new Error(
+                args.includes("--coordinator-generation")
+                  ? stale
+                  : "Deep Scan mutation requires the current coordinator lease.",
+              );
             current = {
               ...current,
-              status: "succeeded",
-              terminalReason: "capped",
+              status: "failed",
+              error: args
+                .find((arg) => arg.startsWith("--message="))!
+                .slice("--message=".length),
             };
-          return { deepScan: current };
-        case "fail-deep-scan":
-          failures.push(args);
-          if (replaced)
-            throw new Error(
-              "Deep Scan mutation requires the current coordinator lease.",
-            );
-          current = {
-            ...current,
-            status: "failed",
-            error: args
-              .find((arg) => arg.startsWith("--message="))!
-              .slice("--message=".length),
-          };
-          return { deepScan: current };
-        default:
-          throw new Error(`Unexpected fixture operation: ${args[0]}`);
-      }
-    });
-    await store.claimCoordinator({
-      scanId: run.scanId,
-      threadId: "fixture-thread",
-    });
-    const coordinator = new DeepScanCoordinatorRegistry().start({
-      run,
-      store,
-      executor: new FakeExecutor(),
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
-      threadId: "fixture-thread",
-      heartbeatIntervalMs: 60_000,
-    });
-    const terminal = await coordinator.wait(undefined, 2_500);
-    assert.equal(terminal?.status, replaced ? "succeeded" : "failed");
-    assert.equal(terminal?.coordinatorGeneration, replaced ? 3 : 2);
-    assert.equal(current.status, terminal?.status);
-    assert.equal(failures.length, replaced ? 0 : 1);
-    if (replaced) {
+            return { deepScan: current };
+          default:
+            throw new Error(`Unexpected fixture operation: ${args[0]}`);
+        }
+      });
+      await store.claimCoordinator({
+        scanId: run.scanId,
+        threadId: "fixture-thread",
+      });
+      const coordinator = new DeepScanCoordinatorRegistry().start({
+        run,
+        store,
+        executor: new FakeExecutor(),
+        pluginRoot: fixture.pluginRoot,
+        clock: immediateClock,
+        threadId: "fixture-thread",
+        heartbeatIntervalMs: 60_000,
+      });
+      const terminal = await coordinator.wait(undefined, 2_500);
       assert.equal(
-        reads,
-        3,
-        "the confirmed handoff must enter the retrying observer",
+        terminal?.status,
+        replaced ? "succeeded" : "failed",
+        confirmation,
       );
-      assert.deepEqual(store.coordinatorLeaseArgs(run.scanId), []);
-    } else {
-      assert.equal(terminal?.error, diagnostic);
-      const generationFlag = failures[0].indexOf("--coordinator-generation");
-      assert.equal(failures[0][generationFlag + 1], "2");
+      assert.equal(terminal?.coordinatorGeneration, replaced ? 3 : 2);
+      assert.equal(current.status, terminal?.status);
+      assert.equal(
+        failures.length,
+        replaced && confirmation === "mutation" ? 0 : 1,
+      );
+      if (replaced) {
+        assert.equal(reads, confirmation === "mutation" ? 3 : 4);
+        assert.deepEqual(store.coordinatorLeaseArgs(run.scanId), []);
+      } else {
+        assert.equal(
+          reads,
+          2,
+          "unconfirmed diagnostics must not add ownership reads",
+        );
+        assert.equal(terminal?.error, diagnostic);
+        const generationFlag = failures[0].indexOf("--coordinator-generation");
+        assert.equal(failures[0][generationFlag + 1], "2");
+      }
     }
-  }
+}
+
+async function testStoreConfirmationSurvivesReplayAndThreadMetadata() {
+  for (const operation of [
+    "finish",
+    "worker-acceptance",
+    "thread-started",
+  ] as const)
+    for (const replaced of [false, true]) {
+      const fixture = await fixtureRun();
+      const run = { ...fixture.run, coordinatorGeneration: 2 };
+      let current: DeepScanRunState = run;
+      const store = new FakeStore(run);
+      const stale =
+        "Deep Scan coordinator lease belongs to a newer generation.";
+      const diagnostic = replaced
+        ? stale
+        : `Permission denied: /fixture/${stale}/lock`;
+      let mutations = 0;
+      let reads = 0;
+      let failures = 0;
+      const persisted = new WorkbenchDeepScanStore(async (args: string[]) => {
+        switch (args[0]) {
+          case "claim-deep-scan-coordinator":
+            return { deepScan: current, coordinatorDisposition: "claimed" };
+          case "finish-deep-scan":
+          case "upsert-deep-scan-worker":
+            mutations += 1;
+            if (operation !== "thread-started" && mutations === 1)
+              throw new Error("Synthetic initial persistence failure.");
+            if (replaced) current = { ...current, coordinatorGeneration: 3 };
+            throw new Error(diagnostic);
+          case "get-deep-scan": {
+            reads += 1;
+            if (reads === 2)
+              throw new Error("sqlite3.OperationalError: database is locked");
+            const snapshot = current;
+            if (replaced)
+              current = {
+                ...current,
+                status: "succeeded",
+                terminalReason: "capped",
+              };
+            return { deepScan: snapshot };
+          }
+          case "fail-deep-scan":
+            failures += 1;
+            if (replaced)
+              throw new Error(
+                "Deep Scan mutation requires the current coordinator lease.",
+              );
+            current = {
+              ...current,
+              status: "failed",
+              error: args
+                .find((arg) => arg.startsWith("--message="))!
+                .slice("--message=".length),
+            };
+            return { deepScan: current };
+          default:
+            throw new Error(`Unexpected fixture operation: ${args[0]}`);
+        }
+      });
+      await persisted.claimCoordinator({
+        scanId: run.scanId,
+        threadId: "fixture-thread",
+      });
+      store.get = persisted.get.bind(persisted);
+      store.fail = persisted.fail.bind(persisted);
+      if (operation === "finish")
+        store.finish = persisted.finish.bind(persisted);
+      else {
+        const updateWorker = store.updateWorker.bind(store);
+        store.updateWorker = async (update) =>
+          (operation === "worker-acceptance" &&
+            update.status === "succeeded") ||
+          (operation === "thread-started" && update.threadId !== undefined)
+            ? persisted.updateWorker(update)
+            : updateWorker(update);
+      }
+      const coordinator = new DeepScanCoordinatorRegistry().start({
+        run,
+        store,
+        executor: new FakeExecutor(),
+        pluginRoot: fixture.pluginRoot,
+        clock: immediateClock,
+        threadId: "fixture-thread",
+        heartbeatIntervalMs: 60_000,
+        retryDelaysMs: [],
+      });
+      const terminal = await coordinator.wait(undefined, 2_500);
+      assert.equal(
+        terminal?.status,
+        replaced ? "succeeded" : "failed",
+        operation,
+      );
+      assert.equal(terminal?.coordinatorGeneration, replaced ? 3 : 2);
+      assert.equal(current.status, terminal?.status);
+      assert.equal(failures, replaced ? 0 : 1);
+      if (replaced) {
+        assert.equal(mutations, operation === "thread-started" ? 1 : 2);
+        assert.equal(reads, 3);
+      } else {
+        assert.ok(terminal?.error?.includes(diagnostic));
+      }
+    }
 }
 
 async function testReducerDiagnosticDoesNotOverrideOwnership() {
@@ -4053,6 +4177,7 @@ try {
   await testTerminalReadFailureIsNotRecordedAsPublicationFailure();
   await testStaleMutationObservesReplacement();
   await testStoreConfirmedReplacementSurvivesReadFailure();
+  await testStoreConfirmationSurvivesReplayAndThreadMetadata();
   await testReducerDiagnosticDoesNotOverrideOwnership();
   await testCoordinatorHeartbeatsStopAfterOwnershipChanges();
   await testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead();

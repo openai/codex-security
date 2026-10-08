@@ -25,7 +25,7 @@ import type {
 } from "./worker-runner.js";
 import {
   boundedDeepScanErrorPair,
-  DeepScanOwnershipChangedError,
+  confirmedOwnershipChange,
   errorNameWithCode,
   abortError,
   errorMessage,
@@ -363,6 +363,14 @@ export class DeepScanCoordinator {
         this.state = failed;
       } catch (persistError) {
         if (this.canceled || this.externallyFailed) return;
+        if (
+          confirmedOwnershipChange(persistError, this.state.scanId) &&
+          (await this.stopAfterOwnershipChange(
+            this.options.threadId,
+            persistError,
+          ))
+        )
+          return;
         this.state = {
           ...this.state,
           status: "failed",
@@ -560,16 +568,7 @@ export class DeepScanCoordinator {
   ): Promise<boolean> {
     if (this.externallyFailed || this.terminal || !threadId)
       return this.externallyFailed;
-    let current: DeepScanRunState | undefined;
-    for (let cause = error; cause instanceof Error; cause = cause.cause) {
-      if (
-        cause instanceof DeepScanOwnershipChangedError &&
-        cause.run.scanId === this.state.scanId
-      ) {
-        current = cause.run;
-        break;
-      }
-    }
+    let current = confirmedOwnershipChange(error, this.state.scanId)?.run;
     try {
       current ??= await this.options.store.get(this.state.scanId, threadId);
     } catch (readError) {
@@ -1099,6 +1098,8 @@ export class DeepScanCoordinator {
     try {
       return await this.options.store.finish(input);
     } catch (firstError) {
+      if (confirmedOwnershipChange(firstError, this.state.scanId))
+        throw firstError;
       this.log({
         event: "coordinator_finish_replay",
         scanId: this.state.scanId,
@@ -1107,6 +1108,8 @@ export class DeepScanCoordinator {
       try {
         return await this.options.store.finish(input);
       } catch (replayError) {
+        if (confirmedOwnershipChange(replayError, this.state.scanId))
+          throw replayError;
         throw new Error(
           `Deep Scan terminal persistence replay failed: ${errorMessage(replayError)}`,
           { cause: firstError },
