@@ -9,9 +9,13 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    get_scan,
     run_workbench,
+    scan_command,
+    set_triage,
     stable_target_id,
     start_delivered_scan,
+    start_workspace_scan,
     write_completed_contract,
 )
 
@@ -41,9 +45,7 @@ def _complete_scan(
     *,
     anchors: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    started = _start_scan(state_dir, workspace_id, scan_root)
-    scan_id = str(started["scanId"])
-    scan_dir = Path(str(started["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, scan_root)
     write_completed_contract(scan_dir, scan_id, target)
     if anchors is not None:
         findings_path = scan_dir / "findings.json"
@@ -58,7 +60,7 @@ def _complete_scan(
             for anchor in anchors
         ]
         findings_path.write_text(json.dumps(document))
-    return run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    return scan_command(state_dir, "complete-scan", scan_id)["scan"]
 
 
 def _close_finding(
@@ -67,25 +69,17 @@ def _close_finding(
     close_reason: str,
     note: str | None = None,
 ) -> dict[str, Any]:
-    arguments = [
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence_id,
-        "--status",
-        "closed",
-        "--close-reason",
-        close_reason,
-    ]
+    arguments = ["--close-reason", close_reason]
     if note is not None:
         arguments.extend(("--note", note))
-    return run_workbench(state_dir, *arguments)["scan"]
+    return set_triage(state_dir, occurrence_id, "closed", *arguments)["scan"]
 
 
 def _feedback(state_dir: Path, scan_id: str) -> dict[str, Any]:
-    return run_workbench(state_dir, "get-scan-feedback", "--scan-id", scan_id)
+    return scan_command(state_dir, "get-scan-feedback", scan_id)
 
 
-@pytest.mark.parametrize("mode", ("standard", "deep"))
+@pytest.mark.parametrize("mode", ("standard", "deep", "headless_deep"))
 def test_native_scan_materializes_false_positive_feedback(tmp_path: Path, mode: str) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "repository"
@@ -100,7 +94,22 @@ def test_native_scan_materializes_false_positive_feedback(tmp_path: Path, mode: 
     if mode == "deep":
         workspace_id = str(create_saved_workspace(state_dir, target, mode=mode)["id"])
 
-    started = _start_scan(state_dir, workspace_id, tmp_path / "scans")
+    if mode == "headless_deep":
+        started = run_workbench(
+            state_dir,
+            "begin-deep-scan",
+            "--thread-id",
+            "feedback-parent",
+            "--available-parallelism",
+            "4",
+            "--target-path",
+            str(target),
+            "--scan-root",
+            str(tmp_path / "scans"),
+            environment={"CODEX_HOME": str(tmp_path / "codex-home")},
+        )["deepScan"]
+    else:
+        started = _start_scan(state_dir, workspace_id, tmp_path / "scans")
     feedback_path = (
         Path(str(started["scanDir"])) / "artifacts" / "01_context" / "false_positive_feedback.json"
     )
@@ -120,12 +129,9 @@ def test_false_positive_triage_requires_a_reason(tmp_path: Path, note: str | Non
     completed = _complete_scan(state_dir, workspace_id, tmp_path / "scans", target)
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
 
-    rejected = run_workbench(
+    rejected = set_triage(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         occurrence_id,
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",
@@ -135,7 +141,7 @@ def test_false_positive_triage_requires_a_reason(tmp_path: Path, note: str | Non
 
     assert rejected["returncode"] != 0
     assert "Explain why this finding is a false positive." in str(rejected["stderr"])
-    scan = run_workbench(state_dir, "get-scan", "--scan-id", str(completed["scanId"]))["scan"]
+    scan = get_scan(state_dir, str(completed["scanId"]))["scan"]
     assert scan["findings"][0]["triage"] == {"status": "open"}
 
 
@@ -257,14 +263,7 @@ def test_latest_decision_controls_false_positive_feedback(tmp_path: Path) -> Non
         feedback["falsePositives"][0]["updatedAt"] == (closed["findings"][0]["triage"]["updatedAt"])
     )
 
-    run_workbench(
-        state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence_id,
-        "--status",
-        "open",
-    )
+    set_triage(state_dir, occurrence_id, "open")
     assert _feedback(state_dir, scan_id)["falsePositives"] == []
 
     _close_finding(state_dir, occurrence_id, "wont_fix", "Accepted risk.")

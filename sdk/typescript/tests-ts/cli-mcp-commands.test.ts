@@ -55,6 +55,14 @@ describe("CLI MCP command schemas", () => {
           { name: "info" },
           { name: "serve" },
           { name: "dedupe" },
+          ...[
+            "policy",
+            "scans resume",
+            "suggest-owners",
+            "classify-severity",
+            "init",
+            "feedback",
+          ].map((name) => ({ name })),
           { name: "findings false-positive", description: "Save a decision." },
           { name: "scans list" },
         ],
@@ -203,7 +211,7 @@ describe("CLI MCP command schemas", () => {
       command("import github", { output: { type: "array" } }).jsonOutput,
     ).toBe(true);
     expect(command("patch", { output: { type: "object" } }).jsonOutput).toBe(
-      false,
+      true,
     );
     expect(command("export").jsonOutput).toBe(false);
   });
@@ -222,7 +230,7 @@ describe("CLI MCP command arguments", () => {
   });
 
   test("preserves argument order, repeated values, booleans, and exact option strings", () => {
-    const tool = command("example run", {
+    const tool = command("scans rerun", {
       args: {
         properties: {
           repository: { type: "string" },
@@ -252,8 +260,8 @@ describe("CLI MCP command arguments", () => {
         },
       }),
     ).toEqual([
-      "example",
-      "run",
+      "scans",
+      "rerun",
       "--json",
       "--output-dir=--help",
       "--workers=3",
@@ -267,13 +275,9 @@ describe("CLI MCP command arguments", () => {
     ]);
   });
 
-  test("lets the CLI apply omitted defaults and accepts a per-call output choice", () => {
+  test("lets the CLI apply omitted defaults and requests its declared output", () => {
     const tool = command("patch", { output: { type: "object" } });
-    expect(buildCliMcpArguments(tool, {})).toEqual(["patch"]);
-    expect(buildCliMcpArguments(tool, {}, { jsonOutput: true })).toEqual([
-      "patch",
-      "--json",
-    ]);
+    expect(buildCliMcpArguments(tool, {})).toEqual(["patch", "--json"]);
   });
 
   test("does not shift a later positional into an omitted earlier argument", () => {
@@ -431,6 +435,55 @@ describe("CLI MCP command processes", () => {
       expect(
         await readFile(join(options.cwd, "started")).catch(() => undefined),
       ).toBeUndefined();
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "forced shutdown kills a command that ignores graceful cancellation",
+    async () => {
+      const options = await script(`
+      process.on("SIGTERM", () => process.stderr.write("cancelled\\n"));
+      process.stderr.write(String(process.pid) + "\\n");
+      setInterval(() => {}, 1000);
+    `);
+      options.executable = execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim();
+      const controller = new AbortController();
+      const force = new AbortController();
+      const ready = Promise.withResolvers<number>();
+      const cancelled = Promise.withResolvers<void>();
+      let progress = "";
+      let pid: number | undefined;
+      const operation = runCliMcpCommand(
+        command("validate"),
+        {},
+        {
+          ...options,
+          signal: controller.signal,
+          forceSignal: force.signal,
+          onStderr: (chunk) => {
+            progress += chunk;
+            if (progress.includes("\n"))
+              ready.resolve(Number(progress.split("\n")[0]));
+            if (progress.includes("cancelled\n")) cancelled.resolve();
+          },
+        },
+      );
+      try {
+        pid = await ready.promise;
+        controller.abort();
+        await cancelled.promise;
+        force.abort();
+        expect(await operation).toMatchObject({
+          exitCode: 130,
+          error: "Command cancelled.",
+        });
+        expect(await processHasExited(pid)).toBe(true);
+      } finally {
+        force.abort();
+        await operation;
+      }
     },
   );
 

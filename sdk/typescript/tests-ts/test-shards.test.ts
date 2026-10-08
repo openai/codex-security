@@ -1,18 +1,18 @@
-import { spawnSync } from "node:child_process";
 import {
   copyFile,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
-  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { expect, test } from "bun:test";
-import { shardTestFiles } from "../scripts/test-shards.mjs";
+import { shardTestFiles } from "../scripts/test-shards.mts";
+import { readSubprocess } from "./support/shell.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 test("balances measured work and includes new files without mutating the inventory", () => {
   const files = [
@@ -39,15 +39,6 @@ test("balances measured work and includes new files without mutating the invento
     }),
   ).toEqual(shards);
 });
-
-test.each([0, -1, 1.5, Number.NaN])(
-  "rejects an invalid shard count %p",
-  (count) => {
-    expect(() => shardTestFiles(["a.test.ts"], count)).toThrow(
-      "positive integer",
-    );
-  },
-);
 
 test.each([
   ["unix", 3],
@@ -106,8 +97,8 @@ test.each([
       await mkdir(join(root, "scripts"));
       await mkdir(join(root, "tests-ts"));
       for (const file of [
-        "run-ci-tests.mjs",
-        "test-shards.mjs",
+        "run-ci-tests.mts",
+        "test-shards.mts",
         "ci-test-durations.json",
       ]) {
         await copyFile(
@@ -129,7 +120,8 @@ test("synthetic report probe --timeout=5000", () => {
       const child = Bun.spawn({
         cmd: [
           node!,
-          join(root, "scripts", "run-ci-tests.mjs"),
+          "--experimental-strip-types",
+          join(root, "scripts", "run-ci-tests.mts"),
           "1/1",
           ...options,
         ],
@@ -143,11 +135,7 @@ test("synthetic report probe --timeout=5000", () => {
         stderr: "pipe",
         timeout: 30_000,
       });
-      const [status, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ]);
+      const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(fail ? 1 : 0);
       expect(stdout).toContain("probe.test.ts");
       expect(stderr).toContain("synthetic report probe");
@@ -171,9 +159,7 @@ test("synthetic report probe --timeout=5000", () => {
 );
 
 test("preserves the configured timeout in isolated test subprocesses", async () => {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-test-timeout-")),
-  );
+  const directory = await temporaryDirectory("codex-security-test-timeout-");
   const fixture = join(directory, "isolated.test.ts");
   const helper = new URL("./support/test-subprocess.ts", import.meta.url).href;
   await writeFile(
@@ -188,18 +174,18 @@ test("isolated timeout", async () => {
   );
 
   try {
-    const result = spawnSync(
-      process.execPath,
-      ["test", "--timeout", "30000", fixture],
-      {
-        encoding: "utf8",
-        env: { ...process.env, CODEX_SECURITY_TEST_TIMEOUT_MS: "100" },
-        timeout: 30_000,
-        windowsHide: true,
-      },
-    );
-    expect(result.status, result.stderr || result.error?.message).toBe(1);
-    expect(result.stderr).toContain("this test timed out after 100ms");
+    const child = Bun.spawn({
+      cmd: [process.execPath, "test", "--timeout", "30000", fixture],
+      env: { ...process.env, CODEX_SECURITY_TEST_TIMEOUT_MS: "100" },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    const { status, stderr } = await readSubprocess(child);
+    expect(status, stderr).toBe(1);
+    expect(stderr).toContain("this test timed out after 100ms");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

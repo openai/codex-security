@@ -1,5 +1,6 @@
 import { CodexSecurity } from "../../src/api.js";
 import type { JsonObject } from "../../src/config.js";
+import { throwing } from "./errors.js";
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 
@@ -57,17 +58,22 @@ export function mockWorkbench(
 }
 
 export class TestClient extends CodexSecurity {
+  static withDependencies(
+    dependencies: Partial<NonNullable<ClientArguments[1]>>,
+  ) {
+    return new TestClient({}, dependencies);
+  }
+
   public constructor(
     config: ClientArguments[0],
-    dependencies: Partial<ClientArguments[1]>,
+    dependencies: Partial<NonNullable<ClientArguments[1]>>,
   ) {
     super(
       config,
       {
-        createCodex: () => {
-          throw new Error("Unexpected Codex invocation in test");
-        },
+        createCodex: throwing("Unexpected Codex invocation in test"),
         environment: {},
+        probeCodexSandbox: async () => {},
         prepareScanArtifactRestorer: async () => ({
           restore: async () => {},
         }),

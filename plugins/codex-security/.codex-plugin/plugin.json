@@ -1,6 +1,6 @@
 {
   "name": "codex-security",
-  "version": "0.1.94",
+  "version": "0.1.95",
   "description": "Codex Security workflows for security scans, analysis, and investigation.",
   "author": {
     "name": "OpenAI"
@@ -18,6 +18,9 @@
   "skills": "./skills/",
   "apps": "./.app.json",
   "mcpServers": "./.mcp.json",
+  "codexSecurity": {
+    "workerProviderSnapshot": 4
+  },
   "interface": {
     "displayName": "Codex Security",
     "shortDescription": "Security scanning for your codebase",

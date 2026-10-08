@@ -1,7 +1,9 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import {
+  basename,
   delimiter,
+  dirname,
   extname,
   isAbsolute,
   join,
@@ -15,14 +17,38 @@ export interface TrustedExecutable {
   environment: Record<string, string | undefined>;
 }
 
+export interface InspectedExecutable {
+  executable: string | null;
+  environment: Record<string, string | undefined>;
+}
+
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
 ): Promise<TrustedExecutable | null> {
-  const root = await realpath(protectedRoot).catch(() =>
-    resolve(protectedRoot),
+  const inspected = await inspectTrustedExecutable(
+    candidate,
+    environment,
+    protectedRoot,
   );
+  return inspected.executable === null
+    ? null
+    : { executable: inspected.executable, environment: inspected.environment };
+}
+
+export async function inspectTrustedExecutable(
+  candidate: string,
+  environment: Readonly<Record<string, string | undefined>>,
+  protectedRoot: string | readonly string[],
+): Promise<InspectedExecutable> {
+  const roots = await Promise.all(
+    (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
+      (root) => realpath(root).catch(() => resolve(root)),
+    ),
+  );
+  const isProtected = (path: string) =>
+    roots.some((root) => isWithin(root, path));
   const path =
     environment["PATH"] ??
     Object.entries(environment).find(
@@ -39,7 +65,7 @@ export async function resolveTrustedExecutable(
     }
     if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
-    if (canonical === null || isWithin(root, canonical)) continue;
+    if (canonical === null || isProtected(canonical)) continue;
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
@@ -81,8 +107,11 @@ export async function resolveTrustedExecutable(
   for (const current of candidates) {
     const canonical = await realpath(current.path).catch(() => null);
     if (canonical === null) continue;
-    if (isWithin(root, canonical)) {
+    if (isProtected(canonical)) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
+      continue;
+    }
+    if (process.platform === "win32" && /\.(?:bat|cmd)$/iu.test(canonical)) {
       continue;
     }
     if (!current.runnable) continue;
@@ -92,12 +121,19 @@ export async function resolveTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      executable ??= pathLike ? canonical : current.path;
+      // Keep explicit virtualenv launchers, but resolve repository-local aliases
+      // to the trusted target instead of invoking them from the repository.
+      const invocationPath = pathLike
+        ? join(await realpath(dirname(current.path)), basename(current.path))
+        : current.path;
+      executable ??=
+        pathLike && (isProtected(current.path) || isProtected(invocationPath))
+          ? canonical
+          : invocationPath;
     } catch {
       continue;
     }
   }
-  if (executable === null) return null;
 
   const sanitizedEnvironment = { ...environment };
   for (const name of Object.keys(sanitizedEnvironment)) {
@@ -109,7 +145,8 @@ export async function resolveTrustedExecutable(
   return { executable, environment: sanitizedEnvironment };
 }
 
-function isWithin(root: string, candidate: string): boolean {
+/** @internal */
+export function isWithin(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return (
     path === "" ||

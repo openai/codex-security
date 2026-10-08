@@ -1,6 +1,7 @@
+import { emptyNeighborhoodReviewer } from "./support/deduplication.js";
 import { readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import type { JsonObject } from "../src/config.js";
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
 import {
@@ -13,6 +14,7 @@ import type { ScanManifest } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { scriptedWorkbench } from "./support/workbench-fakes.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
+import { rejecting } from "./support/errors.js";
 
 type Step = Parameters<typeof scriptedWorkbench>[0][number];
 
@@ -124,12 +126,11 @@ test("deduplicates an external scan through its bound workflow without reading s
   expect(
     await deduplicateScanDirectoryInternal(scanDir, options, {
       environment,
-      runWorkbench: (args, input) =>
-        workbench.run(
-          { environment, pluginRoot: PLUGIN_ROOT, python: "unused" },
-          args,
-          input,
-        ),
+      runWorkbench: workbench.run.bind(workbench, {
+        environment,
+        pluginRoot: PLUGIN_ROOT,
+        python: "unused",
+      }),
       fetch: async (url, init) => {
         requests.push(String(url));
         expect(init.method).toBeUndefined();
@@ -138,14 +139,7 @@ test("deduplicates an external scan through its bound workflow without reading s
           potentialDuplicates: [],
         });
       },
-      reviewer: {
-        async screen() {
-          throw new Error("No review for an empty neighborhood");
-        },
-        async reviewPair() {
-          throw new Error("No pair to review");
-        },
-      },
+      reviewer: emptyNeighborhoodReviewer(),
     }),
   ).toEqual(result);
   expect(requests).toEqual([
@@ -202,9 +196,7 @@ test("failed publication records its error, dry-run does not advance it, and ret
       {
         environment,
         runWorkbench: dryRunWorkbench.run,
-        fetch: async () => {
-          throw new Error("Dry-run must not publish");
-        },
+        fetch: rejecting("Dry-run must not publish"),
       },
     ),
   ).toEqual({ ...result, dryRun: true, findings: document.findings });
@@ -264,7 +256,11 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         response: { workflow: { stages: { dedupe: { status: "running" } } } },
       },
     ];
-    let prepared: JsonObject | undefined;
+    const response = mock((_payload: JsonObject) => {
+      if (failure === "before-post")
+        throw new Error("Synthetic stop before posting");
+      return {};
+    });
     const complete: Step = {
       request: { id, action: "complete", stage: "dedupe", result },
     };
@@ -284,12 +280,7 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
           result,
           pendingWrite: { groups },
         },
-        response(payload) {
-          prepared = payload;
-          if (failure === "before-post")
-            throw new Error("Synthetic stop before posting");
-          return {};
-        },
+        response,
       },
       ...(failure === "lost-completion"
         ? [
@@ -377,14 +368,14 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         });
       }
       expect(url.pathname).toBe("/v1/dedupe-groups");
-      expect(prepared).toMatchObject({
+      expect(response.mock.lastCall?.[0]).toMatchObject({
         result,
         pendingWrite: JSON.parse(init.body as string),
       });
       bodies.push(init.body as string);
-      if (bodies.length === 1 && failure === "before-write")
+      if (bodies.length <= 3 && failure === "before-write")
         return new Response("", { status: 503 });
-      if (bodies.length === 1 && failure === "lost-ack")
+      if (bodies.length <= 3 && failure === "lost-ack")
         return new Response("incomplete acknowledgement", { status: 201 });
       return Response.json([]);
     };
@@ -400,7 +391,13 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
     expect(
       await deduplicateScanInternal(document.scanId, options, dependencies),
     ).toEqual(result);
-    expect(bodies).toHaveLength(failure === "before-post" ? 1 : 2);
+    expect(bodies).toHaveLength(
+      failure === "before-post"
+        ? 1
+        : failure === "before-write" || failure === "lost-ack"
+          ? 4
+          : 2,
+    );
     expect(new Set(bodies).size).toBe(1);
     expect(reviews).toBe(2);
     expect(lookups).toBe(1);

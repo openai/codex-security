@@ -1,7 +1,10 @@
+import { buildCliMcpArguments } from "../src/cli-mcp-commands.js";
+import { writeFile } from "node:fs/promises";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PassThrough, Writable } from "node:stream";
 import { join, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import { main } from "../src/cli.js";
 import { ConfigurationError } from "../src/errors.js";
@@ -59,6 +62,8 @@ const commandInputs: Record<string, object> = {
   validate: { args: { findings: ["Review the synthetic finding."] } },
   "verify-fix": { args: { findings: ["occ_example"] } },
 };
+const { temporaryDirectory, cleanup } = createApiTestFixtures("cli-mcp-");
+afterEach(cleanup);
 
 async function connect(
   deps = dependencies(),
@@ -147,6 +152,7 @@ describe("CLI MCP scans", () => {
     const serverDirectory = resolve("synthetic server");
     const environment = {
       CODEX_SECURITY_STATE_DIR: " state directory ",
+      CODEX_SECURITY_PROJECT_CONFIG: "settings/scan.json",
       CodeX_Home: "codex home",
       CODEX_CLI_PATH: " ",
       codex_cli_path: "bin/codex.exe",
@@ -179,6 +185,10 @@ describe("CLI MCP scans", () => {
         expect(call.environment).toEqual({
           ...originalEnvironment,
           CODEX_SECURITY_STATE_DIR: resolve(serverDirectory, "state directory"),
+          CODEX_SECURITY_PROJECT_CONFIG: resolve(
+            serverDirectory,
+            "settings/scan.json",
+          ),
           CodeX_Home: resolve(serverDirectory, "codex home"),
           codex_cli_path: resolve(serverDirectory, "bin/codex.exe"),
           PyThOn: resolve(serverDirectory, "../runtime/python3"),
@@ -289,6 +299,14 @@ describe("CLI MCP scans", () => {
         destructiveHint: false,
         openWorldHint: false,
       });
+      expect(
+        tools.find((tool) => tool.name === "verify-fix")?.annotations,
+      ).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      });
       const info = await session.call("info").result;
       expect(info.structuredContent).toMatchObject({
         sdkVersion: VERSION,
@@ -311,7 +329,7 @@ describe("CLI MCP scans", () => {
     }[] = [];
     const deps = dependencies();
     deps.runMcpCommand = async (command, input, options) => {
-      calls.push({ name: command.name, input, jsonOutput: options.jsonOutput });
+      calls.push({ name: command.name, input, jsonOutput: command.jsonOutput });
       options.onStderr?.("Command progress.\n");
       return command.name === "import_github"
         ? { exitCode: 0, data: [{ number: 1 }] }
@@ -338,15 +356,61 @@ describe("CLI MCP scans", () => {
             output: "id,title\nexample,Synthetic finding\n",
           });
       }
-      expect(calls.find(({ name }) => name === "patch")?.jsonOutput).toBe(
-        false,
-      );
+      expect(calls.find(({ name }) => name === "patch")?.jsonOutput).toBe(true);
       await session.call("patch", { args: { issues: ["occ_example"] } }).result;
       expect(calls.at(-1)?.jsonOutput).toBe(true);
       await session.call("patch", { options: { resumePr: "patch_example" } })
         .result;
       expect(calls.at(-1)?.jsonOutput).toBe(true);
       expect(session.stderr.text()).toContain("Command progress.");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("leaves omitted settings to the CLI and preserves explicit false and provider options", async () => {
+    const calls: { argv: string[]; input: unknown }[] = [];
+    const deps = dependencies();
+    deps.runMcpCommand = async (command, input) => {
+      calls.push({ argv: buildCliMcpArguments(command, input), input });
+      return { exitCode: 0 };
+    };
+    const session = await connect(deps);
+    try {
+      const omitted = {
+        args: { input: "repositories.csv" },
+        options: { outputDir: "results" },
+      };
+      expect(
+        (await session.call("bulk-scan", omitted).result).isError,
+      ).not.toBe(true);
+      expect(calls[0]?.input).toEqual(omitted);
+      expect(calls[0]?.argv).not.toContain("--no-recover");
+      expect(
+        calls[0]?.argv.some((value) => value.startsWith("--provider=")),
+      ).toBe(false);
+      const explicit = {
+        ...omitted,
+        options: {
+          ...omitted.options,
+          config: "settings/scan.json",
+          recover: false,
+          provider: "amazon-bedrock",
+          model: "synthetic-model",
+        },
+      };
+      expect(
+        (await session.call("bulk-scan", explicit).result).isError,
+      ).not.toBe(true);
+      expect(calls[1]?.input).toEqual(explicit);
+      expect(calls[1]?.argv).toEqual(
+        expect.arrayContaining([
+          "--no-recover",
+          "--config=settings/scan.json",
+          "--provider=amazon-bedrock",
+          "--model=synthetic-model",
+        ]),
+      );
     } finally {
       await session.close();
     }
@@ -546,6 +610,58 @@ describe("CLI MCP scans", () => {
           workflowId: "synthetic-workflow",
         }),
       ]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("shares project settings and per-call overrides with scan and info", async () => {
+    const root = await temporaryDirectory();
+    const config = join(root, "scan.json");
+    await writeFile(
+      config,
+      JSON.stringify({
+        auth: "chatgpt",
+        scan: { mode: "deep", scope: { paths: ["src"] }, deep: { workers: 2 } },
+        limits: { max_cost_usd_per_scan: 7 },
+        codex: { model: "gpt-5.6-terra" },
+      }),
+    );
+    const calls: ScanOptions[] = [];
+    const session = await connect(
+      dependencies({
+        currentDirectory: root,
+        onTurn: (_repository, options) => calls.push(options),
+      }),
+    );
+    try {
+      const info = await session.call("info", { config }).result;
+      expect(info.structuredContent).toMatchObject({
+        scanMcp: true,
+        model: "gpt-5.6-terra",
+        configuration: {
+          path: config,
+          settings: {
+            auth: "chatgpt",
+            mode: "deep",
+            workers: 2,
+            maxCostUsd: 7,
+          },
+        },
+      });
+      expect(
+        (await session.call("scan", { config, workers: 3 }).result).isError,
+      ).not.toBe(true);
+      expect(calls[0]).toMatchObject({
+        auth: "chatgpt",
+        mode: "deep",
+        target: ["src"],
+        workers: 3,
+        maxCostUsd: 7,
+      });
+      expect((await session.call("scan", {}).result).isError).not.toBe(true);
+      expect(calls[1]).toMatchObject({ mode: "standard" });
+      expect(calls[1]?.workers).toBeUndefined();
     } finally {
       await session.close();
     }
@@ -967,5 +1083,101 @@ describe("CLI MCP scans", () => {
       expect(signals.listeners.get("SIGINT")?.size).toBe(0);
       expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     }
+  });
+  test.each([
+    ["SIGINT", "SIGINT", 1_000, 130],
+    ["SIGTERM", "SIGTERM", 1_000, 143],
+    ["SIGINT", "SIGTERM", 100, 130],
+  ] as const)(
+    "a later %s/%s escapes blocked scan cleanup",
+    async (first, repeated, delay, exitCode) => {
+      const signals = new FakeSignals();
+      const started = Promise.withResolvers<void>();
+      const cleanupStarted = Promise.withResolvers<void>();
+      const finishCleanup = Promise.withResolvers<void>();
+      const forced: string[] = [];
+      let now = 0;
+      const deps = dependencies({ signals });
+      deps.now = () => now;
+      deps.forceExit = (signal) => forced.push(signal);
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          started.resolve();
+          await new Promise<void>((resolve) =>
+            options!.signal!.addEventListener("abort", () => resolve(), {
+              once: true,
+            }),
+          );
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {
+          cleanupStarted.resolve();
+          await finishCleanup.promise;
+        },
+      });
+      const session = await connect(deps);
+      try {
+        session.call("scan");
+        await started.promise;
+        signals.emit(first);
+        await cleanupStarted.promise;
+        signals.emit(first);
+        expect(forced).toEqual([]);
+        now = delay;
+        signals.emit(repeated);
+        expect(forced).toEqual([repeated]);
+        expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+        expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      } finally {
+        finishCleanup.resolve();
+        expect(await session.serving).toBe(exitCode);
+      }
+    },
+  );
+  test("a repeated server signal forces pending command cleanup before exiting", async () => {
+    const signals = new FakeSignals();
+    const started = Promise.withResolvers<void>();
+    const cleanup = Promise.withResolvers<void>();
+    const forced: string[] = [];
+    let now = 0;
+    let childForced = false;
+    const deps = dependencies({ signals });
+    deps.now = () => now;
+    deps.forceExit = (signal) => {
+      expect(childForced).toBe(true);
+      forced.push(signal);
+    };
+    deps.runMcpCommand = async (_command, _input, options) => {
+      started.resolve();
+      await new Promise<void>((resolve) =>
+        options.signal!.addEventListener("abort", () => resolve(), {
+          once: true,
+        }),
+      );
+      cleanup.resolve();
+      await new Promise<void>((resolve) =>
+        options.forceSignal!.addEventListener(
+          "abort",
+          () => {
+            childForced = true;
+            resolve();
+          },
+          { once: true },
+        ),
+      );
+      return { exitCode: 130, error: "Command cancelled." };
+    };
+    const session = await connect(deps);
+    session.call("validate", commandInputs["validate"]);
+    await started.promise;
+    signals.emit("SIGINT");
+    await cleanup.promise;
+    signals.emit("SIGINT");
+    expect(forced).toEqual([]);
+    now = 1_000;
+    signals.emit("SIGINT");
+    expect(forced).toEqual(["SIGINT"]);
+    expect(await session.serving).toBe(130);
   });
 });

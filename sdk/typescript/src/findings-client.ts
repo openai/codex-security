@@ -1,4 +1,9 @@
 import { CodexSecurityError } from "./errors.js";
+import {
+  parseFindingsErrorResponse,
+  type FindingsErrorCode,
+} from "./findings-errors.js";
+import { retryDelay, waitForRetry } from "./deduplication/retry.js";
 import type { Finding } from "./models.js";
 import type {
   FindingNeighborhood,
@@ -10,11 +15,50 @@ export type FindingsRequest = (
   init: RequestInit,
 ) => Promise<Response>;
 
+class FindingsHttpError extends CodexSecurityError {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryAfter: string | null,
+    readonly code?: FindingsErrorCode,
+  ) {
+    super(message);
+  }
+
+  static async fromResponse(
+    response: Response,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<FindingsHttpError> {
+    // Gateways can return plain text or HTML instead of the service's JSON error.
+    const body: unknown = await response.json().catch(() => undefined);
+    signal?.throwIfAborted();
+    const error = parseFindingsErrorResponse(body);
+    return new FindingsHttpError(
+      error?.message ? `${message} ${error.message}` : message,
+      response.status,
+      response.headers.get("Retry-After"),
+      error?.error,
+    );
+  }
+}
+
+function isRetryable(error: unknown): boolean {
+  if (error instanceof FindingsHttpError)
+    return [408, 429, 500, 502, 503, 504].includes(error.status);
+  // Fetch rejects network failures with TypeError; JSON truncation can produce SyntaxError.
+  return error instanceof TypeError || error instanceof SyntaxError;
+}
+
 export class FindingsClient {
   constructor(
     private readonly url: string,
     private readonly signal?: AbortSignal,
     private readonly request: FindingsRequest = fetch,
+    private readonly retries: {
+      wait?: typeof waitForRetry;
+      random?: () => number;
+    } = {},
   ) {}
 
   async potentialDuplicates(
@@ -27,17 +71,21 @@ export class FindingsClient {
     if (scope.allRepositories === true)
       url.searchParams.set("allRepositories", "true");
     else url.searchParams.set("repositoryId", scope.repositoryId);
-    const response = await this.request(url, { signal: this.signal });
-    if (!response.ok) {
-      throw new CodexSecurityError(
-        `Potential-duplicates lookup for ${findingId} failed (HTTP ${response.status}).${
-          response.status === 404
-            ? " Import the finding with its repositoryId through POST /v1/bulk/findings before deduplicating."
-            : ""
-        }`,
-      );
-    }
-    return (await response.json()) as FindingNeighborhood;
+    return await this.retry(async () => {
+      const response = await this.request(url, { signal: this.signal });
+      if (!response.ok) {
+        throw await FindingsHttpError.fromResponse(
+          response,
+          `Potential-duplicates lookup for ${findingId} failed (HTTP ${response.status}).${
+            response.status === 404
+              ? " Import the finding with its repositoryId through POST /v1/bulk/findings before deduplicating."
+              : ""
+          }`,
+          this.signal,
+        );
+      }
+      return (await response.json()) as FindingNeighborhood;
+    });
   }
 
   async publish(
@@ -64,7 +112,29 @@ export class FindingsClient {
 
   async storeDedupeGroups(groups: readonly string[][]): Promise<void> {
     if (groups.length === 0) return;
-    await this.post("v1/dedupe-groups", { groups });
+    await this.retry(() => this.post("v1/dedupe-groups", { groups }));
+  }
+
+  private async retry<T>(operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      this.signal?.throwIfAborted();
+      try {
+        return await operation();
+      } catch (error) {
+        this.signal?.throwIfAborted();
+        if (attempt === 3 || !isRetryable(error)) throw error;
+        let delay = retryDelay(attempt, this.retries.random);
+        if (error instanceof FindingsHttpError && error.retryAfter !== null) {
+          const seconds = Number(error.retryAfter);
+          const serverDelay = Number.isFinite(seconds)
+            ? seconds * 1000
+            : Date.parse(error.retryAfter) - Date.now();
+          if (Number.isFinite(serverDelay))
+            delay = Math.max(delay, serverDelay);
+        }
+        await (this.retries.wait ?? waitForRetry)(delay, this.signal);
+      }
+    }
   }
 
   private endpoint(path: string): URL {
@@ -79,8 +149,10 @@ export class FindingsClient {
       signal: this.signal,
     });
     if (!response.ok) {
-      throw new CodexSecurityError(
+      throw await FindingsHttpError.fromResponse(
+        response,
         `Findings API POST /${path} failed (HTTP ${response.status}).`,
+        this.signal,
       );
     }
     return await response.json();

@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
+from source_cases import SOURCE_CASES
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "generate_in_scope_files.py"
 
@@ -73,7 +74,18 @@ def run_inventory(
 
 def standard_inventory(repository: Path, scope: str) -> bytes:
     files = subprocess.run(
-        ["rg", "--files", "--hidden", "--glob", "!.git/**", "--path-separator=/", "--", scope],
+        [
+            "rg",
+            "--files",
+            "--hidden",
+            "--glob",
+            "!**/.git",
+            "--glob",
+            "!**/.git/**",
+            "--path-separator=/",
+            "--",
+            scope,
+        ],
         cwd=repository,
         capture_output=True,
         check=False,
@@ -104,7 +116,7 @@ def test_inventory_matches_the_existing_standard_command(tmp_path: Path, scope: 
 
     assert result.returncode == 0, result.stderr
     assert output.read_bytes() == standard_inventory(repository, scope)
-    assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
+    assert list(output.parent.glob(".*.tmp")) == []
     if scope == ".":
         rows = set(output.read_text(encoding="utf-8").splitlines())
         assert {
@@ -118,6 +130,19 @@ def test_inventory_matches_the_existing_standard_command(tmp_path: Path, scope: 
             "./app/évidence.py",
         } <= rows
         assert {"./ignored/secret.py", "./app/ignored.skip"}.isdisjoint(rows)
+
+
+@pytest.mark.parametrize("name", [f"{'a' * 251}.txt", f"{'文' * 83}.txt"])
+def test_inventory_replaces_outputs_with_long_filenames(tmp_path: Path, name: str) -> None:
+    repository = make_repository(tmp_path)
+    output = tmp_path / name
+    output.write_text("previous.py\n", encoding="utf-8")
+
+    result = run_inventory(repository, ".", output)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == standard_inventory(repository, ".")
+    assert list(output.parent.glob(".*.tmp")) == []
 
 
 def test_absolute_scope_still_produces_repository_relative_paths(tmp_path: Path) -> None:
@@ -148,7 +173,132 @@ def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
     assert "./app/ignored.skip" not in paths
 
 
-def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("scope", "absolute"),
+    [
+        (".", False),
+        ("ignored", False),
+        ("./ignored", False),
+        ("ignored/tracked.py", False),
+        ("./ignored/tracked.py", False),
+        ("ignored", True),
+        ("ignored/tracked.py", True),
+    ],
+)
+def test_inventory_lists_ignored_tracked_files_once(
+    tmp_path: Path, scope: str, absolute: bool
+) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "ignored/tracked.py")
+    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, str(repository / scope) if absolute else scope, output)
+
+    assert result.returncode == 0, result.stderr
+    rows = output.read_bytes().splitlines()
+    prefix = b"./" if scope == "." or scope.startswith("./") else b""
+    assert rows.count(prefix + b"ignored/tracked.py") == 1
+    assert rows == sorted(set(rows))
+    assert result.stdout == f"Recorded {len(rows)} in-scope files.\n"
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [(".", "./vendor/lib/handler.py"), ("vendor", "vendor/lib/handler.py")],
+)
+def test_inventory_excludes_git_metadata_from_a_nested_repository(
+    tmp_path: Path, scope: str, expected: str
+) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "vendor/lib/handler.py")
+    write_file(repository, "vendor/lib/.git/HEAD", b"ref: refs/heads/main\n")
+    write_file(repository, "vendor/lib/.git/config", b"[core]\n\tbare = false\n")
+    write_file(repository, "vendor/lib/.git/objects/ab/cdef", b"blob")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 0, result.stderr
+    paths = output.read_text(encoding="utf-8").splitlines()
+    assert expected in paths
+    assert all(".git" not in PurePosixPath(path).parts for path in paths)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        ".git",
+        "./.git",
+        ".git/hooks",
+        "vendor/lib/.git",
+        "./vendor/lib/.git",
+        "vendor/lib/.git/hooks",
+    ],
+)
+def test_inventory_excludes_metadata_when_scoped_inside_a_git_directory(
+    tmp_path: Path, scope: str
+) -> None:
+    repository = make_repository(tmp_path)
+    for prefix in (".git", "vendor/lib/.git"):
+        write_file(repository, f"{prefix}/hooks/example.py")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == b""
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_inventory_excludes_the_git_file_of_a_linked_worktree(tmp_path: Path, nested: bool) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    worktree = repository / "vendor" / "lib" if nested else tmp_path / "worktree"
+    git(repository, "worktree", "add", "-q", str(worktree), "HEAD")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository if nested else worktree, ".", output)
+
+    assert result.returncode == 0, result.stderr
+    paths = output.read_text(encoding="utf-8").splitlines()
+    prefix = "./vendor/lib" if nested else "."
+    assert f"{prefix}/app/routes.py" in paths
+    assert all(".git" not in PurePosixPath(path).parts for path in paths)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not allow CR/LF in filenames")
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+@pytest.mark.parametrize("ignored_tracked", [False, True])
+@pytest.mark.parametrize("scope_kind", ["repository", "directory", "file"])
+def test_inventory_rejects_line_breaks_before_serializing_paths(
+    tmp_path: Path, separator: str, ignored_tracked: bool, scope_kind: str
+) -> None:
+    repository = make_repository(tmp_path)
+    directory = "ignored" if ignored_tracked else "app"
+    name = f"{directory}/concealed.py{separator}phantom.py"
+    write_file(repository, name)
+    if ignored_tracked:
+        git(repository, "add", "--force", "--", name)
+    scope = {"repository": ".", "directory": f"./{directory}", "file": name}[scope_kind]
+    output = tmp_path / "in_scope_files.txt"
+    previous = b"previous.py\n"
+    output.write_bytes(previous)
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 2
+    assert "path that cannot fit in the file inventory" in result.stderr
+    assert result.stdout == ""
+    assert output.read_bytes() == previous
+    assert list(output.parent.glob(".*.tmp")) == []
+
+
+def test_diff_inventory_includes_power_shell_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
     repository = tmp_path / "repository"
     repository.mkdir()
     subprocess.run(
@@ -334,7 +484,7 @@ def test_large_inventory_is_not_limited_by_a_subprocess_output_buffer(tmp_path: 
         f"#!{sys.executable}\n"
         "import sys\n"
         "for index in range(12000, 0, -1):\n"
-        "    sys.stdout.write(f\"./{'x' * 100}-{index:05d}.py\\n\")\n",
+        "    sys.stdout.write(f\"./{'x' * 100}-{index:05d}.py\\0\")\n",
         encoding="utf-8",
     )
     ripgrep.chmod(0o755)
@@ -349,35 +499,107 @@ def test_large_inventory_is_not_limited_by_a_subprocess_output_buffer(tmp_path: 
     assert rows == sorted(rows)
 
 
-def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path, mode: str) -> None:
     repository = make_repository(tmp_path)
+    write_file(repository, "app/entrypoint", b"exec service\n")
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
+    gitlink = git(repository, "rev-parse", "HEAD")
+    git(repository, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},removed-module")
+    git(repository, "commit", "--amend", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
 
     write_file(repository, "app/routes.py", b"changed = True\n")
     write_file(repository, "app/new handler.py", b"handler = True\n")
     write_file(repository, "app/binary.py", b"\x00\xff\x01")
-    write_file(repository, "tests/demo.py", b"excluded = True\n")
+    write_file(repository, "tests/demo.py", b"changed = True\n")
+    write_file(repository, ".github/workflows/ci.yml", b"name: CI\n")
+    write_file(
+        repository,
+        ".gitmodules",
+        b'[submodule "added-module"]\npath = added-module\nurl = ../module.git\n',
+    )
     (repository / "app/évidence.py").unlink()
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "change")
-    head = git(repository, "rev-parse", "HEAD")
+    (repository / "app/entrypoint").unlink()
+    (repository / "app/binary.dat").unlink()
+    arguments = ["--diff-base", base, "--diff-mode", "local-patch"]
+    if mode in {"revisions", "staged"}:
+        git(repository, "add", ".")
+    git(repository, "update-index", "--force-remove", "removed-module")
+    git(repository, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},added-module")
+    if mode == "revisions":
+        git(repository, "commit", "-qm", "change")
+        arguments = ["--diff-base", base, "--diff-head", git(repository, "rev-parse", "HEAD")]
+        git(repository, "checkout", "-q", base)
     output = tmp_path / "in_scope_files.txt"
 
     result = run_inventory(
         repository,
         ".",
         output,
-        arguments=["--diff-base", base, "--diff-head", head],
+        arguments=arguments,
     )
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == [
+        ".github/workflows/ci.yml",
+        ".gitmodules",
+        "app/entrypoint",
         "app/new handler.py",
         "app/routes.py",
         "app/évidence.py",
+        "tests/demo.py",
     ]
+
+
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
+def test_diff_inventory_only_classifies_source_bytes(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    write_file(repository, "app/text.unlisted", b"x" * (64 * 1024 + 1) + b"text")
+    write_file(repository, "app/binary.py", b"x" * (64 * 1024 + 1) + b"\0")
+    write_file(repository, "app/binary.unlisted", b"x" * (64 * 1024 + 1) + b"\0")
+    arguments = ["--diff-base", base, "--diff-mode", mode]
+    if mode == "revisions":
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "change")
+        arguments.extend(["--diff-head", "HEAD"])
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == ["app/text.unlisted"]
+
+
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_diff_inventory_includes_source_cases(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    for case in SOURCE_CASES:
+        write_file(repository, case.path, (case.before + "\n").encode("utf-8"))
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    for case in SOURCE_CASES:
+        write_file(repository, case.path, (case.after + "\n").encode("utf-8"))
+    arguments = ["--diff-base", base, "--diff-mode", "local-patch"]
+    if mode in {"revisions", "staged"}:
+        git(repository, "add", ".")
+    if mode == "revisions":
+        git(repository, "commit", "-qm", "change")
+        arguments = ["--diff-base", base, "--diff-head", git(repository, "rev-parse", "HEAD")]
+        git(repository, "checkout", "-q", base)
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == sorted(
+        case.path for case in SOURCE_CASES
+    )
 
 
 def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> None:
@@ -389,10 +611,17 @@ def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> 
     write_file(repository, "app/staged.py", b"staged = True\n")
     git(repository, "add", "app/staged.py")
     write_file(repository, "app/untracked.py", b"untracked = True\n")
+    write_file(repository, ".github/workflows/ci.yaml", b"name: CI\n")
     write_file(repository, "app/untracked-binary.py", b"\x00\xff\x01")
     index_only = write_file(repository, "app/index-only.py", b"index_only = True\n")
     git(repository, "add", "app/index-only.py")
     index_only.unlink()
+    nested = repository / "nested"
+    nested.mkdir()
+    git(nested, "init", "-q")
+    write_file(nested, "source.py", b"nested = True\n")
+    git(nested, "add", ".")
+    git(nested, "commit", "-qm", "nested repository")
     output = tmp_path / "in_scope_files.txt"
 
     result = run_inventory(
@@ -404,6 +633,7 @@ def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == [
+        ".github/workflows/ci.yaml",
         "app/routes.py",
         "app/staged.py",
         "app/untracked.py",
@@ -455,7 +685,7 @@ def test_diff_inventory_includes_bom_marked_utf16_text(tmp_path: Path, mode: str
         "app/decoded-nul.ps1",
         b"\xff\xfe" + "text\0binary".encode("utf-16-le"),
     )
-    write_file(repository, "tests/excluded.ps1", b"\xff\xfe" + source.encode("utf-16-le"))
+    write_file(repository, "tests/encoded.ps1", b"\xff\xfe" + source.encode("utf-16-le"))
 
     arguments = ["--diff-base", base, "--diff-mode", mode]
     if mode == "revisions":
@@ -471,6 +701,7 @@ def test_diff_inventory_includes_bom_marked_utf16_text(tmp_path: Path, mode: str
         "app/utf16-be.ps1",
         "app/utf16-le.ps1",
         "app/utf8.ps1",
+        "tests/encoded.ps1",
     ]
 
 
@@ -495,4 +726,30 @@ def test_diff_inventory_rejects_a_narrower_scope(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "diff scans must use the repository root" in result.stderr
+    assert output.read_text(encoding="utf-8") == "previous.py\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes")
+def test_diff_inventory_rejects_non_utf8_path_and_preserves_output(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    blob = git(repository, "rev-parse", f"{base}:app/routes.py")
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", "-z", "--index-info"],
+        input=b"100644 " + blob.encode("ascii") + b"\ttests/caf\xe9.py\0",
+        check=True,
+        capture_output=True,
+    )
+    head = git(
+        repository, "commit-tree", git(repository, "write-tree"), "-p", base, "-m", "Byte path"
+    )
+    output = tmp_path / "in_scope_files.txt"
+    output.write_text("previous.py\n", encoding="utf-8")
+    result = run_inventory(
+        repository, ".", output, arguments=["--diff-base", base, "--diff-head", head]
+    )
+    assert result.returncode == 2
+    assert "cannot be encoded as UTF-8 for the file inventory" in result.stderr
     assert output.read_text(encoding="utf-8") == "previous.py\n"

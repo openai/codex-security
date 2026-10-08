@@ -14,10 +14,15 @@ import type {
   ScanWorkerStatus,
   SeverityLevel,
 } from "../src/index.js";
-import { ScanResult } from "../src/index.js";
+import { CodexSecurityError, ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
+import { throwing } from "./support/errors.js";
 
 type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
+
+export type OnCodex = (
+  ...arguments_: Parameters<MainDependencies["runCodex"]>
+) => number | Promise<number>;
 
 export const SYNTHETIC_CREDENTIALS = [
   "sk-proj-SYNTHETIC_KEY_123",
@@ -71,7 +76,7 @@ export const SYNTHETIC_CREDENTIALS = [
   "https://example.test/?redirect_uri=https%3A%2F%2Finner.test%2Fcb%3Frefresh_token%3DSYNTHETIC_NESTED_REFRESH_123%26password%3DSYNTHETIC_NESTED_PASSWORD_123%26safe%3D1",
 ].join(" ");
 
-export function capture(isTTY = false): {
+export function capture(isTTY: boolean | null = false): {
   stream: Pick<NodeJS.WriteStream, "write"> &
     Partial<Pick<NodeJS.WriteStream, "isTTY">>;
   text(): string;
@@ -79,7 +84,7 @@ export function capture(isTTY = false): {
   let value = "";
   return {
     stream: {
-      isTTY,
+      ...(isTTY === null ? {} : { isTTY }),
       write(chunk: string | Uint8Array): boolean {
         value += chunk.toString();
         return true;
@@ -102,6 +107,19 @@ export function fakePreflight(
     reasoningEffort: "xhigh",
   };
 }
+
+export const savedRecipe = (
+  config: JsonObject = {},
+  target: JsonObject = { kind: "repository", paths: [] },
+) => ({
+  scanId: "scan-original",
+  recipe: {
+    repository: "/original/repository",
+    target,
+    mode: "standard",
+    config,
+  },
+});
 
 export function fakeResult(
   severityLevels: readonly SeverityLevel[] = [],
@@ -186,22 +204,20 @@ export class FakeSignals {
 export function dependencies(
   options: {
     onConfig?: (config: CodexSecurityConfig) => void;
-    onTurn?: (repository: string, options: unknown) => void;
+    onTurn?: (repository: string, options: ScanOptions) => void;
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
-    onCodex?: (
-      ...arguments_: Parameters<MainDependencies["runCodex"]>
-    ) => number | Promise<number>;
+    onCodex?: OnCodex;
     linearClient?: MainDependencies["linearClient"];
     importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
-    bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (
       args: readonly string[],
       input?: string,
+      signal?: AbortSignal,
     ) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
@@ -256,7 +272,7 @@ export function dependencies(
     checkForUpdate: async (signal) => await options.onUpdateCheck?.(signal),
     currentDirectory: () => options.currentDirectory ?? "/current/repository",
     now: () => 0,
-    setInterval: () => ({}) as NodeJS.Timeout,
+    setInterval: fakeInterval,
     clearInterval: () => {},
     addSignalListener: (signal, listener) => signals.add(signal, listener),
     removeSignalListener: (signal, listener) =>
@@ -270,18 +286,20 @@ export function dependencies(
         args,
         repository,
         commandOptions,
-      )) ?? "",
-    ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
+      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
     ...(options.importGitHubAlerts === undefined
       ? {}
       : { importGitHubAlerts: options.importGitHubAlerts }),
-    runWorkbench: async (args, input) =>
-      (await options.onWorkbench?.(args, input)) ?? { scans: [] },
-    matchFindings: async (input) =>
-      (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
+    runWorkbench: async (args, input, signal) =>
+      (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+    matchFindings: async (input, comparisonOptions) =>
+      (await options.onMatch?.(input, comparisonOptions)) ?? {
+        matches: [],
+        uncertain: [],
+      },
     exportFindings: async (arguments_) =>
       new TextEncoder().encode(
         arguments_.format === "csv"
@@ -292,3 +310,28 @@ export function dependencies(
       ),
   };
 }
+
+export const mustNotInitializeCodex = throwing("must not initialize Codex");
+
+export function fakeSecurity(run: CodexSecurity["run"]) {
+  return { run, preflight: async () => fakePreflight(), close: async () => {} };
+}
+
+export function failingSecurity(message: string) {
+  return fakeSecurity(async () => {
+    throw new CodexSecurityError(message);
+  });
+}
+
+export function fakeInterval(_callback: () => void): NodeJS.Timeout {
+  return {} as NodeJS.Timeout;
+}
+
+export const warningResult =
+  (message: string, targetChanged = false) =>
+  async (_repository: string, options?: ScanOptions) => {
+    if (targetChanged)
+      options?.onWarning?.(message, { kind: "target_changed" });
+    else options?.onWarning?.(message);
+    return fakeResult();
+  };

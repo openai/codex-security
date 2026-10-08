@@ -1,11 +1,27 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import type { Server } from "node:http";
+import { readJson } from "./support/json.js";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { handleFindingsRequest } from "../src/server/routes.js";
+import { findingsRequestValidator } from "../src/server/validation.js";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { delimiter, dirname, join } from "node:path";
+import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
-import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
+import {
+  resolvePluginPython,
+  runCodexCommand,
+  runWorkbench,
+} from "../src/runtime.js";
 import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
@@ -13,16 +29,14 @@ import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { EmbeddedFinding, FindingsPage } from "../src/server/storage.js";
 import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { rejecting } from "./support/errors.js";
 
 const servers: Server[] = [];
 const directories: string[] = [];
 const example = (
-  JSON.parse(
-    await readFile(
-      join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
-      "utf8",
-    ),
-  ) as FindingsDocument
+  await readJson<FindingsDocument>(
+    join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+  )
 ).findings[0]!;
 
 function finding(index = 1): Finding {
@@ -75,8 +89,267 @@ async function fixture() {
     ...process.env,
     CODEX_SECURITY_STATE_DIR: join(directory, "state with spaces"),
   };
-  return { environment, store: new SqliteFindingsStore(environment) };
+  return {
+    environment,
+    store: new SqliteFindingsStore({
+      ...environment,
+      PYTHON: join(directory, "missing-python"),
+    }),
+  };
 }
+
+test("initializes the shared database concurrently without Python", async () => {
+  const { environment } = await fixture();
+  const nativeEnvironment = {
+    ...environment,
+    PYTHON: join(environment.CODEX_SECURITY_STATE_DIR, "missing-python"),
+  };
+  await Promise.all([
+    new SqliteFindingsStore(nativeEnvironment).initialize(),
+    new SqliteFindingsStore(nativeEnvironment).initialize(),
+  ]);
+  const result = await runWorkbench(
+    { pluginRoot: PLUGIN_ROOT, environment: nativeEnvironment },
+    ["database-info"],
+  );
+  expect(result).toEqual({
+    databasePath: join(
+      await realpath(environment.CODEX_SECURITY_STATE_DIR),
+      "workbench.sqlite3",
+    ),
+  });
+});
+
+test("invalid findings pagination is rejected before database creation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "findings-page-"));
+  directories.push(directory);
+  const stateDirectory = join(directory, "state");
+  for (const payload of [
+    { limit: 0, offset: 0 },
+    { limit: 1, offset: -1 },
+  ]) {
+    const result = await runCodexCommand(
+      { command: "node" },
+      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "list-stored-findings"],
+      process.env,
+      JSON.stringify({ stateDirectory, payload }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.stderr).toContain("limit must be a positive integer");
+  }
+  expect(await readdir(directory)).toEqual([]);
+});
+
+test.skipIf(process.platform === "win32")(
+  "database initialization under Bun ignores repository-local Node shims",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "database-info-node-"));
+    directories.push(directory);
+    const repository = join(directory, "repository");
+    const other = join(directory, "other", "nested");
+    await mkdir(other, { recursive: true });
+    const bin = join(repository, "node_modules", ".bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      join(bin, "node"),
+      `#!/bin/sh
+: > "$SYNTHETIC_NODE_SHIM_MARKER"
+printf '%s\n' '{"databasePath":"shim"}'
+`,
+      { mode: 0o755 },
+    );
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const tools = join(directory, "tools");
+    const replacementTools = join(directory, "other", "tools");
+    await Promise.all([mkdir(tools), mkdir(replacementTools)]);
+    await symlink(node!, join(tools, "node"));
+    await writeFile(
+      join(replacementTools, "node"),
+      '#!/bin/sh\nprintf invoked > "$SYNTHETIC_NODE_SHIM_MARKER"\nexit 1\n',
+      { mode: 0o755 },
+    );
+    const state = join(directory, "state");
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "--eval",
+        `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const store = new SqliteFindingsStore();
+await store.initialize();
+process.chdir(${JSON.stringify(other)});
+await store.initialize();
+await store.list({ limit: 1, offset: 0 });`,
+      ],
+      {
+        cwd: repository,
+        env: {
+          ...process.env,
+          PATH: [bin, "../tools"].join(delimiter),
+          CODEX_SECURITY_STATE_DIR: state,
+          SYNTHETIC_NODE_SHIM_MARKER: join(bin, "invoked"),
+        },
+      },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(await readdir(bin)).toEqual(["node"]);
+    expect(
+      (await readFile(join(state, "workbench.sqlite3")))
+        .subarray(0, 16)
+        .toString(),
+    ).toBe("SQLite format 3\0");
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "database initialization and findings operations share the configured state directory",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "database-info-location-"));
+    directories.push(directory);
+    const store = new SqliteFindingsStore({
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: join(directory, "state ") + "/",
+    });
+    await store.insert([embedded(1)], "repository-a");
+    await store.initialize();
+    expect(await readdir(directory)).toEqual(["state "]);
+    expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([
+      finding(1),
+    ]);
+  },
+);
+
+test("initialized stores keep relative state in the original directory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "findings-relative-state-"));
+  directories.push(directory);
+  const first = join(directory, "first");
+  const second = join(directory, "second");
+  await Promise.all([mkdir(first), mkdir(second)]);
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      "--eval",
+      `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const store = new SqliteFindingsStore();
+await store.initialize();
+process.chdir(${JSON.stringify(second)});
+await store.insert(${JSON.stringify([embedded(1)])});
+console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));`,
+    ],
+    {
+      cwd: first,
+      env: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: "state",
+        PYTHON: join(directory, "missing-python"),
+      },
+    },
+  );
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
+  expect(await readdir(first)).toEqual(["state"]);
+  expect(await readdir(second)).toEqual([]);
+});
+
+test("initialized stores retain their environment across findings operations", async () => {
+  const { environment } = await fixture();
+  const store = new SqliteFindingsStore(environment);
+  await store.initialize();
+  const directory = dirname(environment.CODEX_SECURITY_STATE_DIR);
+  environment.CODEX_SECURITY_STATE_DIR = join(directory, "other state");
+  const entries = [embedded(1), embedded(2)];
+  await store.insert(entries);
+  const groups = await store.storeDedupeGroups([
+    entries.map(({ finding }) => finding.findingId),
+  ]);
+  expect(await store.listDedupeGroups(entries[0]!.finding.findingId)).toEqual(
+    groups,
+  );
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
+    entries.map(({ finding }) => finding),
+  );
+  expect(await readdir(directory)).toEqual(["state with spaces"]);
+});
+
+test("escapes terminal controls in database helper diagnostics", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-"));
+  directories.push(directory);
+  const blocked = join(directory, "blocked\u202e");
+  await writeFile(blocked, "existing file");
+  const result = await runCodexCommand(
+    { command: "node" },
+    [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+    process.env,
+    JSON.stringify(join(blocked, "state")),
+  );
+  expect(result.success).toBe(false);
+  expect(result.stderr).toContain("\\u202e");
+  expect(result.stderr).not.toContain("\u202e");
+});
+
+test("successful database helper JSON escapes terminal controls without changing the path", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-controls-"));
+  directories.push(directory);
+  const state = join(directory, "state\u009b\u202e\u{e0001}");
+  const result = await runCodexCommand(
+    { command: "node" },
+    [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+    process.env,
+    JSON.stringify(state),
+  );
+  expect(result.success).toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    databasePath: join(await realpath(state), "workbench.sqlite3"),
+  });
+  expect(result.stdout.trimEnd()).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+  expect(result.stdout).toContain("\\udb40\\udc01");
+});
+
+test("database initialization uses the SDK's existing CODEX_HOME configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-home-"));
+  directories.push(directory);
+  const result = await runWorkbench(
+    {
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: undefined,
+        CODEX_HOME: directory,
+        PYTHON: join(directory, "missing-python"),
+      },
+    },
+    ["database-info"],
+  );
+  expect(result).toEqual({
+    databasePath: join(
+      await realpath(directory),
+      "state/plugins/codex-security/workbench.sqlite3",
+    ),
+  });
+});
+
+test("database helper rejects invalid state-directory input before writing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-input-"));
+  directories.push(directory);
+  const ignoredEnvironmentPath = join(directory, "must-not-be-created");
+  for (const input of [
+    undefined,
+    JSON.stringify(null),
+    JSON.stringify("~synthetic-user"),
+    JSON.stringify("C:"),
+    JSON.stringify(directory + "/raw\udcff"),
+  ]) {
+    const result = await runCodexCommand(
+      { command: "node" },
+      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+      { ...process.env, CODEX_SECURITY_STATE_DIR: ignoredEnvironmentPath },
+      input,
+    );
+    expect(result.success).toBe(false);
+    expect(result.stderr).not.toBe("");
+  }
+  expect(await readdir(directory)).toEqual([]);
+});
 
 async function start(
   store: SqliteFindingsStore,
@@ -130,17 +403,17 @@ async function dashboard(
 test("dashboard serves only findings and groups, and never calls an embedding provider", async () => {
   const { store } = await fixture();
   const base = await start(store, {
-    async embed() {
-      throw new Error("Read-only dashboard called embeddings");
-    },
+    embed: rejecting("Read-only dashboard called embeddings"),
   });
-  const redirect = await fetch(`${base}/dashboard`, { redirect: "manual" });
-  expect(redirect.status).toBe(308);
-  for (const prefix of ["", "/service"]) {
-    expect(
-      new URL(redirect.headers.get("location")!, `${base}${prefix}/dashboard`)
-        .pathname,
-    ).toBe(`${prefix}/dashboard/`);
+  for (const path of ["/", "/dashboard"]) {
+    const redirect = await fetch(`${base}${path}`, { redirect: "manual" });
+    expect(redirect.status).toBe(308);
+    for (const prefix of ["", "/service"]) {
+      expect(
+        new URL(redirect.headers.get("location")!, `${base}${prefix}${path}`)
+          .pathname,
+      ).toBe(`${prefix}/dashboard/`);
+    }
   }
   for (const view of ["findings", "groups"]) {
     const result = await dashboard(base, { view });
@@ -157,6 +430,10 @@ test("dashboard serves only findings and groups, and never calls an embedding pr
     "view=scans",
     "view=workflows",
     "sort=unknown",
+    "direction=unknown",
+    "direction=ASC",
+    "view=findings&sort=members",
+    "view=groups&sort=severity",
     "offset=-1",
     "limit=0",
   ]) {
@@ -171,6 +448,179 @@ test("dashboard serves only findings and groups, and never calls an embedding pr
   expect((await fetch(`${base}/dashboard/not-a-bundled-asset`)).status).toBe(
     404,
   );
+});
+
+test("dashboard sorts findings across pages with stable ties and filters", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  const titles = [
+    "Zulu",
+    "alpha",
+    "Bravo",
+    "ALPHA",
+    "Éclair",
+    "éCLAIR",
+    "alpha",
+  ];
+  const severities: Finding["severity"]["level"][] = [
+    "low",
+    "critical",
+    "high",
+    "medium",
+    "informational",
+    "critical",
+    "critical",
+  ];
+  const repositories = [
+    ["zeta"],
+    ["zeta", "Alpha"],
+    ["beta"],
+    ["beta", "Alpha"],
+    ["équipe"],
+    ["ÉQUIPE"],
+    ["Alpha", "beta"],
+  ];
+  const findings = titles.map((title, index) => {
+    const value = finding(index + 1);
+    value.title = title;
+    value.severity.level = severities[index]!;
+    return value;
+  });
+  for (const [index, value] of findings.entries()) {
+    for (const repository of repositories[index]!) {
+      await store.insert(
+        [{ ...embedded(index + 1), finding: value }],
+        repository,
+      );
+    }
+  }
+  await database(
+    environment,
+    `with db:
+    db.executemany("UPDATE findings SET created_at = ?, updated_at = ? WHERE id = ?", json.load(sys.stdin))
+print("null")`,
+    findings.map((value, index) => [
+      `2026-01-0${[3, 1, 2, 1, 4, 4, 1][index]}T00:00:00Z`,
+      `2026-02-0${[1, 2, 2, 2, 3, 2, 2][index]}T00:00:00Z`,
+      value.findingId,
+    ]),
+  );
+  const ids = (indices: number[]) =>
+    indices.map((index) => findings[index - 1]!.findingId);
+  const orders = {
+    activity: { asc: [1, 2, 6, 7, 3, 4, 5], desc: [5, 2, 6, 7, 3, 4, 1] },
+    newest: { asc: [2, 4, 7, 3, 1, 5, 6], desc: [5, 6, 1, 3, 2, 4, 7] },
+    title: { asc: [2, 4, 7, 3, 1, 5, 6], desc: [5, 6, 1, 3, 2, 4, 7] },
+    repository: { asc: [4, 7, 2, 3, 1, 5, 6], desc: [5, 6, 1, 3, 2, 4, 7] },
+    severity: { asc: [5, 1, 4, 3, 2, 6, 7], desc: [2, 6, 7, 3, 4, 1, 5] },
+  };
+  for (const [sort, directions] of Object.entries(orders)) {
+    for (const [direction, indices] of Object.entries(directions)) {
+      const result = await dashboard(base, { sort, direction });
+      expect(result.items.map((item) => item.id)).toEqual(ids(indices));
+      const page = await dashboard(base, {
+        sort,
+        direction,
+        limit: "2",
+        offset: "2",
+      });
+      expect(page.items).toEqual(result.items.slice(2, 4));
+      expect(page.total).toBe(7);
+      expect(page.nextOffset).toBe(4);
+    }
+  }
+  for (const sort of ["activity", "newest"] as const) {
+    const result = await dashboard(base, { sort });
+    expect(result.items.map((item) => item.id)).toEqual(ids(orders[sort].desc));
+  }
+  const result = await dashboard(base);
+  expect(result.items.map((item) => item.id)).toEqual(
+    ids(orders.activity.desc),
+  );
+  expect(
+    result.items.find((item) => item.id === findings[1]!.findingId)!
+      .repositoryIds,
+  ).toEqual(["Alpha", "zeta"]);
+  const filtered = await dashboard(base, {
+    sort: "severity",
+    direction: "desc",
+    query: "ALPHA",
+    repository: "Alpha",
+    limit: "1",
+    offset: "1",
+  });
+  expect(filtered.items.map((item) => item.id)).toEqual(ids([7]));
+  expect(filtered.total).toBe(3);
+  expect(filtered.nextOffset).toBe(2);
+});
+
+test("dashboard sorts group columns by numeric members and displayed repositories", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  const entries = Array.from({ length: 12 }, (_, index) => embedded(index + 1));
+  await store.insert(entries, "zeta");
+  await store.insert([entries[0]!], "Alpha");
+  await store.insert([entries[1]!], "beta");
+  const groups = await store.storeDedupeGroups([
+    [entries[0]!, entries[2]!].map((entry) => entry.finding.findingId),
+    [entries[1]!, entries[2]!, entries[3]!].map(
+      (entry) => entry.finding.findingId,
+    ),
+    entries.slice(2).map((entry) => entry.finding.findingId),
+    [entries[0]!, entries[3]!].map((entry) => entry.finding.findingId),
+  ]);
+  await database(
+    environment,
+    `with db:
+    db.executemany("UPDATE finding_dedupe_groups SET created_at = ? WHERE id = ?", json.load(sys.stdin))
+print("null")`,
+    groups.map((group, index) => [
+      `2026-01-0${[2, 1, 3, 2][index]}T00:00:00Z`,
+      group.groupId,
+    ]),
+  );
+  const [first, second, third, fourth] = groups.map(
+    (group) => group.groupId,
+  ) as [string, string, string, string];
+  const tied = [first, fourth].sort();
+  const titles = groups.map((group) => group.groupId).sort();
+  const orders = {
+    activity: { asc: [second, ...tied, third], desc: [third, ...tied, second] },
+    newest: { asc: [second, ...tied, third], desc: [third, ...tied, second] },
+    title: { asc: titles, desc: [...titles].reverse() },
+    repository: {
+      asc: [...tied, second, third],
+      desc: [third, second, ...tied],
+    },
+    members: { asc: [...tied, second, third], desc: [third, second, ...tied] },
+  };
+  for (const [sort, directions] of Object.entries(orders)) {
+    for (const [direction, ids] of Object.entries(directions)) {
+      const result = await dashboard(base, { view: "groups", sort, direction });
+      expect(result.items.map((item) => item.id)).toEqual(ids);
+      const page = await dashboard(base, {
+        view: "groups",
+        sort,
+        direction,
+        limit: "2",
+        offset: "1",
+      });
+      expect(page.items).toEqual(result.items.slice(1, 3));
+      expect(page.nextOffset).toBe(3);
+    }
+  }
+  const filtered = await dashboard(base, {
+    view: "groups",
+    sort: "members",
+    direction: "desc",
+    repository: "Alpha",
+    limit: "1",
+    offset: "1",
+  });
+  expect(filtered.items.map((item) => item.id)).toEqual(tied.slice(1));
+  expect(filtered.items[0]!.repositoryIds).toEqual(["Alpha", "zeta"]);
+  expect(filtered.total).toBe(2);
+  expect(filtered.nextOffset).toBeNull();
 });
 
 test("dashboard browses imported findings and overlapping groups without local runs", async () => {
@@ -193,36 +643,6 @@ test("dashboard browses imported findings and overlapping groups without local r
     environment,
     "print(json.dumps(list(db.iterdump())))",
   );
-  expect(
-    await database(
-      environment,
-      `from workbench_dashboard import dashboard
-allowed = {'findings', 'finding_repositories', 'finding_dedupe_groups', 'finding_dedupe_group_members'}
-def authorize(action, table, column, database, source):
-    if action == sqlite3.SQLITE_READ and table not in allowed:
-        return sqlite3.SQLITE_DENY
-    return sqlite3.SQLITE_OK
-db.set_authorizer(authorize)
-queries = json.load(sys.stdin)
-print(json.dumps([dashboard(db, query)['total'] for query in queries]))`,
-      [
-        {
-          view: "findings",
-          limit: 50,
-          offset: 0,
-          sort: "activity",
-          id: first.findingId,
-        },
-        {
-          view: "groups",
-          limit: 50,
-          offset: 0,
-          sort: "newest",
-          id: groups[0]!.groupId,
-        },
-      ],
-    ),
-  ).toEqual([3, 2]);
 
   const page = await dashboard(base, {
     limit: "1",
@@ -324,9 +744,19 @@ ${script}
   return JSON.parse(result.stdout);
 }
 
-test("bulk insert preserves complete findings and embeddings without creating scans", async () => {
+test("bulk insert keeps startup dependencies and complete findings without creating scans", async () => {
   const { store, environment } = await fixture();
-  const base = await start(store);
+  const options = { store, embeddings: embedder, host: "127.0.0.1", port: 0 };
+  const server = await startFindingsServer(options);
+  servers.push(server);
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("No port");
+  const base = `http://127.0.0.1:${address.port}`;
+  options.store = (await fixture()).store;
+  options.embeddings = {
+    embed: rejecting("Replaced server embedder was used"),
+  };
   const findings = [finding(1), finding(2)];
   const log = spyOn(console, "log").mockImplementation(() => undefined);
   try {
@@ -424,7 +854,7 @@ test("persists overlapping dedupe groups idempotently without changing findings 
       environment,
       `print(json.dumps({
     "memberships": db.execute("SELECT COUNT(*) FROM finding_dedupe_group_members").fetchone()[0],
-    "embeddings": [list(row) for row in db.execute("SELECT finding_id, model, vector_json FROM finding_embeddings ORDER BY finding_id")]
+    "embeddings": [[row[0], row[1], json.loads(row[2])] for row in db.execute("SELECT finding_id, model, vector_json FROM finding_embeddings ORDER BY finding_id")]
 }))`,
     ),
   ).toEqual({
@@ -432,7 +862,7 @@ test("persists overlapping dedupe groups idempotently without changing findings 
     embeddings: entries.map((entry) => [
       entry.finding.findingId,
       "synthetic",
-      "[1, 0]",
+      [1, 0],
     ]),
   });
   expect(await getGroups(base, "missing-finding")).toEqual([]);
@@ -441,9 +871,7 @@ test("persists overlapping dedupe groups idempotently without changing findings 
 test("rolls back the entire dedupe batch if a finding is missing and rejects invalid groups", async () => {
   const { store, environment } = await fixture();
   const base = await start(store, {
-    embed: async () => {
-      throw new Error("Grouping must not embed");
-    },
+    embed: rejecting("Grouping must not embed"),
   });
   await store.insert([embedded(1), embedded(2), embedded(3)]);
   const [a, b, c] = [1, 2, 3].map((index) => finding(index).findingId) as [
@@ -600,107 +1028,26 @@ test("retrieves complete potential duplicates without vectors or review calls", 
   );
 });
 
-test("SQLite filters repository and embedding compatibility before exact cosine ranking", async () => {
-  const { store, environment } = await fixture();
-  await store.initialize();
-  const anchor = embedded(1, [7, 0]);
-  const boundary = embedded(2, [0.55, Math.sqrt(1 - 0.55 ** 2)]);
-  const below = embedded(3, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
-  const otherModel = embedded(4, [1, 0], "other-model");
-  const otherDimensions = embedded(5, [1, 0, 0]);
-  const foreign = embedded(6);
-  await store.insert(
-    [anchor, below, otherModel, otherDimensions, boundary],
-    "repository-a",
-  );
-  await store.insert([foreign], "repository-b");
+test("translates native duplicate retrieval failures without broadening scope", async () => {
+  const { store } = await fixture();
+  const anchor = embedded(1);
+  await store.insert([anchor], "repository-a");
+  await store.insert([embedded(2, [0, 0])], "repository-b");
   expect(
     await store.findPotentialDuplicates(anchor.finding.findingId, {
       repositoryId: "repository-a",
     }),
-  ).toEqual({
-    finding: anchor.finding,
-    potentialDuplicates: [boundary.finding],
-  });
-  expect(
-    await store.findPotentialDuplicates(anchor.finding.findingId, {
-      allRepositories: true,
-    }),
-  ).toEqual({
-    finding: anchor.finding,
-    potentialDuplicates: [foreign.finding, boundary.finding],
-  });
+  ).toEqual({ finding: anchor.finding, potentialDuplicates: [] });
   await expect(
     store.findPotentialDuplicates(anchor.finding.findingId, {
       repositoryId: "repository-b",
     }),
   ).rejects.toMatchObject({ code: "finding_not_indexed" });
-  await database(
-    environment,
-    `with db:
-    db.execute("UPDATE finding_embeddings SET vector_json = '[0,0]' WHERE finding_id = ?", (json.load(sys.stdin),))
-print("null")`,
-    foreign.finding.findingId,
-  );
-  expect(
-    (
-      await store.findPotentialDuplicates(anchor.finding.findingId, {
-        repositoryId: "repository-a",
-      })
-    ).potentialDuplicates,
-  ).toEqual([boundary.finding]);
   await expect(
     store.findPotentialDuplicates(anchor.finding.findingId, {
       allRepositories: true,
     }),
   ).rejects.toMatchObject({ code: "embedding_failed" });
-});
-
-test("SQLite reads only IDs and vectors before fetching the anchor and stable top 50 documents", async () => {
-  const { store, environment } = await fixture();
-  await store.initialize();
-  const entries = Array.from({ length: 61 }, (_, index) => embedded(index + 1));
-  await store.insert(entries, "repository-a");
-  await store.insert([entries[1]!], "repository-b");
-  const { result, queries } = (await database(
-    environment,
-    `from workbench_findings import find_potential_duplicates
-queries = []
-db.set_trace_callback(queries.append)
-result = find_potential_duplicates(db, json.load(sys.stdin), "repository-a")
-print(json.dumps({"result": result, "queries": queries}))`,
-    entries[0]!.finding.findingId,
-  )) as {
-    result: { finding: Finding; potentialDuplicates: Finding[] };
-    queries: string[];
-  };
-  expect(result).toEqual({
-    finding: entries[0]!.finding,
-    potentialDuplicates: entries.slice(1, 51).map((entry) => entry.finding),
-  });
-  const reads = queries.filter((query) => query.startsWith("SELECT"));
-  expect(reads).toHaveLength(3);
-  expect(reads[0]).toStartWith(
-    "SELECT embeddings.model, embeddings.vector_json ",
-  );
-  expect(reads[1]).toStartWith(
-    "SELECT embeddings.finding_id, embeddings.vector_json ",
-  );
-  expect(reads[1]).toContain("repositories.repository_id = 'repository-a'");
-  expect(reads[2]).toStartWith(
-    "SELECT id, details_json FROM findings WHERE id IN (",
-  );
-  const loadedIds = [...reads[2]!.matchAll(/csf_[0-9a-f]+/g)].map(([id]) => id);
-  expect(loadedIds).toEqual(
-    entries.slice(0, 51).map((entry) => entry.finding.findingId),
-  );
-  expect(
-    (
-      await store.findPotentialDuplicates(entries[0]!.finding.findingId, {
-        allRepositories: true,
-      })
-    ).potentialDuplicates,
-  ).toEqual(result.potentialDuplicates);
 });
 
 test("imports persist repository associations and keep untagged findings in explicit all-repository scope", async () => {
@@ -720,6 +1067,7 @@ test("imports persist repository associations and keep untagged findings in expl
     (
       await fetch(`${base}/v1/bulk/findings`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ findings: [findings[2]] }),
       })
     ).status,
@@ -755,14 +1103,79 @@ test("imports persist repository associations and keep untagged findings in expl
   ]);
 });
 
+test.each([
+  undefined,
+  "text/plain;charset=UTF-8",
+  "application/x-www-form-urlencoded",
+  "multipart/form-data; boundary=synthetic-qa",
+])(
+  "rejects non-JSON mutation bodies before side effects: %s",
+  async (mediaType) => {
+    const { store } = await fixture();
+    const embed = mock(embedder.embed);
+    const base = await start(store, { embed });
+    const existing = [finding(1), finding(2)];
+    expect((await insert(base, existing)).status).toBe(201);
+    embed.mockClear();
+    const writeGroups = spyOn(store, "storeDedupeGroups");
+    try {
+      for (const [path, body] of [
+        ["/v1/bulk/findings", { findings: [finding(3)] }],
+        ["/v1/dedupe-groups", { groups: [existing.map((f) => f.findingId)] }],
+      ] as const) {
+        const response = await fetch(base + path, {
+          method: "POST",
+          headers: {
+            Origin: "null",
+            "Sec-Fetch-Site": "cross-site",
+            ...(mediaType === undefined ? {} : { "Content-Type": mediaType }),
+          },
+          body: Buffer.from(JSON.stringify(body)),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          error: "invalid_request",
+          message: "Request body must use application/json.",
+        });
+      }
+      expect(embed).not.toHaveBeenCalled();
+      expect(writeGroups).not.toHaveBeenCalled();
+      expect(
+        (await (await fetch(base + "/v1/findings")).json()).findings,
+      ).toEqual(existing);
+      expect(await getGroups(base, existing[0]!.findingId)).toEqual([]);
+    } finally {
+      writeGroups.mockRestore();
+    }
+  },
+);
+
+test.each(["application/json", "Application/JSON; charset=UTF-8"])(
+  "accepts JSON mutation bodies with MIME type %s",
+  async (mediaType) => {
+    const { store } = await fixture();
+    const base = await start(store);
+    const findings = [finding(1), finding(2)];
+    for (const [path, body] of [
+      ["/v1/bulk/findings", { findings }],
+      ["/v1/dedupe-groups", { groups: [findings.map((f) => f.findingId)] }],
+    ] as const) {
+      const response = await fetch(base + path, {
+        method: "POST",
+        headers: { "Content-Type": mediaType },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+    }
+    expect(await getGroups(base, findings[0]!.findingId)).toHaveLength(1);
+  },
+);
+
 test("rejects invalid requests before embedding and preserves unknown-route behavior", async () => {
   const { store } = await fixture();
-  let calls = 0;
+  const embed = mock<() => Promise<never[]>>().mockResolvedValue([]);
   const base = await start(store, {
-    async embed() {
-      calls++;
-      return [];
-    },
+    embed,
   });
   for (const body of [
     "not json",
@@ -776,6 +1189,7 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
   ]) {
     const response = await fetch(`${base}/v1/bulk/findings`, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body,
     });
     expect(response.status).toBe(400);
@@ -814,7 +1228,7 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "not_found" });
   }
-  expect(calls).toBe(0);
+  expect(embed).toHaveBeenCalledTimes(0);
 });
 
 test("embedding failure leaves no partial findings or vectors", async () => {
@@ -909,4 +1323,74 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
     ["repository-history", original.findingId],
     ["repository-history", finding(2).findingId],
   ]);
+});
+
+test("dashboard can sort and search a stored title with an unpaired surrogate", async () => {
+  const { store } = await fixture();
+  const base = await start(store);
+  const malformed = finding();
+  malformed.title = "Synthetic title \ud800";
+  expect((await insert(base, [malformed, finding(2)])).status).toBe(201);
+  const queries: Record<string, string>[] = [
+    {},
+    { sort: "title" },
+    { query: "synthetic" },
+  ];
+  for (const parameters of queries) {
+    const result = await dashboard(base, parameters);
+    expect(result.items).toHaveLength(2);
+    expect(
+      result.items.find((item) => item.id === malformed.findingId)?.title,
+    ).toContain("Synthetic title");
+  }
+});
+
+test("malformed request targets return invalid_request at the HTTP handler", async () => {
+  const { store } = await fixture();
+  let status: number | undefined;
+  let body: string | undefined;
+  await handleFindingsRequest(
+    { method: "GET", url: "//" } as IncomingMessage,
+    {
+      writeHead(code: number) {
+        status = code;
+      },
+      end(data: string) {
+        body = data;
+      },
+    } as ServerResponse,
+    store,
+    embedder,
+    await findingsRequestValidator(),
+  );
+  expect(status).toBe(400);
+  expect(JSON.parse(body!).error).toBe("invalid_request");
+});
+
+test("NUL repository IDs are rejected before ingestion and lookup", async () => {
+  const { store } = await fixture();
+  const embed = mock(embedder.embed);
+  const base = await start(store, { embed });
+  for (const repositoryId of ["\0", "repository\0suffix"]) {
+    const response = await insert(base, [finding()], repositoryId);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_request" });
+    const lookup = await fetch(
+      `${base}/v1/finding/${finding().findingId}/potential-duplicates?${new URLSearchParams({ repositoryId })}`,
+    );
+    expect(lookup.status).toBe(400);
+    expect(await lookup.json()).toMatchObject({ error: "invalid_request" });
+  }
+  expect(embed).toHaveBeenCalledTimes(0);
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([]);
+
+  for (const repositoryId of ["repository-a", "\\^@"]) {
+    expect((await insert(base, [finding()], repositoryId)).status).toBe(201);
+    const lookup = await fetch(
+      `${base}/v1/finding/${finding().findingId}/potential-duplicates?${new URLSearchParams({ repositoryId })}`,
+    );
+    expect(lookup.status).toBe(200);
+    expect(await lookup.json()).toMatchObject({ finding: finding() });
+  }
+  expect(embed).toHaveBeenCalledTimes(2);
 });

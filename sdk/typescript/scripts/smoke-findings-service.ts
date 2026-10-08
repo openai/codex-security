@@ -1,3 +1,4 @@
+import { parseJsonLines } from "../tests-ts/support/json.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -53,22 +54,20 @@ const findings: Finding[] = [
     ...example,
     extensions: { ...example.extensions, smokeGroup: "duplicate" },
   },
-  ...[1, 2, 3].map(
-    (index): Finding => ({
-      ...example,
-      findingId: `csf_${"f".repeat(23)}${index}`,
-      occurrenceId: `occ_${"f".repeat(23)}${index}`,
-      fingerprints: {
-        ...example.fingerprints,
-        primary: `codex-security/v1:sha256:${"f".repeat(63)}${index}`,
-      },
-      title: `Synthetic finding ${index}`,
-      extensions: {
-        ...example.extensions,
-        smokeGroup: index < 3 ? "duplicate" : "distinct",
-      },
-    }),
-  ),
+  ...[1, 2, 3].map((index): Finding => ({
+    ...example,
+    findingId: `csf_${"f".repeat(23)}${index}`,
+    occurrenceId: `occ_${"f".repeat(23)}${index}`,
+    fingerprints: {
+      ...example.fingerprints,
+      primary: `codex-security/v1:sha256:${"f".repeat(63)}${index}`,
+    },
+    title: `Synthetic finding ${index}`,
+    extensions: {
+      ...example.extensions,
+      smokeGroup: index < 3 ? "duplicate" : "distinct",
+    },
+  })),
 ];
 const ids = findings.map((finding) => finding.findingId);
 
@@ -300,21 +299,15 @@ async function checkStoredGroups(): Promise<FindingDedupeGroup[]> {
 }
 
 async function checkReviews(): Promise<void> {
-  const calls = (
+  const calls = parseJsonLines<{
+    stage: string;
+    findingIds: string[];
+  }>(
     await readFile(
       join(runnerRoot, "results/.codex-security-state/review-calls.jsonl"),
       "utf8",
-    )
-  )
-    .trim()
-    .split("\n")
-    .map(
-      (line) =>
-        JSON.parse(line) as {
-          stage: string;
-          findingIds: string[];
-        },
-    );
+    ),
+  );
   for (const stage of ["screen", "pair"]) {
     assert.ok(
       calls.some((call) => call.stage === stage),

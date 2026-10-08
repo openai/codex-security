@@ -1,5 +1,51 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { win32 } from "node:path";
+import type { ToolAnnotations } from "@modelcontextprotocol/server";
+
+const readLocal = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+const readRemote = { ...readLocal, openWorldHint: true };
+const writeLocal = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+const writeRemote = { ...writeLocal, openWorldHint: true };
+
+// This is the supported MCP surface; new CLI commands stay CLI-only until added here.
+const commandAnnotations: Record<string, ToolAnnotations> = {
+  "bulk-scan": writeRemote,
+  export: writeLocal,
+  "findings false-positive": writeLocal,
+  "findings list": readLocal,
+  "import github": readRemote,
+  "install-hook": writeLocal,
+  login: readLocal,
+  logout: writeLocal,
+  patch: writeRemote,
+  "publish check": readRemote,
+  "publish scan": writeRemote,
+  "scan-components": writeRemote,
+  "scans compare": writeRemote,
+  "scans list": readLocal,
+  "scans logs": readLocal,
+  "scans match": writeRemote,
+  "scans rerun": writeRemote,
+  "scans show": readLocal,
+  validate: writeRemote,
+  "verify-fix": readRemote,
+};
+
+export function mcpCommandMetadata(command: string) {
+  return Object.hasOwn(commandAnnotations, command)
+    ? { annotations: commandAnnotations[command]! }
+    : false;
+}
 
 export interface CliMcpSchema {
   [key: string]: unknown;
@@ -27,6 +73,7 @@ export interface CliMcpCommand {
   description: string;
   inputSchema: CliMcpSchema;
   jsonOutput: boolean;
+  annotations: ToolAnnotations;
 }
 
 export interface CliMcpInput {
@@ -47,19 +94,20 @@ export interface CliMcpOutputOptions {
   jsonOutput?: boolean;
 }
 
-export interface CliMcpRunOptions extends CliMcpOutputOptions {
+export interface CliMcpRunOptions {
   executable: string;
   entrypoint: string;
   cwd: string;
   environment: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  forceSignal?: AbortSignal;
   onStderr?: (chunk: string) => void;
 }
 
 /** Adapt the public CLI manifest without maintaining a second command schema. */
 export function buildCliMcpCommands(manifest: CliMcpManifest): CliMcpCommand[] {
   return manifest.commands
-    .filter(({ name }) => !["scan", "info", "serve", "dedupe"].includes(name))
+    .filter(({ name }) => Object.hasOwn(commandAnnotations, name))
     .map(({ name, description, schema }) => {
       const properties: Record<string, CliMcpSchema> = {
         workingDirectory: {
@@ -99,16 +147,15 @@ export function buildCliMcpCommands(manifest: CliMcpManifest): CliMcpCommand[] {
         description:
           name === "login"
             ? "Report login status. Complete sign-in locally with the CLI before using authenticated tools."
-            : description ?? name,
+            : (description ?? name),
         inputSchema: {
           type: "object",
           properties,
           ...(required.length > 0 ? { required } : {}),
           additionalProperties: false,
         },
-        // Patch chooses between structured saved-finding output and direct
-        // workflow text. Its caller supplies that decision for each invocation.
-        jsonOutput: schema?.output !== undefined && name !== "patch",
+        jsonOutput: schema?.output !== undefined,
+        annotations: commandAnnotations[name]!,
       };
     });
 }
@@ -149,10 +196,9 @@ function adaptFields(schema: CliMcpSchema, positional: boolean): CliMcpSchema {
 export function buildCliMcpArguments(
   command: CliMcpCommand,
   input: CliMcpInput,
-  options: CliMcpOutputOptions = {},
 ): string[] {
   const argv = [...command.path];
-  if (options.jsonOutput ?? command.jsonOutput) argv.push("--json");
+  if (command.jsonOutput) argv.push("--json");
   for (const name of Object.keys(
     command.inputSchema.properties?.["options"]?.properties ?? {},
   )) {
@@ -235,13 +281,13 @@ export async function runCliMcpCommand(
   input: CliMcpInput,
   options: CliMcpRunOptions,
 ): Promise<CliMcpResult> {
-  if (options.signal?.aborted) {
+  if (options.signal?.aborted || options.forceSignal?.aborted) {
     return { exitCode: 130, error: "Command cancelled." };
   }
-  const jsonOutput = options.jsonOutput ?? command.jsonOutput;
+  const jsonOutput = command.jsonOutput;
   let argv: string[];
   try {
-    argv = buildCliMcpArguments(command, input, { jsonOutput });
+    argv = buildCliMcpArguments(command, input);
   } catch (error) {
     return { exitCode: 2, error: (error as Error).message };
   }
@@ -265,8 +311,14 @@ export async function runCliMcpCommand(
       // The CLI owns its subprocess cleanup, including detached workers and
       // their termination grace periods. Wait for that cleanup before closing.
     };
+    const force = (): void => {
+      cancelled = true;
+      termination = terminateProcess(child, undefined, true);
+    };
     options.signal?.addEventListener("abort", abort, { once: true });
+    options.forceSignal?.addEventListener("abort", force, { once: true });
     if (options.signal?.aborted) abort();
+    if (options.forceSignal?.aborted) force();
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
@@ -289,8 +341,9 @@ export async function runCliMcpCommand(
           terminateProcessGroup(child, "SIGKILL");
         }
         options.signal?.removeEventListener("abort", abort);
+        options.forceSignal?.removeEventListener("abort", force);
         const result = parseCliMcpResult(
-          cancelled ? 130 : signal !== null ? 1 : code ?? 2,
+          cancelled ? 130 : signal !== null ? 1 : (code ?? 2),
           stdout,
           stderr,
           { jsonOutput },
@@ -308,11 +361,12 @@ export async function runCliMcpCommand(
 function terminateProcess(
   child: ChildProcess,
   signal?: AbortSignal,
+  force = false,
 ): Promise<void> {
   if (process.platform !== "win32" || child.pid === undefined) {
     terminateProcessGroup(
       child,
-      signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
+      force ? "SIGKILL" : signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
     );
     return Promise.resolve();
   }
