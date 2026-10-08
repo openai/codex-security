@@ -1704,17 +1704,15 @@ export async function runCodexSkillCommand(
       if (output === undefined || status === 130 || status === 143)
         return status;
       if (status !== 0) {
+        const failure = skillCommandFailure(
+          output.command,
+          status,
+          events?.error ?? diagnostic,
+          authentication,
+        );
         await writeCliOutput(
           output.stderr,
-          `codex-security: ${skillCommandFailure(
-            output.command,
-            status,
-            events?.error ?? diagnostic,
-            authentication,
-          )
-            .split("\n")
-            .map(diagnosticValue)
-            .join("\n")}\n`,
+          `codex-security: ${diagnosticLines(failure)}\n`,
         );
         return status;
       }
@@ -4868,7 +4866,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         }
       },
     })
@@ -8049,6 +8047,10 @@ async function runExport(
 }
 
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
+
+function diagnosticLines(value: unknown): string {
+  return errorMessage(value).split("\n").map(diagnosticValue).join("\n");
+}
 
 function diagnosticValue(value: unknown): string {
   return errorMessage(value).replaceAll(

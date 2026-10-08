@@ -1277,6 +1277,40 @@ process.stdout.write(JSON.stringify({
     );
   });
 
+  test("escapes native validation launch failures at the CLI boundary", async () => {
+    const directory = await temporaryDirectory("validation-launch-failure-");
+    try {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const command = join(
+        directory,
+        "missing-codex\u001b[31m\rnext\nline-café",
+      );
+      expect(
+        await runCli(
+          ["validate", "Synthetic finding"],
+          dependencies({
+            currentDirectory: directory,
+            environment: {
+              PATH: process.env["PATH"],
+              CODEX_HOME: join(directory, "home"),
+              CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+              OPENAI_API_KEY: "synthetic-validation-key",
+            },
+            onCodex: (_args, output, environment) =>
+              runCodexSkillCommand([], output, { command }, environment),
+          }),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("missing-codex");
+      expect(stderr.text()).toContain("line-café");
+      expect(stderr.text()).not.toContain("\u001b");
+      expect(stderr.text()).not.toContain("\r");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("keeps unknown credential failures neutral", () => {
     for (const authentication of [
       null,

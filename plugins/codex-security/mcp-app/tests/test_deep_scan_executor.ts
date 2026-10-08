@@ -2711,6 +2711,11 @@ function testCodeModeFrameDiagnosticBoundaries() {
       result: resultWithText(ipcFrameError),
     },
     {
+      ...failedArtifactTool,
+      server: "foreign_server",
+      error: { message: "Synthetic unrelated transport failure" },
+    },
+    {
       type: "command_execution",
       status: "failed",
       aggregated_output: ipcFrameError,

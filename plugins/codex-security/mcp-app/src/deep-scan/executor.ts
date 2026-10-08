@@ -379,7 +379,9 @@ function appendItemDiagnostic(
     item.type === "mcp_tool_call" &&
     isRecord(item.error) &&
     typeof item.error.message === "string" &&
-    item.error.message.length > 0
+    /^code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length [0-9]+ exceeds [0-9]+ bytes$/u.exec(
+      item.error.message,
+    )?.[0] === item.error.message
   ) {
     appendUniqueDiagnostic(diagnostics, {
       code: "artifact_tool_failed",
