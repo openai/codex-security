@@ -8,7 +8,9 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import type { Server } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { handleFindingsRequest } from "../src/server/routes.js";
+import { findingsRequestValidator } from "../src/server/validation.js";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
@@ -1323,4 +1325,74 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
     ["repository-history", original.findingId],
     ["repository-history", finding(2).findingId],
   ]);
+});
+
+test("dashboard can sort and search a stored title with an unpaired surrogate", async () => {
+  const { store } = await fixture();
+  const base = await start(store);
+  const malformed = finding();
+  malformed.title = "Synthetic title \ud800";
+  expect((await insert(base, [malformed, finding(2)])).status).toBe(201);
+  const queries: Record<string, string>[] = [
+    {},
+    { sort: "title" },
+    { query: "synthetic" },
+  ];
+  for (const parameters of queries) {
+    const result = await dashboard(base, parameters);
+    expect(result.items).toHaveLength(2);
+    expect(
+      result.items.find((item) => item.id === malformed.findingId)?.title,
+    ).toContain("Synthetic title");
+  }
+});
+
+test("malformed request targets return invalid_request at the HTTP handler", async () => {
+  const { store } = await fixture();
+  let status: number | undefined;
+  let body: string | undefined;
+  await handleFindingsRequest(
+    { method: "GET", url: "//" } as IncomingMessage,
+    {
+      writeHead(code: number) {
+        status = code;
+      },
+      end(data: string) {
+        body = data;
+      },
+    } as ServerResponse,
+    store,
+    embedder,
+    await findingsRequestValidator(),
+  );
+  expect(status).toBe(400);
+  expect(JSON.parse(body!).error).toBe("invalid_request");
+});
+
+test("NUL repository IDs are rejected before ingestion and lookup", async () => {
+  const { store } = await fixture();
+  const embed = mock(embedder.embed);
+  const base = await start(store, { embed });
+  for (const repositoryId of ["\0", "repository\0suffix"]) {
+    const response = await insert(base, [finding()], repositoryId);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_request" });
+    const lookup = await fetch(
+      `${base}/v1/finding/${finding().findingId}/potential-duplicates?${new URLSearchParams({ repositoryId })}`,
+    );
+    expect(lookup.status).toBe(400);
+    expect(await lookup.json()).toMatchObject({ error: "invalid_request" });
+  }
+  expect(embed).toHaveBeenCalledTimes(0);
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([]);
+
+  for (const repositoryId of ["repository-a", "\\^@"]) {
+    expect((await insert(base, [finding()], repositoryId)).status).toBe(201);
+    const lookup = await fetch(
+      `${base}/v1/finding/${finding().findingId}/potential-duplicates?${new URLSearchParams({ repositoryId })}`,
+    );
+    expect(lookup.status).toBe(200);
+    expect(await lookup.json()).toMatchObject({ finding: finding() });
+  }
+  expect(embed).toHaveBeenCalledTimes(2);
 });
