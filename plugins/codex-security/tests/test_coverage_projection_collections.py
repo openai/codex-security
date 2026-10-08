@@ -13,6 +13,7 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
     [
         "raw_null",
         "raw_null_row",
+        "raw_many_null_rows",
         "raw_idless",
         "raw_bad_id",
         "parent_null",
@@ -127,6 +128,8 @@ def test_reviewed_missing_deferred_recovers_malformed_worker_surfaces(
         target[collection][0][field] = values[suffix]
         if case.startswith("retained_links"):
             raw["coverage"][collection][0][field] = values[suffix]
+    elif case == "raw_many_null_rows":
+        target["deferred"] = [None] * 30 + target["deferred"]
     elif case.endswith("null_row"):
         target["surfaces"] = [None]
     elif case.endswith("null"):

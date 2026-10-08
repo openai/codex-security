@@ -2234,8 +2234,12 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  for (const cancelRegistration of [false, true]) {
-    test(`archives accepted output before starting, cancellation=${cancelRegistration}`, async () => {
+  test.each([
+    ["false", false],
+    ["true", true],
+  ] as const)(
+    "archives accepted output before starting, cancellation=%s",
+    async (_label, cancelRegistration) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -2311,8 +2315,8 @@ describe("CodexSecurity orchestration", () => {
       );
       await expect(stat(output)).resolves.toBeDefined();
       await client.close();
-    });
-  }
+    },
+  );
 
   test.each(
     (["preparation", "empty", "legacy", "commit", "rollback"] as const).flatMap(

@@ -130,7 +130,7 @@ export async function readDeepReductionSources(
           artifactPrefix.slice(0, artifactPrefix.lastIndexOf("/")) +
           "/attempts/";
         const receiptDigests = new Map<string, string>();
-        const collectReceiptDigests = async (
+        const readReceiptDigests = async (
           sources: (typeof originalCoverage)[],
         ) => {
           const receiptRefs = new Set(
@@ -169,7 +169,7 @@ export async function readDeepReductionSources(
             }),
           );
         };
-        await collectReceiptDigests([
+        await readReceiptDigests([
           originalCoverage,
           ...originalArchivedCoverage,
         ]);
@@ -219,7 +219,7 @@ export async function readDeepReductionSources(
           );
           result = preserved.input;
           currentCheckpointCoverage = preserved.originalCurrentCoverage;
-          await collectReceiptDigests(currentCheckpointCoverage);
+          await readReceiptDigests(currentCheckpointCoverage);
         }
         result.findings = result.findings.map((finding, index) => ({
           ...finding,

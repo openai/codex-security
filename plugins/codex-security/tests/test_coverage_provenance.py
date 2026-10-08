@@ -1953,3 +1953,99 @@ def test_selected_parent_projection_consumes_each_occurrence_once(
     retained = [row for row in coverage["deferred"] if row.get("id") != "scan-stopped"]
     assert result.read_bytes() == original
     assert retained == projected
+
+
+@pytest.mark.parametrize("mode", ["idless", "explicit"])
+@pytest.mark.parametrize("field", ["deferred", "explicitExclusions", "openQuestions"])
+@pytest.mark.parametrize("retained", [0, 1, 2], ids=["missing", "partial", "full"])
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+def test_retry_nonsurface_occurrences_survive_supported_parent_projection(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    mode,
+    field,
+    retained,
+    retry,
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET attempt = 2, artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    records = {
+        "deferred": {"reason": "Synthetic repeated remaining proof observation"},
+        "explicitExclusions": {
+            "pattern": "synthetic/excluded/**",
+            "reason": "Synthetic repeated excluded scope",
+        },
+        "openQuestions": {"question": "Synthetic repeated accepted question"},
+    }
+    items = [
+        {**records[field], **({"id": "source-first"} if mode == "explicit" else {})},
+        {**records[field], **({"id": "source-second"} if mode == "explicit" else {})},
+    ]
+    # The historical worker writer accepted equal rows before assigning deferred IDs.
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "completeness": "partial", field: items},
+            }
+        )
+    )
+    originals = {result: result.read_bytes()}
+    archive = result.parent.parent / "attempts/attempt-1/result.json"
+    archive.parent.mkdir(parents=True)
+    prior = json.loads(originals[result])
+    prior["coverage"][field] = prior["coverage"][field][:1]
+    archive.write_text(json.dumps(prior))
+    originals[archive] = archive.read_bytes()
+    projected = []
+    for index, item in enumerate(items, 1):
+        attempt = index
+        provenance = {"workerId": worker_id, "attempt": attempt}
+        if "id" in item:
+            provenance["sourceId"] = item["id"]
+        row = {**copy.deepcopy(item), "provenance": provenance}
+        if field == "deferred":
+            row["id"] = f"{worker_id}-attempt-{attempt}-deferred-{index}"
+        projected.append(row)
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            field: projected[:retained],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2)
+            ],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    recovered = [row for row in coverage[field] if row.get("id") != "scan-stopped"]
+    assert len(recovered) == 2
+    assert [row["provenance"]["attempt"] for row in recovered] == [1, 2]
+    for actual, expected in zip(recovered, projected, strict=True):
+        assert {key: value for key, value in actual.items() if key != "id"} == {
+            key: value for key, value in expected.items() if key != "id"
+        }
+    for path, saved in originals.items():
+        assert path.read_bytes() == saved

@@ -1180,36 +1180,34 @@ def merge_saved_results(
         ]
 
     retained_surface_ids: dict[tuple[str, str, int], dict[str, Any]] = {}
-    # Each saved occurrence gets one projection; repeated lookups reuse its assignment.
+    # Reuse each saved occurrence's projection.
     retained_records: dict[tuple[str, str, str, int], dict[str, Any] | None] = {}
-    matched_records: dict[tuple[str, str, str, int], set[int]] = {}
+    matched_records: dict[tuple[str, str, str], list[tuple[Any, int]]] = {}
 
     def retained_coverage_record(
-        field: str, item: Any, worker: Any, relative: str
+        field: str, item: Any, worker: Any, relative: str, index: int | None = None
     ) -> dict[str, Any] | None:
-        if not isinstance(item, dict):
-            return None
-        record_key = (worker["id"], relative, field, id(item))
+        rows = drafts_by_path.get(relative, {}).get("coverage", {}).get(field, [])
+        if index is None and isinstance(rows, list):
+            index = next((offset for offset, row in enumerate(rows, 1) if row is item), None)
+        record_key = (worker["id"], relative, field, index if index is not None else id(item))
         if record_key in retained_records:
             return retained_records[record_key]
-        rows = drafts_by_path.get(relative, {}).get("coverage", {}).get(field, [])
-        if isinstance(rows, list) and any(row is item for row in rows):
-            for row in rows:
-                if row is item:
-                    break
-                retained_coverage_record(field, row, worker, relative)
         item = original_coverage_rows.get(id(item), item)
+        if field == "openQuestions" and isinstance(item, str):
+            item = {"question": item.strip()}
+        if not isinstance(item, dict):
+            return None
+        if index is not None and isinstance(rows, list):
+            for offset, row in enumerate(rows[: index - 1], 1):
+                retained_coverage_record(field, row, worker, relative, offset)
         source = dict(item)
         if field == "surfaces":
             source["receiptRefs"] = coverage_receipts(item, worker, relative)
-        retained_record = None
         for projection in projected_coverages:
             records = projection.get(field, [])
-            matched = matched_records.setdefault(
-                (worker["id"], relative, field, id(projection)), set()
-            )
-            for index, record in enumerate(records if isinstance(records, list) else []):
-                if index in matched or not isinstance(record, dict):
+            for offset, record in enumerate(records if isinstance(records, list) else []):
+                if not isinstance(record, dict):
                     continue
                 provenance = record.get("provenance")
                 if (
@@ -1273,12 +1271,19 @@ def merge_saved_results(
                         if isinstance(value.get("question"), str):
                             value["question"] = value["question"].strip()
                 if original == source:
-                    matched.add(index)
-                    if retained_record is None:
-                        retained_record = record
-                    break
-        retained_records[record_key] = retained_record
-        return retained_record
+                    matched = matched_records.setdefault((worker["id"], relative, field), [])
+                    identity = (
+                        (record["id"], 0)
+                        if isinstance(record.get("id"), str)
+                        else (record, sum(row == record for row in records[: offset + 1]))
+                    )
+                    if identity in matched:
+                        continue
+                    matched.append(identity)
+                    retained_records[record_key] = record
+                    return record
+        retained_records[record_key] = None
+        return None
 
     def coverage_source_attempt(relative: str, worker: Any) -> int:
         directory = Path(relative).parent
@@ -1558,10 +1563,6 @@ def merge_saved_results(
             and not source_superseded(relative, None)
         ],
     ]
-    # A selected parent checkpoint can also be its frozen projection.
-    projected_coverages = list(
-        {id(projection): projection for projection in projected_coverages}.values()
-    )
     # V1 persists the review projection in the parent, without reducer sourceCoverage.
     reviewed_attempts = {
         (review.get("workerId"), review.get("attempt"))
@@ -1574,13 +1575,6 @@ def merge_saved_results(
     }
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
-    # Normalize legacy questions once so repeated lookups keep the same row identity.
-    for _, draft, _ in all_sources:
-        questions = draft["coverage"].get("openQuestions")
-        if isinstance(questions, list):
-            draft["coverage"]["openQuestions"] = [
-                {"question": item.strip()} if isinstance(item, str) else item for item in questions
-            ]
     # Retained projections describe raw saved rows, while reconciliation needs their aliases.
     original_coverage_rows: dict[int, dict[str, Any]] = {}
     # Older checkpoints can omit IDs already assigned in their published output.
@@ -1704,6 +1698,11 @@ def merge_saved_results(
             "deferred": [],
             **coverage,
         }
+    if isinstance(coverage.get("openQuestions"), list):
+        coverage["openQuestions"] = [
+            {"question": item.strip()} if isinstance(item, str) else item
+            for item in coverage["openQuestions"]
+        ]
     canonical_rows = (
         {
             id(item)
@@ -2586,8 +2585,10 @@ def merge_saved_results(
                     and (worker_id, item["id"]) in closed_deferred
                 ):
                     continue
-                if reviewed and retained_coverage_record(field, item, worker, relative):
+                if reviewed and retained_coverage_record(field, item, worker, relative, index):
                     continue
+                if field == "openQuestions" and isinstance(item, str):
+                    item = {"question": item.strip()}
                 if (
                     field == "surfaces"
                     and isinstance(item, dict)

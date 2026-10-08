@@ -333,8 +333,8 @@ export function projectDiscoveryCoverage(
   );
   // Each historical occurrence accounts for one current row in its collection.
   const matchedHistoricalRows = new Map<
-    (typeof history)[number],
-    Map<string, Set<number>>
+    string,
+    Map<(typeof history)[number], Set<number>>
   >();
   const surfaces = coverage.surfaces as Record<string, unknown>[];
   const prefix = (item: Record<string, unknown>) =>
@@ -349,18 +349,17 @@ export function projectDiscoveryCoverage(
         receiptDigests,
       );
     let original: (typeof history)[number] | undefined;
+    const matchedHistory = matchedHistoricalRows.get(field) ?? new Map();
+    matchedHistoricalRows.set(field, matchedHistory);
     for (const historical of history) {
       const rows = (historical.coverage[field] as unknown[] | undefined) ?? [];
-      const matchedFields =
-        matchedHistoricalRows.get(historical) ?? new Map<string, Set<number>>();
-      const matched = matchedFields.get(field) ?? new Set<number>();
+      const matched = matchedHistory.get(historical) ?? new Set<number>();
       const index = rows.findIndex(
         (saved, index) => !matched.has(index) && matches(saved),
       );
       if (index < 0) continue;
       matched.add(index);
-      matchedFields.set(field, matched);
-      matchedHistoricalRows.set(historical, matchedFields);
+      matchedHistory.set(historical, matched);
       original ??= historical;
     }
     const currentSources = (
