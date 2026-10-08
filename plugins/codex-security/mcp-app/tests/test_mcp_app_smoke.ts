@@ -2,10 +2,10 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { gitText } from "../scripts/git.mjs";
 import { assertNoError } from "./assertions.ts";
-import { consumeStreamLines, writeMessage } from "./support/streams.ts";
+import { startRpcServer } from "./support/rpc-server.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { hash, randomUUID } from "node:crypto";
 import {
   chmod,
@@ -187,88 +187,16 @@ function startTestServer({
   cwd: string;
   env?: NodeJS.ProcessEnv;
 }) {
-  const childEnvironment = { ...process.env, ...env };
-  for (const [name, value] of Object.entries(env)) {
-    if (value === undefined) {
-      delete childEnvironment[name];
-    }
-  }
-  const childProcess = spawn(command, args, {
-    cwd,
-    env: childEnvironment,
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-  const responses: ReturnType<typeof JSON.parse>[] = [];
-  consumeStreamLines(childProcess.stdout, (line) =>
-    responses.push(JSON.parse(line)),
+  return startRpcServer(
+    {
+      command,
+      args,
+      cwd,
+      env: { ...process.env, ...env },
+      stderr: "inherit",
+    },
+    { terminateOnStop: true },
   );
-
-  return {
-    notify(method: string, params = {}) {
-      writeMessage(childProcess, { jsonrpc: "2.0", method, params });
-    },
-    sendRequest(id: number, method: string, params = {}) {
-      writeMessage(childProcess, { jsonrpc: "2.0", id, method, params });
-    },
-    sendResponse(id: string, result: unknown) {
-      writeMessage(childProcess, { jsonrpc: "2.0", id, result });
-    },
-    sendError(id: string, code: number, message: string) {
-      writeMessage(childProcess, {
-        jsonrpc: "2.0",
-        id,
-        error: { code, message },
-      });
-    },
-    async waitForMessage(
-      predicate: (message: ReturnType<typeof JSON.parse>) => boolean,
-      description = "matching JSON-RPC message",
-    ) {
-      const started = Date.now();
-      while (Date.now() - started < 30000) {
-        const message = responses.find(predicate);
-        if (message) return message;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      throw new Error(`Timed out waiting for ${description}`);
-    },
-    initialize(name: string, capabilities: Record<string, unknown> = {}) {
-      return this.requestAndWait(1, "initialize", {
-        protocolVersion: "2025-11-25",
-        capabilities,
-        clientInfo: { name, version: "0.1.0" },
-      });
-    },
-    callTool(id: number, params: Record<string, unknown>) {
-      return this.requestAndWait(id, "tools/call", params);
-    },
-    async requestAndWait(id: number, method: string, params = {}) {
-      writeMessage(childProcess, { jsonrpc: "2.0", id, method, params });
-      const started = Date.now();
-      while (Date.now() - started < 30000) {
-        const response = responses.find((candidate) => candidate.id === id);
-        if (response) return response;
-        if (childProcess.exitCode !== null) {
-          throw new Error(
-            `MCP server exited with code ${childProcess.exitCode} while waiting for JSON-RPC response ${id}`,
-          );
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      throw new Error(`Timed out waiting for JSON-RPC response ${id}`);
-    },
-    async stop() {
-      if (childProcess.exitCode != null || childProcess.signalCode != null) {
-        return;
-      }
-      const closed = new Promise((resolve) => {
-        childProcess.once("close", resolve);
-      });
-      childProcess.stdin.end();
-      childProcess.kill();
-      await closed;
-    },
-  };
 }
 
 const testServer = startTestServer({
@@ -281,7 +209,7 @@ const testServer = startTestServer({
     TMPDIR: scanRoot,
   },
 });
-const requestAndWait = testServer.requestAndWait;
+const request = testServer.request;
 
 async function assertBundledNodeLauncher() {
   const emptyPath = await temporaryDirectory("codex-security-empty-path-");
@@ -330,7 +258,7 @@ async function assertBundledNodeLauncher() {
     assertNoError(
       await bundledNodeServer.initialize("codex-security-bundled-node-smoke"),
     );
-    assertNoError(await bundledNodeServer.requestAndWait(2, "tools/list"));
+    assertNoError(await bundledNodeServer.request(2, "tools/list"));
     if (!windows) {
       assert.equal(
         await readFile(path.join(emptyPath, "bundled-node-used"), "utf8"),
@@ -403,7 +331,7 @@ async function assertWorkbenchStdinFailureDoesNotCrashServer() {
       _meta: { "openai/threadId": "fixture-thread" },
     });
     assert.equal(response.result.isError, true);
-    assertNoError(await server.requestAndWait(3, "tools/list"));
+    assertNoError(await server.request(3, "tools/list"));
   } finally {
     server.stop();
     await rm(helperRoot, { recursive: true, force: true });
@@ -993,7 +921,7 @@ try {
   );
   assert.deepEqual(initialized.result.capabilities.logging, {});
 
-  const trustedAccessToolList = await requestAndWait(9600, "tools/list");
+  const trustedAccessToolList = await request(9600, "tools/list");
   assertNoError(trustedAccessToolList);
   const trustedAccessTool = trustedAccessToolList.result.tools.find(
     (tool: { name: string }) =>
@@ -1376,7 +1304,7 @@ try {
   if (process.platform !== "win32") {
     await rm(launchCwd, { recursive: true, force: true });
   }
-  const toolList = await requestAndWait(2, "tools/list");
+  const toolList = await request(2, "tools/list");
   assertNoError(toolList);
   for (const tool of toolList.result.tools) {
     assert.equal(tool._meta?.["openai/outputTemplate"], undefined);
@@ -1553,11 +1481,16 @@ try {
       .description,
     "How should Codex Security handle the blocked preflight?",
   );
+  assert.deepEqual(elicitationRequest.params.requestedSchema.required, [
+    "concurrent_deep_scan",
+    "preflight_action",
+  ]);
   testServer.sendResponse(elicitationRequest.id, {
     action: "accept",
     content: {
       concurrent_deep_scan: "Cancel (Recommended)",
       preflight_action: "Leave paused",
+      extra_answer: "Ignored",
     },
   });
   const userInputResponse = await testServer.waitForMessage(
@@ -1596,75 +1529,57 @@ try {
   });
   assert.equal(invalidUserInput.result.isError, true);
 
-  testServer.sendRequest(9002, "tools/call", {
-    name: "request_codex_security_user_input",
-    arguments: {
-      questions: [
-        {
-          header: "Decline?",
-          id: "decline_request",
-          question: "Decline this Codex Security input request?",
-          options: continuationOptions,
-        },
-      ],
-    },
-  });
-  const declinedElicitation = await testServer.waitForMessage(
-    (message) =>
-      message.method === "elicitation/create" &&
-      message.params?.message.startsWith(
-        "Decline this Codex Security input request?",
-      ),
-    "declined Codex Security elicitation request",
-  );
-  assert.equal(
-    declinedElicitation.params.message,
+  for (const [index, [reply, status]] of [
+    [{ action: "decline" }, "declined"],
+    [{ action: "cancel" }, "cancelled"],
+    [{ action: "accept" }, "unavailable"],
+    [{ action: "accept", content: null }, "unavailable"],
+    [{ action: "accept", content: {} }, "unavailable"],
+    [{ action: "accept", content: { choice: false } }, "unavailable"],
+    [{ action: "accept", content: { choice: 0 } }, "unavailable"],
+    [{ action: "accept", content: { choice: "" } }, "unavailable"],
     [
-      "Decline this Codex Security input request?",
-      "- Continue: Continue the current workflow.",
-      "- Cancel: Leave the current workflow paused.",
-    ].join("\n"),
-  );
-  testServer.sendResponse(declinedElicitation.id, { action: "decline" });
-  const declinedUserInput = await testServer.waitForMessage(
-    (message) => message.id === 9002,
-    "declined Codex Security user-input response",
-  );
-  assertNoError(declinedUserInput);
-  assert.deepEqual(declinedUserInput.result.structuredContent, {
-    status: "declined",
-  });
-
-  testServer.sendRequest(9003, "tools/call", {
-    name: "request_codex_security_user_input",
-    arguments: {
-      questions: [
-        {
-          header: "Cancel?",
-          id: "cancel_request",
-          question: "Cancel this Codex Security input request?",
-          options: continuationOptions,
-        },
-      ],
-    },
-  });
-  const cancelledElicitation = await testServer.waitForMessage(
-    (message) =>
-      message.method === "elicitation/create" &&
-      message.params?.message.startsWith(
-        "Cancel this Codex Security input request?",
-      ),
-    "cancelled Codex Security elicitation request",
-  );
-  testServer.sendResponse(cancelledElicitation.id, { action: "cancel" });
-  const cancelledUserInput = await testServer.waitForMessage(
-    (message) => message.id === 9003,
-    "cancelled Codex Security user-input response",
-  );
-  assertNoError(cancelledUserInput);
-  assert.deepEqual(cancelledUserInput.result.structuredContent, {
-    status: "cancelled",
-  });
+      { action: "accept", content: { choice: "Unknown option" } },
+      "unavailable",
+    ],
+  ].entries()) {
+    const requestId = 9002 + index;
+    const question = `Choose an option for request ${requestId}?`;
+    testServer.sendRequest(requestId, "tools/call", {
+      name: "request_codex_security_user_input",
+      arguments: {
+        questions: [
+          {
+            header: "Choice",
+            id: "choice",
+            question,
+            options: continuationOptions,
+          },
+        ],
+      },
+    });
+    const elicitation = await testServer.waitForMessage(
+      (message) =>
+        message.method === "elicitation/create" &&
+        message.params?.message.startsWith(question),
+      `Codex Security elicitation request ${requestId}`,
+    );
+    assert.equal(
+      elicitation.params.message,
+      [
+        question,
+        "- Continue: Continue the current workflow.",
+        "- Cancel: Leave the current workflow paused.",
+      ].join("\n"),
+    );
+    testServer.sendResponse(elicitation.id, reply);
+    const response = await testServer.waitForMessage(
+      (message) => message.id === requestId,
+      `Codex Security user-input response ${requestId}`,
+    );
+    assertNoError(response);
+    assert.deepEqual(response.result.structuredContent, { status });
+  }
   const start = toolList.result.tools.find(
     (tool: { name: string }) => tool.name === "start_codex_security_scan",
   );
