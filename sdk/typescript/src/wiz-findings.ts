@@ -45,12 +45,16 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
   const version = text(record["version"]);
   const severity = text(record["vendorSeverity"]) ?? text(record["severity"]);
   const asset = object(record["vulnerableAsset"]);
+  const artifactType = object(record["artifactType"]);
   if (!name || !packageName || !text(asset?.["id"])) {
     throw new Error(
       "Expected a Wiz package vulnerability finding with name, detailedName, and vulnerableAsset.id. Other finding classes need a separate mapping.",
     );
   }
-  const digest = text(asset?.["imageDigest"]) ?? text(record["imageDigest"]);
+  const digest =
+    text(asset?.["imageDigest"]) ??
+    text(record["imageDigest"]) ??
+    (asset?.["type"] === "CONTAINER_IMAGE" ? text(asset["imageId"]) : null);
   const updated = text(record["updatedAt"]);
   const updatedSeconds = updated ? Date.parse(updated) / 1000 : null;
   if (
@@ -68,20 +72,21 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
     description: text(record["description"]),
     severity: severity?.toLowerCase(),
     url: text(record["portalUrl"]),
-    advisory_ids: name ? [name] : [],
-    packages: packageName
-      ? [
-          {
-            name: packageName,
-            ecosystem: text(record["packageManager"]),
-            installed_version: version,
-            manifest_path: null,
-            fixed_versions: text(record["fixedVersion"])
-              ? [record["fixedVersion"]]
-              : [],
-          },
-        ]
-      : [],
+    advisory_ids: [name],
+    packages: [
+      {
+        name: packageName,
+        ecosystem:
+          text(record["packageManager"]) ??
+          text(artifactType?.["osPackageManager"]) ??
+          text(artifactType?.["codeLibraryLanguage"]),
+        installed_version: version,
+        manifest_path: null,
+        fixed_versions: text(record["fixedVersion"])
+          ? [record["fixedVersion"]]
+          : [],
+      },
+    ],
     locations: [],
     branch: null,
     code_revision: null,

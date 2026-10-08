@@ -340,6 +340,72 @@ test("Wiz occurrence mapping preserves original evidence without inventing repos
   });
 });
 
+test("Wiz API nodes preserve artifact ecosystems and distinguish container digests from VM image IDs", async () => {
+  const finding = {
+    name: "CVE-2099-0001",
+    detailedName: "example-package",
+    version: "1.2.0",
+    vendorSeverity: "HIGH",
+  };
+  const records = [
+    {
+      ...finding,
+      id: "container-package",
+      artifactType: { osPackageManager: "DPKG", codeLibraryLanguage: null },
+      vulnerableAsset: {
+        id: "container-image",
+        type: "CONTAINER_IMAGE",
+        imageId: `sha256:${"a".repeat(64)}`,
+      },
+    },
+    {
+      ...finding,
+      id: "vm-library",
+      artifactType: { osPackageManager: null, codeLibraryLanguage: "PYTHON" },
+      vulnerableAsset: {
+        id: "virtual-machine",
+        type: "VIRTUAL_MACHINE",
+        imageId: "ami-synthetic",
+      },
+    },
+    {
+      ...finding,
+      id: "explicit-metadata",
+      packageManager: "reported-manager",
+      imageDigest: `sha256:${"b".repeat(64)}`,
+      artifactType: { osPackageManager: "DPKG" },
+      vulnerableAsset: {
+        id: "explicit-container",
+        type: "CONTAINER_IMAGE",
+        imageId: `sha256:${"c".repeat(64)}`,
+      },
+    },
+  ];
+  const f = await fixture({
+    data: {
+      vulnerabilityFindings: {
+        nodes: records,
+        pageInfo: { hasNextPage: false },
+      },
+    },
+  });
+  const parsed = await readVendorFindings(f.file);
+  expect(parsed.excluded).toEqual([]);
+  expect(
+    parsed.findings.map(({ evidence }) => ({
+      ecosystem: evidence.packages?.[0]?.ecosystem,
+      digests: evidence.image_digests,
+    })),
+  ).toEqual([
+    { ecosystem: "DPKG", digests: [`sha256:${"a".repeat(64)}`] },
+    { ecosystem: "PYTHON", digests: [] },
+    { ecosystem: "reported-manager", digests: [`sha256:${"b".repeat(64)}`] },
+  ]);
+  expect(parsed.findings.map(({ evidence }) => evidence.source_data)).toEqual(
+    records,
+  );
+});
+
 test("unsupported records are visible exclusions; duplicate identities and unfinished pages stop publication", async () => {
   const f = await fixture([normalized(), normalized("unknown", "unknown")]);
   const parsed = await readVendorFindings(f.file);
