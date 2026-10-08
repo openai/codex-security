@@ -1946,6 +1946,16 @@ def merge_saved_results(
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
+                        if _finding_key(retained) == _finding_key(finding):
+                            # Equivalent number spellings must retain the identity binding
+                            # used to derive published IDs and their saved triage decisions.
+                            finding["identity"] = copy.deepcopy(retained["identity"])
+                            if "preservedIdentity" in retained["provenance"]:
+                                provenance["preservedIdentity"] = copy.deepcopy(
+                                    retained["provenance"]["preservedIdentity"]
+                                )
+                            else:
+                                provenance.pop("preservedIdentity", None)
                         retained = finding
                         findings[finding_positions[key]] = retained
                     else:
