@@ -2767,27 +2767,25 @@ export function resolveCodexCommand(
     return { command: resolve(expanded) };
   }
 
-  return packagedCodexCommand(import.meta.url);
+  return packagedCodexCommand();
 }
 
-function packagedCodexCommand(
-  anchor: string,
-  vendorFallback = false,
-): CodexCommand {
+function packagedCodexCommand(codexPackageJson?: string): CodexCommand {
   const platform = process.platform === "android" ? "linux" : process.platform;
   const packageName = `@openai/codex-${platform}-${process.arch}`;
   let packageJson: string;
   let legacyVendor = false;
   try {
-    const require = createRequire(anchor);
-    const codexPackageJson = require.resolve("@openai/codex/package.json");
+    const selectedPackageJson =
+      codexPackageJson ??
+      createRequire(import.meta.url).resolve("@openai/codex/package.json");
     try {
-      packageJson = createRequire(codexPackageJson).resolve(
+      packageJson = createRequire(selectedPackageJson).resolve(
         `${packageName}/package.json`,
       );
     } catch (error) {
-      if (!vendorFallback) throw error;
-      packageJson = codexPackageJson;
+      if (codexPackageJson === undefined) throw error;
+      packageJson = selectedPackageJson;
       legacyVendor = true;
     }
   } catch (error) {
@@ -2838,7 +2836,7 @@ export async function codexExecutableReadPaths(
   // npm's entrypoint launches a native binary, which Linux re-executes in the sandbox.
   return [
     executable,
-    await realpath(packagedCodexCommand(executable, true).command),
+    await realpath(packagedCodexCommand(packageJson).command),
   ];
 }
 

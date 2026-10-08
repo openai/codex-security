@@ -161,7 +161,9 @@ describe("CodexSecurity policy API", () => {
   test.each([
     "bundled",
     "symlink",
-    ...(process.platform === "win32" ? [] : ["npm", "npm-vendor"]),
+    ...(process.platform === "win32"
+      ? []
+      : ["npm", "npm-vendor", "npm-linked", "npm-vendor-linked"]),
   ])(
     "grants only the selected runtime files to policy turns (%s)",
     async (installation) => {
@@ -178,7 +180,9 @@ describe("CodexSecurity policy API", () => {
         await symlink(executable, selected, "file");
       if (installation.startsWith("npm")) {
         const modules = join(runtimeFixture.root, "node_modules", "@openai");
-        const packageRoot = join(modules, "codex");
+        const packageRoot = installation.endsWith("-linked")
+          ? join(runtimeFixture.root, "linked-codex")
+          : join(modules, "codex");
         selected = join(packageRoot, "bin", "codex.js");
         await mkdir(dirname(selected), { recursive: true });
         await writeFile(selected, "#!/usr/bin/env node\n");
@@ -190,16 +194,22 @@ describe("CodexSecurity policy API", () => {
           }),
         );
         const platformPackage = `codex-${process.platform}-${process.arch}`;
-        const nativeRoot =
-          installation === "npm" ? join(modules, platformPackage) : packageRoot;
+        const nativeRoot = installation.startsWith("npm-vendor")
+          ? packageRoot
+          : join(
+              installation.endsWith("-linked")
+                ? join(packageRoot, "node_modules", "@openai")
+                : modules,
+              platformPackage,
+            );
         const architecture = process.arch === "arm64" ? "aarch64" : "x86_64";
         const target = `${architecture}-${process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`;
         const native = join(nativeRoot, "vendor", target, "bin", "codex");
         await mkdir(dirname(native), { recursive: true });
         await writeFile(native, "synthetic native executable\n");
-        if (installation === "npm-vendor")
+        if (installation.startsWith("npm-vendor"))
           await mkdir(join(nativeRoot, "vendor", "a-different-platform"));
-        if (installation === "npm")
+        if (!installation.startsWith("npm-vendor"))
           await writeFile(
             join(nativeRoot, "package.json"),
             JSON.stringify({ name: `@openai/${platformPackage}` }),
