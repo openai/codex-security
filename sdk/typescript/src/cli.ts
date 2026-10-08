@@ -150,6 +150,7 @@ import {
   AuthenticationRequiredError,
   ConfigurationError,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
@@ -9030,6 +9031,7 @@ function isLocalScanFailure(error: unknown): boolean {
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
     error instanceof ConfigurationError ||
+    error instanceof LocalPluginBootstrapError ||
     error instanceof PluginPythonUnavailableError
   ) {
     return true;

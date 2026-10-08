@@ -2678,7 +2678,9 @@ async function testJoinAndOrphanRules() {
   assert.equal(failures.mock.callCount(), 0);
 }
 
-async function testPausedDiscoverySurvivesCoordinatorRestart() {
+async function testPausedDiscoverySurvivesCoordinatorRestart(
+  removeHistoricalPrompts = true,
+) {
   const fixture = await fixtureRun({
     stopAfterNoNew: 2,
     maxDiscoveryRuns: 2,
@@ -2764,6 +2766,11 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   store.heartbeatCoordinator = async () => structuredClone(store.run);
   const replacementExecutor = new FakeExecutor();
   const acceptedResult = await readFile(accepted.resultManifestPath!, "utf8");
+  const acceptedWorkerId = await workerIdFromPrompt(accepted.promptPath);
+  if (removeHistoricalPrompts)
+    await Promise.all(
+      persistedWorkers.map((worker) => rm(worker.promptPath, { force: true })),
+    );
   const resumed = await startOrJoinDeepScanCoordinator({
     run: structuredClone(store.run),
     registry: new DeepScanCoordinatorRegistry(),
@@ -2784,9 +2791,7 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   assert.equal(store.failureMessages.length, 0);
   assert.equal(replacementExecutor.discoveryAttempts.size, 1);
   assert.equal(
-    replacementExecutor.discoveryAttempts.has(
-      await workerIdFromPrompt(accepted.promptPath),
-    ),
+    replacementExecutor.discoveryAttempts.has(acceptedWorkerId),
     false,
   );
   assert.equal(store.dedupClaims.length, 1);
@@ -2855,6 +2860,11 @@ async function testResumedDiscoveryDeadlineUsesPersistedCreationTime(
     persistedWorkers: structuredClone([...store.workers.values()]),
   };
 
+  await Promise.all(
+    store.run.persistedWorkers!.map((worker) =>
+      rm(worker.promptPath, { force: true }),
+    ),
+  );
   const resumedExecutor = new FakeExecutor({
     blockDiscoveryAfterCalls: 0,
     canonicalCandidateId: "candidate-1",
@@ -2893,6 +2903,7 @@ async function testResumedDiscoveryDeadlineUsesPersistedCreationTime(
 
 async function testResumedManifestPreservesCompletedReducer(
   includeUnstartedReducer = false,
+  removeHistoricalPrompts = true,
 ) {
   const fixture = await fixtureRun({
     workers: 2,
@@ -2954,7 +2965,21 @@ async function testResumedManifestPreservesCompletedReducer(
     persistedWorkers: structuredClone([...store.workers.values()]),
     persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
   };
-  const terminal = await runCoordinator(fixture, store, new FakeExecutor(), {
+  const acceptedWorkers = store.run.persistedWorkers!.filter(
+    (worker) => worker.status === "succeeded",
+  );
+  const acceptedResults = await Promise.all(
+    acceptedWorkers.map((worker) =>
+      readFile(worker.resultManifestPath!, "utf8"),
+    ),
+  );
+  const persistedInputs = structuredClone(store.run.persistedDedupInputs);
+  const persistedWorkers = structuredClone(store.run.persistedWorkers);
+  const committedReducer = store.workers.get(store.dedupClaims[0].id)!;
+  const committedResult = await readJson(committedReducer.resultManifestPath!);
+  if (removeHistoricalPrompts) await rm(committedReducer.promptPath);
+  const replacementExecutor = new FakeExecutor();
+  const terminal = await runCoordinator(fixture, store, replacementExecutor, {
     run: store.run,
   });
   assert.equal(terminal?.status, "succeeded");
@@ -2962,6 +2987,22 @@ async function testResumedManifestPreservesCompletedReducer(
   assert.equal(manifest.scan.scanId, fixture.run.scanId);
   assert.equal(store.dedupCommits.length, 1);
   assert.equal(store.dedupClaims.length, 1);
+  assert.equal(
+    replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
+    0,
+    "accepted work needs no new worker launch",
+  );
+  assert.deepEqual(manifest.findings, committedResult.findings);
+  assert.deepEqual(store.run.persistedDedupInputs, persistedInputs);
+  assert.deepEqual(store.run.persistedWorkers, persistedWorkers);
+  assert.deepEqual(
+    await Promise.all(
+      acceptedWorkers.map((worker) =>
+        readFile(worker.resultManifestPath!, "utf8"),
+      ),
+    ),
+    acceptedResults,
+  );
   assert.equal(
     store.run.persistedWorkers!.some(
       (worker) => worker.id === unstartedReducer?.id,
@@ -2996,8 +3037,15 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
     persistedWorkers: structuredClone([...store.workers.values()]),
     persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
   };
+  const persistedInputs = structuredClone(store.run.persistedDedupInputs);
+  await Promise.all(
+    store.run.persistedWorkers!.map((worker) =>
+      rm(worker.promptPath, { force: true }),
+    ),
+  );
+  const replacementExecutor = new FakeExecutor();
   const completedDrafts: ScanDraftInput[] = [];
-  const resumed = await runCoordinator(fixture, store, new FakeExecutor(), {
+  const resumed = await runCoordinator(fixture, store, replacementExecutor, {
     run: store.run,
     onComplete: async (draft) =>
       void completedDrafts.push(structuredClone(draft)),
@@ -3024,6 +3072,11 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
   assert.deepEqual(
     completedDrafts.map((draft) => draft.findings),
     [latestResult.findings],
+  );
+  assert.deepEqual(store.run.persistedDedupInputs, persistedInputs);
+  assert.equal(
+    replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
+    0,
   );
 }
 
@@ -3063,10 +3116,9 @@ async function testPersistedErrorLimitStopsBeforeRescheduling() {
     assert.equal(executor.discoveryCalls, 0);
     assert.match(
       terminal?.error ?? "",
-      promptExists ? /2 consecutive unsuccessful discovery workers/ : /ENOENT/,
+      /2 consecutive unsuccessful discovery workers/,
     );
-    if (promptExists)
-      assert.match(terminal?.error ?? "", /persisted worker failure/);
+    assert.match(terminal?.error ?? "", /persisted worker failure/);
     assert.equal(terminal.manifestPath, undefined);
     assert.equal(store.run.persistedWorkers![0].id, failedWorker.id);
   }
@@ -3586,7 +3638,7 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
   assert.equal(completed[0].coverage.completeness, "complete");
 }
 
-async function testResumeRequiresHistoricalWorkerPrompt(
+async function testResumeDoesNotRequireHistoricalWorkerPrompt(
   status: "failed" | "canceled",
 ) {
   const fixture = await fixtureRun({
@@ -3611,10 +3663,10 @@ async function testResumeRequiresHistoricalWorkerPrompt(
   const terminal = await runCoordinator(fixture, store, executor, {
     run: store.run,
   });
-  assert.equal(terminal?.status, "failed");
-  assert.match(terminal.error, /ENOENT/);
-  assert.ok(terminal.error.includes(promptPath));
-  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(store.failureMessages.length, 0);
+  assert.equal(executor.discoveryCalls, 2);
+  assert.equal(store.run.persistedWorkers?.[0].promptPath, promptPath);
 }
 
 async function testRecoverableWorkerErrorsCannotFailScan() {
@@ -3925,13 +3977,15 @@ try {
   await testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead();
   await testRemoteObserverRetriesTransientPersistenceFailures();
   await testJoinAndOrphanRules();
-  await testResumeRequiresHistoricalWorkerPrompt("failed");
-  await testResumeRequiresHistoricalWorkerPrompt("canceled");
+  await testResumeDoesNotRequireHistoricalWorkerPrompt("failed");
+  await testResumeDoesNotRequireHistoricalWorkerPrompt("canceled");
+  await testPausedDiscoverySurvivesCoordinatorRestart(false);
   await testPausedDiscoverySurvivesCoordinatorRestart();
   await testResumedDiscoveryDeadlineUsesPersistedCreationTime();
   await testResumedDiscoveryDeadlineUsesPersistedCreationTime(true);
   await testResumedDiscoveryDeadlineUsesPersistedCreationTime(false, 2.5);
   await testResumedDiscoveryDeadlineUsesPersistedCreationTime(true, 96);
+  await testResumedManifestPreservesCompletedReducer(false, false);
   await testResumedManifestPreservesCompletedReducer();
   await testResumedManifestPreservesCompletedReducer(true);
   await testResumeUsesHistoricalCandidateSnapshotForEachReducer();
