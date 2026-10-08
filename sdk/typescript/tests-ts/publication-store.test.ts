@@ -69,7 +69,6 @@ async function publicationFixture(
   };
   const publication: PreparedScanPublication = {
     scanId: SCAN_ID,
-    uploadId: SCAN_ID,
     scanDirectory,
     destination: {
       type: "linear",
@@ -474,7 +473,6 @@ describe("read-only publication history", () => {
     const otherScan: PreparedScanPublication = {
       ...fixture.publication,
       scanId: OTHER_SCAN_ID,
-      uploadId: OTHER_SCAN_ID,
       scanDirectory,
       issues: fixture.publication.issues.map((issue) => ({
         ...issue,
@@ -802,7 +800,6 @@ connection.close()
     const otherScan: PreparedScanPublication = {
       ...fixture.publication,
       scanId: OTHER_SCAN_ID,
-      uploadId: OTHER_SCAN_ID,
       scanDirectory: anotherDirectory,
       issues: [
         {

@@ -6,7 +6,9 @@ import { PLUGIN_ROOT, copyCompletedScan } from "../plugin-root.js";
 type PreparedRuntime = Awaited<
   ReturnType<
     NonNullable<
-      ConstructorParameters<typeof CodexSecurity>[1]["prepareRuntime"]
+      NonNullable<
+        ConstructorParameters<typeof CodexSecurity>[1]
+      >["prepareRuntime"]
     >
   >
 >;
@@ -48,16 +50,11 @@ type ScanEventOptions = Omit<
   "thread" | "events" | "signal" | "scanDir" | "pluginRoot" | "expectation"
 > & { abortController?: AbortController };
 
-export async function* completedEvents(
-  threadId = "thread-1",
-): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: threadId };
-  yield { type: "turn.started" };
-  yield {
-    type: "item.completed",
-    item: { id: "message-1", type: "agent_message", text: "scan complete" },
-  };
-  yield {
+export function completedTurn(): Extract<
+  ThreadEvent,
+  { type: "turn.completed" }
+> {
+  return {
     type: "turn.completed",
     usage: {
       input_tokens: 10,
@@ -67,6 +64,22 @@ export async function* completedEvents(
       reasoning_output_tokens: 1,
     },
   };
+}
+
+export async function* completedEvents(
+  threadId = "thread-1",
+  events?: AsyncIterable<ThreadEvent>,
+): AsyncGenerator<ThreadEvent> {
+  yield { type: "thread.started", thread_id: threadId };
+  yield { type: "turn.started" };
+  if (events) yield* events;
+  else {
+    yield {
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "scan complete" },
+    };
+  }
+  yield completedTurn();
 }
 
 export function runEvents(
@@ -118,9 +131,12 @@ export function collectObserverErrors(errors: [ScanObserverName, string][]) {
   };
 }
 
-export function codexFactory<Run>(runStreamed: Run) {
+export function codexFactory<Run>(
+  runStreamed: Run,
+  threadId: string | null = null,
+) {
   return () => ({
-    startThread: () => ({ id: null, runStreamed }),
+    startThread: () => ({ id: threadId, runStreamed }),
   });
 }
 

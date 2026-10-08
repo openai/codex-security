@@ -9,7 +9,6 @@ import os
 import shutil
 import sqlite3
 import sys
-import tempfile
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -438,7 +437,7 @@ def independent_review_progress(
         "active": int(active),
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": run["phase"] == "reducing",
+        "consolidating": run["phase"] in {"reducing", "terminal"},
         "updatedAt": str(run["updated_at"]),
     }
 
@@ -755,12 +754,6 @@ def begin_deep_scan_for_target(
         scan_id = str(uuid.uuid4())
         timestamp = dependencies().now()
         target_id = dependencies().ensure_security_target(connection, target_path)
-        scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{dependencies().safe_segment(revision)}_{dependencies().compact_timestamp()}_",
-                dir=target_root,
-            )
-        ).resolve()
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -798,7 +791,6 @@ def begin_deep_scan_for_target(
             handoff_status="delivered",
             model=model,
             reasoning_effort=reasoning_effort,
-            scan_dir=scan_dir,
         )
         scan = dependencies().require_scan(connection, scan_id)
         ensure_deep_scan_run(connection, scan, config, workflow_version, timestamp)
@@ -855,6 +847,7 @@ def coordinator_lease_is_live(
         if heartbeat["coordinatorGeneration"] == run["coordinator_generation"]:
             heartbeat_time = max(heartbeat_time, _parse_timestamp(heartbeat["updatedAt"]))
     except (OSError, KeyError, TypeError, ValueError):
+        # Missing or invalid heartbeat files leave the persisted lease timestamp in effect.
         pass
     current_time = _parse_timestamp(timestamp)
     return heartbeat_time > current_time - timedelta(seconds=DEEP_SCAN_COORDINATOR_LEASE_SECONDS)

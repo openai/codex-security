@@ -6,34 +6,14 @@ import { delimiter, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 const testPosix = process.platform === "win32" ? test.skip : test;
-const publicEntrypoint = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "docker",
-  "entrypoint.sh",
-);
-const entrypoint = existsSync(publicEntrypoint)
-  ? publicEntrypoint
-  : join(import.meta.dir, "..", "public-repo", "docker", "entrypoint.sh");
-const publicVersionVerifier = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "docker",
-  "verify-container-release-version.sh",
-);
-const versionVerifier = existsSync(publicVersionVerifier)
-  ? publicVersionVerifier
-  : join(
-      import.meta.dir,
-      "..",
-      "public-repo",
-      "docker",
-      "verify-container-release-version.sh",
-    );
+function dockerScript(name: string): string {
+  const canonical = join(import.meta.dir, "..", "..", "..", "docker", name);
+  return existsSync(canonical)
+    ? canonical
+    : join(import.meta.dir, "..", "public-repo", "docker", name);
+}
+const entrypoint = dockerScript("entrypoint.sh");
+const versionVerifier = dockerScript("verify-container-release-version.sh");
 async function runEntrypoint(
   args: readonly string[],
   overrides: Record<string, string> = {},
@@ -103,7 +83,7 @@ async function runVersionVerifier(
         versionVerifier,
         endpoint,
         "0.1.4",
-        ...(expectedDigest ? [expectedDigest] : []),
+        ...(expectedDigest === undefined ? [] : [expectedDigest]),
       ],
       {
         encoding: "utf8",
@@ -156,6 +136,14 @@ describe("customer container entrypoint", () => {
   testPosix("accepts CSVs after global and bulk-scan options", async () => {
     for (const arguments_ of [
       ["bulk-scan", "--workers", "2", "/input/repositories.csv"],
+      ["bulk-scan", "--config", "settings.json", "/input/repositories.csv"],
+      ["bulk-scan", "-c", "settings.json", "/input/repositories.csv"],
+      [
+        "bulk-scan",
+        "--validation-prompt-file",
+        "prompt.md",
+        "/input/repositories.csv",
+      ],
       ["bulk-scan", "--max-cost", "12.50", "/input/repositories.csv"],
       ["bulk-scan", "bulk-scan", "--output-dir", "/output"],
       [
@@ -206,6 +194,9 @@ describe("customer container entrypoint", () => {
       for (const arguments_ of [
         ["bulk-scan"],
         ["bulk-scan", "--workers", "8"],
+        ["bulk-scan", "--config", "settings.json"],
+        ["bulk-scan", "-c", "settings.json"],
+        ["bulk-scan", "--validation-prompt-file", "prompt.md"],
         ["bulk-scan", "--max-cost", "12.50"],
         ["bulk-scan", "--scan-prompt-file", "prompt.md"],
         ["bulk-scan", "--post-scan-prompt-file", "post-prompt.md"],
@@ -250,6 +241,7 @@ describe("immutable customer container releases", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Synthetic package lookup failed.");
     expect(result.stderr).toContain("refusing to publish");
+    expect(result.workflowOutput).toBe("");
   });
 
   testPosix("rejects an existing immutable release version", async () => {
@@ -264,6 +256,7 @@ describe("immutable customer container releases", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Container version 0.1.4 already exists");
+    expect(result.workflowOutput).toBe("");
   });
 
   testPosix(
@@ -271,44 +264,70 @@ describe("immutable customer container releases", () => {
     async () => {
       const digest = `sha256:${"a".repeat(64)}`;
       for (const newer of [false, true]) {
-        const versions = [
-          { name: digest, metadata: { container: { tags: ["0.1.4"] } } },
-          ...(newer
-            ? [
-                {
-                  name: `sha256:${"b".repeat(64)}`,
-                  metadata: { container: { tags: ["0.2.0", "latest"] } },
+        for (const latest of ["same", "different", "missing"]) {
+          const versions = [
+            {
+              name: digest,
+              metadata: {
+                container: {
+                  tags: ["0.1.4", ...(latest === "same" ? ["latest"] : [])],
                 },
-              ]
-            : []),
-        ];
-        const result = await runVersionVerifier(
-          `[]\n${JSON.stringify(versions)}`,
-          false,
-          digest,
-        );
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.workflowOutput).toBe(`publish_latest=${!newer}\n`);
+              },
+            },
+            {
+              name: `sha256:${"b".repeat(64)}`,
+              metadata: {
+                container: {
+                  tags: [
+                    ...(newer ? ["0.2.0"] : []),
+                    ...(latest === "different" ? ["latest"] : []),
+                  ],
+                },
+              },
+            },
+          ];
+          const result = await runVersionVerifier(
+            `[]\n${JSON.stringify(versions)}`,
+            false,
+            digest,
+          );
+          const allowed = newer || latest === "same";
+          expect(result.status, JSON.stringify({ newer, latest })).toBe(
+            allowed ? 0 : 1,
+          );
+          expect(result.workflowOutput).toBe(
+            allowed ? `publish_latest=${!newer}\n` : "",
+          );
+          if (allowed) expect(result.stderr).toBe("");
+        }
       }
     },
   );
 
   testPosix(
-    "rejects a retry with a different or missing published digest",
+    "requires every existing version tag to match a valid verified digest",
     async () => {
       const digest = `sha256:${"a".repeat(64)}`;
-      for (const name of [`sha256:${"b".repeat(64)}`, undefined]) {
+      for (const [name, verified] of [
+        [`sha256:${"b".repeat(64)}`, digest],
+        [undefined, digest],
+        ["invalid", "invalid"],
+      ] as const) {
         const result = await runVersionVerifier(
           JSON.stringify([
+            {
+              name: verified,
+              metadata: { container: { tags: ["0.1.4", "latest"] } },
+            },
             { name, metadata: { container: { tags: ["0.1.4"] } } },
+            { metadata: { container: { tags: ["0.2.0"] } } },
           ]),
           false,
-          digest,
+          verified,
         );
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(
-          "stable version tags cannot be overwritten",
+          "Container version 0.1.4 already exists",
         );
         expect(result.workflowOutput).toBe("");
       }
@@ -350,5 +369,6 @@ describe("immutable customer container releases", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("refusing to publish");
+    expect(result.workflowOutput).toBe("");
   });
 });
