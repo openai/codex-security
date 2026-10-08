@@ -1811,7 +1811,22 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
 @pytest.mark.parametrize("source_findings", [False, True])
 @pytest.mark.parametrize(
     "variant",
-    ["integer", "location", "evidence", "score", "extension", "fraction", "boolean", "string"],
+    [
+        "integer",
+        "location",
+        "evidence",
+        "score",
+        "extension",
+        "fraction",
+        "boolean",
+        "string",
+        "raw-fraction",
+        "raw-long-fraction",
+        "raw-underflow",
+        "raw-large-underflow",
+        "raw-exponent",
+        "deep-extension",
+    ],
 )
 def test_recovery_does_not_promote_already_retained_historical_finding(
     tmp_path: Path,
@@ -1833,6 +1848,11 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     historical["confidence"]["level"] = "high"
     historical.pop("identity")
     checkpoint_historical = copy.deepcopy(historical)
+    if variant == "deep-extension":
+        deep: object = 1.5
+        for _ in range(350):
+            deep = {"nested": deep}
+        checkpoint_historical["extensions"]["deep"] = deep
     if variant in {"location", "evidence"}:
         for location in checkpoint_historical[
             "locations" if variant == "location" else "codeEvidence"
@@ -1871,7 +1891,25 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     checkpoint = copy.deepcopy(worker_document)
     checkpoint["complete"] = False
     checkpoint["findings"] = [checkpoint_historical]
-    checkpoint_path = write_checkpoint(worker_result.parent / "checkpoints", checkpoint)
+    raw_token = {
+        "raw-fraction": "1.0000000000000001",
+        "raw-long-fraction": "1.0000000000000000000000000000000000000001",
+        "raw-underflow": "1e-400",
+        "raw-large-underflow": "1e-9999999999999999999",
+        "raw-exponent": "1e0",
+    }.get(variant)
+    if raw_token is None:
+        checkpoint_path = write_checkpoint(worker_result.parent / "checkpoints", checkpoint)
+    else:
+        raw = (
+            json.dumps(checkpoint)
+            .replace('"observation": 1', f'"observation": {raw_token}')
+            .encode()
+        )
+        checkpoint_dir = worker_result.parent / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = checkpoint_dir / f"{hashlib.sha256(raw).hexdigest()}.json"
+        checkpoint_path.write_bytes(raw)
     source_bytes = {file: file.read_bytes() for file in (worker_result, checkpoint_path)}
     committed_standard_reducer(state_dir, codex_home, scan_dir, scan_id, worker_id, worker_result)
 
@@ -1883,7 +1921,16 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     assert failed["findingCount"] == 1
     retained = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     assert {file: file.read_bytes() for file in source_bytes} == source_bytes
-    if variant in {"fraction", "boolean", "string"}:
+    if variant in {
+        "fraction",
+        "boolean",
+        "string",
+        "raw-fraction",
+        "raw-long-fraction",
+        "raw-underflow",
+        "raw-large-underflow",
+        "deep-extension",
+    }:
         assert retained["locations"][0]["startLine"] == 1
         assert retained["severity"]["level"] == "critical"
         assert any(
@@ -1902,7 +1949,13 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
 
 @pytest.mark.parametrize(
     ("parent_value", "worker_value", "distinct"),
-    [(1, 1.0, False), (1, True, True), (0, False, True), (1, "1", True)],
+    [
+        (1, 1.0, False),
+        (1, True, True),
+        (0, False, True),
+        (1, "1", True),
+        (1, ["number", 1, "1", "0x0"], True),
+    ],
 )
 def test_recovery_distinguishes_parent_and_worker_json_values(
     tmp_path: Path, parent_value: object, worker_value: object, distinct: bool

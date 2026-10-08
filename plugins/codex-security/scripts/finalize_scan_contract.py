@@ -25,7 +25,7 @@ from urllib.parse import quote, urlsplit
 
 # Some hosts load this script with Python's safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench.json_numbers import is_json_integer
+from workbench.json_numbers import JsonFloat, is_json_integer, json_number_key
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -106,7 +106,7 @@ def _reject_non_finite_json(value: str) -> None:
 
 
 def _loads_json(value: str | bytes) -> Any:
-    return json.loads(value, parse_constant=_reject_non_finite_json)
+    return json.loads(value, parse_float=JsonFloat, parse_constant=_reject_non_finite_json)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -1804,7 +1804,11 @@ def _schema_values_equal(left: Any, right: Any) -> bool:
         and isinstance(right, (int, float))
         and not isinstance(right, bool)
     ):
-        return left == right
+        if (isinstance(left, float) and not math.isfinite(left)) or (
+            isinstance(right, float) and not math.isfinite(right)
+        ):
+            return left == right
+        return json_number_key(left) == json_number_key(right)
     if type(left) is not type(right):
         return False
     if isinstance(left, dict):

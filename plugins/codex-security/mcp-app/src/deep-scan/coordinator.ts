@@ -25,6 +25,7 @@ import type {
 } from "./worker-runner.js";
 import {
   boundedDeepScanErrorPair,
+  DeepScanOwnershipChangedError,
   errorNameWithCode,
   abortError,
   errorMessage,
@@ -337,7 +338,7 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) {
         return;
       }
-      if (await this.stopAfterOwnershipChange(this.options.threadId)) {
+      if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
         return;
       }
       const message = errorMessage(error);
@@ -555,12 +556,22 @@ export class DeepScanCoordinator {
 
   private async stopAfterOwnershipChange(
     threadId: string | undefined,
+    error?: unknown,
   ): Promise<boolean> {
     if (this.externallyFailed || this.terminal || !threadId)
       return this.externallyFailed;
-    let current: DeepScanRunState;
+    let current: DeepScanRunState | undefined;
+    for (let cause = error; cause instanceof Error; cause = cause.cause) {
+      if (
+        cause instanceof DeepScanOwnershipChangedError &&
+        cause.run.scanId === this.state.scanId
+      ) {
+        current = cause.run;
+        break;
+      }
+    }
     try {
-      current = await this.options.store.get(this.state.scanId, threadId);
+      current ??= await this.options.store.get(this.state.scanId, threadId);
     } catch (readError) {
       this.log({
         event: "coordinator_ownership_read_failed",

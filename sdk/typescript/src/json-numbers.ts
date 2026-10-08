@@ -1,16 +1,24 @@
 import { ContractValidationError } from "./errors.js";
 
 export function parseJsonNumbers(source: string, context: string): unknown {
-  return JSON.parse(source, (_key, value: unknown) => {
-    if (typeof value === "number") validateJsonNumber(value, context);
-    return value;
-  });
+  const value: unknown = JSON.parse(source);
+  validateJsonNumbers(value, context);
+  return value;
 }
 
 export function validateJsonNumbers(value: unknown, context: string): void {
-  if (typeof value === "number") validateJsonNumber(value, context);
-  else if (value !== null && typeof value === "object")
-    for (const item of Object.values(value)) validateJsonNumbers(item, context);
+  const pending = [value];
+  const seen = new WeakSet<object>();
+  while (pending.length > 0) {
+    const item = pending.pop();
+    if (typeof item === "number") validateJsonNumber(item, context);
+    else if (item !== null && typeof item === "object" && !seen.has(item)) {
+      seen.add(item);
+      const children = Object.values(item);
+      for (let index = children.length - 1; index >= 0; index--)
+        pending.push(children[index]);
+    }
+  }
 }
 
 export function validateJsonNumber(value: number, context: string): void {

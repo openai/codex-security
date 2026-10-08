@@ -5,6 +5,7 @@ import { writeJsonAtomic } from "./artifacts.js";
 import {
   boundedDeepScanErrorMessage,
   DeepScanNonRetryableError,
+  DeepScanOwnershipChangedError,
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
@@ -491,9 +492,20 @@ export class WorkbenchDeepScanStore {
         const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;
         if (lease && isStaleCoordinatorGenerationError(error)) {
           // Diagnostics can contain paths or user text; only state establishes ownership.
-          await this.get(lease.input.scanId, lease.input.threadId).catch(
-            () => {},
-          );
+          const current = await this.get(
+            lease.input.scanId,
+            lease.input.threadId,
+          ).catch(() => undefined);
+          if (
+            current &&
+            (current.status !== "running" ||
+              (current.coordinatorGeneration !== undefined &&
+                lease.run.coordinatorGeneration !== undefined &&
+                current.coordinatorGeneration >
+                  lease.run.coordinatorGeneration))
+          ) {
+            throw new DeepScanOwnershipChangedError(current, error);
+          }
         }
         throw error;
       }
