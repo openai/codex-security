@@ -1045,3 +1045,59 @@ test.each([
     ).toBe(false);
   },
 );
+
+test.each(["JSON", "JSONL"])(
+  "malformed %s input keeps Node parser diagnostics terminal-safe",
+  async (format) => {
+    const f = await fixture();
+    await writeFile(
+      f.file,
+      `${format === "JSONL" ? "{}\n" : ""}\u001b[2Jmalformed`,
+    );
+    // Bundle beneath the SDK so the real Node process resolves installed packages.
+    const bundle = await mkdtemp(
+      join(import.meta.dir, "..", ".import-parser-"),
+    );
+    cleanups.push(() => rm(bundle, { recursive: true, force: true }));
+    const runner = join(bundle, "parse-input.mts");
+    await writeFile(
+      runner,
+      `
+      import { main } from "../src/cli.js";
+      import { dependencies } from "../tests-ts/cli-fixtures.js";
+      process.exitCode = await main(process.argv.slice(2), process.stdout, process.stderr, {
+        ...dependencies({ environment: process.env }),
+        cloudFetch: async () => { throw new Error("Unexpected Cloud request"); },
+      });
+    `,
+    );
+    const built = await Bun.build({
+      entrypoints: [runner],
+      outdir: bundle,
+      target: "node",
+      format: "esm",
+      packages: "external",
+    });
+    expect(built.success).toBe(true);
+    const child = Bun.spawn(
+      [Bun.which("node")!, built.outputs[0]!.path, ...f.command, "--dry-run"],
+      {
+        env: f.environment,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).toBe(2);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("Could not read vendor findings:");
+    expect(stderr).toContain("malformed");
+    expect(stderr).not.toContain("\u001b");
+    expect(f.posts).toHaveLength(0);
+    expect(await readdir(join(f.root, "state")).catch(() => [])).toEqual([]);
+  },
+);

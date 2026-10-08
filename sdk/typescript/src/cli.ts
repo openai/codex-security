@@ -3264,7 +3264,7 @@ export async function main(
         return { ...result, excluded: preview.excluded };
       } catch (error) {
         reportPublicationError(
-          error,
+          diagnosticValue(error),
           controller.signal.aborted ? controller.signal.reason : undefined,
         );
         return undefined;
