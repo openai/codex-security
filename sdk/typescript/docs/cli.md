@@ -1240,7 +1240,8 @@ codex-security install-hook /path/to/repository
 
 To migrate an existing generated hook, verify it is a regular file used only by
 this repository and contains only the generated command. Preserve its severity.
-The installer can update older `npx` hooks when the severity matches. New hooks
+The installer can update older `npx` hooks, and earlier generated hooks with the
+same Node/CLI paths, when the severity matches. New hooks
 record absolute Node/CLI paths. If those change, back up and remove the verified
 generated hook, then reinstall with the same threshold. Restore the backup if
 installation fails. The installer respects `core.hooksPath`.
