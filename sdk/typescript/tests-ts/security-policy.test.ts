@@ -397,6 +397,35 @@ describe("security policy generation", () => {
     expect(inventory.gitMetadataPaths).toEqual([]);
   });
 
+  test("leaves Git-ignored dependencies out of the policy inventory", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    await writeFile(
+      join(f.repository, ".gitignore"),
+      "node_modules/\n.venv/\n",
+    );
+    await writeFile(join(f.repository, "SECURITY.md"), POLICY);
+    for (const directory of [
+      "node_modules/dependency",
+      "node_modules/tracked",
+      ".venv/src/dependency",
+      "services/api",
+    ]) {
+      await mkdir(join(f.repository, directory), { recursive: true });
+      await writeFile(join(f.repository, directory, "SECURITY.md"), POLICY);
+    }
+    policyGit(join(f.repository, ".venv/src/dependency"), "init", "--quiet");
+    policyGit(f.repository, "add", "--force", "node_modules/tracked");
+    const inventory = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(f.repository),
+    );
+    expect(inventory.policyPaths).toEqual([
+      "SECURITY.md",
+      "node_modules/tracked/SECURITY.md",
+      "services/api/SECURITY.md",
+    ]);
+  });
+
   test("recognizes shared Git storage without HEAD during policy discovery", async () => {
     const f = await fixture();
     const metadata = join(f.repository, "shared-data");
