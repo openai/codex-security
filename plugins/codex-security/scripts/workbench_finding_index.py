@@ -7,10 +7,13 @@ import json
 import sqlite3
 from typing import Any
 
-from finalize_scan_contract import _schema_values_equal
-from workbench.json_numbers import JsonFloat, dumps_json
+from workbench.json_numbers import JsonFloat, dumps_json, json_number_key
 
-_finding_json = json.JSONDecoder(parse_float=JsonFloat)
+# Tag number tokens without imposing Python's integer-string conversion limit.
+_finding_json = json.JSONDecoder(
+    parse_int=lambda value: (json_number_key(JsonFloat(value)),),
+    parse_float=lambda value: (json_number_key(JsonFloat(value)),),
+)
 
 
 def upsert_finding(
@@ -27,9 +30,7 @@ def upsert_finding(
     if (
         current is not None
         and current["details_json"] is not None
-        and _schema_values_equal(
-            _finding_json.decode(current["details_json"]), _finding_json.decode(details)
-        )
+        and _finding_json.decode(current["details_json"]) == _finding_json.decode(details)
     ):
         details = current["details_json"]
     connection.execute(

@@ -317,3 +317,26 @@ def test_completion_preserves_exact_numeric_values_in_finding_indexes(tmp_path: 
                 parse_float=str,
             )
             assert stored == finding
+
+
+@pytest.mark.parametrize("digits", [4300, 4301])
+def test_index_refresh_accepts_large_integer_tokens_from_native_storage(workbench_db, digits):
+    from workbench_finding_index import upsert_finding
+
+    finding = {
+        "findingId": "synthetic-finding",
+        "fingerprints": {"primary": "synthetic-fingerprint"},
+        "ruleId": "synthetic-rule",
+        "identity": {"anchor": "synthetic-anchor"},
+        "extensions": {"value": 1},
+    }
+    timestamp = "2026-01-01T00:00:00Z"
+    upsert_finding(workbench_db, finding, timestamp)
+    # The native writer retains arbitrary-precision JSON integer tokens.
+    stored = json.dumps(finding).replace('"value": 1', '"value": ' + "9" * digits)
+    workbench_db.execute("UPDATE findings SET details_json = ?", (stored,))
+    upsert_finding(workbench_db, finding, timestamp)
+    assert (
+        json.loads(workbench_db.execute("SELECT details_json FROM findings").fetchone()[0])
+        == finding
+    )
