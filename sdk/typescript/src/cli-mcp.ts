@@ -248,9 +248,12 @@ export async function serveCliMcp<
     removeSignals();
     await server.close();
   }
-  return shutdown.signal.reason === "SIGINT"
-    ? 130
-    : shutdown.signal.reason === "SIGTERM"
-      ? 143
-      : 0;
+  const signal = shutdown.signal.reason;
+  if (signal === "SIGINT" || signal === "SIGTERM") {
+    // Cleanup is complete. Restore signal termination so an unread stdout pipe
+    // cannot keep the process alive; ordinary EOF still flushes queued output.
+    dependencies.forceExit(signal);
+    return signal === "SIGINT" ? 130 : 143;
+  }
+  return 0;
 }
