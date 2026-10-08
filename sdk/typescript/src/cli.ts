@@ -1217,7 +1217,7 @@ interface CliDependencies {
   exportFindings(
     arguments_: ExportArguments,
     output?: Writable,
-  ): Promise<Uint8Array | undefined>;
+  ): Promise<string | Uint8Array | undefined>;
   runCodex(
     args: readonly string[],
     output?: SkillCommandOutput,

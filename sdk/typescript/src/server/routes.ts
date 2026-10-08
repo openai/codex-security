@@ -2,6 +2,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ValidateFunction } from "ajv";
 import { parseJsonNumbers } from "../json-numbers.js";
 import { ContractValidationError } from "../errors.js";
+import {
+  FINDINGS_ERROR_STATUS,
+  type FindingsErrorResponse,
+} from "../findings-errors.js";
 import { FindingsError } from "./errors.js";
 import { dashboardQuery, serveDashboard } from "./dashboard.js";
 import type { FindingEmbedder } from "./embeddings.js";
@@ -109,20 +113,17 @@ export async function handleFindingsRequest(
       return;
     }
     request.resume();
-    json(response, 404, { error: "not_found" });
+    json(response, FINDINGS_ERROR_STATUS.not_found, {
+      error: "not_found",
+    } satisfies FindingsErrorResponse);
   } catch (error) {
     if (error instanceof FindingsError) {
-      const status = {
-        invalid_request: 400,
-        finding_conflict: 409,
-        embedding_unavailable: 503,
-        embedding_failed: 502,
-        finding_not_indexed: 404,
-      }[error.code];
-      json(response, status, { error: error.code, message: error.message });
+      json(response, error.status, error.toJSON());
     } else {
       console.error(error);
-      json(response, 500, { error: "internal_error" });
+      json(response, FINDINGS_ERROR_STATUS.internal_error, {
+        error: "internal_error",
+      } satisfies FindingsErrorResponse);
     }
   }
 }
