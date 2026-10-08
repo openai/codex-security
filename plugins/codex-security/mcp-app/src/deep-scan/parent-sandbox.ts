@@ -131,7 +131,6 @@ export function resolveDeepWorkerParentSandbox(
     }
   }
 
-
   if (!hasRootRead) {
     throw unsupportedParentSandbox(
       "the parent restricts readable paths beyond the supported read-only worker sandbox",

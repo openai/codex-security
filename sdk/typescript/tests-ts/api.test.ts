@@ -1956,9 +1956,8 @@ describe("CodexSecurity orchestration", () => {
                     "forced_login_method",
                     "forced_chatgpt_workspace_id",
                   ] as const) {
-                    const expected = (
-                      authentication[key] ?? DEFAULT_CODEX_CONFIG[key]
-                    ) as string | undefined;
+                    const expected = (authentication[key] ??
+                      DEFAULT_CODEX_CONFIG[key]) as string | undefined;
                     expect(workerConfig[key]).toEqual(expected);
                     expect(options.config?.[key]).toEqual(expected);
                   }

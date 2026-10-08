@@ -3218,7 +3218,22 @@ async function testWorkerCancellation() {
 async function testNullUsageCompletion() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[] = [],
+    options: SpawnOptions = {},
+  ) =>
+    originalSpawn(
+      command,
+      command === process.execPath ||
+        command === path.toNamespacedPath(process.execPath)
+        ? [fixture.executablePath, ...args]
+        : args,
+      options,
+    )) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  process.env.CODEX_CLI_PATH = process.execPath;
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     await writeFile(promptPath, "NULL_USAGE\n");
@@ -3238,6 +3253,8 @@ async function testNullUsageCompletion() {
       }
     }
   } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }
 }
