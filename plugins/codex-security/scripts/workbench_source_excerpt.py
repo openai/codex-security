@@ -65,7 +65,7 @@ def finding_source_excerpt(
 def scanned_source_text(scan: sqlite3.Row, target: Path, path: str) -> str | None:
     if safe_source_path(target, path) is None:
         return None
-    if scan["mode"] == "diff" and scan["diff_target_kind"] not in {"commit", "range"}:
+    if scan["diff_target_kind"] is None and scan["mode"] == "diff":
         return None
     revision = scan["target_revision"]
     if revision == "unversioned":
@@ -73,7 +73,12 @@ def scanned_source_text(scan: sqlite3.Row, target: Path, path: str) -> str | Non
     snapshot_digest = scan["target_snapshot_digest"]
     if snapshot_digest is not None and snapshot_digest != clean_worktree_content_digest():
         return None
-    object_name = f"{revision}:{path}"
+    if (
+        scan["diff_target_kind"] == "working_tree"
+        and scan["diff_content_digest"] != clean_worktree_content_digest()
+    ):
+        return None
+    object_name = f"{revision}:./{path}"
     content = git_bytes(target, "cat-file", "blob", object_name)
     return content.decode("utf-8", errors="replace") if content is not None else None
 
@@ -92,9 +97,5 @@ def safe_source_path(target: Path, relative_path: str) -> Path | None:
     return path
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

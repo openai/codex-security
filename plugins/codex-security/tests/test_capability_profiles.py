@@ -10,6 +10,8 @@ import sys
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
+import pytest
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
@@ -23,6 +25,19 @@ SYSTEM_CONFIG_PATH = (
     if os.name == "nt"
     else "/etc/codex/config.toml"
 )
+
+
+AVAILABLE_RUNTIME_CHECKS = (
+    "--runtime-check",
+    "delegation_available=true",
+    "--runtime-check",
+    "goal_tools_available=true",
+)
+
+
+@pytest.fixture
+def config_path(tmp_path: Path) -> Path:
+    return tmp_path / "config.toml"
 
 
 def test_preflight_uses_windows_system_config(monkeypatch) -> None:
@@ -52,7 +67,14 @@ def test_preflight_matches_windows_project_path_aliases(monkeypatch) -> None:
     assert trust_level(layers, root) == "untrusted"
 
 
-def test_preflight_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("script", "run_name"),
+    [
+        (PREFLIGHT_SCRIPT, "config_preflight_test"),
+        (DEEP_SCAN_CONFIG_SCRIPT, "deep_scan_config_test"),
+    ],
+)
+def test_config_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch, script, run_name) -> None:
     real_import = builtins.__import__
     monkeypatch.setitem(sys.modules, "tomli", tomllib)
 
@@ -63,23 +85,7 @@ def test_preflight_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch) -> No
 
     monkeypatch.setattr(builtins, "__import__", import_without_tomllib)
 
-    namespace = runpy.run_path(str(PREFLIGHT_SCRIPT), run_name="config_preflight_test")
-
-    assert namespace["tomllib"] is tomllib
-
-
-def test_deep_scan_config_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch) -> None:
-    real_import = builtins.__import__
-    monkeypatch.setitem(sys.modules, "tomli", tomllib)
-
-    def import_without_tomllib(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "tomllib":
-            raise ModuleNotFoundError("No module named 'tomllib'", name="tomllib")
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", import_without_tomllib)
-
-    namespace = runpy.run_path(str(DEEP_SCAN_CONFIG_SCRIPT), run_name="deep_scan_config_test")
+    namespace = runpy.run_path(str(script), run_name=run_name)
 
     assert namespace["tomllib"] is tomllib
 
@@ -143,6 +149,13 @@ def run_preflight(
     )
 
 
+def run_config_preflight(
+    profile: str, config_path: Path, config: str, *args: str
+) -> subprocess.CompletedProcess[str]:
+    config_path.write_text(config)
+    return run_preflight("--profile", profile, "--config", str(config_path), *args)
+
+
 def available_deep_scan_skills_except(excluded: str | None = None) -> tuple[str, ...]:
     return tuple(
         item
@@ -173,8 +186,7 @@ def standalone_v1() -> tuple[str, ...]:
     )
 
 
-def test_deep_scan_preflight_is_ready_with_required_capabilities(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
+def test_deep_scan_preflight_is_ready_with_required_capabilities(config_path: Path) -> None:
     config_path.write_text(
         "[features]\ngoals = true\n\n"
         "[features.multi_agent_v2]\nenabled = true\n"
@@ -186,10 +198,7 @@ def test_deep_scan_preflight_is_ready_with_required_capabilities(tmp_path: Path)
         "deep-security-scan",
         "--config",
         str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
     )
 
@@ -201,8 +210,7 @@ def test_deep_scan_preflight_is_ready_with_required_capabilities(tmp_path: Path)
     assert payload["unknown"] == []
 
 
-def test_standard_and_deep_preflight_do_not_probe_goal_tools(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
+def test_standard_and_deep_preflight_do_not_probe_goal_tools(config_path: Path) -> None:
     config_path.write_text("[features]\ngoals = false\n")
 
     for profile in ("security_scan", "deep_security_scan"):
@@ -226,15 +234,13 @@ def test_standard_and_deep_preflight_do_not_probe_goal_tools(tmp_path: Path) -> 
         )
 
 
-def test_deep_preflight_compatibility_profile_has_no_runtime_requirements(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[features]\ngoals = false\n")
-
-    result = run_preflight(
-        "--profile",
+def test_deep_preflight_compatibility_profile_has_no_runtime_requirements(
+    config_path: Path,
+) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "[features]\ngoals = false\n",
     )
 
     payload = json.loads(result.stdout)
@@ -245,15 +251,11 @@ def test_deep_preflight_compatibility_profile_has_no_runtime_requirements(tmp_pa
     assert payload["remediation"].get("patches", []) == []
 
 
-def test_deep_preflight_ignores_unrelated_bridge_backend_configuration(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[multiagent_config]\nmax_concurrency = 4\n")
-
-    result = run_preflight(
-        "--profile",
+def test_deep_preflight_ignores_unrelated_bridge_backend_configuration(config_path: Path) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "[multiagent_config]\nmax_concurrency = 4\n",
     )
 
     payload = json.loads(result.stdout)
@@ -262,19 +264,12 @@ def test_deep_preflight_ignores_unrelated_bridge_backend_configuration(tmp_path:
     assert payload["results"] == []
 
 
-def test_deep_scan_preflight_accepts_native_v1_with_legacy_thread_limits(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[agents]\nmax_threads = 8\n")
-
-    result = run_preflight(
-        "--profile",
+def test_deep_scan_preflight_accepts_native_v1_with_legacy_thread_limits(config_path: Path) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        "[agents]\nmax_threads = 8\n",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
     )
 
@@ -288,24 +283,15 @@ def test_deep_scan_preflight_accepts_native_v1_with_legacy_thread_limits(tmp_pat
 
 
 def test_deep_scan_preflight_accepts_model_selected_v2_with_legacy_thread_limits(
-    tmp_path: Path,
+    config_path: Path,
 ) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
+    result = run_config_preflight(
+        "deep_security_scan",
+        config_path,
         "[agents]\nmax_threads = 8\n\n"
         "[features]\ngoals = true\n\n"
-        "[features.multi_agent_v2]\nenabled = false\n"
-    )
-
-    result = run_preflight(
-        "--profile",
-        "deep_security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        "[features.multi_agent_v2]\nenabled = false\n",
+        *AVAILABLE_RUNTIME_CHECKS,
         "--multi-agent-runtime-owner",
         "native",
         "--multi-agent-runtime-version",
@@ -339,21 +325,14 @@ def test_scan_profiles_do_not_require_or_remediate_csv_fanout() -> None:
         )
 
 
-def test_deep_scan_preflight_does_not_require_available_skill_enumeration(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n"
-    )
-
-    result = run_preflight(
-        "--profile",
+def test_deep_scan_preflight_does_not_require_available_skill_enumeration(
+    config_path: Path,
+) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
+        *AVAILABLE_RUNTIME_CHECKS,
     )
 
     payload = json.loads(result.stdout)
@@ -362,21 +341,12 @@ def test_deep_scan_preflight_does_not_require_available_skill_enumeration(tmp_pa
     assert payload["unknown"] == []
 
 
-def test_deep_scan_preflight_does_not_block_on_partial_skill_enumeration(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n"
-    )
-
-    result = run_preflight(
-        "--profile",
+def test_deep_scan_preflight_does_not_block_on_partial_skill_enumeration(config_path: Path) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills_except("validation"),
     )
 
@@ -386,15 +356,11 @@ def test_deep_scan_preflight_does_not_block_on_partial_skill_enumeration(tmp_pat
     assert payload["failed"] == []
 
 
-def test_deep_scan_preflight_rejects_prefixed_plugin_skill_id(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("")
-
-    result = run_preflight(
-        "--profile",
+def test_deep_scan_preflight_rejects_prefixed_plugin_skill_id(config_path: Path) -> None:
+    result = run_config_preflight(
         "security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "",
         "--available-plugin-skill",
         "codex-security:validation",
     )
@@ -422,15 +388,11 @@ def test_preflight_rejects_multi_agent_mode_override() -> None:
     assert "unrecognized arguments: --multi-agent-mode v1" in result.stderr
 
 
-def test_preflight_keeps_unknown_warning_capabilities_advisory(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("")
-
-    result = run_preflight(
-        "--profile",
+def test_preflight_keeps_unknown_warning_capabilities_advisory(config_path: Path) -> None:
+    result = run_config_preflight(
         "security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "",
         *standalone_v1(),
         *available_deep_scan_skills(),
     )
@@ -441,15 +403,11 @@ def test_preflight_keeps_unknown_warning_capabilities_advisory(tmp_path: Path) -
     assert {item["check"] for item in payload["unknown"]} == {"delegation_available"}
 
 
-def test_preflight_keeps_unknown_suggested_capabilities_advisory(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("")
-
-    result = run_preflight(
-        "--profile",
+def test_preflight_keeps_unknown_suggested_capabilities_advisory(config_path: Path) -> None:
+    result = run_config_preflight(
         "security_diff_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "",
         "--runtime-check",
         "delegation_available=true",
         *standalone_v1(),
@@ -461,19 +419,12 @@ def test_preflight_keeps_unknown_suggested_capabilities_advisory(tmp_path: Path)
     assert {item["check"] for item in payload["unknown"]} == {"goal_tools_available"}
 
 
-def test_preflight_uses_enabled_goals_default(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("")
-
-    result = run_preflight(
-        "--profile",
+def test_preflight_uses_enabled_goals_default(config_path: Path) -> None:
+    result = run_config_preflight(
         "security_diff_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        "",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
     )
 
@@ -485,20 +436,14 @@ def test_preflight_uses_enabled_goals_default(tmp_path: Path) -> None:
 
 
 def test_security_scan_keeps_configured_capacity_when_delegation_is_unavailable(
-    tmp_path: Path,
+    config_path: Path,
 ) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
+    result = run_config_preflight(
+        "security_scan",
+        config_path,
         "[features]\ngoals = true\n\n"
         "[features.multi_agent_v2]\nenabled = true\n"
-        "max_concurrent_threads_per_session = 9\n"
-    )
-
-    result = run_preflight(
-        "--profile",
-        "security_scan",
-        "--config",
-        str(config_path),
+        "max_concurrent_threads_per_session = 9\n",
         "--runtime-check",
         "delegation_available=false",
         "--runtime-check",
@@ -521,19 +466,12 @@ def test_security_scan_keeps_configured_capacity_when_delegation_is_unavailable(
     assert worker_slots["actual"] == 8
 
 
-def test_diff_scan_still_suggests_enabling_disabled_goals(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[features]\ngoals = false\n")
-
-    result = run_preflight(
-        "--profile",
+def test_diff_scan_still_suggests_enabling_disabled_goals(config_path: Path) -> None:
+    result = run_config_preflight(
         "security_diff_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        "[features]\ngoals = false\n",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
         *standalone_v1(),
     )
@@ -562,10 +500,7 @@ def test_preflight_applies_config_layers_in_cli_order(tmp_path: Path) -> None:
         str(user_config),
         "--config",
         str(project_config),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
     )
 
@@ -599,10 +534,7 @@ def test_preflight_discovers_trusted_project_layers_from_cwd(tmp_path: Path) -> 
         "security_scan",
         "--cwd",
         str(cwd),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
         env={"CODEX_HOME": str(codex_home)},
     )
@@ -644,10 +576,7 @@ def test_preflight_expands_tilde_codex_home(tmp_path: Path) -> None:
         "security_scan",
         "--cwd",
         str(cwd),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
         env={"HOME": str(home), "CODEX_HOME": "~/.codex"},
     )
@@ -680,10 +609,7 @@ def test_preflight_skips_untrusted_project_layers(tmp_path: Path) -> None:
         "security_scan",
         "--cwd",
         str(project_root),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
         env={"CODEX_HOME": str(codex_home)},
     )
@@ -703,22 +629,13 @@ def test_preflight_skips_untrusted_project_layers(tmp_path: Path) -> None:
 
 
 def test_preflight_loads_legacy_selected_profile_from_manual_config_map(
-    tmp_path: Path,
+    config_path: Path,
 ) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        'profile = "scan"\n\n[features]\ngoals = false\n\n[profiles.scan.features]\ngoals = true\n'
-    )
-
-    result = run_preflight(
-        "--profile",
+    result = run_config_preflight(
         "security_diff_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        'profile = "scan"\n\n[features]\ngoals = false\n\n[profiles.scan.features]\ngoals = true\n',
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
     )
 
@@ -732,24 +649,15 @@ def test_preflight_loads_legacy_selected_profile_from_manual_config_map(
     assert goals["source"] == f"{config_path} [profiles.scan]"
 
 
-def test_embedded_profile_ignores_unsupported_agents_settings(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
+def test_embedded_profile_ignores_unsupported_agents_settings(config_path: Path) -> None:
+    result = run_config_preflight(
+        "security_scan",
+        config_path,
         'profile = "scan"\n\n'
         "[agents]\nmax_threads = 4\nmax_depth = 1\n\n"
         "[features]\ngoals = true\n\n"
-        "[profiles.scan.agents]\nmax_threads = 8\nmax_depth = 2\n"
-    )
-
-    result = run_preflight(
-        "--profile",
-        "security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        "[profiles.scan.agents]\nmax_threads = 8\nmax_depth = 2\n",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
     )
 
@@ -775,10 +683,7 @@ def test_higher_layer_overrides_lower_embedded_profile(tmp_path: Path) -> None:
         str(user_config),
         "--config",
         str(project_config),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
     )
 
@@ -810,10 +715,7 @@ def test_preflight_loads_current_cli_profile_layer(tmp_path: Path) -> None:
         str(project_root),
         "--codex-config-profile",
         "scan",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
         env={"CODEX_HOME": str(codex_home)},
     )
@@ -856,10 +758,7 @@ def test_trusted_project_config_overrides_current_cli_profile_layer(tmp_path: Pa
         str(project_root),
         "--codex-config-profile",
         "scan",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
         env={"CODEX_HOME": str(codex_home)},
     )
@@ -890,10 +789,7 @@ def test_missing_current_cli_profile_file_is_an_empty_layer(tmp_path: Path) -> N
         str(project_root),
         "--codex-config-profile",
         "missing",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
         env={"CODEX_HOME": str(codex_home)},
     )
@@ -917,10 +813,7 @@ def test_current_cli_profile_name_uses_cli_v2_grammar(tmp_path: Path) -> None:
         "--cwd",
         str(project_root),
         "--codex-config-profile=_scan-1",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
         env={"CODEX_HOME": str(codex_home)},
     )
@@ -940,21 +833,12 @@ def test_current_cli_profile_name_uses_cli_v2_grammar(tmp_path: Path) -> None:
     assert "invalid config profile name 'scan.fast'" in json.loads(rejected.stdout)["error"]
 
 
-def test_preflight_auto_selects_quoted_profile_name(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        'profile = "scan.fast"\n\n[profiles."scan.fast".features]\ngoals = true\n'
-    )
-
-    result = run_preflight(
-        "--profile",
+def test_preflight_auto_selects_quoted_profile_name(config_path: Path) -> None:
+    result = run_config_preflight(
         "security_diff_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        'profile = "scan.fast"\n\n[profiles."scan.fast".features]\ngoals = true\n',
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
     )
 
@@ -965,22 +849,61 @@ def test_preflight_auto_selects_quoted_profile_name(tmp_path: Path) -> None:
     assert goals["actual"] is True
 
 
-def test_preflight_rejects_missing_legacy_selected_profile(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text('profile = "missing"\n')
-
-    result = run_preflight(
-        "--profile",
-        "security_scan",
-        "--config",
-        str(config_path),
-    )
-
+@pytest.mark.parametrize(
+    ("profile", "config", "args", "error"),
+    [
+        pytest.param(
+            "security_scan",
+            'profile = "missing"\n',
+            (),
+            "config profile 'missing' not found",
+            id="preflight_rejects_missing_legacy_selected_profile",
+        ),
+        pytest.param(
+            "deep_security_scan",
+            "[agents]\nmax_threads = 9\n\n"
+            "[features.multi_agent_v2]\nenabled = true\n"
+            "max_concurrent_threads_per_session = 9\n",
+            (),
+            "agents.max_threads cannot be set when multi_agent_v2 is enabled",
+            id="preflight_rejects_native_v2_agents_max_threads_conflict",
+        ),
+        pytest.param(
+            "security_scan",
+            "",
+            (
+                "--multi-agent-runtime-owner",
+                "native",
+                "--multi-agent-runtime-version",
+                "v2",
+                "--multi-agent-session-cap",
+                "4",
+            ),
+            "explicit multi-agent runtime facts require --multi-agent-runtime-provenance",
+            id="preflight_requires_provenance_for_runtime_facts",
+        ),
+        pytest.param(
+            "security_scan",
+            "",
+            (
+                "--multi-agent-runtime-owner",
+                "codex-bridge",
+                "--multi-agent-runtime-version",
+                "v2",
+                "--multi-agent-runtime-provenance",
+                "thread-context",
+            ),
+            "codex-bridge ownership requires --multi-agent-runtime-provenance verified-bridge",
+            id="preflight_requires_verified_bridge_provenance",
+        ),
+    ],
+)
+def test_preflight_rejects_invalid_configuration(
+    config_path: Path, profile: str, config: str, args: tuple[str, ...], error: str
+) -> None:
+    result = run_config_preflight(profile, config_path, config, *args)
     assert result.returncode == 2
-    assert json.loads(result.stdout) == {
-        "error": "config profile 'missing' not found",
-        "status": "error",
-    }
+    assert json.loads(result.stdout) == {"error": error, "status": "error"}
 
 
 def test_cli_profile_overrides_config_selected_profile(tmp_path: Path) -> None:
@@ -1002,10 +925,7 @@ def test_cli_profile_overrides_config_selected_profile(tmp_path: Path) -> None:
         str(profile_config),
         "--codex-config-profile",
         "scan",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
     )
 
@@ -1037,10 +957,7 @@ def test_project_profile_selection_and_definitions_are_ignored(tmp_path: Path) -
         "security_diff_scan",
         "--cwd",
         str(project_root),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *standalone_v1(),
         env={"CODEX_HOME": str(codex_home)},
     )
@@ -1052,26 +969,17 @@ def test_project_profile_selection_and_definitions_are_ignored(tmp_path: Path) -
     assert goals["actual"] is True
 
 
-def test_profile_native_v2_cap_overrides_base_config(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
+def test_profile_native_v2_cap_overrides_base_config(config_path: Path) -> None:
+    result = run_config_preflight(
+        "security_scan",
+        config_path,
         'profile = "scan"\n\n'
         "[features]\ngoals = false\n\n"
         "[features.multi_agent_v2]\nenabled = false\n\n"
         "[profiles.scan.features]\ngoals = true\n\n"
         "[profiles.scan.features.multi_agent_v2]\nenabled = true\n"
-        "max_concurrent_threads_per_session = 9\n"
-    )
-
-    result = run_preflight(
-        "--profile",
-        "security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        "max_concurrent_threads_per_session = 9\n",
+        *AVAILABLE_RUNTIME_CHECKS,
     )
 
     payload = json.loads(result.stdout)
@@ -1085,25 +993,16 @@ def test_profile_native_v2_cap_overrides_base_config(tmp_path: Path) -> None:
     assert worker_slots["source"] == f"{config_path} [profiles.scan]"
 
 
-def test_partial_embedded_profile_v2_table_inherits_base_enabled(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
+def test_partial_embedded_profile_v2_table_inherits_base_enabled(config_path: Path) -> None:
+    result = run_config_preflight(
+        "security_scan",
+        config_path,
         'profile = "scan"\n\n'
         "[features]\ngoals = true\n\n"
         "[features.multi_agent_v2]\nenabled = true\n\n"
         "[profiles.scan.features.multi_agent_v2]\n"
-        "max_concurrent_threads_per_session = 9\n"
-    )
-
-    result = run_preflight(
-        "--profile",
-        "security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        "max_concurrent_threads_per_session = 9\n",
+        *AVAILABLE_RUNTIME_CHECKS,
     )
 
     payload = json.loads(result.stdout)
@@ -1131,10 +1030,7 @@ def test_higher_partial_v2_table_inherits_lower_enabled(tmp_path: Path) -> None:
         str(user_config),
         "--config",
         str(project_config),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
     )
 
     payload = json.loads(result.stdout)
@@ -1147,11 +1043,11 @@ def test_higher_partial_v2_table_inherits_lower_enabled(tmp_path: Path) -> None:
     assert worker_slots["source"] == str(project_config)
 
 
-def test_higher_partial_v2_table_replaces_lower_boolean(tmp_path: Path) -> None:
+def test_higher_partial_v2_table_inherits_lower_boolean(tmp_path: Path) -> None:
     user_config = tmp_path / "user.toml"
     project_config = tmp_path / "project.toml"
     user_config.write_text("[features]\ngoals = true\nmulti_agent_v2 = true\n")
-    project_config.write_text("[features.multi_agent_v2]\nmax_concurrent_threads_per_session = 9\n")
+    project_config.write_text("[features.multi_agent_v2]\nmax_concurrent_threads_per_session = 3\n")
 
     result = run_preflight(
         "--profile",
@@ -1160,33 +1056,29 @@ def test_higher_partial_v2_table_replaces_lower_boolean(tmp_path: Path) -> None:
         str(user_config),
         "--config",
         str(project_config),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
     )
 
     payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["multi_agent_mode"] == "v1"
-    assert payload["multi_agent_context"]["version_source"] == "documented-default"
-
-
-def test_deep_scan_preflight_accepts_native_v2_without_parent_slots(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n"
+    worker_slots = next(
+        item for item in payload["results"] if item["capability"] == "usable_worker_slots_6"
     )
+    assert result.returncode == 0
+    assert payload["multi_agent_mode"] == "v2"
+    assert payload["multi_agent_context"]["version_source"] == str(user_config)
+    assert worker_slots["configured_value"] == 3
+    assert worker_slots["actual"] == 2
+    assert worker_slots["source"] == str(project_config)
+    assert worker_slots["status"] == "fail"
+    assert worker_slots["severity"] == "warn"
 
-    result = run_preflight(
-        "--profile",
+
+def test_deep_scan_preflight_accepts_native_v2_without_parent_slots(config_path: Path) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
     )
 
@@ -1205,25 +1097,18 @@ def test_deep_scan_preflight_accepts_native_v2_without_parent_slots(tmp_path: Pa
     )
 
 
-def test_model_selected_native_v2_does_not_require_observed_parent_cap(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n")
-
-    result = run_preflight(
-        "--profile",
+def test_model_selected_native_v2_does_not_require_observed_parent_cap(config_path: Path) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
         "--multi-agent-runtime-owner",
         "native",
         "--multi-agent-runtime-version",
         "v2",
         "--multi-agent-runtime-provenance",
         "app-server",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
     )
 
@@ -1235,25 +1120,20 @@ def test_model_selected_native_v2_does_not_require_observed_parent_cap(tmp_path:
     assert payload["unknown"] == []
 
 
-def test_deep_scan_preflight_does_not_require_verified_parent_runtime_owner(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[features]\ngoals = true\n")
-
-    result = run_preflight(
-        "--profile",
+def test_deep_scan_preflight_does_not_require_verified_parent_runtime_owner(
+    config_path: Path,
+) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "[features]\ngoals = true\n",
         "--multi-agent-runtime-version",
         "v2",
         "--multi-agent-session-cap",
         "9",
         "--multi-agent-runtime-provenance",
         "tool-surface",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
     )
 
@@ -1269,41 +1149,12 @@ def test_deep_scan_preflight_does_not_require_verified_parent_runtime_owner(tmp_
     )
 
 
-def test_preflight_rejects_native_v2_agents_max_threads_conflict(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "[agents]\nmax_threads = 9\n\n"
-        "[features.multi_agent_v2]\nenabled = true\n"
-        "max_concurrent_threads_per_session = 9\n"
-    )
-
-    result = run_preflight(
-        "--profile",
-        "deep_security_scan",
-        "--config",
-        str(config_path),
-    )
-
-    assert result.returncode == 2
-    assert json.loads(result.stdout) == {
-        "error": "agents.max_threads cannot be set when multi_agent_v2 is enabled",
-        "status": "error",
-    }
-
-
-def test_preflight_supports_boolean_native_v2_feature(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[features]\ngoals = true\nmulti_agent_v2 = true\n")
-
-    result = run_preflight(
-        "--profile",
+def test_preflight_supports_boolean_native_v2_feature(config_path: Path) -> None:
+    result = run_config_preflight(
         "security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        "[features]\ngoals = true\nmulti_agent_v2 = true\n",
+        *AVAILABLE_RUNTIME_CHECKS,
     )
 
     payload = json.loads(result.stdout)
@@ -1331,10 +1182,7 @@ def test_higher_precedence_boolean_feature_overrides_lower_table(tmp_path: Path)
         str(lower_config),
         "--config",
         str(higher_config),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
     )
 
     payload = json.loads(result.stdout)
@@ -1343,15 +1191,42 @@ def test_higher_precedence_boolean_feature_overrides_lower_table(tmp_path: Path)
     assert payload["multi_agent_context"]["owner"] == "native"
 
 
-def test_security_scan_warns_for_insufficient_bridge_worker_slots(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[features]\ngoals = true\n")
+def test_higher_boolean_v2_feature_preserves_lower_table_capacity(tmp_path: Path) -> None:
+    lower_config = tmp_path / "lower.toml"
+    higher_config = tmp_path / "higher.toml"
+    lower_config.write_text(
+        "[features.multi_agent_v2]\nenabled = false\nmax_concurrent_threads_per_session = 9\n"
+    )
+    higher_config.write_text("[features]\nmulti_agent_v2 = true\n")
 
     result = run_preflight(
         "--profile",
         "security_scan",
         "--config",
-        str(config_path),
+        str(lower_config),
+        "--config",
+        str(higher_config),
+        *AVAILABLE_RUNTIME_CHECKS,
+    )
+
+    payload = json.loads(result.stdout)
+    worker_slots = next(
+        item for item in payload["results"] if item["capability"] == "usable_worker_slots_6"
+    )
+    assert result.returncode == 0
+    assert payload["multi_agent_mode"] == "v2"
+    assert payload["multi_agent_context"]["version_source"] == str(higher_config)
+    assert worker_slots["configured_value"] == 9
+    assert worker_slots["actual"] == 8
+    assert worker_slots["source"] == str(lower_config)
+    assert worker_slots["status"] == "pass"
+
+
+def test_security_scan_warns_for_insufficient_bridge_worker_slots(config_path: Path) -> None:
+    result = run_config_preflight(
+        "security_scan",
+        config_path,
+        "[features]\ngoals = true\n",
         "--effective-config",
         "multiagent_config.max_concurrency=4",
         "--multi-agent-runtime-owner",
@@ -1360,10 +1235,7 @@ def test_security_scan_warns_for_insufficient_bridge_worker_slots(tmp_path: Path
         "v2",
         "--multi-agent-runtime-provenance",
         "verified-bridge",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
     )
 
     payload = json.loads(result.stdout)
@@ -1379,15 +1251,11 @@ def test_security_scan_warns_for_insufficient_bridge_worker_slots(tmp_path: Path
     assert worker_slots["multi_agent_mode"] == "bridge-v2"
 
 
-def test_preflight_rejects_unverified_bridge_backend_fact(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[features]\ngoals = true\n")
-
-    result = run_preflight(
-        "--profile",
+def test_preflight_rejects_unverified_bridge_backend_fact(config_path: Path) -> None:
+    result = run_config_preflight(
         "security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "[features]\ngoals = true\n",
         "--effective-config",
         "multiagent_config.max_concurrency=4",
     )
@@ -1398,67 +1266,11 @@ def test_preflight_rejects_unverified_bridge_backend_fact(tmp_path: Path) -> Non
     assert "does not prove bridge ownership" in payload["error"]
 
 
-def test_preflight_requires_provenance_for_runtime_facts(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("")
-
-    result = run_preflight(
-        "--profile",
-        "security_scan",
-        "--config",
-        str(config_path),
-        "--multi-agent-runtime-owner",
-        "native",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-session-cap",
-        "4",
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 2
-    assert payload == {
-        "error": "explicit multi-agent runtime facts require --multi-agent-runtime-provenance",
-        "status": "error",
-    }
-
-
-def test_preflight_requires_verified_bridge_provenance(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("")
-
-    result = run_preflight(
-        "--profile",
-        "security_scan",
-        "--config",
-        str(config_path),
-        "--multi-agent-runtime-owner",
-        "codex-bridge",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-runtime-provenance",
-        "thread-context",
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 2
-    assert payload == {
-        "error": (
-            "codex-bridge ownership requires --multi-agent-runtime-provenance verified-bridge"
-        ),
-        "status": "error",
-    }
-
-
-def test_deep_scan_preflight_accepts_verified_bridge_owned_runtime(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n")
-
-    result = run_preflight(
-        "--profile",
+def test_deep_scan_preflight_accepts_verified_bridge_owned_runtime(config_path: Path) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
         "--effective-config",
         "multiagent_config.max_concurrency=4",
         "--multi-agent-runtime-owner",
@@ -1467,10 +1279,7 @@ def test_deep_scan_preflight_accepts_verified_bridge_owned_runtime(tmp_path: Pat
         "v2",
         "--multi-agent-runtime-provenance",
         "verified-bridge",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
     )
 
@@ -1482,23 +1291,14 @@ def test_deep_scan_preflight_accepts_verified_bridge_owned_runtime(tmp_path: Pat
     assert payload["failed"] == []
 
 
-def test_deep_scan_preflight_accepts_native_v2_from_static_config(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
+def test_deep_scan_preflight_accepts_native_v2_from_static_config(config_path: Path) -> None:
+    result = run_config_preflight(
+        "deep_security_scan",
+        config_path,
         "[features]\ngoals = true\n\n"
         "[features.multi_agent_v2]\nenabled = true\n"
-        "max_concurrent_threads_per_session = 9\n"
-    )
-
-    result = run_preflight(
-        "--profile",
-        "deep_security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        "max_concurrent_threads_per_session = 9\n",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
     )
 
@@ -1511,15 +1311,11 @@ def test_deep_scan_preflight_accepts_native_v2_from_static_config(tmp_path: Path
     assert payload["remediation"].get("patches", []) == []
 
 
-def test_deep_scan_bridge_mode_omits_inapplicable_native_remediation(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n")
-
-    result = run_preflight(
-        "--profile",
+def test_deep_scan_bridge_mode_omits_inapplicable_native_remediation(config_path: Path) -> None:
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
+        config_path,
+        "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
         "--effective-config",
         "multiagent_config.max_concurrency=9",
         "--multi-agent-runtime-owner",
@@ -1528,10 +1324,7 @@ def test_deep_scan_bridge_mode_omits_inapplicable_native_remediation(tmp_path: P
         "v2",
         "--multi-agent-runtime-provenance",
         "verified-bridge",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
     )
 
@@ -1544,20 +1337,13 @@ def test_deep_scan_bridge_mode_omits_inapplicable_native_remediation(tmp_path: P
 
 
 def test_deep_scan_preflight_omits_concurrency_patch_when_mode_is_unknown(
-    tmp_path: Path,
+    config_path: Path,
 ) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n")
-
-    result = run_preflight(
-        "--profile",
+    result = run_config_preflight(
         "deep_security_scan",
-        "--config",
-        str(config_path),
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
+        config_path,
+        "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
+        *AVAILABLE_RUNTIME_CHECKS,
         *available_deep_scan_skills(),
     )
 

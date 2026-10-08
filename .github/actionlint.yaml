@@ -1,0 +1,11 @@
+paths:
+  .github/workflows/{node-github-release,node-release-cut,node-release}.yml:
+    ignore:
+      # actionlint 1.7.12 predates GitHub's queue: max support. Keep release queuing.
+      # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+      - '^unexpected key "queue" for "concurrency" section\.'
+  .github/workflows/invoice-desk-scan.yml:
+    ignore:
+      # actionlint 1.7.12 predates GitHub's job-level cache permissions.
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idcache-mode
+      - '^unexpected key "cache-mode" for "job" section\.'

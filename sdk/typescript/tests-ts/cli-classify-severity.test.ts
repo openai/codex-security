@@ -1,7 +1,10 @@
+import { rejecting } from "./support/errors.js";
 import { resolve } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
+
+import { captureCli, runCapturedCli } from "./support/cli-run.js";
 
 const result = {
   schemaVersion: 1 as const,
@@ -12,11 +15,14 @@ const result = {
   assessments: [],
 };
 
-test.each(["latest", "scan_prefix"])(
-  "classify-severity accepts saved scan selector %s",
-  async (selector) => {
+test.each([
+  ["latest", "--finding-id"],
+  ["scan_prefix", "--findingId"],
+])(
+  "classify-severity accepts saved scan selector %s with %s",
+  async (selector, findingFlag) => {
     const deps = dependencies();
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     deps.classifyScanSeverity = async (scanId, options, history, surface) => {
       expect(scanId).toBe(selector);
       expect(options!.rubricPath).toBe(
@@ -34,7 +40,7 @@ test.each(["latest", "scan_prefix"])(
       return result;
     };
     expect(
-      await main(
+      await stdout.run(
         [
           "classify-severity",
           "--scan",
@@ -43,9 +49,9 @@ test.each(["latest", "scan_prefix"])(
           "policy.md",
           "--knowledge-base",
           "context.md",
-          "--finding-id",
+          findingFlag,
           "finding-one",
-          "--finding-id",
+          findingFlag,
           "finding-two",
           "--model",
           "synthetic-model",
@@ -54,8 +60,6 @@ test.each(["latest", "scan_prefix"])(
           "--reprocess",
           "--json",
         ],
-        stdout.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(0);
@@ -76,10 +80,9 @@ test("classify-severity accepts external scan directories and defaults to existi
     return result;
   };
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       ["classify-severity", "--scan-dir", "saved scan", "--json"],
-      capture().stream,
-      capture().stream,
       deps,
     ),
   ).toBe(0);
@@ -88,32 +91,19 @@ test("classify-severity accepts external scan directories and defaults to existi
 
 test("classify-severity rejects missing or conflicting selectors and surfaces SDK errors", async () => {
   const deps = dependencies();
-  let calls = 0;
-  deps.classifyScanSeverity = async () => {
-    calls++;
-    throw new Error("The scan is incomplete");
-  };
+  const classifyScanSeverity = mock(rejecting("The scan is incomplete"));
+  deps.classifyScanSeverity = classifyScanSeverity;
   for (const args of [[], ["--scan", "latest", "--scan-dir", "saved"]]) {
     expect(
-      await main(
-        ["classify-severity", ...args],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
+      await runCapturedCli(main, ["classify-severity", ...args], deps),
     ).toBe(2);
   }
-  expect(calls).toBe(0);
-  const stderr = capture();
+  expect(classifyScanSeverity).toHaveBeenCalledTimes(0);
+  const stderr = captureCli(main, "stderr");
   expect(
-    await main(
-      ["classify-severity", "--scan", "latest"],
-      capture().stream,
-      stderr.stream,
-      deps,
-    ),
+    await stderr.run(["classify-severity", "--scan", "latest"], deps),
   ).toBe(2);
-  expect(stderr.text()).toContain("The scan is incomplete");
+  expect(stderr.text()).toBe("codex-security: The scan is incomplete\n");
 });
 
 test.each([
@@ -133,10 +123,9 @@ test.each([
       return result;
     };
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["classify-severity", "--scan", "latest"],
-        capture().stream,
-        capture().stream,
         deps,
       ),
     ).toBe(expectedCode);
@@ -161,7 +150,8 @@ test("publication forwards selected finding IDs only to Linear", async () => {
     };
   };
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       [
         "publish",
         "scan",
@@ -178,13 +168,12 @@ test("publication forwards selected finding IDs only to Linear", async () => {
         "--dry-run",
         "--json",
       ],
-      capture().stream,
-      capture().stream,
       deps,
     ),
   ).toBe(0);
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       [
         "publish",
         "scan",
@@ -197,8 +186,6 @@ test("publication forwards selected finding IDs only to Linear", async () => {
         "--finding-id",
         "finding-one",
       ],
-      capture().stream,
-      capture().stream,
       deps,
     ),
   ).toBe(2);

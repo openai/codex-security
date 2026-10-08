@@ -1,3 +1,8 @@
+export { exportArtifact } from "./artifact-export.js";
+export type {
+  ExportArtifactOptions,
+  ArtifactExportResult,
+} from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {
@@ -46,7 +51,7 @@ export type {
   ComponentPlanningOptions,
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost, ScanSessionEvent } from "./cost.js";
+export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
 export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
@@ -137,6 +142,7 @@ export type {
 } from "./deduplication/records.js";
 export type {
   DeduplicationReviewRequest,
+  DeduplicationReviewAttribution,
   DeduplicationReviewRunner,
 } from "./deduplication/review.js";
 export {
@@ -149,6 +155,12 @@ export type {
   DeduplicateScanResult,
 } from "./deduplication/scan.js";
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
+export type { FindingEmbeddingBinding } from "./deduplication/local.js";
+export type {
+  DeduplicationDiagnostic,
+  DeduplicationDiagnosticObserver,
+} from "./deduplication/diagnostics.js";
+export type { FindingEmbedder } from "./server/embeddings.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,

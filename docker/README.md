@@ -88,8 +88,10 @@ After merging to `main`, push `container-v<version>` matching the SDK package
 version or run `container-release` manually on `main`. Releases require a commit
 on protected `main`; pull requests only build and test.
 
-If a release fails, fix the cause and rerun only failed jobs; do not overwrite
-an existing stable version. `bootstrap` and
+If a release fails, fix the cause and rerun only failed jobs. Promotion retries
+require the existing stable version to reference the verified digest. If a newer
+stable version exists, promotion leaves `latest` untouched; otherwise a retry
+also requires `latest` to reference that digest. `bootstrap` and
 `release-candidate-<commit>` tags are not consumer releases.
 
 See the [findings service guide](../sdk/typescript/README.md#findings-service-preview)
@@ -131,7 +133,12 @@ docker compose -f compose.runner.yaml pull
 docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
 ```
 
-For unattended use, provide `OPENAI_API_KEY` or `CODEX_API_KEY` instead of login.
+The `login --device-auth` command above signs the runner in with ChatGPT and
+requires device auth to be enabled in your workspace. If device auth is
+disabled, skip that command and export `OPENAI_API_KEY` or `CODEX_API_KEY` in
+your host shell. Compose passes the key to the runner. Use API keys for
+unattended runs too.
+
 Git authentication uses the existing `GH_TOKEN`/`GITHUB_TOKEN` and optional
 `CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs;
 the findings service's embedding credentials are configured separately.

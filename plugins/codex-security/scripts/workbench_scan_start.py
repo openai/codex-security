@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,20 +18,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
+from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, user_text
+from workbench_validation import optional_text
 
 
 def safe_segment(value: str) -> str:
-    segment = "".join(
-        character if character.isalnum() or character in "._-" else "-" for character in value
-    )
-    return segment.strip("-") or "scan"
+    return re.sub(r"[^\w.-]", "-", value).strip("-") or "scan"
 
 
 def compact_timestamp() -> str:
@@ -86,13 +86,16 @@ def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
     return target
 
 
+@contextmanager
 def archive_scan(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
     scan_dir: Path,
     timestamp: str,
     canonical_directory: Callable[[Path], Path],
-) -> None:
+    *,
+    before_archive: Callable[[], None] | None = None,
+) -> Iterator[Path | None]:
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
         if args.archived_scan_dir is not None
@@ -108,44 +111,89 @@ def archive_scan(
     previous_scan = connection.execute(
         "SELECT id, status FROM scans WHERE scan_dir = ?", (str(scan_dir),)
     ).fetchone()
-    if previous_scan is None:
-        return
-    if not args.archive_existing:
-        raise SystemExit(
-            "The scan artifact directory belongs to an existing scan. "
-            "Use --archive-existing to preserve that scan and start a new one."
-        )
-    if previous_scan["status"] == "running":
-        raise SystemExit("Cannot archive the output of a running scan.")
-    artifacts = connection.execute(
-        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?",
-        (previous_scan["id"],),
-    ).fetchall()
-    if archived_scan_dir is None:
-        if artifacts:
+    if previous_scan is not None:
+        if not args.archive_existing:
             raise SystemExit(
-                "The archived scan directory is required to preserve existing scan artifacts."
+                "The scan artifact directory belongs to an existing scan. "
+                "Use --archive-existing to preserve that scan and start a new one."
             )
-        archived_scan_dir = Path(
-            tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
-        ).resolve()
-    connection.execute(
-        "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-        (str(archived_scan_dir), timestamp, previous_scan["id"]),
-    )
-    for artifact in artifacts:
-        try:
-            relative_path = Path(artifact["path"]).relative_to(scan_dir)
-        except ValueError:
-            continue
+        if previous_scan["status"] == "running":
+            raise SystemExit("Cannot archive the output of a running scan.")
+    has_contents = next(scan_dir.iterdir(), None) is not None
+    if previous_scan is None and not (args.archive_existing and has_contents):
+        yield archived_scan_dir
+        return
+    artifacts = (
         connection.execute(
-            "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
-            (
-                str(archived_scan_dir / relative_path),
-                previous_scan["id"],
-                artifact["kind"],
-            ),
-        )
+            "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (previous_scan["id"],)
+        ).fetchall()
+        if previous_scan is not None
+        else []
+    )
+    moved = False
+    try:
+        if archived_scan_dir is None:
+            protected_directories = [
+                state_dir(),
+                *(
+                    Path(row[2]).resolve().parent
+                    for row in connection.execute("PRAGMA database_list")
+                    if row[2]
+                ),
+            ]
+            if any(path == scan_dir or scan_dir in path.parents for path in protected_directories):
+                raise SystemExit(
+                    "Cannot archive output containing the workbench state or active database."
+                )
+            if artifacts and not has_contents:
+                raise SystemExit(
+                    "The archived scan directory is required to preserve existing scan artifacts."
+                )
+            if before_archive is not None:
+                before_archive()
+            archived_scan_dir = Path(
+                tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
+            ).resolve()
+            archived_scan_dir.rmdir()
+            scan_dir.rename(archived_scan_dir)
+            moved = True
+            scan_dir.mkdir(mode=0o700)
+            scan_dir.chmod(0o700)
+        if previous_scan is not None:
+            connection.execute(
+                "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
+                (str(archived_scan_dir), timestamp, previous_scan["id"]),
+            )
+            for artifact in artifacts:
+                try:
+                    relative_path = Path(artifact["path"]).relative_to(scan_dir)
+                except ValueError:
+                    continue
+                connection.execute(
+                    "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
+                    (str(archived_scan_dir / relative_path), previous_scan["id"], artifact["kind"]),
+                )
+        # The caller commits registration before leaving this context. Older SDKs
+        # supplied an already-moved directory; only restore moves we own.
+        yield archived_scan_dir
+    except BaseException:
+        if moved:
+            if not connection.in_transaction:
+                current_owner = connection.execute(
+                    "SELECT id FROM scans WHERE scan_dir = ?", (str(scan_dir),)
+                ).fetchone()
+                if current_owner is not None and (
+                    previous_scan is None or current_owner["id"] != previous_scan["id"]
+                ):
+                    # A post-commit interrupt must not undo the saved archive location.
+                    raise
+            try:
+                scan_dir.rmdir()
+            except FileNotFoundError:
+                # Registration may fail before recreating the empty output directory.
+                pass
+            archived_scan_dir.rename(scan_dir)
+        raise
 
 
 def insert_running_scan(
@@ -168,7 +216,7 @@ def insert_running_scan(
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
-    user_context = user_text(workspace["user_context"])
+    user_context = optional_text(workspace["user_context"])
     if scan_dir is None:
         scan_dir = Path(
             tempfile.mkdtemp(
@@ -197,10 +245,7 @@ def insert_running_scan(
             workspace["default_mode"],
             user_context,
             workspace["thread_id"] if workspace["default_mode"] == "deep" else None,
-            diff_target["kind"] if diff_target else None,
-            diff_target["baseRevision"] if diff_target else None,
-            diff_target["headRevision"] if diff_target else None,
-            diff_target.get("contentDigest") if diff_target else None,
+            *scan_diff_identity(diff_target or None),
             target_summary,
             str(scan_dir),
             optional_text(model, maximum=200),
@@ -236,9 +281,5 @@ def insert_running_scan(
     return scan_id
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

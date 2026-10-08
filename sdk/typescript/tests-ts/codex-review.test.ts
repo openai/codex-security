@@ -1,19 +1,17 @@
+import { parseJsonLines } from "./support/json.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
-import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import {
+  CodexReviewRunner,
+  type CodexReview,
+} from "../src/deduplication/codex-review.js";
+import { DEFAULT_CODEX_CONFIG, type JsonObject } from "../src/config.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { checkpointWorkbench } from "./support/workbench-fakes.js";
@@ -22,9 +20,200 @@ import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
 import { isReviewRefusal } from "../src/deduplication/refusal.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
+import { readCodexHomeConfig } from "../src/auth.js";
+import {
+  CodexDeduplicationReviewer,
+  CodexGroupingReviewer,
+} from "../src/deduplication/deduplication-reviewer.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
+);
+
+test("container review fixture accepts screening and pairs with repository context", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "container review fixture accepts screening and pairs with repository context",
+    )
+  )
+    return;
+  await using f = await workflowFixture();
+  process.env["CODEX_SECURITY_STATE_DIR"] = f.root;
+  await import(
+    new URL("../../../docker/fixtures/mock-reviews.mjs", import.meta.url).href
+  );
+  const modelHome = process.env["CODEX_HOME"]!;
+  try {
+    const config = parse(
+      await readFile(join(modelHome, "config.toml"), "utf8"),
+    ) as {
+      model_providers: { smoke: { base_url: string } };
+    };
+    const runner = {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        const response = await fetch(
+          `${config.model_providers.smoke.base_url}/responses`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: review.model,
+              reasoning: { effort: review.effort },
+              input: [
+                { content: [{ type: "input_text", text: review.prompt }] },
+                {
+                  type: "additional_tools",
+                  tools: [
+                    {
+                      type: "namespace",
+                      name: "review_validator",
+                      tools: [
+                        {
+                          type: "function",
+                          name: "submit_decisions",
+                          parameters: review.schema,
+                        },
+                      ],
+                    },
+                    {
+                      type: "namespace",
+                      name: "functions",
+                      tools: [
+                        { name: "exec", description: "### `exec_command`" },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            }),
+          },
+        );
+        expect(response.status).toBe(200);
+        const completed = (await response.text())
+          .split("\n")
+          .filter((line) => line.startsWith("data: "))
+          .map((line) => JSON.parse(line.slice(6)))
+          .find((event) => event.type === "response.completed");
+        return review.validate(
+          JSON.parse(completed.response.output[0].arguments),
+        );
+      },
+    };
+    const findings = [1, 2, 3].map((index) => ({
+      ...f.document.findings[0]!,
+      findingId: `csf_${String(index).repeat(24)}`,
+    }));
+    for (const context of ["Synthetic repository context.\n\n", ""]) {
+      for (const Reviewer of [
+        CodexGroupingReviewer,
+        CodexDeduplicationReviewer,
+      ]) {
+        const reviewer = new Reviewer(runner, {}, () => context);
+        expect(
+          Object.keys((await reviewer.screen(findings)).decisions),
+        ).toEqual(["pair-1", "pair-2"]);
+        expect((await reviewer.reviewPair(findings.slice(0, 2))).decision).toBe(
+          "SAME",
+        );
+      }
+    }
+  } finally {
+    await rm(modelHome, { recursive: true, force: true });
+  }
+});
+
+test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
+  "dedupe respects %s configuration and keeps review policy attached to stage",
+  async (selection) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME);
+    const config = {
+      mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+      ...(selection === "defaults"
+        ? {}
+        : {
+            model:
+              selection === "luna-model"
+                ? "gpt-5.6-luna"
+                : "synthetic-review-model",
+            model_reasoning_effort: "medium",
+          }),
+      ...(selection === "legacy-profile"
+        ? {
+            profile: "review",
+            profiles: {
+              review: { model: "gpt-5.6-luna", model_reasoning_effort: "low" },
+            },
+          }
+        : {}),
+    };
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify(config),
+    );
+    const environment = {
+      ...f.environment,
+      OPENAI_API_KEY: "synthetic-review-key",
+    };
+    const findings = [f.document.findings[0]!, f.document.findings[0]!];
+    for (const stage of ["screening", "pair-review"] as const) {
+      const transcript = join(f.root, `${stage}.jsonl`);
+      const runner = new CodexReviewRunner(
+        environment,
+        (_command, _args, options) =>
+          spawn(
+            process.execPath,
+            [fixture, "configured-model", transcript, f.repository, stage],
+            options,
+          ),
+        undefined,
+        f.repository,
+      );
+      const reviewer = new CodexDeduplicationReviewer(
+        runner,
+        await readCodexHomeConfig(environment),
+      );
+      if (selection === "legacy-profile") {
+        await expect(reviewer.screen(findings)).rejects.toThrow(
+          "legacy `profile =",
+        );
+        expect(existsSync(transcript)).toBe(false);
+        break;
+      }
+      if (stage === "screening") await reviewer.screen(findings);
+      else await reviewer.reviewPair(findings);
+      const messages = parseJsonLines<{
+        method?: string;
+        params?: Record<string, unknown>;
+      }>(await readFile(transcript, "utf8"));
+      const model =
+        selection === "defaults"
+          ? stage === "screening"
+            ? "gpt-5.6-luna"
+            : "gpt-5.6-sol"
+          : selection === "luna-model"
+            ? "gpt-5.6-luna"
+            : "synthetic-review-model";
+      const effort =
+        selection === "defaults"
+          ? stage === "screening"
+            ? "xhigh"
+            : "high"
+          : "medium";
+      expect(
+        messages.find((m) => m.method === "thread/start")?.params,
+      ).toMatchObject({
+        model,
+        approvalPolicy: stage === "screening" ? "never" : "on-request",
+      });
+      expect(
+        messages.find((m) => m.method === "turn/start")?.params,
+      ).toMatchObject({ model, effort });
+    }
+  },
 );
 
 const failureReasons: Record<string, string> = {
@@ -43,7 +232,7 @@ const failureReasons: Record<string, string> = {
   "bad-request-turn": "Invalid model configuration",
   "unknown-turn": "Unknown model failure",
   "request-error": "Authentication required",
-  "credential-error": "[redacted]",
+  "credential-error": "Authentication failed: Bearer synthetic-review-key",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
   "required-source-error":
@@ -92,18 +281,28 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
   commandAuth?: "direct" | "ambient";
+  windowsConfig?: JsonObject;
+  expectedWindowsSandbox?: string;
 }[] = [
   {
     scenario: "correction",
     name: "command auth without an API key",
     commandAuth: "direct",
+    windowsConfig: { features: { elevated_windows_sandbox: false } },
+    expectedWindowsSandbox: "unelevated",
   },
   {
     scenario: "correction",
     name: "command auth with ambient API key and relative home",
     commandAuth: "ambient",
+    windowsConfig: { windows: { sandbox: "unelevated" } },
+    expectedWindowsSandbox: "unelevated",
   },
-  { scenario: "retry-correction" },
+  {
+    scenario: "retry-correction",
+    windowsConfig: { features: { elevated_windows_sandbox: true } },
+    expectedWindowsSandbox: "elevated",
+  },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
   { scenario: "accepted-no-replay" },
@@ -150,13 +349,13 @@ for (const {
   extraEnvironment,
   windowsOnly = false,
   commandAuth,
+  windowsConfig,
+  expectedWindowsSandbox,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
-    const checkout = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-review-source-")),
-    );
+    const checkout = await temporaryDirectory("codex-review-source-", true);
     const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
@@ -176,6 +375,7 @@ for (const {
       };
       const configuration = stringify({
         mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...windowsConfig,
         ...(commandAuth
           ? {
               model_provider: "synthetic.provider",
@@ -219,8 +419,11 @@ for (const {
               : selected,
           );
           args = commandArgs;
-          directory = options.env!["CODEX_SQLITE_HOME"];
-          expect(options.cwd).toBe(directory);
+          directory = options.cwd as string;
+          expect(options.env!["CODEX_SQLITE_HOME"]).toBeUndefined();
+          expect(
+            commandArgs.some((arg) => arg.startsWith("sqlite_home=")),
+          ).toBe(false);
           expect(environmentEntry(options.env!, "CODEX_HOME")).toBe(modelHome);
           child = spawn(
             process.execPath,
@@ -261,7 +464,17 @@ for (const {
           },
         },
       );
-      let validations = 0;
+      const validate = mock((value: unknown) => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          !("decision" in value) ||
+          value.decision !==
+            (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
+        )
+          throw new Error("Invalid decision");
+        return { decision: value.decision };
+      });
       const checkpoints = checkpointWorkbench("blocked-review", {
         repository: checkout,
       });
@@ -295,18 +508,7 @@ for (const {
           required: ["decision"],
           additionalProperties: false,
         },
-        validate(value: unknown) {
-          validations++;
-          if (
-            typeof value !== "object" ||
-            value === null ||
-            !("decision" in value) ||
-            value.decision !==
-              (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
-          )
-            throw new Error("Invalid decision");
-          return { decision: value.decision };
-        },
+        validate,
       });
       if (
         recovery ||
@@ -318,7 +520,7 @@ for (const {
         ].includes(scenario)
       ) {
         expect(await result).toEqual({ decision: "SAME" });
-        expect(validations).toBe(
+        expect(validate).toHaveBeenCalledTimes(
           recovery
             ? recovery === "invalid-submission"
               ? 3
@@ -335,7 +537,7 @@ for (const {
         expect(await result).toEqual({
           decision: scenario === "incomplete-content" ? "DISTINCT" : "SAME",
         });
-        expect(validations).toBe(1);
+        expect(validate).toHaveBeenCalledTimes(1);
       } else if (
         ["cancel", "cancel-continuation", "cancel-backoff"].includes(scenario)
       ) {
@@ -379,25 +581,23 @@ for (const {
               : 1) * sessions,
           reason: refused
             ? "The model refused the deduplication review."
-            : scenario === "credential-error"
-              ? "[redacted]"
-              : scenario === "invalid-submission"
-                ? "The submitted review failed semantic validation."
-                : scenario === "text-only"
-                  ? "Codex did not submit a validated review."
-                  : modelFailures.has(scenario)
-                    ? "Codex review turn failed."
-                    : reportsBlocker
-                      ? "A required review check could not be completed."
-                      : scenario === "request-error"
-                        ? "Codex rejected the review request."
-                        : "Codex review transport failed.",
+            : scenario === "invalid-submission"
+              ? "The submitted review failed semantic validation."
+              : scenario === "text-only"
+                ? "Codex did not submit a validated review."
+                : modelFailures.has(scenario)
+                  ? "Codex review turn failed."
+                  : reportsBlocker
+                    ? "A required review check could not be completed."
+                    : ["request-error", "credential-error"].includes(scenario)
+                      ? "Codex rejected the review request."
+                      : "Codex review transport failed.",
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
         expect(supportBundle).not.toContain(checkout);
         expect(supportBundle).not.toContain("review-thread");
-        expect(validations).toBe(
+        expect(validate).toHaveBeenCalledTimes(
           scenario === "invalid-submission"
             ? 2 * sessions
             : modelFailures.has(scenario) ||
@@ -432,6 +632,13 @@ for (const {
         expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
+      expect(
+        parse(args.find((value) => value.startsWith("windows="))!)["windows"],
+      ).toEqual({
+        sandbox:
+          expectedWindowsSandbox ??
+          (DEFAULT_CODEX_CONFIG["windows"] as { sandbox: string }).sandbox,
+      });
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
       );
@@ -442,16 +649,10 @@ for (const {
         `${JSON.stringify(resolve(ghConfig))}="deny"`,
       );
       if (scenario !== "cancel") {
-        const messages = (await readFile(transcript, "utf8"))
-          .trim()
-          .split("\n")
-          .map(
-            (line) =>
-              JSON.parse(line) as {
-                method?: string;
-                params?: { apiKey?: string };
-              },
-          );
+        const messages = parseJsonLines<{
+          method?: string;
+          params?: { apiKey?: string };
+        }>(await readFile(transcript, "utf8"));
         const loginRequest = messages.find(
           (message) => message.method === "account/login/start",
         );
@@ -501,6 +702,216 @@ for (const {
     }
   });
 }
+
+test.each([
+  "default",
+  "environment",
+  "configuration",
+  "relative-environment",
+  "relative-configuration",
+  "configuration-over-environment",
+])(
+  "concurrent ephemeral reviews reuse %s native SQLite without deleting it",
+  async (selection) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME, { recursive: true });
+    const sqliteHome =
+      selection === "default"
+        ? f.environment.CODEX_HOME
+        : join(f.root, "native-sqlite");
+    await mkdir(sqliteHome, { recursive: true });
+    const marker = join(sqliteHome, "existing-state");
+    const configured = selection.includes("configuration");
+    const inherited = selection.endsWith("environment");
+    const environmentHome =
+      selection === "configuration-over-environment"
+        ? join(f.root, "ignored-environment-state")
+        : sqliteHome;
+    await writeFile(marker, "Existing native state");
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify({
+        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...(configured
+          ? {
+              sqlite_home: selection.startsWith("relative")
+                ? relative(f.environment.CODEX_HOME, sqliteHome)
+                : sqliteHome,
+            }
+          : {}),
+      }),
+    );
+    const environment = {
+      ...f.environment,
+      OPENAI_API_KEY: "synthetic-review-key",
+      ...(inherited
+        ? {
+            CODEX_SQLITE_HOME: selection.startsWith("relative")
+              ? relative(process.cwd(), sqliteHome)
+              : environmentHome,
+          }
+        : {}),
+    };
+    const originalEnvironment = { ...environment };
+    const scratch: string[] = [];
+    let starts = 0;
+    const runner = new CodexReviewRunner(
+      environment,
+      (_command, args, options) => {
+        scratch.push(options.cwd as string);
+        expect(args.some((arg) => arg.startsWith("sqlite_home="))).toBe(false);
+        expect(
+          args.find((arg) =>
+            arg.startsWith("permissions.codex_security_review="),
+          ),
+        ).toContain(`${JSON.stringify(sqliteHome)}="deny"`);
+        expect(options.env!["CODEX_HOME"]).toBe(f.environment.CODEX_HOME);
+        expect(options.env!["CODEX_SQLITE_HOME"]).toBe(
+          inherited ? environmentHome : undefined,
+        );
+        return spawn(
+          process.execPath,
+          [
+            fixture,
+            "accepted-no-replay",
+            join(f.root, `sqlite-${starts++}.jsonl`),
+            f.repository,
+          ],
+          options,
+        );
+      },
+      undefined,
+      f.repository,
+    );
+    const review = {
+      stage: "pair-review" as const,
+      model: "synthetic-model",
+      effort: "high",
+      prompt: "Compare synthetic findings",
+      schema: {},
+      validate: () => ({ decision: "SAME" }),
+    };
+    await Promise.all([runner.run(review), runner.run(review)]);
+    expect(environment).toEqual(originalEnvironment);
+    expect(new Set(scratch).size).toBe(2);
+    expect(scratch.every((path) => !existsSync(path))).toBe(true);
+    expect(await readFile(marker, "utf8")).toBe("Existing native state");
+  },
+);
+
+test.each(["capture", "throw", "reject", "pending"])(
+  "native review diagnostics preserve messages and IDs without blocking on %s observers",
+  async (behavior) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME);
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify({
+        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+      }),
+    );
+    const events: import("../src/deduplication/diagnostics.js").DeduplicationDiagnostic[] =
+      [];
+    const runner = new CodexReviewRunner(
+      { ...f.environment, OPENAI_API_KEY: "synthetic-review-key" },
+      (_command, _args, options) =>
+        spawn(
+          process.execPath,
+          [
+            fixture,
+            "diagnostics",
+            join(f.root, "diagnostics.jsonl"),
+            f.repository,
+          ],
+          options,
+        ),
+      undefined,
+      f.repository,
+      undefined,
+      (event) => {
+        events.push(event);
+        if (behavior === "throw") throw new Error("Observer failed");
+        if (behavior === "reject")
+          return Promise.reject(new Error("Observer rejected"));
+        if (behavior === "pending") return new Promise<void>(() => {});
+      },
+    );
+    expect(
+      await runner.run({
+        stage: "pair-review",
+        model: "synthetic-model",
+        effort: "high",
+        prompt: "Compare synthetic findings",
+        schema: {},
+        validate: () => ({ decision: "SAME" }),
+      }),
+    ).toEqual({ decision: "SAME" });
+    expect(events[0]).toMatchObject({
+      event: "review.started",
+      stage: "pair-review",
+      model: "synthetic-model",
+      effort: "high",
+      attempt: 1,
+    });
+    expect(events.at(-1)?.event).toBe("review.completed");
+    expect(new Set(events.map((event) => event.reviewId)).size).toBe(1);
+    expect(
+      events
+        .filter((event) => event.event === "review.stderr")
+        .map((event) => event.message)
+        .join(""),
+    ).toBe("Native diagnostic: Bearer synthetic-review-key\n");
+    expect(
+      events
+        .filter((event) => event.event === "review.warning")
+        .map((event) => event.details),
+    ).toEqual([
+      {
+        method: "configWarning",
+        message: "Configured model fallback: synthetic-review-key",
+      },
+      {
+        method: "warning",
+        message: "Source lookup warning",
+        threadId: "review-thread",
+      },
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "review.event",
+        details: {
+          method: "item/completed",
+          threadId: "review-thread",
+          turnId: "review-turn-1",
+          item: {
+            id: "command-1",
+            type: "commandExecution",
+            status: "completed",
+            exitCode: 7,
+            aggregatedOutput: "Source lookup failed: synthetic-review-key",
+          },
+        },
+      }),
+    );
+    expect(
+      events
+        .filter(
+          (event) => event.details?.["method"] === "thread/tokenUsage/updated",
+        )
+        .map((event) => event.details?.["threadId"]),
+    ).toEqual(["nested-review", "review-thread"]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "review.submission",
+        details: expect.objectContaining({
+          threadId: "review-thread",
+          turnId: "review-turn-1",
+          accepted: true,
+        }),
+      }),
+    );
+  },
+);
 
 test.each([
   "cyber_policy",
@@ -633,7 +1044,7 @@ test("retry backoff grows exponentially with jitter and preserves cancellation",
 test("a missing Codex executable is not retried", async () => {
   const root = await mkdtemp(join(tmpdir(), "codex-review-missing-command-"));
   let starts = 0;
-  const delays: number[] = [];
+  const delays = mock(async (_delay: number) => {});
   try {
     await writeFile(join(root, "config.toml"), "");
     const runner = new CodexReviewRunner(
@@ -645,9 +1056,7 @@ test("a missing Codex executable is not retried", async () => {
       undefined,
       root,
       {
-        wait: async (delay) => {
-          delays.push(delay);
-        },
+        wait: delays,
       },
     );
     await expect(
@@ -661,7 +1070,7 @@ test("a missing Codex executable is not retried", async () => {
       }),
     ).rejects.toThrow("ENOENT");
     expect(starts).toBe(1);
-    expect(delays).toEqual([]);
+    expect(delays).not.toHaveBeenCalled();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

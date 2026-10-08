@@ -2,20 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "codex-security://schemas/tools/candidate-validations.schema.json",
   "title": "Record compact Codex Security candidate validations",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["scanId", "validations"],
-  "properties": {
-    "scanId": {
-      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
-    },
-    "validations": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/validationUpdate"
-      }
-    }
-  },
+  "$ref": "#/$defs/input",
   "$defs": {
     "input": {
       "type": "object",
