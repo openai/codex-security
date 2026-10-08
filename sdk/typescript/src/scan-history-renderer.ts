@@ -79,18 +79,17 @@ export function renderScanHistory(
   const wrap = (value: string, indent: number, prefix?: string): void => {
     const available = width - indent - 2;
     let line = "";
-    let first = true;
     for (const word of clean(value).split(/\s+/)) {
       if (line.length > 0 && line.length + word.length + 1 > available) {
-        lines.push(`${first && prefix ? prefix : " ".repeat(indent)}${line}`);
-        first = false;
+        lines.push(`${prefix || " ".repeat(indent)}${line}`);
+        prefix = undefined;
         line = word;
       } else {
         line = line.length > 0 ? `${line} ${word}` : word;
       }
     }
     if (line.length > 0) {
-      lines.push(`${first && prefix ? prefix : " ".repeat(indent)}${line}`);
+      lines.push(`${prefix || " ".repeat(indent)}${line}`);
     }
   };
 
@@ -279,9 +278,7 @@ export function renderScanHistory(
       lines.push(
         `  ${strong("CONFIGURATION")}  ${Object.entries(config)
           .map(([key, value]) => {
-            const rendered =
-              typeof value === "object" ? JSON.stringify(value) : value;
-            return `${clean(key)}=${clean(rendered)}`;
+            return `${clean(key)}=${clean(typeof value === "object" ? JSON.stringify(value) : value)}`;
           })
           .join(`  ${accent("·")}  `)}`,
       );

@@ -5,6 +5,7 @@ import path from "node:path";
 type PythonPlatform = NodeJS.Platform;
 
 interface ResolvePythonCommandOptions {
+  cacheDirectory?: string;
   configuredPython?: string;
   homeDirectory?: string;
   isUsableExecutable?: (candidate: string) => Promise<boolean>;
@@ -28,9 +29,11 @@ export async function resolvePythonCommand(
 
   const platform = options.platform ?? process.platform;
   const pathImplementation = platform === "win32" ? path.win32 : path.posix;
+  const cacheDirectory =
+    (options.cacheDirectory ?? process.env.XDG_CACHE_HOME) ||
+    pathImplementation.join(options.homeDirectory ?? homedir(), ".cache");
   const bundledPythonRoot = pathImplementation.join(
-    options.homeDirectory ?? homedir(),
-    ".cache",
+    cacheDirectory,
     "codex-runtimes",
     "codex-primary-runtime",
     "dependencies",
@@ -67,8 +70,7 @@ export async function isUsablePythonExecutable(
   platform: PythonPlatform,
 ): Promise<boolean> {
   try {
-    const candidateStat = await fs.stat(candidate);
-    if (!candidateStat.isFile()) {
+    if (!(await fs.stat(candidate)).isFile()) {
       return false;
     }
     if (platform !== "win32") {

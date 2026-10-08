@@ -1,10 +1,8 @@
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { findingEntry } from "./value.js";
 import { z } from "incur";
-import type { CodexSecurityConfig } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
-import { prepareKnowledgeBase } from "./knowledge-base.js";
+import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
 import type { Finding, SeverityLevel } from "./models.js";
 import {
   runReadOnlyCodex,
@@ -20,18 +18,19 @@ export type SeverityClassificationFinding = Pick<
   Partial<Pick<Finding, "occurrenceId" | "severity">> &
   Record<string, unknown>;
 
-export interface ClassifySeverityOptions {
+export interface ClassifySeverityOptions extends Pick<
+  ReadOnlyCodexOptions,
+  | "config"
+  | "environment"
+  | "model"
+  | "reasoningEffort"
+  | "signal"
+  | "workingDirectory"
+> {
   /** Classification policy. Omit to inherit existing severity without a model call. */
   rubricPath?: string;
   /** Supporting evidence, separate from classification policy. */
   knowledgeBasePaths?: readonly string[];
-  config?: CodexSecurityConfig;
-  environment?: NodeJS.ProcessEnv;
-  model?: string;
-  reasoningEffort?:
-    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
-  signal?: AbortSignal;
-  workingDirectory?: string;
   /** @internal Test client for the shared read-only runtime. */
   codex?: ReadOnlyCodexOptions["codex"];
 }
@@ -146,12 +145,7 @@ export async function classifySeverityInternal(
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
     assessments: [],
   };
-  const cached = new Map(
-    (await checkpoint?.load(result))?.map((assessment) => [
-      assessment.findingId,
-      assessment,
-    ]),
-  );
+  const cached = new Map((await checkpoint?.load(result))?.map(findingEntry));
   for (const finding of findings) {
     options.signal?.throwIfAborted();
     const inputSha256 = workflowDigest(finding);
@@ -239,23 +233,11 @@ async function readDocuments(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const prepared = await prepareKnowledgeBase(paths, signal);
-  try {
-    const files = (await readdir(prepared.path)).sort();
-    const contents = await Promise.all(
-      files.map((file) =>
-        readFile(join(prepared.path, file), { encoding: "utf8", signal }),
-      ),
-    );
-    if (contents.every((text) => !text.trim())) {
-      throw new CodexSecurityError(
-        "Classification documents must not be empty.",
-      );
-    }
-    return contents;
-  } finally {
-    await prepared.cleanup();
+  const contents = await readKnowledgeBaseDocuments(paths, signal);
+  if (contents.every((text) => !text.trim())) {
+    throw new CodexSecurityError("Classification documents must not be empty.");
   }
+  return contents;
 }
 
 /** @internal Check parsed assessments against the actual finding evidence. */
@@ -263,7 +245,7 @@ export function validateSeverityClassification(
   result: SeverityClassification,
   findings: readonly SeverityClassificationFinding[],
 ): SeverityClassification {
-  const byId = new Map(findings.map((finding) => [finding.findingId, finding]));
+  const byId = new Map(findings.map(findingEntry));
   for (const assessment of result.assessments) {
     const finding = byId.get(assessment.findingId);
     if (

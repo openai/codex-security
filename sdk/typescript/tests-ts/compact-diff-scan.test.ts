@@ -1,63 +1,27 @@
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
+import { git } from "./git-fixture.js";
+import { initializeMcpClient } from "./support/mcp-client.js";
+import { writeSource } from "./support/shell.js";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 type JsonObject = Record<string, unknown>;
 
-const temporaryRoots: string[] = [];
+const temporaryRoots = createTemporaryDirectoriesSync(true);
 
-afterEach(() => {
-  for (const root of temporaryRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryRoots.cleanup);
 
 function createRepository(): { root: string; repository: string } {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "codex-security-diff-")),
-  );
-  temporaryRoots.push(root);
+  const root = temporaryRoots.create("codex-security-diff-");
   const repository = join(root, "repository");
   mkdirSync(repository);
   git(repository, "init", "-q");
   return { root, repository };
-}
-
-function git(repository: string, ...args: string[]): string {
-  return execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.com",
-      ...args,
-    ],
-    { cwd: repository, encoding: "utf8" },
-  ).trim();
-}
-
-function writeSource(
-  repository: string,
-  path: string,
-  content: string | Buffer,
-): void {
-  const destination = join(repository, path);
-  mkdirSync(dirname(destination), { recursive: true });
-  writeFileSync(destination, content);
 }
 
 function python(script: string, ...args: string[]) {
@@ -94,49 +58,10 @@ async function startMcp(root: string) {
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
-  const messages = createInterface({ input: child.stdout })[
-    Symbol.asyncIterator
-  ]();
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  let nextId = 0;
-
-  async function request(
-    method: string,
-    params: JsonObject,
-  ): Promise<JsonObject> {
-    const id = ++nextId;
-    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
-    child.stdin.write("\n");
-
-    while (true) {
-      const message = await messages.next();
-      if (message.done) {
-        throw new Error(`MCP server exited before replying: ${stderr}`);
-      }
-      const response = JSON.parse(message.value) as JsonObject;
-      if (response["id"] !== id) continue;
-      if (response["error"] !== undefined) {
-        throw new Error(JSON.stringify(response["error"]));
-      }
-      return response["result"] as JsonObject;
-    }
-  }
-
-  await request("initialize", {
-    protocolVersion: "2025-11-25",
-    capabilities: {},
-    clientInfo: { name: "compact-diff-test", version: "1.0.0" },
-  });
-  child.stdin.write(
-    `${JSON.stringify({
-      jsonrpc: "2.0",
-      method: "notifications/initialized",
-      params: {},
-    })}\n`,
+  const { request, close } = await initializeMcpClient(
+    child,
+    "compact-diff-test",
+    true,
   );
 
   return {
@@ -154,12 +79,7 @@ async function startMcp(root: string) {
       expect(result["isError"], JSON.stringify(result)).not.toBe(true);
       return result["structuredContent"] as JsonObject;
     },
-    async close(): Promise<void> {
-      child.stdin.end();
-      await new Promise<void>((resolve) => {
-        child.once("close", () => resolve());
-      });
-    },
+    close,
   };
 }
 
@@ -216,7 +136,7 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/handler.py", "value = 2\n");
     writeSource(repository, "src/new handler.py", "created = True\n");
     writeSource(repository, "src/binary.py", Buffer.from([0, 255, 1]));
-    writeSource(repository, "tests/ignored.py", "ignored = True\n");
+    writeSource(repository, "tests/example.py", "test_setup = True\n");
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "selected changes");
     const head = git(repository, "rev-parse", "HEAD");
@@ -242,6 +162,7 @@ describe("compact diff scan", () => {
       "src/guard.py",
       "src/handler.py",
       "src/new handler.py",
+      "tests/example.py",
     ]);
   });
 
@@ -378,23 +299,26 @@ describe("compact diff scan", () => {
         .map((entry) => JSON.stringify(entry))
         .join("\n") + "\n",
     );
-    const args = [
-      "--input",
-      input,
-      "--out",
-      output,
-      "--repo-root",
-      repository,
-      "--in-scope-files",
-      inventory,
-    ];
-
-    expect(python("normalize_candidates.py", ...args).status).toBe(2);
-    const accepted = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const normalize = (...options: string[]) =>
+      spawnSync(
+        process.execPath,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "normalize-candidates",
+          "--input",
+          input,
+          "--out",
+          output,
+          "--repo-root",
+          repository,
+          "--in-scope-files",
+          inventory,
+          ...options,
+        ],
+        { encoding: "utf8" },
+      );
+    expect(normalize().status).toBe(2);
+    const accepted = normalize("--allow-missing-in-scope");
     expect(accepted.status, accepted.stderr).toBe(0);
     const contents = readFileSync(output, "utf8");
     expect(contents).toContain("Résumé: missing guard");
@@ -408,11 +332,7 @@ describe("compact diff scan", () => {
     ]);
 
     writeFileSync(inventory, "../escaped.py\nsrc/handler.py\n");
-    const escaped = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const escaped = normalize("--allow-missing-in-scope");
     expect(escaped.status).toBe(2);
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
@@ -622,6 +542,7 @@ describe("compact diff scan", () => {
       };
       const markdownFact =
         "Selected input stays separate from private state (src/handler.py:1).";
+      const canonicalMarkdown = `# Canonical threat model\n\n## Assumptions\n\n${markdownFact}\n`;
       const savedModelPath = join(
         scanDir,
         "artifacts",
@@ -631,11 +552,11 @@ describe("compact diff scan", () => {
       mkdirSync(dirname(savedModelPath), { recursive: true, mode: 0o700 });
       writeFileSync(
         savedModelPath,
-        `# Saved threat model\n\n${markdownFact}\n`,
+        "# Saved threat model\n\nSuperseded supplemental model.\n",
       );
       const threatModel =
         format === "Markdown"
-          ? { summary: readFileSync(savedModelPath, "utf8") }
+          ? { format: "markdown" as const, content: canonicalMarkdown }
           : canonicalModel;
       const openQuestions = [
         {
@@ -805,6 +726,16 @@ describe("compact diff scan", () => {
           openQuestions,
         },
       });
+      const savedThreatModel = readFileSync(
+        join(scanDir, "threatmodel.md"),
+        "utf8",
+      );
+      expect(savedThreatModel).not.toContain("Superseded supplemental model.");
+      if (format === "Markdown")
+        expect(savedThreatModel.startsWith(canonicalMarkdown)).toBe(true);
+      else
+        for (const fact of Object.values(canonicalModel).flat())
+          expect(savedThreatModel).toContain(fact);
       const canonicalDraftIdentities = (
         JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
           findings: JsonObject[];
@@ -883,6 +814,18 @@ describe("compact diff scan", () => {
       for (const fact of modelFacts) {
         expect(report).toContain(fact);
       }
+      expect(report).not.toContain("Superseded supplemental model.");
+      expect(report).not.toContain("# Saved threat model");
+      if (format === "Markdown") expect(report).toContain(canonicalMarkdown);
+      const completedThreatModel = readFileSync(
+        join(scanDir, "threatmodel.md"),
+        "utf8",
+      );
+      if (format === "Markdown")
+        expect(completedThreatModel.startsWith(canonicalMarkdown)).toBe(true);
+      else
+        for (const fact of modelFacts)
+          expect(completedThreatModel).toContain(fact);
       expect(report).toContain(openQuestions[0]!.question);
       expect(report).toContain(openQuestions[0]!.followUpPrompt);
       expect(report).toContain(coverageNote);
@@ -930,9 +873,11 @@ describe("compact diff scan", () => {
         "utf8",
       );
       expect(terminalReport).toContain(markdownFact);
-      expect(terminalReport.match(/^#{1,2} .+$/gm)).toEqual(
-        report.match(/^#{1,2} .+$/gm),
-      );
+      expect(terminalReport).toContain("Existing threat model");
+      expect(terminalReport).not.toContain("\n# Existing threat model\n");
+      expect(
+        readFileSync(join(terminalDir, "threatmodel.md"), "utf8"),
+      ).toContain(markdownModel);
     } finally {
       await client.close();
     }

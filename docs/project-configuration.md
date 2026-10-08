@@ -43,7 +43,7 @@ scan:
     paths: [src]
   knowledge_base: [SECURITY.md, docs/architecture.md]
 codex:
-  model: gpt-6-sol
+  model: gpt-5.6-sol
   model_reasoning_effort: xhigh
 policy:
   fail_on_severity: high
@@ -76,6 +76,7 @@ node sdk/typescript/bin/codex-security.mjs scan . -c docs/examples/codex-securit
 | ------------------------------ | ---------------------------------------------------------------------------- | ---------------------------------- |
 | `auth`                         | Credential source: `auto`, `chatgpt`, or `api-key`; never a credential value | `auto`                             |
 | `scan.mode`                    | `standard` or `deep`                                                         | `standard`                         |
+| `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`  | Unset; preserve Codex defaults     |
 | `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`   | Whole repository                   |
 | `scan.knowledge_base`          | Context files or directories                                                 | Empty list                         |
 | `scan.instructions_file`       | Additional scan instructions                                                 | Unset                              |
@@ -97,26 +98,27 @@ project-file resolution. Project files and typed `ProjectConfigInput` objects
 use `snake_case`; SDK options keep `camelCase`, and CLI flags keep `kebab-case`.
 The resolver maps file keys to the existing SDK options:
 
-| Project file                              | SDK option                            | CLI flag                        |
-| ----------------------------------------- | ------------------------------------- | ------------------------------- |
-| `auth`                                    | `auth`                                | `--auth`                        |
-| `scan.mode`                               | `mode`                                | `--mode`                        |
-| `scan.scope.paths`                        | `target: ["src"]`                     | `--path`                        |
-| `scan.scope.diff`                         | `target: DiffTarget.refs(...)`        | `--diff`, `--head`              |
-| `scan.scope.working_tree`                 | `target: DiffTarget.workingTree(...)` | `--working-tree`, `--base`      |
-| `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`              |
-| `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`            |
-| `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`      |
-| `scan.deep.workers`                       | `workers`                             | `--workers`                     |
-| `scan.deep.subagents_per_worker`          | `subagents`                           | `--subagents`                   |
-| `scan.deep.stop_after_no_new`             | `stopAfterNoNew`                      | `--stop-after-no-new`           |
-| `scan.deep.stop_after_consecutive_errors` | `stopAfterConsecutiveErrors`          | No flag                         |
-| `scan.deep.max_discovery_runs`            | `maxDiscoveryRuns`                    | `--max-discovery-runs`          |
-| `scan.deep.max_time_hours`                | `maxTimeHours`                        | `--max-time-hours`              |
-| `limits.max_cost_usd_per_scan`            | `maxCostUsd`                          | `--max-cost`                    |
-| `policy.fail_on_severity`                 | `failureSeverity`                     | `--fail-on-severity`            |
-| `output.directory`                        | `outputDir`                           | `--output-dir`                  |
-| `codex`                                   | Constructor `codexOverrides`          | `--codex`, model/provider flags |
+| Project file                              | SDK option                            | CLI flag                                             |
+| ----------------------------------------- | ------------------------------------- | ---------------------------------------------------- |
+| `auth`                                    | `auth`                                | `--auth`                                             |
+| `scan.mode`                               | `mode`                                | `--mode`                                             |
+| `scan.cyber_access_program`               | `cyberAccessProgram`                  | `--cyber-access-program` (`scan`, `scan-components`) |
+| `scan.scope.paths`                        | `target: ["src"]`                     | `--path`                                             |
+| `scan.scope.diff`                         | `target: DiffTarget.refs(...)`        | `--diff`, `--head`                                   |
+| `scan.scope.working_tree`                 | `target: DiffTarget.workingTree(...)` | `--working-tree`, `--base`                           |
+| `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`                                   |
+| `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`                                 |
+| `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`                           |
+| `scan.deep.workers`                       | `workers`                             | `--workers`                                          |
+| `scan.deep.subagents_per_worker`          | `subagents`                           | `--subagents`                                        |
+| `scan.deep.stop_after_no_new`             | `stopAfterNoNew`                      | `--stop-after-no-new`                                |
+| `scan.deep.stop_after_consecutive_errors` | `stopAfterConsecutiveErrors`          | No flag                                              |
+| `scan.deep.max_discovery_runs`            | `maxDiscoveryRuns`                    | `--max-discovery-runs`                               |
+| `scan.deep.max_time_hours`                | `maxTimeHours`                        | `--max-time-hours`                                   |
+| `limits.max_cost_usd_per_scan`            | `maxCostUsd`                          | `--max-cost`                                         |
+| `policy.fail_on_severity`                 | `failureSeverity`                     | `--fail-on-severity`                                 |
+| `output.directory`                        | `outputDir`                           | `--output-dir`                                       |
+| `codex`                                   | Constructor `codexOverrides`          | `--codex`, model/provider flags                      |
 
 Use an explicit file with `loadProjectConfig()`:
 

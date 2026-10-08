@@ -22,7 +22,7 @@ describe("bundled scan report and source limits", () => {
       "    source = b'x' * (1024 * 1024 + 1)",
       "    excerpts.git_bytes = lambda *args: source",
       "    target = pathlib.Path(directory).resolve()",
-      "    excerpt = excerpts.scanned_source_text({'target_revision': 'deadbeef', 'target_snapshot_digest': None}, target, 'large.py')",
+      "    excerpt = excerpts.scanned_source_text({'target_revision': 'deadbeef', 'target_snapshot_digest': None, 'diff_target_kind': None}, target, 'large.py')",
       "    hashes = finalizer._github_line_hashes(io.StringIO('line\\n' * 100001), {100001})",
       "    print(json.dumps({'documentBytes': len(document), 'sourceBytes': len(excerpt), 'lateSourceLine': 100001 in hashes, 'unsafePathRejected': excerpts.safe_source_path(target, '../outside') is None}))",
     ].join("\n");

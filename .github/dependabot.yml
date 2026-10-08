@@ -2,6 +2,7 @@ version: 2
 updates:
   - package-ecosystem: npm
     directories:
+      - /github-action
       - /sdk/typescript
       - /plugins/codex-security/mcp-app
       - /evals/triage-finding
@@ -61,3 +62,36 @@ updates:
         - "openai/*"
     commit-message:
       prefix: ci
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: cargo
+    directory: /plugins/codex-security/native
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: devcontainers
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope

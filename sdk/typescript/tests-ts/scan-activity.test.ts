@@ -980,3 +980,96 @@ describe("scan activity", () => {
     ).toBeNull();
   });
 });
+
+describe("concrete repository path prefixes", () => {
+  test.each([
+    [
+      "drive casing",
+      "C:\\code\\project",
+      "c:\\CODE\\PROJECT\\Src\\Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "drive forward slashes",
+      "C:/code/project",
+      "c:/CODE/PROJECT/Src/Login.ts",
+      ["Src/Login.ts"],
+    ],
+    ["drive root", "C:\\", "c:\\Src\\Login.ts", ["Src/Login.ts"]],
+    ["drive root forward slashes", "C:/", "c:/Src/Login.ts", ["Src/Login.ts"]],
+    [
+      "UNC casing",
+      "\\\\Server\\Share\\project",
+      "\\\\server\\SHARE\\PROJECT\\Src\\Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "UNC share root",
+      "\\\\Server\\Share\\",
+      "\\\\server\\SHARE\\Src\\Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "UNC forward slashes",
+      "//Server/Share/project",
+      "//server/share/PROJECT/Src/Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "matching POSIX casing",
+      "/code/project",
+      "/code/project/Src/Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "different POSIX casing",
+      "/code/project",
+      "/code/PROJECT/Src/Login.ts",
+      [],
+    ],
+    [
+      "sibling directory",
+      "C:\\code\\project",
+      "c:\\code\\project-other\\Src\\Login.ts",
+      [],
+    ],
+    ["different drive", "C:\\", "D:\\Src\\Login.ts", []],
+    [
+      "different UNC share",
+      "\\\\Server\\Share",
+      "\\\\server\\Share-other\\Src\\Login.ts",
+      [],
+    ],
+    [
+      "parent traversal",
+      "C:\\code\\project",
+      "c:\\CODE\\PROJECT\\..\\outside.ts",
+      [],
+    ],
+  ] as const)(
+    "preserves relative activity paths for %s",
+    (_name, repository, path, paths) => {
+      expect(
+        scanActivityFromEvent(toolEvent("read_file", { path }), repository),
+      ).toMatchObject({ paths });
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "function_call",
+            name: "read_file",
+            call_id: "worker-tool",
+            arguments: JSON.stringify({ path }),
+          }),
+          repository,
+        ),
+      ).toMatchObject({ paths });
+      const command = `type "${path}"`;
+      expect(
+        scanActivityFromEvent(
+          commandEvent("item.started", command),
+          repository,
+        ),
+      ).toMatchObject({ paths, description: command });
+    },
+  );
+});
