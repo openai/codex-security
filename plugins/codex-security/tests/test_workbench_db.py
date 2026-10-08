@@ -77,6 +77,7 @@ EXPECTED_TABLES = {
     "finding_dedupe_group_members",
     "finding_dedupe_groups",
     "finding_embeddings",
+    "local_finding_embeddings",
     "finding_locations",
     "finding_occurrences",
     "finding_publications",
@@ -912,7 +913,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (43,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (46,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 

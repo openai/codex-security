@@ -1,4 +1,6 @@
 import { expect, test, mock } from "bun:test";
+import { Writable } from "node:stream";
+import { setImmediate } from "node:timers/promises";
 import { main } from "../src/cli.js";
 import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { throwing, rejecting } from "./support/errors.js";
@@ -17,6 +19,91 @@ const args = [
   "http://127.0.0.1:3000",
   "--json",
 ];
+
+test("asynchronous stderr failures do not discard successful dedupe results", async () => {
+  const deps = dependencies();
+  const result = {
+    scanId: "scan-example",
+    uniqueFindingIds: [],
+    duplicateGroups: [],
+    deduplicationStatus: "completed" as const,
+  };
+  deps.deduplicateScan = async (_scan, options) => {
+    options.onDiagnostic?.({
+      event: "review.started",
+      timestamp: "synthetic-time",
+      stage: "screening",
+      model: "synthetic-model",
+    });
+    return result;
+  };
+  const stderr = new Writable({
+    write(_chunk, _encoding, callback) {
+      queueMicrotask(() =>
+        callback(new Error("Synthetic closed diagnostic stream")),
+      );
+    },
+  });
+  const { stdout } = createCliTest(main);
+  expect(await main(args, stdout.stream, stderr, deps)).toBe(0);
+  await setImmediate();
+  expect(JSON.parse(stdout.text())).toEqual(result);
+  expect(stderr.listenerCount("error")).toBe(0);
+});
+
+test.each([false, true])(
+  "dedupe diagnostics preserve JSON output and expose native details in debug mode: %j",
+  async (debug) => {
+    const deps = dependencies();
+    if (debug) deps.environment["CODEX_SECURITY_LOG_LEVEL"] = "debug";
+    const result = {
+      scanId: "scan-example",
+      uniqueFindingIds: [],
+      duplicateGroups: [],
+      deduplicationStatus: "completed" as const,
+    };
+    deps.deduplicateScan = async (_id, options) => {
+      options.onDiagnostic?.({
+        event: "review.started",
+        timestamp: "synthetic-time",
+        stage: "screening",
+        model: "synthetic-model",
+        effort: "medium",
+      });
+      options.onDiagnostic?.({
+        event: "review.warning",
+        timestamp: "synthetic-time",
+        details: {
+          method: "configWarning",
+          message: "Provider warning: Bearer synthetic-key",
+        },
+      });
+      options.onDiagnostic?.({
+        event: "review.event",
+        timestamp: "synthetic-time",
+        details: {
+          method: "item/completed",
+          threadId: "thread-example",
+          turnId: "turn-example",
+          item: {
+            id: "command-example",
+            exitCode: 7,
+            aggregatedOutput: "Command failed",
+          },
+        },
+      });
+      return result;
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(args, deps)).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(stderr.text()).toContain("review.started");
+    expect(stderr.text()).toContain("synthetic-model");
+    expect(stderr.text()).toContain("Provider warning: Bearer synthetic-key");
+    expect(stderr.text().includes("thread-example")).toBe(debug);
+    expect(stderr.text().includes("Command failed")).toBe(debug);
+  },
+);
 
 test.each([false, true])(
   "dedupe reports refusals and succeeds even when diagnostic output fails: %j",
@@ -118,6 +205,7 @@ test.each([false, true])(
     deps.deduplicateScan = async (scanId, options, dependencies) => {
       expect(scanId).toBe("latest");
       expect(options).toEqual({
+        onDiagnostic: expect.any(Function),
         findingsUrl: "http://127.0.0.1:3000",
         concurrency: 8,
         allRepositories,
@@ -200,15 +288,11 @@ test("dedupe help and schema expose concurrency and its default", async () => {
   });
 });
 
-test("dedupe requires both explicit inputs and reports SDK failures", async () => {
+test("dedupe requires a scan selector and reports SDK failures", async () => {
   const deps = dependencies();
   const deduplicateScan = mock(rejecting("Finding has not been indexed"));
   deps.deduplicateScan = deduplicateScan;
-  for (const flags of [
-    [],
-    ["--scan", "latest"],
-    ["--findings-url", "http://127.0.0.1:3000"],
-  ]) {
+  for (const flags of [[], ["--findings-url", "http://127.0.0.1:3000"]]) {
     expect(await runCapturedCli(main, ["dedupe", ...flags], deps)).not.toBe(0);
   }
   expect(deduplicateScan).not.toHaveBeenCalled();
@@ -217,6 +301,23 @@ test("dedupe requires both explicit inputs and reports SDK failures", async () =
   expect(await runCli(args, deps)).toBe(2);
   expect(stdout.text()).toBe("");
   expect(stderr.text()).toBe("codex-security: Finding has not been indexed\n");
+});
+
+test("dedupe defaults to local storage without a findings URL", async () => {
+  const deps = dependencies();
+  deps.deduplicateScan = async (scanId, options) => {
+    expect(scanId).toBe("latest");
+    expect(options.findingsUrl).toBeUndefined();
+    return {
+      scanId,
+      uniqueFindingIds: [],
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    };
+  };
+  expect(
+    await runCapturedCli(main, ["dedupe", "--scan", "latest", "--json"], deps),
+  ).toBe(0);
 });
 
 test("dedupe forwards cancellation and removes signal handlers", async () => {

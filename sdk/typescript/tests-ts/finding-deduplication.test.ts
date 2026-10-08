@@ -12,6 +12,7 @@ import {
 } from "../src/deduplication/deduplication.js";
 import {
   CodexDeduplicationReviewer,
+  CodexGroupingReviewer,
   pairKey,
   screeningPairSlot,
   validateReview,
@@ -80,6 +81,51 @@ const distinct: DuplicateDecision = {
   decision: "DISTINCT",
   rationale: "Independent controls require different corrections.",
 };
+
+test("saved-scan pair reviews submit decisions without generating replacement findings", async () => {
+  const findings = [entry(1), entry(2)];
+  const originals = structuredClone(findings);
+  const calls: CodexReview<unknown>[] = [];
+  const reviewer = new CodexGroupingReviewer(
+    {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        calls.push(review);
+        const result = {
+          decision: "SAME",
+          rationale: "One shared control closes both paths.",
+        };
+        const validateSchema = new Ajv2020({ strict: false }).compile(
+          review.schema as object,
+        );
+        expect(validateSchema(result)).toBe(true);
+        expect(
+          validateSchema({
+            ...result,
+            mergedFinding: findings[0],
+            canonicalFindingId: findings[0]!.findingId,
+          }),
+        ).toBe(false);
+        return review.validate(result);
+      },
+    },
+    { model: "synthetic-configured-model", model_reasoning_effort: "medium" },
+  );
+  expect(await reviewer.reviewPair(findings)).toEqual({
+    decision: "SAME",
+    rationale: "One shared control closes both paths.",
+  });
+  expect(calls[0]).toMatchObject({
+    stage: "pair-review",
+    model: "synthetic-configured-model",
+    effort: "medium",
+  });
+  expect(calls[0]!.prompt).toContain(JSON.stringify({ findings }));
+  expect(calls[0]!.prompt).not.toContain("actually synthesize");
+  expect(findings).toEqual(originals);
+  expect(() =>
+    validateReview({ decision: "SAME", rationale: "Same control" }, findings),
+  ).toThrow();
+});
 
 function screening(
   findings: readonly Finding[],
