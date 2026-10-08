@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import Ajv2020 from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
@@ -104,6 +105,27 @@ export function validateExternalEvidence(
     )
       throw new Error(
         "Evidence URLs must be HTTP(S) links without credentials.",
+      );
+    if (authority.includes("[")) {
+      const closing = authority.indexOf("]");
+      const host = authority.slice(1, closing);
+      const port = authority.slice(closing + 1);
+      const [address, scope, ...extraScopes] = host.split("%");
+      const validHost = host.startsWith("v")
+        ? /^v[\da-fA-F]+\.[\s\S]+$/u.test(host)
+        : isIP(address!) === 6 && scope !== "" && extraScopes.length === 0;
+      if (
+        !authority.startsWith("[") ||
+        (port !== "" && !port.startsWith(":")) ||
+        !validHost
+      )
+        throw new Error("Evidence URL has an invalid bracketed host.");
+    }
+    const hostname = authority.replace(/[@:#?]/gu, "");
+    const normalized = hostname.normalize("NFKC");
+    if (normalized !== hostname && /[/?:#@]/u.test(normalized))
+      throw new Error(
+        "Evidence URL authority contains an invalid normalized separator.",
       );
   }
   const pending: [unknown, number][] = [[result, 0]];

@@ -783,11 +783,12 @@ codex-security publish findings selected-wiz.json \
 
 This command reads the authorized destination and current source versions during
 preview. It uses the same saved ChatGPT file login as scan publication. The Cloud
-repository needs an existing environment; no native scan is required. Review the
-account, repository, environment, findings, and exclusions, then rerun without
-`--dry-run`. The default terminal prompt is No; `--yes` confirms a previously
-reviewed input for scripts or the plugin. Without a terminal or `--yes`, no upload
-occurs.
+repository needs an existing environment; no native scan is required. Existing
+source reports retain their environment; new reports use the discovered default.
+Review the account, repository, prepared environments, findings, and exclusions,
+then rerun without `--dry-run`. The default terminal prompt is No; `--yes`
+confirms a previously reviewed input for scripts or the plugin. Without a
+terminal or `--yes`, no upload occurs.
 
 Input can be a Wiz vulnerability finding, an array, a complete
 `data.vulnerabilityFindings.nodes` response, or JSONL with one vendor record per
@@ -812,6 +813,8 @@ retains each record in `source_data`, uses reported severity, and leaves unknown
 branch/revision and repository locations empty. Container paths are retained as
 vendor evidence rather than interpreted as source-code locations. It does not
 fetch from Wiz, assess findings, or change vendor or Cloud triage decisions.
+Findings from external network scans are excluded from this package vulnerability
+mapping.
 
 Requests contain at most 100 findings and respect the Cloud payload limits.
 Before uploading, the publisher saves request IDs and bodies privately under
@@ -821,8 +824,8 @@ retires the old request without republishing; review and explicitly approve a
 fresh invocation. Final item errors are reported individually with exit code 1;
 correct the input or source conflict before a fresh submission. Transport or
 readback failures return exit code 2 and retain the resumable request. Successful
-receipts are saved locally; the CLI verifies Cloud source-report reads and
-returns a Findings link. Search indexing can lag an accepted import.
+receipts are saved locally; the CLI verifies Cloud source-report reads before
+reporting success. The current Cloud findings page does not display these imports.
 
 Preview selected completed scans before uploading:
 

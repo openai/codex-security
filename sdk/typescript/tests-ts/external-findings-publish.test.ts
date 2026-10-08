@@ -191,7 +191,10 @@ async function fixture(records: unknown = [normalized()]) {
           };
           for (const item of request.items) {
             const previous = reports.get(item.source_finding_id);
-            if (state.finalError) {
+            const scopeConflict =
+              previous !== undefined &&
+              previous.environment_id !== request.repository.environment_id;
+            if (state.finalError || scopeConflict) {
               receipt.counts.error = (receipt.counts.error ?? 0) + 1;
               receipt.results.push({
                 client_id: item.client_id,
@@ -201,8 +204,10 @@ async function fixture(records: unknown = [normalized()]) {
                 canonical_finding_id: null,
                 version: null,
                 error: {
-                  code: "version_conflict",
-                  message: "Reload current evidence",
+                  code: scopeConflict ? "scope_conflict" : "version_conflict",
+                  message: scopeConflict
+                    ? "Source report belongs to a different Cloud environment"
+                    : "Reload current evidence",
                 },
               });
               continue;
@@ -336,13 +341,15 @@ test("Wiz occurrence mapping preserves original evidence without inventing repos
       source_updated_at: null,
       source_data: record,
       image_digests: ["sha256:example"],
+      advisory_ids: [record.name],
     },
   });
 });
 
 test("Wiz API nodes preserve artifact ecosystems and distinguish container digests from VM image IDs", async () => {
   const finding = {
-    name: "CVE-2099-0001",
+    name: "Vendor display advisory",
+    vulnerabilityExternalId: "CVE-2099-0001",
     detailedName: "example-package",
     version: "1.2.0",
     vendorSeverity: "HIGH",
@@ -366,6 +373,16 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
         id: "virtual-machine",
         type: "VIRTUAL_MACHINE",
         imageId: "ami-synthetic",
+        containerImageId: "ami-synthetic-alias",
+      },
+    },
+    {
+      ...finding,
+      id: "container-alias",
+      vulnerableAsset: {
+        id: "aliased-image",
+        type: "CONTAINER_IMAGE",
+        containerImageId: `sha256:${"d".repeat(64)}`,
       },
     },
     {
@@ -391,6 +408,10 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
   });
   const parsed = await readVendorFindings(f.file);
   expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.evidence.title).toContain(finding.name);
+  expect(parsed.findings.map(({ evidence }) => evidence.advisory_ids)).toEqual(
+    records.map(() => [finding.vulnerabilityExternalId]),
+  );
   expect(
     parsed.findings.map(({ evidence }) => ({
       ecosystem: evidence.packages?.[0]?.ecosystem,
@@ -399,11 +420,42 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
   ).toEqual([
     { ecosystem: "DPKG", digests: [`sha256:${"a".repeat(64)}`] },
     { ecosystem: "PYTHON", digests: [] },
+    { ecosystem: null, digests: [`sha256:${"d".repeat(64)}`] },
     { ecosystem: "reported-manager", digests: [`sha256:${"b".repeat(64)}`] },
   ]);
   expect(parsed.findings.map(({ evidence }) => evidence.source_data)).toEqual(
     records,
   );
+});
+
+test("Wiz network-scan findings are excluded without requiring a detection method on package exports", async () => {
+  const supported = {
+    id: "package-occurrence",
+    name: "CVE-2099-0001",
+    detailedName: "example-package",
+    vendorSeverity: "HIGH",
+    vulnerableAsset: { id: "synthetic-asset" },
+  };
+  const network = {
+    ...supported,
+    id: "network-occurrence",
+    name: "CWE-89",
+    detailedName: "GET /synthetic-endpoint",
+    detectionMethod: "EXTERNAL_NETWORK_SCAN",
+  };
+  const f = await fixture([supported, network]);
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  expect(
+    prepared.preview.findings.map((finding) => finding.source_finding_id),
+  ).toEqual([supported.id]);
+  expect(prepared.preview.excluded).toEqual([
+    expect.objectContaining({
+      source_finding_id: network.id,
+      reason: expect.stringContaining("external network"),
+    }),
+  ]);
+  expect((await prepared.publish()).counts.created).toBe(1);
+  expect(f.reports.has(network.id)).toBe(false);
 });
 
 test("unsupported records are visible exclusions; duplicate identities and unfinished pages stop publication", async () => {
@@ -517,6 +569,35 @@ test("Cloud validation preserves allowed evidence boundaries and raw vendor stri
   ).toThrow("finite JSON");
 });
 
+test("evidence URL authorities match Cloud bracket and Unicode separator checks", () => {
+  for (const url of [
+    "https://[::1]",
+    "https://[fe80::1%eth0]",
+    "https://[fe80::1%25eth0]",
+    "https://[v1.example]",
+    "https://[vF.example]:service",
+    "https://éxample.test",
+    "https://example.test:non-numeric/finding",
+  ]) {
+    expect(
+      validateExternalEvidence({ ...normalized().evidence, url }).url,
+    ).toBe(url);
+  }
+  for (const url of [
+    "https://[example.test]",
+    "https://[127.0.0.1]",
+    "https://prefix[::1]",
+    "https://[::1]suffix",
+    "https://[::1%]",
+    "https://[::1%a%b]",
+    "https://example.com／path",
+  ]) {
+    expect(() =>
+      validateExternalEvidence({ ...normalized().evidence, url }),
+    ).toThrow();
+  }
+});
+
 test("request and pagination metadata retain Cloud byte limits and distinct identities", async () => {
   const f = await fixture();
   const prepared = await prepareExternalPublication(f.file, options, f.deps);
@@ -601,6 +682,8 @@ test("CLI creates, reimports unchanged, and updates the same canonical finding",
   expect(await first.runCli([...f.command, "--yes"], f.cliDeps)).toBe(0);
   const canonical = f.reports.get("vendor-1")!.canonical_finding_id;
   expect(JSON.parse(first.stdout.text()).counts.created).toBe(1);
+  expect(JSON.parse(first.stdout.text())).not.toHaveProperty("cloudUrl");
+  expect(first.stderr.text()).not.toContain("/codex/cloud/security/findings");
   expect(first.stderr.text()).not.toContain("Selected findings and evidence:");
   const again = await prepareExternalPublication(f.file, options, f.deps);
   expect((await again.publish()).counts.unchanged).toBe(1);
@@ -612,6 +695,66 @@ test("CLI creates, reimports unchanged, and updates the same canonical finding",
     canonical_finding_id: canonical,
     version: 2,
   });
+});
+
+test("publication preserves existing environments and resumes ordered mixed batches after the default changes", async () => {
+  const f = await fixture([
+    normalized("existing-first"),
+    normalized("existing-last"),
+  ]);
+  const originalEnvironment = f.state.environmentId!;
+  await (await prepareExternalPublication(f.file, options, f.deps)).publish();
+  f.state.environmentId = "new-default";
+  const selected = [
+    normalized("existing-first", "critical"),
+    normalized("new"),
+    normalized("existing-last", "critical"),
+  ];
+  await writeFile(f.file, JSON.stringify(selected));
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  expect(
+    prepared.preview.requests.map(
+      (request) => request.repository.environment_id,
+    ),
+  ).toEqual([originalEnvironment, "new-default", originalEnvironment]);
+  expect(
+    prepared.preview.requests.flatMap((request) =>
+      request.items.map((item) => item.source_finding_id),
+    ),
+  ).toEqual(selected.map((finding) => finding.source_finding_id));
+  f.state.throttle = true;
+  await expect(prepared.publish()).rejects.toThrow("Retry-After");
+  f.state.throttle = false;
+  f.state.environmentId = "changed-default";
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(f.command, {
+      ...f.cliDeps,
+      externalPublicationPrompt: {
+        isInteractive: () => true,
+        confirm: async () => {
+          expect(cli.stderr.text()).toContain(
+            `Environment: ${originalEnvironment}, new-default`,
+          );
+          expect(cli.stderr.text()).not.toContain("changed-default");
+          return true;
+        },
+      },
+    }),
+  ).toBe(0);
+  expect(JSON.parse(cli.stdout.text()).counts).toEqual({
+    created: 1,
+    updated: 2,
+    unchanged: 0,
+    error: 0,
+  });
+  expect(f.reports.get("existing-first")!.environment_id).toBe(
+    originalEnvironment,
+  );
+  expect(f.reports.get("existing-last")!.environment_id).toBe(
+    originalEnvironment,
+  );
+  expect(f.reports.get("new")!.environment_id).toBe("new-default");
 });
 
 test("normalized input accepts server-materialized optional evidence defaults", async () => {
