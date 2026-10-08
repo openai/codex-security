@@ -96,7 +96,7 @@ test("opens a private WAL database at the configured state path", async () => {
       database.prepare("PRAGMA journal_mode").get()?.journal_mode,
       "wal",
     );
-    assertMigrationNames(database, migrations.at(-1)!.version);
+    assertMigrationNames(database, ...migrations.map(({ version }) => version));
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     if (process.platform !== "win32") {
       assert.equal((await stat(databasePath)).mode & 0o777, 0o600);
@@ -235,7 +235,10 @@ test(
         database.prepare("SELECT value FROM retained").get()?.value,
         "original",
       );
-      assertMigrationNames(database, migrations.at(-1)!.version);
+      assertMigrationNames(
+        database,
+        ...migrations.map(({ version }) => version),
+      );
     } finally {
       database.close();
     }
@@ -708,7 +711,10 @@ test("retries an upgrade when another process holds the write lock beyond the bu
     await once(writer, "message");
     const database = await openWorkbenchDatabase(databasePath);
     try {
-      assertMigrationNames(database, migrations.at(-1)!.version);
+      assertMigrationNames(
+        database,
+        ...migrations.map(({ version }) => version),
+      );
       assert.equal(
         database.prepare("SELECT COUNT(*) AS count FROM security_targets").get()
           ?.count,
