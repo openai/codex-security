@@ -6,7 +6,7 @@ import { transaction } from "./transaction";
 
 const records = {
   findings: `
-    SELECT findings.id, json_extract(details_json, '$.title') AS title,
+    SELECT findings.id, json_extract(dashboard_title(details_json), '$') AS title,
       COALESCE(repositories.ids, '[]') AS repositoryIds,
       json_extract(details_json, '$.severity.level') AS severity,
       findings.created_at AS createdAt, findings.updated_at AS updatedAt
@@ -103,6 +103,11 @@ function detail(
 export function dashboard(database: DatabaseSync, query: DashboardQuery) {
   requireSqliteText([query.query, query.repository, query.id]);
   // JSON preserves text across Node 22 SQLite result and callback boundaries.
+  database.function("dashboard_title", { deterministic: true }, (value) =>
+    JSON.stringify(
+      (JSON.parse(value as string).title as string).toWellFormed(),
+    ),
+  );
   database.function("dashboard_lower", { deterministic: true }, (value) =>
     (JSON.parse(value as string) as string).toLowerCase(),
   );

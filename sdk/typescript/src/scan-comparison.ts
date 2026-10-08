@@ -23,6 +23,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
+  inlineToml,
   mergedCodexConfig,
   normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
@@ -35,6 +36,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import {
   createProfileCodex,
   createProviderProfile,
@@ -316,6 +318,7 @@ export async function matchScanFindingsInternal(
   }
   const { thread, cleanup } = await startReadOnlyCodexThread(options, {
     ...runtimeOptions,
+    command: "compare",
     threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
   });
   const remainingPages = new Set(pages.keys());
@@ -589,6 +592,16 @@ async function startReadOnlyCodexThread(
     );
   }
   const sdkConfig = structuredCodexConfig(config);
+  const requestMetadata = {
+    ...(homeExecutionConfig["responses_api_metadata"] as
+      JsonObject | undefined),
+    ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
+    ...codexSecurityRequestMetadata(
+      runtimeOptions.surface,
+      runtimeOptions.command,
+    ),
+  };
+  delete sdkConfig["responses_api_metadata"];
   delete sdkConfig["default_permissions"];
   const providerSettings = commandAuth ? providerConfig : (config ?? {});
   const effectiveFeatures = resolveCodexProfile(
@@ -603,6 +616,8 @@ async function startReadOnlyCodexThread(
   );
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
+    // A single table preserves literal keys that the SDK would split on dots.
+    configOverrides: [`responses_api_metadata=${inlineToml(requestMetadata)}`],
     codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
@@ -621,9 +636,6 @@ async function startReadOnlyCodexThread(
       ),
       allow_login_shell: false,
       project_doc_max_bytes: 0,
-      responses_api_metadata: {
-        codex_security_surface: runtimeOptions.surface,
-      },
       features: {
         api_key_cyber_access_programs:
           effectiveFeatures?.["api_key_cyber_access_programs"],
@@ -701,6 +713,7 @@ export async function runReadOnlyCodex(
   options: ReadOnlyCodexOptions,
   runtimeOptions: {
     surface: CodexSecuritySurface;
+    command: string;
     threadSource: ReadOnlyCodexThreadSource;
   },
 ): Promise<string> {

@@ -104,6 +104,7 @@ import {
   resolveCompletedScan,
   resolveWorkflowScan,
   type SavedScan,
+  type SavedScanDependencies,
 } from "./saved-scan.js";
 import {
   publishFindingsCsvToCloud,
@@ -199,6 +200,7 @@ import {
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
+  pluginMetadata,
   runWorkbench,
   sameFile,
   setCodexSecurityCredentialLogout,
@@ -215,6 +217,7 @@ import {
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
@@ -1030,12 +1033,28 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
+  coverageError?: string;
 }
+
+const incompleteScanEnvelopeSchema = z
+  .looseObject({
+    ok: z.literal(false),
+    error: z.object({
+      code: z.literal("SCAN_FAILED"),
+      message: z.string(),
+    }),
+    data: z.unknown().optional(),
+    meta: z.record(z.string(), z.unknown()),
+  })
+  .describe(
+    "Incomplete full-output JSON or JSONL with available scan results.",
+  );
 
 function scanOutputSchema(...codes: [string, ...string[]]) {
   return z
     .union([
       z.record(z.string(), z.unknown()),
+      incompleteScanEnvelopeSchema,
       z.object({
         status: z.literal("failed"),
         code: z.literal(codes),
@@ -1829,6 +1848,17 @@ export async function main(
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
   let scanStructuredError = false;
+  let incompleteScanOutput:
+    { format: "json" | "jsonl"; message: string } | undefined;
+  const recordIncompleteScanOutput = (outcome: ScanOutcome, format: string) => {
+    if (
+      outcome.coverageError !== undefined &&
+      (format === "json" || format === "jsonl") &&
+      argv.includes("--full-output")
+    ) {
+      incompleteScanOutput = { format, message: outcome.coverageError };
+    }
+  };
   let filteredScanFailure:
     { format: string; data: Record<string, unknown> } | undefined;
   let renderedScanFailure: string | undefined;
@@ -1843,7 +1873,10 @@ export async function main(
     code = "SCAN_FAILED",
   ): Record<string, unknown> | undefined => {
     exitCode = outcome.exitCode;
-    if (outcome.error === undefined) return outcome.data;
+    if (outcome.error === undefined) {
+      recordIncompleteScanOutput(outcome, format);
+      return outcome.data;
+    }
     if (format === "json" || format === "jsonl") {
       const message = errorMessage(outcome.error);
       if (!argv.includes("--full-output")) {
@@ -2258,6 +2291,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
+      hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -2323,6 +2357,7 @@ export async function main(
     })
     .command("rerun", {
       description: "Rerun a saved scan with its original configuration.",
+      hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -2800,10 +2835,8 @@ export async function main(
                 dependencies.environment,
               )
             : undefined;
-        if (options.to !== "linear") {
-          signalHandlers(dependencies, "add", onInterrupt, onTerminate);
-          observingSignals = true;
-        }
+        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
+        observingSignals = true;
         if (csvPath !== undefined) {
           const result = await (
             dependencies.publishFindingsCsvToCloud ?? publishFindingsCsvToCloud
@@ -2815,18 +2848,26 @@ export async function main(
           });
           return { ...result };
         }
+        const scanDependencies: SavedScanDependencies = {
+          currentDirectory: dependencies.currentDirectory,
+          runWorkbench: (args, input) =>
+            dependencies.runWorkbench(args, input, controller.signal),
+        };
         const selectedScans: { scanDir: string; scanId?: string }[] =
           directories.map((scanDir) => ({ scanDir }));
         for (const requestedId of new Set(options.scan)) {
           controller.signal.throwIfAborted();
-          const scan = await resolveCompletedScan(requestedId, dependencies);
+          const scan = await resolveCompletedScan(
+            requestedId,
+            scanDependencies,
+          );
           if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
             selectedScans.push(scan);
           }
         }
         if (options.workflowId !== undefined && selectedScans.length === 0) {
           selectedScans.push(
-            await resolveWorkflowScan(options.workflowId, dependencies),
+            await resolveWorkflowScan(options.workflowId, scanDependencies),
           );
         }
         let scanDir = selectedScans[0]?.scanDir;
@@ -2840,7 +2881,7 @@ export async function main(
               `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
             );
           }
-          const saved = await dependencies.runWorkbench([
+          const saved = await scanDependencies.runWorkbench([
             "list-scans",
             "--status",
             "complete",
@@ -2921,7 +2962,10 @@ export async function main(
               .replaceAll(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
               .replace(/\s+/gu, " ")
               .slice(-6)}`;
-            repositories.set(directory, repository);
+            repositories.set(
+              resolveCliPath(currentDirectory, directory),
+              repository,
+            );
             scansById.set(scanId, {
               scanId,
               scanDir: resolveCliPath(currentDirectory, directory),
@@ -2932,7 +2976,7 @@ export async function main(
                 findings,
                 age: publicationScanAge(timestamp, now),
                 scanId: shortScanId,
-                value: options.to === "cloud" ? scanId : directory,
+                value: scanId,
               },
             ];
           });
@@ -2996,12 +3040,16 @@ export async function main(
             );
             scanDir = selectedScans[0]!.scanDir;
           } else {
-            scanDir = await prompt.select(
+            controller.signal.throwIfAborted();
+            const selectedId = await prompt.select(
               "Which completed scan would you like to publish?",
               choices,
               { header },
+              controller.signal,
             );
-            selectedScans.push({ scanDir });
+            controller.signal.throwIfAborted();
+            selectedScans.push(scansById.get(selectedId)!);
+            scanDir = selectedScans[0]!.scanDir;
           }
           publicationRepository =
             repositories.get(scanDir) ?? basename(scanDir);
@@ -3110,8 +3158,6 @@ export async function main(
           publicationRepository,
         );
         presentation = progress;
-        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
-        observingSignals = true;
         if (!options.dryRun) {
           progress.start();
         }
@@ -3141,7 +3187,6 @@ export async function main(
         } finally {
           progress.stop();
         }
-        controller.signal.throwIfAborted();
         if (result.failed.length > 0) exitCode = 2;
         if ("warnings" in result && Array.isArray(result.warnings)) {
           for (const warning of result.warnings) {
@@ -3483,7 +3528,8 @@ export async function main(
         "Import existing findings without security analysis:\n" +
         "  codex-security scan import --csv findings.csv\n" +
         "  codex-security scan import --json findings.json\n" +
-        "Use ./import to scan a repository named import.",
+        "Use ./import to scan a repository named import.\n" +
+        "Incomplete JSON/JSONL --full-output returns ok: false and keeps scan results under data.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
@@ -3704,6 +3750,7 @@ export async function main(
           errorOutput.write(`${message}\n`);
           outcome = { exitCode: 2, error: message };
         }
+
         if (
           outcome.error === undefined &&
           !options.dryRun &&
@@ -4106,6 +4153,7 @@ export async function main(
               {
                 environment: dependencies.environment,
                 currentDirectory: dependencies.currentDirectory,
+                surface: "cli",
                 ...(defaultWorkbench
                   ? {}
                   : { runWorkbench: dependencies.runWorkbench }),
@@ -4317,6 +4365,7 @@ export async function main(
             }
           }
           const result = await runComponentScans({
+            surface: "cli",
             repository,
             outputDir: settings.outputDir,
             ...(options.auto ? { auto: true } : { components }),
@@ -5925,7 +5974,7 @@ export async function main(
       });
     renderedScanFailure = failureOutput.text();
   }
-  const frameworkOutput = frameworkCapture.text();
+  let frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
     if (policyFullOutput || patchStructuredError || scanStructuredError) {
@@ -5953,6 +6002,24 @@ export async function main(
             streamedLogs,
             frameworkOutput ? JSON.parse(frameworkOutput).cta : undefined,
           );
+    if (incompleteScanOutput !== undefined) {
+      const envelope: JsonValue = JSON.parse(frameworkOutput);
+      // Token-count output is a number, not a full-output envelope.
+      if (isJsonObject(envelope) && envelope["ok"] === true) {
+        frameworkOutput = `${JSON.stringify(
+          {
+            ...envelope,
+            ok: false,
+            error: {
+              code: "SCAN_FAILED",
+              message: incompleteScanOutput.message,
+            },
+          },
+          null,
+          incompleteScanOutput.format === "json" ? 2 : undefined,
+        )}\n`;
+      }
+    }
     await writeCliOutput(
       output,
       logOutput ??
@@ -7543,6 +7610,10 @@ async function runSkill(
     contents.push(contentsOrLiteral);
   }
   const plugin = await bundledPluginRoot();
+  const pluginVersion = await pluginMetadata(plugin).then(
+    (metadata) => metadata.version,
+    () => undefined,
+  );
   const verify = skill === "verify-fix";
   const assess = skill === "assess-patch-risk";
   const inputLabel = skill === "validation" || verify ? "Findings" : "Issues";
@@ -7644,8 +7715,22 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
-      "--config",
-      'responses_api_metadata.codex_security_surface="cli"',
+      ...Object.entries(
+        codexSecurityRequestMetadata(
+          "cli",
+          assess
+            ? "assess-patch-risk"
+            : verify
+              ? "verify-fix"
+              : patch
+                ? "patch"
+                : "validate",
+          pluginVersion,
+        ),
+      ).flatMap(([key, value]) => [
+        "--config",
+        `responses_api_metadata.${key}=${JSON.stringify(value)}`,
+      ]),
       ...(options.safetyIdentifier === undefined
         ? []
         : [
@@ -8863,7 +8948,15 @@ async function executeScan(
     showCost,
     deepScanStop,
   );
-  const completedScan = (exitCode: number): ScanOutcome => {
+  const coverageError = incomplete
+    ? threshold === undefined
+      ? `Scan coverage is ${result.coverage.completeness}; results may be incomplete.`
+      : `Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.`
+    : undefined;
+  const completedScan = (
+    exitCode: number,
+    error = coverageError,
+  ): ScanOutcome => {
     diagnostic("scan.completed", {
       coverage: result.coverage.completeness,
       findings: findings.length,
@@ -8876,20 +8969,20 @@ async function executeScan(
       exit_code: exitCode,
     });
     progress?.stopTimer();
-    return { exitCode, data: scanData };
+    return {
+      exitCode,
+      data: scanData,
+      ...(error === undefined ? {} : { coverageError: error }),
+    };
   };
   if (targetWarnings.length > 0) {
-    errorOutput.write(
-      "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
-    );
-    return completedScan(2);
+    const message =
+      "Scan target changed during execution; results do not represent the current checkout.";
+    errorOutput.write(`codex-security: ${message}\n`);
+    return completedScan(2, incomplete ? message : undefined);
   }
-  if (incomplete) {
-    errorOutput.write(
-      threshold === undefined
-        ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
-        : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
-    );
+  if (coverageError !== undefined) {
+    errorOutput.write(`codex-security: ${coverageError}\n`);
     return completedScan(2);
   }
 
