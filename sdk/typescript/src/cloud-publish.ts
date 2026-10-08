@@ -1,10 +1,9 @@
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
 import { parse as parseToml } from "smol-toml";
-import { loadContract } from "./contract.js";
+import { loadContract, sha256Text as sha256 } from "./contract.js";
 import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
 import type { Finding, ScanManifest } from "./models.js";
 import {
@@ -161,18 +160,11 @@ export async function publishFindingsCsvToCloud(
   return publishCloudPayload(scan, findings, dependencies);
 }
 
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
 async function publishCloudPayload(
   scan: ScanManifest["scan"],
   findings: Finding[],
   dependencies: CloudPublicationDependencies,
 ): Promise<CloudPublicationResult> {
-  if (findings.length === 0) {
-    throw new CodexSecurityError("There are no findings to publish.");
-  }
   dependencies.signal?.throwIfAborted();
   if (dependencies.dryRun) {
     return {
@@ -260,8 +252,9 @@ async function publishCloudPayload(
 }
 
 async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+  const configuredHome = environment["CODEX_HOME"];
   let home = expandHome(
-    environment["CODEX_HOME"]?.trim() || "~/.codex",
+    configuredHome?.trim() ? configuredHome : "~/.codex",
     environment,
   );
   let requireFileStorage = true;

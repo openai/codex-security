@@ -1,0 +1,48 @@
+name: published-install-smoke
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/published-install-smoke.yml
+      - sdk/typescript/scripts/smoke-published-package.mjs
+      - sdk/typescript/scripts/package-smoke-npm.mjs
+      - sdk/typescript/scripts/package-smoke-timeouts.mjs
+      - sdk/typescript/tests-ts/published-install-smoke.test.ts
+  schedule:
+    - cron: "43 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  install:
+    name: published latest / ${{ matrix.os }} / node-${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: ["22", "24", "26"]
+        include:
+          - os: macos-latest
+            node: "24"
+          - os: windows-latest
+            node: "24"
+    steps:
+      - name: Checkout smoke checks
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Install and start the published package
+        run: node sdk/typescript/scripts/smoke-published-package.mjs

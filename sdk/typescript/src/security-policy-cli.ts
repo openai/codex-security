@@ -1,8 +1,9 @@
+import { listenForAbort } from "./cli-signals.js";
 import type { CodexSecurity, ScanAuthMode } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { formatScanCost } from "./cost-model.js";
-import { safeErrorMessage } from "./errors.js";
+import { errorMessage } from "./errors.js";
 import {
   formatSecurityPolicyText as display,
   type SecurityPolicyOptions,
@@ -73,30 +74,11 @@ export async function runPolicyCommand(
       errorOutput.write(`${message}\n`);
     } catch {}
   };
-  let firstSignalAt = 0;
-  const signalListener = (signal: SignalName) => () => {
-    if (controller.signal.aborted) {
-      // Match scan's handling of duplicate initial signals from launchers.
-      if (
-        controller.signal.reason === signal &&
-        dependencies.now() - firstSignalAt < 500
-      )
-        return;
-      removeSignalListeners();
-      dependencies.forceExit(signal);
-      return;
-    }
-    firstSignalAt = dependencies.now();
-    controller.abort(signal);
-  };
-  const interrupt = signalListener("SIGINT");
-  const terminate = signalListener("SIGTERM");
-  const removeSignalListeners = () => {
-    dependencies.removeSignalListener("SIGINT", interrupt);
-    dependencies.removeSignalListener("SIGTERM", terminate);
-  };
-  dependencies.addSignalListener("SIGINT", interrupt);
-  dependencies.addSignalListener("SIGTERM", terminate);
+  const removeSignalListeners = listenForAbort(
+    dependencies,
+    controller,
+    (signal) => dependencies.forceExit(signal),
+  );
   try {
     const auth =
       interactive && !options.dryRun
@@ -132,7 +114,7 @@ export async function runPolicyCommand(
       },
       onStage: (stage) => write(STAGES[stage]),
       onWarning: (warning) =>
-        write(`codex-security: ${display(safeErrorMessage(warning))}`),
+        write(`codex-security: ${display(errorMessage(warning))}`),
       ...(interactive
         ? {
             answerQuestions: async (
@@ -171,7 +153,7 @@ export async function runPolicyCommand(
         controller.signal.throwIfAborted();
         diff = "Preview unavailable. Review the saved draft.";
         write(
-          `codex-security: Could not preview the policy: ${display(safeErrorMessage(error))}`,
+          `codex-security: Could not preview the policy: ${display(errorMessage(error))}`,
         );
       }
       const preview = [
@@ -191,7 +173,8 @@ export async function runPolicyCommand(
     if (humanOutput) {
       write(`\nDraft: ${display(draft.draftPath)}`);
       write(`Architecture: ${display(draft.specificationPath)}`);
-      write(`Threat model: ${display(draft.threatModelPath)}`);
+      if (draft.threatModelPath !== null)
+        write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
           "No repository files changed. Review the saved SECURITY.md before copying it into the repository.",
@@ -213,6 +196,7 @@ export async function runPolicyCommand(
         draftPath: draft.draftPath,
         specificationPath: draft.specificationPath,
         threatModelPath: draft.threatModelPath,
+        threatModel: draft.threatModel,
         customPlugin: draft.customPlugin,
         reviewNotes: draft.reviewNotes,
         cost,
@@ -230,7 +214,7 @@ export async function runPolicyCommand(
         ? "Policy generation canceled by Ctrl-C."
         : signal === "SIGTERM"
           ? "Policy generation terminated by SIGTERM."
-          : display(safeErrorMessage(error));
+          : display(errorMessage(error));
     write(`codex-security: ${message}`);
     if (outputDir !== undefined)
       write(`Saved artifacts: ${display(outputDir)}`);
@@ -244,7 +228,7 @@ export async function runPolicyCommand(
       await security?.close();
     } catch (error) {
       write(
-        `codex-security: Could not clean up the policy runtime: ${display(safeErrorMessage(error))}`,
+        `codex-security: Could not clean up the policy runtime: ${display(errorMessage(error))}`,
       );
     }
   }

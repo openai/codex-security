@@ -8,9 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from workbench_test_support import (
-    create_saved_workspace,
-    run_workbench,
-    start_delivered_scan,
+    cancel_remediation_request,
+    claim_remediation_resend,
+    mark_remediation_delivered,
+    request_remediation,
+    request_remediation_action,
+    scan_command,
+    set_remediation,
+    set_triage,
+    start_saved_scan,
     write_completed_contract,
 )
 
@@ -24,20 +30,8 @@ def update_remediation(
     state: str,
     *extra: str,
 ) -> dict[str, Any]:
-    result = run_workbench(
-        state_dir,
-        "set-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-        "--expected-version",
-        str(expected_version),
-        "--state",
-        state,
-        *extra,
+    result = set_remediation(
+        state_dir, occurrence_id, request_id, action_token, str(expected_version), state, *extra
     )
     return result["scan"]["findings"][0]["remediationState"]
 
@@ -48,42 +42,15 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     target.mkdir()
     source = target / "source.txt"
     source.write_text("vulnerable\n")
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
 
     request_id = str(uuid.uuid4())
     action_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-    )
-    run_workbench(
-        state_dir,
-        "mark-finding-remediation-delivered",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-    )
+    request_remediation(state_dir, occurrence_id, request_id, action_token)
+    mark_remediation_delivered(state_dir, occurrence_id, request_id, action_token)
     failed = update_remediation(
         state_dir,
         occurrence_id,
@@ -98,12 +65,9 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     assert failed["actionClaimToken"] is None
     assert failed["actionDeliveredAt"] is None
 
-    closed = run_workbench(
+    closed = set_triage(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         occurrence_id,
-        "--status",
         "closed",
         "--close-reason",
         "wont_fix",
@@ -111,89 +75,33 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
         "Closing is allowed after the remediation worker has failed.",
     )["scan"]
     assert closed["findings"][0]["triage"]["status"] == "closed"
-    run_workbench(
-        state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence_id,
-        "--status",
-        "open",
-    )
+    set_triage(state_dir, occurrence_id, "open")
 
     resend_token = str(uuid.uuid4())
-    resent = run_workbench(
-        state_dir,
-        "claim-finding-remediation-resend",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        resend_token,
-    )["scan"]
+    resent = claim_remediation_resend(state_dir, occurrence_id, request_id, resend_token)["scan"]
     assert resent["findings"][0]["remediationState"]["actionClaimToken"] == resend_token
-    delivered = run_workbench(
-        state_dir,
-        "mark-finding-remediation-delivered",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        resend_token,
-    )["scan"]
+    delivered = mark_remediation_delivered(state_dir, occurrence_id, request_id, resend_token)[
+        "scan"
+    ]
     assert delivered["findings"][0]["remediationState"]["actionDeliveredAt"]
-    canceled = run_workbench(
-        state_dir,
-        "cancel-finding-remediation-request",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        resend_token,
-    )["scan"]["findings"][0]["remediationState"]
+    canceled = cancel_remediation_request(state_dir, occurrence_id, request_id, resend_token)[
+        "scan"
+    ]["findings"][0]["remediationState"]
     assert canceled["state"] == "failed"
     assert canceled["pendingAction"] == "generate"
     assert canceled["actionClaimToken"] is None
-    replayed = run_workbench(
-        state_dir,
-        "cancel-finding-remediation-request",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        resend_token,
-    )["scan"]["findings"][0]["remediationState"]
+    replayed = cancel_remediation_request(state_dir, occurrence_id, request_id, resend_token)[
+        "scan"
+    ]["findings"][0]["remediationState"]
     assert replayed == canceled
 
     resend_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "claim-finding-remediation-resend",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        resend_token,
-    )
+    claim_remediation_resend(state_dir, occurrence_id, request_id, resend_token)
 
     failed_request_id = request_id
     request_id = str(uuid.uuid4())
     action_token = str(uuid.uuid4())
-    blocked = run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-        check=False,
-    )
+    blocked = request_remediation(state_dir, occurrence_id, request_id, action_token, check=False)
     assert blocked["returncode"] != 0
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
@@ -204,16 +112,9 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
             """,
             ("2000-01-01T00:00:00Z", failed_request_id),
         )
-    regenerated = run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-    )["scan"]["findings"][0]["remediationState"]
+    regenerated = request_remediation(state_dir, occurrence_id, request_id, action_token)["scan"][
+        "findings"
+    ][0]["remediationState"]
     assert regenerated["state"] == "requested"
 
     patch_path = scan_dir / "remediation.patch"
@@ -240,20 +141,7 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     )
 
     apply_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--expected-version",
-        "2",
-        "--action",
-        "apply",
-        "--action-token",
-        apply_token,
-    )
+    request_remediation_action(state_dir, occurrence_id, request_id, "2", "apply", apply_token)
     subprocess.run(["git", "apply", "--no-index", str(patch_path)], cwd=target, check=True)
     failed = update_remediation(
         state_dir,
@@ -267,16 +155,7 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     )
     assert failed["pendingAction"] == "apply"
     apply_retry_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "claim-finding-remediation-resend",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        apply_retry_token,
-    )
+    claim_remediation_resend(state_dir, occurrence_id, request_id, apply_retry_token)
     applied = update_remediation(
         state_dir,
         occurrence_id,
@@ -291,30 +170,8 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     assert applied["summary"] is None
 
     verify_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--expected-version",
-        "5",
-        "--action",
-        "verify",
-        "--action-token",
-        verify_token,
-    )
-    run_workbench(
-        state_dir,
-        "mark-finding-remediation-delivered",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        verify_token,
-    )
+    request_remediation_action(state_dir, occurrence_id, request_id, "5", "verify", verify_token)
+    mark_remediation_delivered(state_dir, occurrence_id, request_id, verify_token)
     update_remediation(
         state_dir,
         occurrence_id,
@@ -339,25 +196,9 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     assert failed["actionClaimToken"] is None
     assert failed["actionDeliveredAt"] is None
     verify_retry_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "claim-finding-remediation-resend",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        verify_retry_token,
-    )
-    delivered = run_workbench(
-        state_dir,
-        "mark-finding-remediation-delivered",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        verify_retry_token,
+    claim_remediation_resend(state_dir, occurrence_id, request_id, verify_retry_token)
+    delivered = mark_remediation_delivered(
+        state_dir, occurrence_id, request_id, verify_retry_token
     )["scan"]["findings"][0]["remediationState"]
     assert delivered["actionDeliveredAt"]
     verified = update_remediation(

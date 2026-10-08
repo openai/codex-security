@@ -167,6 +167,28 @@
         }
       }
     },
+    "resolvedDeferred": {
+      "description": "Completed generic review tasks, with their saved IDs and completion reasons.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
     "openQuestions": {
       "type": "array",
       "items": {

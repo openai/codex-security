@@ -138,7 +138,7 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 
 | Inventory strategy | Meaning                                                   |
 | ------------------ | --------------------------------------------------------- |
-| `repository`       | Repository-wide tracked source-like file inventory        |
+| `repository`       | Repository-wide file inventory                            |
 | `scoped_path`      | Repository inventory constrained to requested paths       |
 | `diff`             | Files selected from the reviewed Git change set           |
 | `directory`        | Deterministic non-Git directory inventory                 |
@@ -169,7 +169,7 @@ The three canonical JSON files are also the only semantic inputs to final report
 Record report-specific semantics without duplicating data already represented elsewhere:
 
 - `scan.scope`: optional narrative `summary`, reviewed artifact names, runtime/test status, validation mode, scan context, and limitations. Include/exclude paths remain the authoritative scope boundaries.
-- `scan.threatModel`: concise summary plus assets, trust boundaries, attacker capabilities, security objectives, and assumptions.
+- `scan.threatModel`: structured summary plus assets, trust boundaries, attacker capabilities, security objectives, and assumptions, or `{ "format": "markdown", "content": "<exact model text>" }` for a retained document. Optional model `scope` and `origin` identify the modeled paths and source separately from the scan's scope. The host derives `<scan_dir>/threatmodel.md` from this content; it is an exportable projection, not an independently authored input.
 - finding `validation`: validation method, direct evidence, counterevidence, and the conclusion used by the report.
 - finding `codeEvidence`: stable, exact source snippets with labels, locations, language, and explanations; `rootCause`, `validation`, and `attackPath` select the snippets they need through `evidenceRefs`.
 - finding `rootCause`: the violated invariant and the code that breaks it. Do not substitute a path/line restatement for the explanation.

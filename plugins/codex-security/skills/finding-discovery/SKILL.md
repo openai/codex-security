@@ -29,11 +29,12 @@ Read `../../references/security-guidance.md` and resolve the applicable policy b
 When a running diff scan already supplies its file inventory through `list_codex_security_review_items`, review that inventory directly and record all candidates once with `record_codex_security_discovery_candidates`. Do not generate ranked worklists, per-finding ledgers, discovery receipts, or discovery reports. Skip the legacy workflow and artifact requirements below.
 
 ### Code Diff Workflow
+
 For a targeted code diff without an existing compact inventory:
 
 - Read `../security-scan/references/scan-artifacts-and-ledger.md`.
-- Generate `rank_input.jsonl` deterministically from changed source-like files with `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode revisions --head <head> --out <discovery_dir>/rank_input.jsonl` for PR, commit, and branch diffs, or `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode local-patch --out <discovery_dir>/rank_input.jsonl` for a local patch.
-- Copy every diff row into `deep_review_input.jsonl` with `<python_command> <plugin_dir>/scripts/generate_rank_input.py copy-deep-review-input --rank-input <discovery_dir>/rank_input.jsonl --out <discovery_dir>/deep_review_input.jsonl`. Diff scans do not rank or drop changed files before deep review.
+- Generate `rank_input.jsonl` deterministically from changed text files regardless of filename, extension, or directory, with `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode revisions --head <head> --out <discovery_dir>/rank_input.jsonl` for PR, commit, and branch diffs, or `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode local-patch --out <discovery_dir>/rank_input.jsonl` for a local patch.
+- Copy every diff row into `deep_review_input.jsonl` with `<plugin_dir>/scripts/launch_codex_security_mcp --helper copy-deep-review-input --rank-input <discovery_dir>/rank_input.jsonl --out <discovery_dir>/deep_review_input.jsonl`. On Windows, use the [PowerShell copy command](../security-scan/references/scan-artifacts-and-ledger.md#windows-worklist-copy) to preserve literal paths. Diff scans do not rank or drop changed files before deep review.
 - Add directly supporting files required to understand the changed security behavior only when repository evidence shows they are needed. Do not use them to broaden into unrelated repository-wide enumeration.
 - Deep-review every file in `deep_review_input.jsonl` using the shared scoped file-review rules.
 - Stay anchored to the changed code and directly supporting files. Unchanged siblings are context or negative controls unless the diff newly reaches them, weakens their shared control, or changes a shared sink/helper they depend on.
@@ -144,7 +145,6 @@ Otherwise, for each candidate include:
 - enough evidence that a later reviewer can understand why the candidate is technically plausible before validation
 
 For legacy diff-scoped discovery without a compact inventory, when candidates are emitted, create the per-finding directory from `../../references/scan-artifacts.md` and append one discovery receipt to that finding's candidate ledger. The ledger row should identify the candidate, scan scope, discovery status, affected locations, and the discovery artifact or evidence that produced it.
-
 
 ## Hard Rules
 

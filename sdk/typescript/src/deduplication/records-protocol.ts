@@ -55,10 +55,8 @@ export async function runRecordsProtocol(
   let pending:
     | { id: string; resolve(value: unknown): void; reject(error: Error): void }
     | undefined;
-  let complete!: (code: number) => void;
-  const completion = new Promise<number>((resolve) => {
-    complete = resolve;
-  });
+  const { promise: completion, resolve: complete } =
+    Promise.withResolvers<number>();
   const lines = createInterface({
     input,
     crlfDelay: Infinity,
