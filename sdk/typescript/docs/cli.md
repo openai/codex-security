@@ -814,6 +814,8 @@ retains each record in `source_data`, uses reported severity, and leaves unknown
 branch/revision and repository locations empty. Container paths are retained as
 vendor evidence rather than interpreted as source-code locations. It does not
 fetch from Wiz, assess findings, or change vendor or Cloud triage decisions.
+Findings from external network scans are excluded from this package vulnerability
+mapping.
 
 Requests contain at most 100 findings and respect the Cloud payload limits.
 Before uploading, the publisher saves request IDs and bodies privately under

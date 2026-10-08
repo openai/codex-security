@@ -191,7 +191,10 @@ async function fixture(records: unknown = [normalized()]) {
           };
           for (const item of request.items) {
             const previous = reports.get(item.source_finding_id);
-            if (state.finalError) {
+            const scopeConflict =
+              previous !== undefined &&
+              previous.environment_id !== request.repository.environment_id;
+            if (state.finalError || scopeConflict) {
               receipt.counts.error = (receipt.counts.error ?? 0) + 1;
               receipt.results.push({
                 client_id: item.client_id,
@@ -201,8 +204,10 @@ async function fixture(records: unknown = [normalized()]) {
                 canonical_finding_id: null,
                 version: null,
                 error: {
-                  code: "version_conflict",
-                  message: "Reload current evidence",
+                  code: scopeConflict ? "scope_conflict" : "version_conflict",
+                  message: scopeConflict
+                    ? "Source report belongs to a different Cloud environment"
+                    : "Reload current evidence",
                 },
               });
               continue;
@@ -337,9 +342,142 @@ test("Wiz occurrence mapping preserves original evidence without inventing repos
       source_updated_at: null,
       source_data: record,
       image_digests: ["sha256:example"],
+      advisory_ids: [record.name],
       packages: [{ name: "example-lib", ecosystem: "legacy-manager" }],
     },
   });
+});
+
+test("Wiz API nodes preserve artifact ecosystems and distinguish container digests from VM image IDs", async () => {
+  const finding = {
+    name: "Vendor display advisory",
+    vulnerabilityExternalId: "CVE-2099-0001",
+    detailedName: "example-package",
+    version: "1.2.0",
+    vendorSeverity: "HIGH",
+  };
+  const records = [
+    {
+      ...finding,
+      id: "container-package",
+      artifactType: { osPackageManager: "DPKG", codeLibraryLanguage: null },
+      codeLibraryLanguage: "JAVA",
+      vulnerableAsset: {
+        id: "container-image",
+        type: "CONTAINER_IMAGE",
+        imageId: `sha256:${"a".repeat(64)}`,
+      },
+    },
+    {
+      ...finding,
+      id: "vm-library",
+      artifactType: { osPackageManager: null, codeLibraryLanguage: "PYTHON" },
+      codeLibraryLanguage: "JAVA",
+      vulnerableAsset: {
+        id: "virtual-machine",
+        type: "VIRTUAL_MACHINE",
+        imageId: "ami-synthetic",
+        containerImageId: "ami-synthetic-alias",
+      },
+    },
+    {
+      ...finding,
+      id: "container-alias",
+      vulnerableAsset: {
+        id: "aliased-image",
+        type: "CONTAINER_IMAGE",
+        containerImageId: `sha256:${"d".repeat(64)}`,
+      },
+    },
+    {
+      ...finding,
+      id: "running-container",
+      vulnerableAsset: {
+        id: "running-image",
+        type: "CONTAINER",
+        ImageExternalId: `sha256:${"e".repeat(64)}`,
+      },
+    },
+    {
+      ...finding,
+      id: "explicit-metadata",
+      packageManager: "reported-manager",
+      imageDigest: `sha256:${"b".repeat(64)}`,
+      artifactType: { osPackageManager: "DPKG" },
+      codeLibraryLanguage: "JAVA",
+      vulnerableAsset: {
+        id: "explicit-container",
+        type: "CONTAINER_IMAGE",
+        imageId: `sha256:${"c".repeat(64)}`,
+      },
+    },
+    {
+      ...finding,
+      id: "legacy-library",
+      codeLibraryLanguage: "JAVASCRIPT",
+      vulnerableAsset: { id: "legacy-image" },
+    },
+  ];
+  const f = await fixture({
+    data: {
+      vulnerabilityFindings: {
+        nodes: records,
+        pageInfo: { hasNextPage: false },
+      },
+    },
+  });
+  const parsed = await readVendorFindings(f.file);
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.evidence.title).toContain(finding.name);
+  expect(parsed.findings.map(({ evidence }) => evidence.advisory_ids)).toEqual(
+    records.map(() => [finding.vulnerabilityExternalId]),
+  );
+  expect(
+    parsed.findings.map(({ evidence }) => ({
+      ecosystem: evidence.packages?.[0]?.ecosystem,
+      digests: evidence.image_digests,
+    })),
+  ).toEqual([
+    { ecosystem: "DPKG", digests: [`sha256:${"a".repeat(64)}`] },
+    { ecosystem: "PYTHON", digests: [] },
+    { ecosystem: null, digests: [`sha256:${"d".repeat(64)}`] },
+    { ecosystem: null, digests: [`sha256:${"e".repeat(64)}`] },
+    { ecosystem: "reported-manager", digests: [`sha256:${"b".repeat(64)}`] },
+    { ecosystem: "JAVASCRIPT", digests: [] },
+  ]);
+  expect(parsed.findings.map(({ evidence }) => evidence.source_data)).toEqual(
+    records,
+  );
+});
+
+test("Wiz network-scan findings are excluded without requiring a detection method on package exports", async () => {
+  const supported = {
+    id: "package-occurrence",
+    name: "CVE-2099-0001",
+    detailedName: "example-package",
+    vendorSeverity: "HIGH",
+    vulnerableAsset: { id: "synthetic-asset" },
+  };
+  const network = {
+    ...supported,
+    id: "network-occurrence",
+    name: "CWE-89",
+    detailedName: "GET /synthetic-endpoint",
+    detectionMethod: "EXTERNAL_NETWORK_SCAN",
+  };
+  const f = await fixture([supported, network]);
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  expect(
+    prepared.preview.findings.map((finding) => finding.source_finding_id),
+  ).toEqual([supported.id]);
+  expect(prepared.preview.excluded).toEqual([
+    expect.objectContaining({
+      source_finding_id: network.id,
+      reason: expect.stringContaining("external network"),
+    }),
+  ]);
+  expect((await prepared.publish()).counts.created).toBe(1);
+  expect(f.reports.has(network.id)).toBe(false);
 });
 
 test("unsupported records are visible exclusions; duplicate identities and unfinished pages stop publication", async () => {
@@ -442,6 +580,9 @@ test("Cloud validation preserves allowed evidence boundaries and raw vendor stri
     "https://[example.test]/finding",
     "https://prefix[::1]/finding",
     "https://[::1]suffix/finding",
+    "https://[::1%]/finding",
+    "https://[::1%a%b]/finding",
+    "https://example.com／path",
     "https://example.test\uFF1A443/finding",
     "https://exam\u2100ple.test/finding",
   ]) {
@@ -454,6 +595,8 @@ test("Cloud validation preserves allowed evidence boundaries and raw vendor stri
     "https://[fe80::1%25eth0]/finding",
     "https://[fe80::1%zone!]/finding",
     "https://[v1.example]/finding",
+    "https://[vF.example]:service",
+    "https://[fe80::1%eth0]/finding",
     "https://[::1]:non-numeric/finding",
     "https://bücher.example/finding",
   ]) {
@@ -1497,6 +1640,10 @@ test("mixed environments preserve input order and are shown before confirmation"
     ["new-b", 0],
     ["existing-c", 1],
   ]);
+  f.state.throttle = true;
+  await expect(prepared.publish()).rejects.toThrow("Retry-After");
+  f.state.throttle = false;
+  f.state.environmentId = "changed-default";
   const cli = createCliTest(main);
   expect(
     await cli.runCli(f.command, {
@@ -1507,12 +1654,19 @@ test("mixed environments preserve input order and are shown before confirmation"
           expect(cli.stderr.text()).toContain(
             "Environment: environment-example, replacement-environment",
           );
-          expect(f.posts).toHaveLength(1);
+          expect(cli.stderr.text()).not.toContain("changed-default");
+          expect(f.posts).toHaveLength(2);
           return true;
         },
       },
     }),
   ).toBe(0);
+  expect(
+    JSON.parse(cli.stdout.text()).receipts.map(
+      (receipt: FindingImportReceipt) => receipt.id,
+    ),
+  ).toEqual(prepared.preview.requests.map((request) => request.request_id));
+  expect(f.posts[2]).toBe(f.posts[1]);
   expect(JSON.parse(cli.stdout.text()).counts).toEqual({
     created: 1,
     updated: 2,
@@ -1645,6 +1799,13 @@ test.each([false, true])(
       if (cancel) {
         await expect(completion).rejects.toThrow("Synthetic cancellation");
         expect(f.posts).toHaveLength(0);
+        const retry = await prepareExternalPublication(f.file, options, f.deps);
+        expect(retry.preview.resumed).toBe(true);
+        expect(retry.preview.requests[0]!.request_id).toBe(
+          prepared.preview.requests[0]!.request_id,
+        );
+        expect((await retry.publish()).counts.created).toBe(1);
+        expect(f.posts[0]).toBe(JSON.stringify(prepared.preview.requests[0]));
       } else {
         expect((await completion).counts.created).toBe(1);
         expect(f.posts).toHaveLength(1);

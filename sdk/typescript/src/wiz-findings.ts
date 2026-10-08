@@ -39,6 +39,10 @@ function sourceFindingId(value: unknown): string {
 
 /** Keep a Wiz vulnerability occurrence intact; advisory names are not identities. */
 function wizFinding(record: Record<string, unknown>): VendorFinding {
+  if (record["detectionMethod"] === "EXTERNAL_NETWORK_SCAN")
+    throw new Error(
+      "Wiz external network findings are not supported by the package vulnerability mapping.",
+    );
   const id = sourceFindingId(record["id"]);
   const name = text(record["name"]);
   const packageName = text(record["detailedName"]);
@@ -51,11 +55,17 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
       "Expected a Wiz package vulnerability finding with name, detailedName, and vulnerableAsset.id. Other finding classes need a separate mapping.",
     );
   }
+  const assetType = text(asset?.["type"]);
   const digest =
-    text(asset?.["imageId"]) ??
-    text(asset?.["ImageExternalId"]) ??
     text(asset?.["imageDigest"]) ??
-    text(record["imageDigest"]);
+    text(record["imageDigest"]) ??
+    (assetType === null ||
+    assetType === "CONTAINER_IMAGE" ||
+    assetType === "CONTAINER"
+      ? (text(asset?.["imageId"]) ??
+        text(asset?.["containerImageId"]) ??
+        text(asset?.["ImageExternalId"]))
+      : null);
   const updated = text(record["updatedAt"]);
   const updatedSeconds = updated ? Date.parse(updated) / 1000 : null;
   if (
@@ -73,15 +83,16 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
     description: text(record["description"]),
     severity: severity?.toLowerCase(),
     url: text(record["portalUrl"]),
-    advisory_ids: name ? [name] : [],
+    advisory_ids: [text(record["vulnerabilityExternalId"]) ?? name],
     packages: packageName
       ? [
           {
             name: packageName,
             ecosystem:
+              text(record["packageManager"]) ??
               text(artifact?.["osPackageManager"]) ??
               text(artifact?.["codeLibraryLanguage"]) ??
-              text(record["packageManager"]),
+              text(record["codeLibraryLanguage"]),
             installed_version: version,
             manifest_path: null,
             fixed_versions: text(record["fixedVersion"])
