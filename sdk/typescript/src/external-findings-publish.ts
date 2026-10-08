@@ -405,6 +405,7 @@ export async function prepareExternalPublication(
   const submission: SavedSubmission = {
     accountId: credentials.account_id,
     requests,
+    receipts: saved?.receipts,
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,
@@ -430,6 +431,7 @@ export async function prepareExternalPublication(
         }
         let receipts: FindingImportReceipt[] = [];
         try {
+          receipts = (submission.receipts ?? []).map(validateImportReceipt);
           await link(pendingTemporary, pendingPath);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -442,13 +444,13 @@ export async function prepareExternalPublication(
             );
           }
           receipts = (other.receipts ?? []).map(validateImportReceipt);
-          if (receipts.length > requests.length)
-            throw new CodexSecurityError(
-              "Saved publication has more receipts than requests.",
-            );
         } finally {
           await rm(pendingTemporary, { force: true });
         }
+        if (receipts.length > requests.length)
+          throw new CodexSecurityError(
+            "Saved publication has more receipts than requests.",
+          );
         try {
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validateImportReceipt(
