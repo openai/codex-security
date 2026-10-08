@@ -51,13 +51,21 @@ for (const formatting of [
   "escaped",
   "signed-zero",
   "large-exponent",
+  "fraction",
+  "subnormal",
 ]) {
   test(`unchanged service upserts retain local cache and document serialization: ${formatting}`, (t) => {
     const database = open(t);
     const original = entry("shared-finding");
     original.finding.extensions = {
-      score: 0,
-      opaqueId: 9007199254740993n,
+      score:
+        formatting === "fraction"
+          ? 0.125
+          : formatting === "subnormal"
+            ? 5e-324
+            : 0,
+      opaqueId:
+        formatting === "large-exponent" ? 9007199254740992n : 9007199254740993n,
     };
     storeFindings(database, [original], "created");
     const body =
@@ -71,11 +79,11 @@ for (const formatting of [
         formatting === "signed-zero" ? '"score": -0.0' : '"score": 0',
       )
       .replace(
-        '"opaqueId": 9007199254740993',
-        formatting === "large-exponent"
-          ? '"opaqueId": 9.0071992547409930e+15'
-          : '"opaqueId": 9007199254740993',
-      );
+        '"opaqueId": 9007199254740992',
+        '"opaqueId": 9.0071992547409920e+15',
+      )
+      .replace('"score": 0.125', '"score": 1.25e-1')
+      .replace('"score": 5e-324', '"score": 50e-325');
     database
       .prepare("UPDATE findings SET details_json = ? WHERE id = ?")
       .run(stored, original.finding.findingId);
@@ -149,6 +157,13 @@ for (const [name, before, after, storedNumber] of [
     "9007199254740992.1",
   ],
   ["underflow", 0, 0, "1e-1000"],
+  [
+    "unreadable exponent",
+    9007199254740993n,
+    9007199254740993n,
+    "9.0071992547409930e+15",
+  ],
+  ["unreadable overflow", 10n ** 400n, 10n ** 400n, "1e400"],
 ] as const) {
   test(`changed ${name} invalidates the local finding cache`, (t) => {
     const database = open(t);
@@ -172,6 +187,14 @@ for (const [name, before, after, storedNumber] of [
       .run(original.finding.findingId);
     original.finding.extensions = { value: after };
     storeFindings(database, [original], "updated");
+    assert.deepEqual(
+      listStoredFindings(database, { limit: 10, offset: 0 }).findings[0],
+      original.finding,
+    );
+    assert.deepEqual(
+      findPotentialDuplicates(database, original.finding.findingId).finding,
+      original.finding,
+    );
     assert.equal(
       database
         .prepare("SELECT COUNT(*) AS count FROM local_finding_embeddings")
