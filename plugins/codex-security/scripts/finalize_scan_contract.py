@@ -1798,29 +1798,35 @@ def _schema_type_matches(value: Any, expected: str) -> bool:
 
 
 def _schema_values_equal(left: Any, right: Any) -> bool:
-    if (
-        isinstance(left, (int, float))
-        and not isinstance(left, bool)
-        and isinstance(right, (int, float))
-        and not isinstance(right, bool)
-    ):
-        if (isinstance(left, float) and not math.isfinite(left)) or (
-            isinstance(right, float) and not math.isfinite(right)
+    pending = [(left, right)]
+    while pending:
+        left, right = pending.pop()
+        if (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
         ):
-            return left == right
-        return json_number_key(left) == json_number_key(right)
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, dict):
-        return left.keys() == right.keys() and all(
-            _schema_values_equal(left[key], right[key]) for key in left
-        )
-    if isinstance(left, list):
-        return len(left) == len(right) and all(
-            _schema_values_equal(left_item, right_item)
-            for left_item, right_item in zip(left, right, strict=True)
-        )
-    return left == right
+            if (isinstance(left, float) and not math.isfinite(left)) or (
+                isinstance(right, float) and not math.isfinite(right)
+            ):
+                if left != right:
+                    return False
+            elif json_number_key(left) != json_number_key(right):
+                return False
+        elif type(left) is not type(right):
+            return False
+        elif isinstance(left, dict):
+            if left.keys() != right.keys():
+                return False
+            pending.extend((left[key], right[key]) for key in left)
+        elif isinstance(left, list):
+            if len(left) != len(right):
+                return False
+            pending.extend(zip(left, right, strict=True))
+        elif left != right:
+            return False
+    return True
 
 
 def _resolve_schema_reference(
