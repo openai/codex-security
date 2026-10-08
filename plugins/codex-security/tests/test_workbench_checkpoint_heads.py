@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import workbench_test_support
 from test_workbench_standard_deep_results import (
     accepted_standard_worker,
     committed_standard_reducer,
@@ -1906,11 +1907,14 @@ def test_tied_parent_findings_keep_exact_history_order(
     assert checkpoint.read_bytes() == raw
 
 
+@pytest.mark.parametrize("scan_seed", [1000, 2000])
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions", "deferred"])
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("initial_third", [False, True])
 @pytest.mark.parametrize(
     "tokens",
     [
+        ("1", "2", "2.0", "2e0"),
         ("1", "2", "2.00000000000000001", "2.00000000000000002"),
         (
             "1.00000000000000001",
@@ -1921,8 +1925,26 @@ def test_tied_parent_findings_keep_exact_history_order(
     ],
 )
 def test_exact_surface_collisions_keep_published_ids_when_sources_grow(
-    tmp_path: Path, reverse: bool, initial_third: bool, tokens: tuple[str, ...]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scan_seed: int,
+    field: str,
+    reverse: bool,
+    initial_third: bool,
+    tokens: tuple[str, ...],
 ) -> None:
+    # Stable scan UUIDs exercise opposite checkpoint-hash orders through the real CLI.
+    launcher = tmp_path / "workbench.py"
+    launcher.write_text(
+        "import itertools, sys, uuid\n"
+        f"sys.path.insert(0, {str(workbench_test_support.SCRIPT.parent)!r})\n"
+        "import workbench_db\n"
+        f"counter = itertools.count({scan_seed})\n"
+        "if sys.argv[1] == 'begin-deep-scan':\n"
+        "    uuid.uuid4 = lambda: uuid.UUID(int=next(counter))\n"
+        "raise SystemExit(workbench_db.main())\n"
+    )
+    monkeypatch.setattr(workbench_test_support, "SCRIPT", launcher)
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     row = {
@@ -1932,7 +1954,16 @@ def test_exact_surface_collisions_keep_published_ids_when_sources_grow(
         "receiptRefs": [],
         "extensions": {"observation": "RAW_NUMBER"},
     }
-    template = saved_draft(scan_id, surfaces=[row], complete=False)
+    if field != "surfaces":
+        row = {
+            "id": "review",
+            "reason": "Synthetic pending review.",
+            "extensions": row["extensions"],
+        }
+    if field == "explicitExclusions":
+        row["pattern"] = "vendor/**"
+    template = saved_draft(scan_id, complete=False)
+    template["coverage"][field] = [row]
 
     def source(token: str) -> bytes:
         return json.dumps(template).replace('"RAW_NUMBER"', token).encode()
@@ -1958,13 +1989,11 @@ def test_exact_surface_collisions_keep_published_ids_when_sources_grow(
 
     def published():
         document = json.loads(coverage_path.read_text(), parse_float=Decimal)
-        return {
-            Decimal(item["extensions"]["observation"]): item["id"] for item in document["surfaces"]
-        }
+        return [item for item in document[field] if "extensions" in item]
 
     before = published()
-    assert len(before) == (3 if initial_third else 2)
-    assert len(set(before.values())) == len(before)
+    assert len(before) == len({Decimal(token) for token in tokens[: 3 if initial_third else 2]})
+    assert len({item["id"] for item in before}) == len(before)
     directory = result.parent / "checkpoints"
     directory.mkdir(exist_ok=True)
     for token in (tokens[2], tokens[2] + "0", tokens[3]):
@@ -1976,8 +2005,191 @@ def test_exact_surface_collisions_keep_published_ids_when_sources_grow(
             state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
         )
         after = published()
-        assert set(after) == set(before) | {Decimal(token)}
-        assert all(after[value] == identity for value, identity in before.items())
-        assert len(set(after.values())) == len(after)
+        expected = {Decimal(item["extensions"]["observation"]) for item in before} | {
+            Decimal(token)
+        }
+        assert {Decimal(item["extensions"]["observation"]) for item in after} == expected
+        assert len(after) == len(expected)
+        assert all(item in after for item in before)
+        assert len({item["id"] for item in after}) == len(after)
         before = after
+        frozen = coverage_path.read_bytes()
+        preserve_scan_results(
+            state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+        )
+        assert coverage_path.read_bytes() == frozen
+    # Equal content with a different explicit ID remains an independent row.
+    raw = source(tokens[3]).replace(b'"review"', b'"separate-review"')
+    path = directory / f"{hashlib.sha256(raw).hexdigest()}.json"
+    path.write_bytes(raw)
+    original[path] = raw
+    scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    after = published()
+    assert len(after) == len(before) + 1
+    assert all(item in after for item in before)
+    assert any(item["id"] == "separate-review" for item in after)
     assert all(path.read_bytes() == raw for path, raw in original.items())
+
+
+@pytest.mark.parametrize("legacy_id", [None, 17, {"opaque": True}])
+def test_recovery_keeps_exclusions_without_published_string_ids(
+    tmp_path: Path, legacy_id: object
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    exclusion = {"pattern": "vendor/**", "reason": "Synthetic exclusion."}
+    if legacy_id is not None:
+        exclusion["id"] = legacy_id
+    parent = saved_draft(scan_id)
+    parent["coverage"]["explicitExclusions"] = [exclusion]
+    write_saved_parent(scan_dir, parent, 100)
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan_dir / name, ns=(100, 100))
+    original = json.dumps(saved_draft(scan_id)).encode()
+    result.write_bytes(original)
+    os.utime(result, ns=(10, 10))
+    fail_deep_scan(state, codex_home, scan_id)
+    coverage_path = scan_dir / "coverage.json"
+    assert json.loads(coverage_path.read_text())["explicitExclusions"] == [exclusion]
+
+    incoming = {**exclusion, "id": "independent-review"}
+    worker = saved_draft(scan_id)
+    worker["coverage"]["explicitExclusions"] = [incoming]
+    checkpoint = write_checkpoint(result.parent / "checkpoints", worker)
+    raw = checkpoint.read_bytes()
+    scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    recovered = json.loads(coverage_path.read_text())["explicitExclusions"]
+    assert len(recovered) == 2
+    assert incoming in recovered
+    if legacy_id is not None:
+        assert exclusion in recovered
+    else:
+        assert all(
+            {key: value for key, value in row.items() if key != "id"} == exclusion
+            for row in recovered
+        )
+    frozen = coverage_path.read_bytes()
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert coverage_path.read_bytes() == frozen
+    assert result.read_bytes() == original
+    assert checkpoint.read_bytes() == raw
+
+
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions", "deferred"])
+@pytest.mark.parametrize("initial_plain", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_recovery_reserves_explicit_ids_before_matching_derived_ids(
+    tmp_path: Path, field: str, initial_plain: bool, reverse: bool
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    row = (
+        {
+            "id": "review",
+            "label": "Synthetic review",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [],
+        }
+        if field == "surfaces"
+        else {"id": "review", "reason": "Synthetic review."}
+    )
+    if field == "explicitExclusions":
+        row["pattern"] = "vendor/**"
+    named = {**row, "id": f"review-{saved._digest(row)[:16]}"}
+    initial = [named, row] if initial_plain else [named]
+    if reverse:
+        initial.reverse()
+    parent = saved_draft(scan_id)
+    parent["coverage"][field] = initial
+    write_saved_parent(scan_dir, parent, 100)
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan_dir / name, ns=(100, 100))
+    original = json.dumps(saved_draft(scan_id)).encode()
+    result.write_bytes(original)
+    os.utime(result, ns=(10, 10))
+    fail_deep_scan(state, codex_home, scan_id)
+    coverage_path = scan_dir / "coverage.json"
+    before = json.loads(coverage_path.read_text())[field]
+    assert all(item in before for item in initial)
+
+    another = {**row, "id": "another"}
+    incoming = [another] if initial_plain else [row, another]
+    if reverse:
+        incoming.reverse()
+    worker = saved_draft(scan_id)
+    worker["coverage"][field] = incoming
+    checkpoint = write_checkpoint(result.parent / "checkpoints", worker)
+    raw = checkpoint.read_bytes()
+    recovered = scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    after = json.loads(coverage_path.read_text())[field]
+    assert all(item in after for item in [*before, *incoming])
+    assert len(after) == len(before) + len(incoming)
+    assert len({item["id"] for item in after}) == len(after)
+    assert not recovered["scan"]["warnings"]
+    frozen = coverage_path.read_bytes()
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert coverage_path.read_bytes() == frozen
+    assert result.read_bytes() == original
+    assert checkpoint.read_bytes() == raw
+
+
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_recovery_preserves_updated_explicit_ids_before_matching_derived_ids(
+    tmp_path: Path, field: str, reverse: bool
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    row = (
+        {
+            "id": "review",
+            "label": "Synthetic review",
+            "disposition": "no_issue_found",
+            "receiptRefs": [],
+        }
+        if field == "surfaces"
+        else {"id": "review", "pattern": "vendor/**", "reason": "Synthetic review."}
+    )
+    named = {**row, "id": f"review-{saved._digest(row)[:16]}"}
+    first = saved_draft(scan_id, complete=True)
+    first["coverage"][field] = [named]
+    original = json.dumps(first).encode()
+    result.write_bytes(original)
+    os.utime(result, ns=(100, 100))
+    fail_deep_scan(state, codex_home, scan_id)
+    _, _, coverage = finalize_scan_contract.finalize_scan(scan_dir)
+    assert coverage[field] == [named]
+
+    updated = {**named, "label" if field == "surfaces" else "reason": "Updated synthetic review"}
+    incoming = [updated, row]
+    if reverse:
+        incoming.reverse()
+    worker = saved_draft(scan_id, complete=True)
+    worker["coverage"][field] = incoming
+    checkpoint = write_checkpoint(result.parent / "checkpoints", worker)
+    raw = checkpoint.read_bytes()
+    os.utime(checkpoint, ns=(200, 200))
+    select(result.parent, checkpoint, 300)
+    response = scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    _, _, coverage = finalize_scan_contract.finalize_scan(scan_dir)
+    assert coverage[field] == incoming
+    assert not response["scan"]["warnings"]
+    frozen = (scan_dir / "coverage.json").read_bytes()
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert (scan_dir / "coverage.json").read_bytes() == frozen
+    assert result.read_bytes() == original
+    assert checkpoint.read_bytes() == raw
