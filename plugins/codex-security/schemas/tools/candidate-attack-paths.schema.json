@@ -26,10 +26,7 @@
       "required": ["attackPaths"],
       "properties": {
         "attackPaths": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/attackPathUpdate"
-          }
+          "$ref": "#/$defs/input/properties/attackPaths"
         }
       }
     },
