@@ -271,3 +271,53 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
     assert second["openFindingsCount"] == 1
     assert second["scanCount"] == 1
+
+
+def test_overlapping_scans_mark_findings_present_in_latest_started_scan(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repo"
+    target.mkdir()
+    first = complete_scan(state_dir, target, identity_anchor="recurring-finding")
+    second = complete_scan(state_dir, target, identity_anchor="recurring-finding")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            ("2026-01-01T00:00:00Z", first["scanId"]),
+        )
+        connection.execute(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            ("2026-01-02T00:00:00Z", second["scanId"]),
+        )
+        connection.execute(
+            "UPDATE finding_occurrences SET created_at = ? WHERE scan_id = ?",
+            ("2026-01-04T00:00:00Z", first["scanId"]),
+        )
+        connection.execute(
+            "UPDATE finding_occurrences SET created_at = ? WHERE scan_id = ?",
+            ("2026-01-03T00:00:00Z", second["scanId"]),
+        )
+    finding = run_workbench(state_dir, "list-global-findings")["findings"][0]
+    assert finding["confirmedInLatestScan"] is True
+    assert set(finding["knownScanIds"]) == {first["scanId"], second["scanId"]}
+
+
+@pytest.mark.parametrize("query", ["strasse", "STRAẞE", "éclair", "ÉCLAIR"])
+def test_scan_and_finding_search_casefold_unicode(tmp_path: Path, query: str) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "Straße ÉCLAIR"
+    target.mkdir()
+    first = complete_scan(state_dir, target, identity_anchor="first-finding")
+    complete_scan(state_dir, target, identity_anchor="second-finding")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE finding_occurrences SET title = ?", ("Straße ÉCLAIR",))
+    page = run_workbench(state_dir, "list-scans", "--query", query, "--limit", "1")
+    assert len(page["scans"]) == 1
+    assert page["nextOffset"] == 1
+    next_page = run_workbench(
+        state_dir, "list-scans", "--query", query, "--limit", "1", "--offset", "1"
+    )
+    assert len(next_page["scans"]) == 1
+    findings = run_workbench(
+        state_dir, "list-findings", "--scan-id", str(first["scanId"]), "--query", query
+    )
+    assert len(findings["findingsPage"]["findings"]) == 1

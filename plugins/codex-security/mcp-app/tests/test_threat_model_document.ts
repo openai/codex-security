@@ -54,10 +54,21 @@ for (const complete of [true, undefined]) {
       try {
         const { context, draft } = draftFixture(root, "deep");
         context.pluginRoot = pluginRoot;
+        const target = context.targetContract!.target as Record<
+          string,
+          unknown
+        >;
+        target.requiredSnapshotDigest =
+          "codex-security-snapshot/v1:sha256:" + "a".repeat(64);
         await recordCodexSecurityScanDraft(context, {
           ...draft({ deferred: [{ reason: "Earlier unfinished review." }] }),
           threatModel,
         });
+        assert.ok(
+          (await readFile(join(root, "threatmodel.md"), "utf8")).includes(
+            `Snapshot: ${target.requiredSnapshotDigest}`,
+          ),
+        );
         // A final Deep result replaces old review documents without parsing them.
         await writeFile(join(root, "findings.json"), "unfinished findings");
         await writeFile(join(root, "coverage.json"), "unfinished coverage");
@@ -122,6 +133,37 @@ for (const complete of [true, undefined]) {
       }
     });
   }
+}
+
+for (const kind of ["working_tree", "commit", "range"]) {
+  test(`diff threat model includes its saved ${kind} snapshot`, async () => {
+    const root = await temporaryDirectory("threatmodel-diff-");
+    try {
+      const { context, draft } = draftFixture(root, "diff");
+      context.pluginRoot = pluginRoot;
+      const target = context.targetContract!.target as Record<string, unknown>;
+      const diffTarget = context.targetContract!.diffTarget as Record<
+        string,
+        unknown
+      >;
+      delete target.requiredSnapshotDigest;
+      diffTarget.kind = kind;
+      if (kind === "working_tree")
+        diffTarget.contentDigest =
+          "codex-security-snapshot/v1:sha256:" + "c".repeat(64);
+      await recordCodexSecurityScanDraft(context, { ...draft(), threatModel });
+      const manifest = await readJson(root, "scan-manifest.json");
+      const digest = manifest.scan.target.snapshotDigest;
+      assert.match(
+        digest,
+        /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
+      );
+      const document = await readFile(join(root, "threatmodel.md"), "utf8");
+      assert.ok(document.includes(`Snapshot: ${digest}`), document);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 }
 
 test("terminal Deep model inheritance retries a changed canonical draft", async () => {
@@ -349,7 +391,7 @@ test("overlapping draft projections retain the latest committed model", async (t
     pluginRoot,
     pythonCommand: "fixture-python",
     targetRevision: "example-revision",
-    targetContract: { requiredSnapshotDigest: "example-snapshot" },
+    targetContract: { target: { requiredSnapshotDigest: "example-snapshot" } },
   };
   const firstModel = { format: "markdown", content: "# First model\n" };
   const latestModel = { format: "markdown", content: "# Latest model\n" };
@@ -373,7 +415,7 @@ test("overlapping draft projections retain the latest committed model", async (t
     assert.equal(input.provenance.revision, context.targetRevision);
     assert.equal(
       input.provenance.snapshotDigest,
-      context.targetContract.requiredSnapshotDigest,
+      context.targetContract.target.requiredSnapshotDigest,
     );
     const latest = recordCodexSecurityWorkerScanDraft(context, {
       scanId,

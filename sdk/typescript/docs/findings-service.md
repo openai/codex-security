@@ -61,7 +61,6 @@ environment. For a service started outside Docker, export any of these settings:
 | `CODEX_SECURITY_EMBEDDINGS_URL` | Full embeddings endpoint URL, including its path and any query parameters. Defaults to `https://api.openai.com/v1/embeddings` when unset or empty. |
 | `CODEX_SECURITY_STATE_DIR`      | State directory containing `workbench.sqlite3`; Compose uses `/state`.                                                                             |
 | `HOST` / `PORT`                 | Listen address and port; outside Compose, defaults are `127.0.0.1` and `3000`.                                                                     |
-| `PYTHON`                        | Python interpreter used by the storage adapter.                                                                                                    |
 
 Exported values override Compose's `.env` values. The repository excludes `.env`
 from Git and Docker builds. Startup, listing, duplicate-group operations, and
@@ -269,34 +268,151 @@ start scans, publication, or deduplication.
 
 Overview counts cover the whole service, regardless of filters. The default
 order is last update descending, then severity descending for findings, then ID
-ascending. Text sorts ignore case; severity and member counts use their natural
-order. The dashboard uses the same unauthenticated endpoint as the API.
+ascending. Search compares uppercase JavaScript strings; text sorts compare
+lowercase strings. Severity and member counts use their natural order. The
+dashboard uses the same unauthenticated endpoint as the API.
+
+### Migrating direct Python helper calls
+
+The Python `workbench_db.py` commands listed below have been retired. Direct
+helper callers can use the existing Node helpers from an installed plugin
+directory. For example:
+
+```bash
+scripts/launch_codex_security_mcp --helper dashboard < dashboard-request.json
+```
+
+On Windows, use `scripts\launch_codex_security_mcp.cmd --helper dashboard` with
+the same JSON on stdin. The request wraps the dashboard query in `payload` and
+specifies the absolute directory containing the existing `workbench.sqlite3`:
+
+```json
+{
+  "stateDirectory": "/absolute/path/to/state",
+  "payload": {
+    "view": "findings",
+    "sort": "activity",
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
+Use an absolute Windows path on Windows. The SDK, service API, and
+`codex-security` CLI already use the Node implementation and need no changes.
+
+Use the same command name after `--helper`, with these fields in `payload`:
+
+| Command                     | Payload fields                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------- |
+| `dashboard`                 | The dashboard query shown above; optional `direction`, `query`, `repository`, and `id`.           |
+| `store-findings`            | `entries` containing finding and embedding records; optional `repositoryId`.                      |
+| `list-stored-findings`      | Positive integer `limit` and non-negative integer `offset`.                                       |
+| `find-potential-duplicates` | `findingId` and `scope`: either `{"repositoryId":"REPOSITORY_ID"}` or `{"allRepositories":true}`. |
+| `store-dedupe-groups`       | `groups`, an array of finding-ID arrays.                                                          |
+| `list-dedupe-groups`        | `findingId`.                                                                                      |
+
+Pagination and finding/repository selectors move from Python command flags into
+these JSON fields. Retained scan commands such as `workbench_db.py list-findings`
+keep their existing interface.
 
 ## Deduplicate a scan
 
-Publish the scan first, or import its findings with `repositoryId`. Then run:
+Saved-scan deduplication uses local SQLite by default. No findings service or
+publication step is required:
+
+```bash
+codex-security dedupe --scan SCAN_ID --json
+```
+
+The CLI prepares missing or stale embeddings for the local repository's stored
+findings, searches them, and saves reviewed duplicate groups in the workbench
+database. Local vectors are stored separately from findings-service vectors,
+even when both use the same database. Repeated runs reuse compatible vectors.
+Ordinary scans do not generate
+embeddings automatically. New embeddings still send complete finding JSON to
+the configured embeddings endpoint and require `OPENAI_API_KEY` or `CODEX_API_KEY`
+on the CLI host; ChatGPT login alone is insufficient. Cached vectors avoid those
+requests, but fresh duplicate reviews still need the configured model provider.
+
+Local scope uses the scan's `targetId`, which identifies its local checkout.
+Preparation checks this identity against the approved checkout and existing
+target registration before reading findings. A detached scan directory must use
+its original local target (including registered imports); artifacts cannot select
+another checkout's stored corpus. The explicit findings-service mode remains
+available for remotely stored artifacts. Separate clones are not automatically
+combined. `--all-repositories` searches
+the selected local database, including untagged imports. Historical scan IDs
+select logical findings using their current stored bodies; dedupe does not
+replace newer bodies with old scan artifacts. A local database does not include
+findings stored only in a separate Docker volume or remote service.
+
+To retain a centralized findings corpus, publish the scan first, or import its
+findings with `repositoryId`, and explicitly select the service:
 
 ```bash
 codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
 ```
 
-Both `--findings-url` and a scan or workflow selector are required. `--scan`
+A scan or workflow selector is required. `--scan`
 accepts a full ID, unique prefix, or `latest` for the current repository. The
 scan must be complete, with sealed artifacts and a local checkout available.
+Local `latest` lookup matches the exact checkout path without Git. Matching
+across worktrees or clones additionally requires a Git executable outside all
+saved scan targets. If an unrelated historical target includes the available
+Git installation, use `codex-security dedupe --scan SCAN_ID` with an explicit
+saved scan ID instead.
 By default, candidates come from its manifest's `scan.target.targetId`. Use
-`--all-repositories` to search the whole service.
+`--all-repositories` to search the whole selected database or service. Explicit
+`--findings-url` retains the existing remote lookup and publication behavior.
+
+`--workflow-id` also works locally and saves review checkpoints and group-write
+retries without running a publication stage. A workflow remains bound to its
+original local database or remote URL; use a new workflow ID to switch backends
+or review changed inputs. Completed workflow results describe that run, not
+findings added afterward. Cancellation can retain completed embedding preparation
+for retry; it does not change sealed scan artifacts.
 
 ```typescript
 import { deduplicateScan } from "@openai/codex-security";
 
 const result = await deduplicateScan("scan_example_001", {
-  findingsUrl: "http://127.0.0.1:3000",
+  // findingsUrl: "http://127.0.0.1:3000", // Optional remote corpus.
   concurrency: 8,
   // allRepositories: true,
   // signal: controller.signal,
 });
 console.log(result.duplicateGroups);
 ```
+
+For a different embedding provider or model, both saved-scan SDK methods accept
+an `embedding` binding. Reuse the `FindingEmbedder` interface: return one
+`{ model, vector }` per input finding, in input order. The adapter owns its
+credentials, tokenization, chunking, and provider request format.
+
+```typescript
+import { deduplicateScan, type FindingEmbedder } from "@openai/codex-security";
+
+async function dedupeWithEmbeddings(scanId: string, embedder: FindingEmbedder) {
+  return await deduplicateScan(scanId, {
+    embedding: {
+      embedder,
+      model: "example-embedding-model",
+      dimensions: 384,
+      cacheNamespace: "example-provider:document-v1",
+    },
+  });
+}
+```
+
+Choose a stable namespace identifying the actual vector space and preprocessing
+version, including any provider or model revision that changes the vectors.
+Changing the namespace, model, or dimensions refreshes cached vectors. Do not
+put credentials in the namespace. The local cache keeps one vector per finding;
+switching spaces replaces it, and concurrent runs with different spaces may
+need a retry. `embedding` cannot be combined with `findingsUrl`, whose service
+owns embedding preparation. Without a binding, the existing OpenAI adapter and
+endpoint setting apply.
 
 For a sealed scan directory outside local history, supply the checkout:
 
@@ -340,19 +456,42 @@ exits successfully after saving the other accepted groups.
 
 ### Reviews, concurrency, and failures
 
-Deduplication retrieves all candidate neighborhoods, screens them with
-`gpt-5.6-luna` at `xhigh`, then independently reviews nominated pairs with
-`gpt-5.6-sol` at `high`. A pair review can start after all screenings that cover
-it finish without a `DISTINCT` decision. Accepted pairs form groups only when
-no reviewed `DISTINCT` decision or refusal contradicts the group.
+By default, deduplication retrieves all candidate neighborhoods, screens them
+with `gpt-5.6-luna` at `xhigh`, then independently reviews nominated pairs with
+`gpt-5.6-sol` at `high`. The host's Codex `model` and `model_reasoning_effort`
+settings override these defaults for both stages. Provider selection uses the
+existing Codex configuration; embedding configuration is separate. Screening
+and pair-review permissions stay attached to their stages regardless of model name.
+Accepted pairs form groups only when no reviewed `DISTINCT` decision or refusal
+contradicts the group. Saved-scan pair reviews return a decision and rationale;
+they do not generate replacement findings. The host chooses representatives
+from the original records. Host-provided records reviews retain their full
+merged-finding contract.
+
+Local reviews receive the stored repository associations separately from the
+finding text. When the current document matches a saved scan occurrence, this
+context also includes its recorded revision and working-tree snapshot digest;
+missing occurrence context is omitted rather than inferred from the current
+checkout. A file in the selected checkout can establish that checkout's
+current source; it cannot stand in for another repository or a historical
+revision. Matching paths or snippets alone do not establish a shared maintained
+control across repositories. The review does not gain permission to open other
+checkouts from their stored associations.
 
 The default concurrency is 8. Set `--concurrency N` or SDK `concurrency: N` to
 change it; use 1 for serial execution. Candidate retrieval uses that limit, and
 screenings and ready pair reviews share one worker pool. Results are combined
 in input order, independent of completion order.
 
-Reviews run on the SDK/CLI host using its Codex sign-in or environment API key;
-credentials are not sent to the findings service. Each review receives complete
+Reviews run on the SDK/CLI host using its Codex sign-in or environment API key.
+For the built-in OpenAI provider, an available `OPENAI_API_KEY` (or fallback
+`CODEX_API_KEY`) is also used to
+authenticate reviews, even when Codex is already signed in. The built-in
+embedding adapter uses the same key selection. An embedding-only key therefore
+does not select ChatGPT authentication for reviews. A custom SDK embedding
+adapter can own separate embedding credentials while reviews use the host's
+normal Codex authentication. Review credentials are not sent to the findings
+service. Each review receives complete
 original findings and may inspect the approved local checkout. Reviews preserve
 severity and priority rather than reassessing them. The baseline filesystem is
 read-only and excludes credentials and Codex state. Screening denies approval
@@ -360,11 +499,21 @@ requests; pair reviews use Codex's automatic approval reviewer. Web, plugins,
 and inherited MCP servers are disabled. Finding content and linked tickets do
 not authorize access to another target.
 
-Models must submit a validated decision. A session that ends without one gets
-one corrective turn. Invalid output and eligible transient failures can retry
-in fresh sessions, up to three sessions per review. Transient service failures
-allow up to three request attempts; HTTP retries honor `Retry-After`. Backoff
-occupies the job's concurrency slot.
+Reviews are ephemeral and reuse Codex's configured SQLite storage. They do not
+rebuild a temporary copy of the caller's session history for every pair. Explicit
+`sqlite_home` and `CODEX_SQLITE_HOME` settings remain effective, and the native
+state directory is excluded from the review's source access.
+
+The CLI reports preparation, review progress, and native warnings on stderr;
+JSON results remain on stdout. The existing `CODEX_SECURITY_LOG_LEVEL=debug`
+(or `LOG_LEVEL=debug`) includes structured review diagnostics with thread,
+turn, and command identifiers, command failures, and native token-usage events.
+Usage counters are cumulative per native thread; do not add every update.
+SDK callers can receive the same events through `onDiagnostic`. Observer
+failures do not interrupt reviews or discard completed results.
+
+Models must submit a validated decision. Invalid output and eligible transient
+failures are retried automatically; HTTP retries honor `Retry-After`.
 
 Cancellation, authentication/configuration errors, permanent HTTP errors, and
 required-source-access blockers are not retried. Refusals are not retried or
@@ -454,7 +603,7 @@ not support the migrated database.
 
 ## Run without Docker
 
-With the package's supported Node.js and Python versions installed:
+With the package's supported Node.js version installed (22.13 or later in a supported major):
 
 ```bash
 npm install -g @openai/codex-security
@@ -463,8 +612,9 @@ CODEX_SECURITY_STATE_DIR="$HOME/.codex-security-findings" codex-security serve -
 
 `--port` overrides `PORT`. The service does not load `.env`; export the embedding
 key before importing findings. Without a state override, it shares the CLI's
-default state directory. `HOST`, `PORT`, `CODEX_SECURITY_STATE_DIR`, and `PYTHON`
-also work on Windows. Stop with Ctrl-C or SIGTERM.
+default state directory. `HOST`, `PORT`, and `CODEX_SECURITY_STATE_DIR` also
+work on Windows. The findings service uses Node’s built-in SQLite and does not
+require Python. Stop with Ctrl-C or SIGTERM.
 
 For source builds, prepare the
 [universal native payload](https://github.com/openai/codex-security/blob/main/plugins/codex-security/native/README.md#package-inputs),

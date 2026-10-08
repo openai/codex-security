@@ -14,7 +14,10 @@ import {
 } from "node:path";
 import { promisify } from "node:util";
 import { InvalidTargetError, abortReason } from "./errors.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  type TrustedExecutable,
+} from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
 import type { ScanMode } from "./scan-modes.js";
@@ -707,6 +710,40 @@ async function resolveGitRef(
   }
 }
 
+/** Read-only identity for matching saved history with an already selected host Git. */
+export async function gitHistoryIdentity(
+  repository: string,
+  git: TrustedExecutable,
+  signal?: AbortSignal,
+): Promise<{ commonDirectory: string | null; origin: string | null }> {
+  const read = async (args: readonly string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFile(
+        git.executable,
+        ["-c", "core.fsmonitor=false", "-C", repository, ...args],
+        {
+          encoding: "utf8",
+          signal,
+          env: isolatedGitEnvironment(true, git.environment),
+          maxBuffer: Infinity,
+        },
+      );
+      return (
+        stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "") ||
+        null
+      );
+    } catch {
+      throwIfAborted(signal);
+      return null;
+    }
+  };
+  const [commonDirectory, origin] = await Promise.all([
+    read(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    read(["remote", "get-url", "origin"]),
+  ]);
+  return { commonDirectory, origin };
+}
+
 async function gitOutput(
   repository: string,
   args: readonly string[],
@@ -741,10 +778,49 @@ export async function gitMarkerRoot(
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  const canonical = await abortable(() => realpath(repository), signal);
-  let current = (await lstat(canonical)).isDirectory()
-    ? canonical
-    : dirname(canonical);
+  let candidate = resolve(repository);
+  let current: string;
+  while (true) {
+    try {
+      const canonical = await abortable(() => realpath(candidate), signal);
+      current = (await lstat(canonical)).isDirectory()
+        ? canonical
+        : dirname(canonical);
+      break;
+    } catch (error) {
+      // Stale or inaccessible descendants still belong to their accessible checkout ancestors.
+      throwIfAborted(signal);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        search !== "outermost" ||
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
+      )
+        throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) throw error;
+      candidate = parent;
+    }
+  }
+  return await walkGitMarkers(current, signal, search);
+}
+
+/** Protect both the stored path's checkout and its resolved destination. */
+export async function gitProtectionRoots(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots = await Promise.all([
+    gitMarkerRoot(repository, signal, "outermost"),
+    walkGitMarkers(resolve(repository), signal, "outermost"),
+  ]);
+  return [...new Set(roots.filter((root): root is string => root !== null))];
+}
+
+async function walkGitMarkers(
+  current: string,
+  signal: AbortSignal | undefined,
+  search: "nearest" | "outermost",
+): Promise<string | null> {
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);
@@ -753,7 +829,14 @@ export async function gitMarkerRoot(
       if (search === "nearest") return current;
       root = current;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      throwIfAborted(signal);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        code !== "ENOENT" &&
+        code !== "ENOTDIR" &&
+        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
+      )
+        throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;
@@ -763,8 +846,9 @@ export async function gitMarkerRoot(
 
 function isolatedGitEnvironment(
   preserveGitConfiguration: boolean,
+  source: Readonly<Record<string, string | undefined>> = process.env,
 ): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
+  const environment = { ...source };
   for (const name of Object.keys(environment)) {
     const normalized = name.toUpperCase();
     if (

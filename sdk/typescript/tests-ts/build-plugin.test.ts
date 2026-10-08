@@ -95,9 +95,11 @@ describe("bundled plugin build", () => {
         filter: (path) =>
           !["node_modules", ".preview"].includes(basename(path)),
       });
-      await cp(join(plugin, "schemas"), join(source, "schemas"), {
-        recursive: true,
-      });
+      for (const directory of ["schemas", "shared"]) {
+        await cp(join(plugin, directory), join(source, directory), {
+          recursive: true,
+        });
+      }
       for (const file of [
         "reserved_artifact_paths.json",
         "codex_profile.mjs",
@@ -479,4 +481,43 @@ describe("generated plugin ownership", () => {
       "Generated plugin payload must not be tracked: _bundled_plugin/mcp/server.mjs",
     );
   });
+});
+
+test("failed compiler preserves the previous bundle and its diagnostics", async () => {
+  const root = await temporaryDirectory();
+  const source = join(root, "source");
+  const destination = join(root, "bundle");
+  const contractPath = join(source, "plugin-files.json");
+  await writeFixture(
+    source,
+    "plugin-files.json",
+    JSON.stringify({
+      externalOwnedExact: [".codex-plugin/plugin.json"],
+      shippedExact: ["mcp/server.mjs"],
+    }),
+  );
+  await writeFixture(source, ".codex-plugin/plugin.json", "{}");
+  await writeFixture(
+    source,
+    "mcp-app/scripts/build_mcp_app.mjs",
+    'console.log("synthetic compiler diagnostic"); process.exit(1);',
+  );
+  await writeFixture(destination, "previous.txt", "previous valid bundle");
+  const driver = join(root, "driver.mjs");
+  await writeFile(
+    driver,
+    `import { buildBundledPlugin } from ${JSON.stringify(new URL("../scripts/build-plugin.mjs", import.meta.url).href)};
+try { await buildBundledPlugin(${JSON.stringify({ contractPath, destination, source })}); }
+catch (error) { console.error(error.message); process.exitCode = 1; }`,
+  );
+  const result = await execFileAsync(process.execPath, [driver]).then(
+    () => {
+      throw new Error("synthetic compiler unexpectedly succeeded");
+    },
+    (error: { stdout: string; stderr: string }) => error,
+  );
+  expect(result.stdout).toContain("synthetic compiler diagnostic");
+  expect(await readFile(join(destination, "previous.txt"), "utf8")).toBe(
+    "previous valid bundle",
+  );
 });
