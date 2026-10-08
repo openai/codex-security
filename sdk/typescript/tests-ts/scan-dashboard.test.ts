@@ -594,6 +594,8 @@ describe("live scan dashboard", () => {
       filesCompleted: 0,
       filesTotal: 1_258,
     });
+    expect(lastFrame(stderr)).toContain("1,258 in scope");
+    expect(lastFrame(stderr)).not.toContain("reviewed");
     dashboard.record({
       id: "read-1",
       kind: "command",
@@ -608,6 +610,13 @@ describe("live scan dashboard", () => {
         output_tokens: 236,
       }).cost!,
     );
+    dashboard.setFiles({
+      phase: "discovery",
+      filesCompleted: 3,
+      filesTotal: 1_258,
+    });
+    expect(lastFrame(stderr)).toContain("3 / 1,258 reviewed");
+    expect(lastFrame(stderr)).not.toContain("in scope");
     dashboard.stop();
 
     const text = stripVTControlCharacters(stderr.text());
@@ -623,7 +632,6 @@ describe("live scan dashboard", () => {
     expect(text).toContain("               routes/login.ts");
     expect(text).not.toContain("[09:41:19]   routes/login.ts");
     expect(text).toContain("routes/login.ts");
-    expect(text).toContain("0 / 1,258 reviewed");
     expect(text).not.toContain("opened");
     expect(text).not.toContain("3 / 6 active");
     expect(text.replace(/\s+/gu, " ")).toContain(

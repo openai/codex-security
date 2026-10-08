@@ -1,4 +1,4 @@
-Read and follow plugins/codex-security/skills/triage-finding/SKILL.md to triage the supplied scanner finding.
+Read and follow skills/triage-finding/SKILL.md to triage the supplied scanner finding.
 
 Repository checkout to inspect:
 {{target_repo}}

@@ -1,3 +1,4 @@
+import { findingGroupRoots } from "../finding-catalogue.js";
 import type { Finding } from "../models.js";
 import type { FindingNeighborhood } from "../finding-retrieval.js";
 import {
@@ -338,41 +339,24 @@ export class FindingDeduplicator {
       else rejected.push(state.ids);
     }
 
-    const adjacent = new Map<string, Set<string>>();
-    for (const pair of supported) {
-      for (const [left, right] of [pair, [pair[1], pair[0]]] as const) {
-        const neighbors = adjacent.get(left) ?? new Set<string>();
-        neighbors.add(right);
-        adjacent.set(left, neighbors);
-      }
-    }
-
-    const components: {
-      members: string[];
-      supported: [string, string][];
-      rejected: [string, string][];
-    }[] = [];
-    const componentByFinding = new Map<string, (typeof components)[number]>();
-    for (const id of findings.keys()) {
-      this.signal?.throwIfAborted();
-      if (!adjacent.has(id) || componentByFinding.has(id)) continue;
-      const component: (typeof components)[number] = {
-        members: [],
-        supported: [],
-        rejected: [],
-      };
-      components.push(component);
-      const pending = [id];
-      while (pending.length > 0) {
-        const member = pending.pop()!;
-        if (componentByFinding.has(member)) continue;
-        componentByFinding.set(member, component);
-        pending.push(...adjacent.get(member)!);
-      }
-    }
+    const { parents, root } = findingGroupRoots();
+    for (const [left, right] of supported) parents.set(root(right), root(left));
     // Preserve finding insertion order for contradiction-grouping ties.
-    for (const id of findings.keys())
-      componentByFinding.get(id)?.members.push(id);
+    const membersByRoot = Map.groupBy(findings.keys(), (id) => {
+      this.signal?.throwIfAborted();
+      return parents.has(id) ? root(id) : undefined;
+    });
+    membersByRoot.delete(undefined);
+    const components = [...membersByRoot.values()].map((members) => ({
+      members,
+      supported: [] as [string, string][],
+      rejected: [] as [string, string][],
+    }));
+    const componentByFinding = new Map(
+      components.flatMap((component) =>
+        component.members.map((id) => [id, component] as const),
+      ),
+    );
     for (const pair of supported)
       componentByFinding.get(pair[0])!.supported.push(pair);
     for (const pair of rejected) {

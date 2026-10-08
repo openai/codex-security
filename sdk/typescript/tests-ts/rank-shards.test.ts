@@ -1,26 +1,24 @@
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   renameSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
-const roots: string[] = [];
+const roots = createTemporaryDirectoriesSync(true);
 const newline = process.platform === "win32" ? "\r\n" : "\n";
 type Row = Record<string, unknown>;
 const candidate = (path: string, area = "src") => ({
@@ -36,8 +34,7 @@ const ranked = (row: Row) => ({
   reason: "runtime surface",
 });
 function fixture() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "rank-shards-")));
-  roots.push(root);
+  const root = roots.create("rank-shards-");
   return {
     root,
     input: join(root, "input.jsonl"),
@@ -109,10 +106,7 @@ function complete(f: Fixture) {
         .map(ranked),
     );
 }
-afterEach(() => {
-  for (const root of roots.splice(0))
-    rmSync(root, { recursive: true, force: true });
-});
+afterEach(roots.cleanup);
 
 describe("rank shard helpers", () => {
   test.skipIf(process.platform !== "win32")(

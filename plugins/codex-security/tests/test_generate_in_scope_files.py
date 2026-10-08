@@ -499,36 +499,57 @@ def test_large_inventory_is_not_limited_by_a_subprocess_output_buffer(tmp_path: 
     assert rows == sorted(rows)
 
 
-def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path, mode: str) -> None:
     repository = make_repository(tmp_path)
+    write_file(repository, "app/entrypoint", b"exec service\n")
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
+    gitlink = git(repository, "rev-parse", "HEAD")
+    git(repository, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},removed-module")
+    git(repository, "commit", "--amend", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
 
     write_file(repository, "app/routes.py", b"changed = True\n")
     write_file(repository, "app/new handler.py", b"handler = True\n")
     write_file(repository, "app/binary.py", b"\x00\xff\x01")
-    write_file(repository, "tests/demo.py", b"excluded = True\n")
+    write_file(repository, "tests/demo.py", b"changed = True\n")
     write_file(repository, ".github/workflows/ci.yml", b"name: CI\n")
+    write_file(
+        repository,
+        ".gitmodules",
+        b'[submodule "added-module"]\npath = added-module\nurl = ../module.git\n',
+    )
     (repository / "app/évidence.py").unlink()
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "change")
-    head = git(repository, "rev-parse", "HEAD")
+    (repository / "app/entrypoint").unlink()
+    (repository / "app/binary.dat").unlink()
+    arguments = ["--diff-base", base, "--diff-mode", "local-patch"]
+    if mode in {"revisions", "staged"}:
+        git(repository, "add", ".")
+    git(repository, "update-index", "--force-remove", "removed-module")
+    git(repository, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},added-module")
+    if mode == "revisions":
+        git(repository, "commit", "-qm", "change")
+        arguments = ["--diff-base", base, "--diff-head", git(repository, "rev-parse", "HEAD")]
+        git(repository, "checkout", "-q", base)
     output = tmp_path / "in_scope_files.txt"
 
     result = run_inventory(
         repository,
         ".",
         output,
-        arguments=["--diff-base", base, "--diff-head", head],
+        arguments=arguments,
     )
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == [
         ".github/workflows/ci.yml",
+        ".gitmodules",
+        "app/entrypoint",
         "app/new handler.py",
         "app/routes.py",
         "app/évidence.py",
+        "tests/demo.py",
     ]
 
 
@@ -538,9 +559,9 @@ def test_diff_inventory_only_classifies_source_bytes(tmp_path: Path, mode: str) 
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, "app/surrogate.json", b'{"\\ud800":1}')
-    write_file(repository, "app/integer.json", ('{"value":' + "1" * 4301 + "}").encode())
-    write_file(repository, "app/binary.py", b"x" * 4096 + b"\0")
+    write_file(repository, "app/text.unlisted", b"x" * (64 * 1024 + 1) + b"text")
+    write_file(repository, "app/binary.py", b"x" * (64 * 1024 + 1) + b"\0")
+    write_file(repository, "app/binary.unlisted", b"x" * (64 * 1024 + 1) + b"\0")
     arguments = ["--diff-base", base, "--diff-mode", mode]
     if mode == "revisions":
         git(repository, "add", ".")
@@ -551,10 +572,7 @@ def test_diff_inventory_only_classifies_source_bytes(tmp_path: Path, mode: str) 
     result = run_inventory(repository, ".", output, arguments=arguments)
 
     assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8").splitlines() == [
-        "app/integer.json",
-        "app/surrogate.json",
-    ]
+    assert output.read_text(encoding="utf-8").splitlines() == ["app/text.unlisted"]
 
 
 @pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
@@ -584,44 +602,6 @@ def test_diff_inventory_includes_source_cases(tmp_path: Path, mode: str) -> None
     )
 
 
-def test_diff_inventory_keeps_every_javascript_module_extension(tmp_path: Path) -> None:
-    repository = make_repository(tmp_path)
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "base")
-    base = git(repository, "rev-parse", "HEAD")
-
-    for name in (
-        "app/loader.cjs",
-        "app/loader.mjs",
-        "app/loader.js",
-        "app/types.cts",
-        "app/types.mts",
-        "app/types.ts",
-    ):
-        write_file(repository, name, b"export const handler = 1;\n")
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "change")
-    head = git(repository, "rev-parse", "HEAD")
-    output = tmp_path / "in_scope_files.txt"
-
-    result = run_inventory(
-        repository,
-        ".",
-        output,
-        arguments=["--diff-base", base, "--diff-head", head],
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8").splitlines() == [
-        "app/loader.cjs",
-        "app/loader.js",
-        "app/loader.mjs",
-        "app/types.cts",
-        "app/types.mts",
-        "app/types.ts",
-    ]
-
-
 def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     git(repository, "add", ".")
@@ -636,6 +616,12 @@ def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> 
     index_only = write_file(repository, "app/index-only.py", b"index_only = True\n")
     git(repository, "add", "app/index-only.py")
     index_only.unlink()
+    nested = repository / "nested"
+    nested.mkdir()
+    git(nested, "init", "-q")
+    write_file(nested, "source.py", b"nested = True\n")
+    git(nested, "add", ".")
+    git(nested, "commit", "-qm", "nested repository")
     output = tmp_path / "in_scope_files.txt"
 
     result = run_inventory(
@@ -699,7 +685,7 @@ def test_diff_inventory_includes_bom_marked_utf16_text(tmp_path: Path, mode: str
         "app/decoded-nul.ps1",
         b"\xff\xfe" + "text\0binary".encode("utf-16-le"),
     )
-    write_file(repository, "tests/excluded.ps1", b"\xff\xfe" + source.encode("utf-16-le"))
+    write_file(repository, "tests/encoded.ps1", b"\xff\xfe" + source.encode("utf-16-le"))
 
     arguments = ["--diff-base", base, "--diff-mode", mode]
     if mode == "revisions":
@@ -715,6 +701,7 @@ def test_diff_inventory_includes_bom_marked_utf16_text(tmp_path: Path, mode: str
         "app/utf16-be.ps1",
         "app/utf16-le.ps1",
         "app/utf8.ps1",
+        "tests/encoded.ps1",
     ]
 
 
@@ -739,4 +726,30 @@ def test_diff_inventory_rejects_a_narrower_scope(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "diff scans must use the repository root" in result.stderr
+    assert output.read_text(encoding="utf-8") == "previous.py\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes")
+def test_diff_inventory_rejects_non_utf8_path_and_preserves_output(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    blob = git(repository, "rev-parse", f"{base}:app/routes.py")
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", "-z", "--index-info"],
+        input=b"100644 " + blob.encode("ascii") + b"\ttests/caf\xe9.py\0",
+        check=True,
+        capture_output=True,
+    )
+    head = git(
+        repository, "commit-tree", git(repository, "write-tree"), "-p", base, "-m", "Byte path"
+    )
+    output = tmp_path / "in_scope_files.txt"
+    output.write_text("previous.py\n", encoding="utf-8")
+    result = run_inventory(
+        repository, ".", output, arguments=["--diff-base", base, "--diff-head", head]
+    )
+    assert result.returncode == 2
+    assert "cannot be encoded as UTF-8 for the file inventory" in result.stderr
     assert output.read_text(encoding="utf-8") == "previous.py\n"

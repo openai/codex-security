@@ -1,5 +1,5 @@
 import type { JsonObject } from "./types.js";
-import { isRecord as isObject } from "./record.js";
+import { isRecord as isObject, isNonEmptyString } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, sep } from "node:path";
@@ -536,8 +536,7 @@ async function preserveScanDraft(
                 !terminalOutcomeIds.has(surface.candidateId as string)),
           ),
         },
-        [result.coverage],
-        false,
+        result.coverage,
         ambiguousDeferredIds,
       );
       sources.unshift(progress);
@@ -701,8 +700,7 @@ async function preserveScanDraft(
     );
     result.coverage = preserveScanCoverage(
       result.coverage,
-      [previousCoverage],
-      false,
+      previousCoverage,
       ambiguousDeferredIds,
     );
   }
@@ -1658,10 +1656,9 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
 }
 
 /** Reducers cannot resolve source review by omitting its coverage records. */
-export function preserveScanCoverage(
+function preserveScanCoverage(
   coverage: JsonObject,
-  sources: JsonObject[],
-  preserveCompleteness = true,
+  previous: JsonObject,
   ambiguousDeferredIds = new Set<string>(),
 ): JsonObject {
   const result = structuredClone(coverage);
@@ -1673,21 +1670,19 @@ export function preserveScanCoverage(
   ] as const) {
     const current = (result[field] as unknown[] | undefined) ?? [];
     const values = [...current];
-    for (const source of sources) {
-      for (const value of (source[field] as unknown[] | undefined) ?? []) {
-        const present =
-          field === "deferred" ? deferredEntryPresent : coverageEntryPresent;
-        if (
-          !present(
-            values,
-            value,
-            field === "deferred" || field === "surfaces"
-              ? ambiguousDeferredIds
-              : undefined,
-          )
+    for (const value of (previous[field] as unknown[] | undefined) ?? []) {
+      const present =
+        field === "deferred" ? deferredEntryPresent : coverageEntryPresent;
+      if (
+        !present(
+          values,
+          value,
+          field === "deferred" || field === "surfaces"
+            ? ambiguousDeferredIds
+            : undefined,
         )
-          values.push(structuredClone(value));
-      }
+      )
+        values.push(structuredClone(value));
     }
     if (
       field !== "openQuestions" ||
@@ -1696,22 +1691,7 @@ export function preserveScanCoverage(
     )
       result[field] = values;
   }
-  if (
-    coverageHasOutstandingWork(result) ||
-    (preserveCompleteness &&
-      sources.some(
-        (source) =>
-          source.completeness === "partial" &&
-          !coverageHasOutstandingWork(source),
-      ))
-  )
-    result.completeness = "partial";
-  else if (
-    preserveCompleteness &&
-    sources.some((source) => source.completeness === "unknown")
-  ) {
-    result.completeness = "unknown";
-  }
+  if (coverageHasOutstandingWork(result)) result.completeness = "partial";
   return result;
 }
 
@@ -1905,7 +1885,7 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
     canonicalEvidence.flatMap((evidence) => {
       if (!isObject(evidence)) return [];
       const id = evidence.id;
-      return typeof id === "string" && id.trim().length > 0 ? [id] : [];
+      return isNonEmptyString(id) ? [id] : [];
     }),
   );
   if (Array.isArray(finding.code_evidence)) {
@@ -1915,10 +1895,8 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
       const id = evidence.id;
       const code = evidence.code;
       if (
-        typeof id !== "string" ||
-        id.trim().length === 0 ||
-        typeof code !== "string" ||
-        code.trim().length === 0 ||
+        !isNonEmptyString(id) ||
+        !isNonEmptyString(code) ||
         evidenceIds.has(id)
       ) {
         continue;
@@ -1962,15 +1940,11 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
     const section = finding[sectionName];
     if (!isObject(section)) continue;
     normalizePersistedStringLists(section, listFields);
-    filterPersistedEvidenceRefs(section, evidenceIds);
   }
 
   const rootCause = finding.rootCause;
   if (isObject(rootCause)) {
-    if (
-      typeof rootCause.summary !== "string" ||
-      rootCause.summary.trim().length === 0
-    ) {
+    if (!isNonEmptyString(rootCause.summary)) {
       delete finding.rootCause;
     } else {
       removeUnsupportedPersistedStrings(rootCause, ["code", "language"]);
@@ -1983,10 +1957,7 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
       "code",
       "language",
     ]);
-  } else if (
-    "root_cause" in finding &&
-    (typeof legacyRootCause !== "string" || legacyRootCause.trim().length === 0)
-  ) {
+  } else if ("root_cause" in finding && !isNonEmptyString(legacyRootCause)) {
     delete finding.root_cause;
   }
 
@@ -2006,16 +1977,8 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
   removeUnsupportedPersistedStrings(attackPath, ["summary"]);
   for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
     const detail = attackPath[field];
-    if (detail === null) {
-      delete attackPath[field];
-      continue;
-    }
-    if (typeof detail === "string") {
-      if (detail.trim().length === 0) delete attackPath[field];
-      continue;
-    }
     if (!isObject(detail)) {
-      if (field in attackPath) delete attackPath[field];
+      if (!isNonEmptyString(detail)) delete attackPath[field];
       continue;
     }
     removeUnsupportedPersistedStrings(detail, [
@@ -2031,7 +1994,6 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
       "transformations",
       ...(field === "reachability" ? ["preconditions"] : []),
     ]);
-    filterPersistedEvidenceRefs(detail, evidenceIds);
   }
   for (const field of ["impact", "likelihood"]) {
     const detail = attackPath[field];
@@ -2040,49 +2002,32 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
     } else if (
       detail !== undefined &&
       detail !== null &&
-      (typeof detail !== "string" || detail.trim().length === 0)
+      !isNonEmptyString(detail)
     ) {
       delete attackPath[field];
     }
   }
-}
 
-function normalizePersistedStringLists(
-  section: JsonObject,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (!(field in section)) continue;
-    const value = section[field];
-    const normalized =
-      typeof value === "string"
-        ? value.trim().length > 0
-          ? [value]
-          : []
+  function normalizePersistedStringLists(
+    section: JsonObject,
+    fields: string[],
+  ): void {
+    for (const field of fields) {
+      if (!(field in section)) continue;
+      const value = section[field];
+      const normalized = isNonEmptyString(value)
+        ? [value]
         : Array.isArray(value)
-          ? value.filter(
-              (item): item is string =>
-                typeof item === "string" && item.trim().length > 0,
-            )
+          ? value.filter(isNonEmptyString)
           : [];
-    if (normalized.length > 0) section[field] = normalized;
-    else delete section[field];
-  }
-}
-
-function filterPersistedEvidenceRefs(
-  section: JsonObject,
-  evidenceIds: Set<string>,
-): void {
-  for (const field of ["evidenceRefs", "evidence_refs"]) {
-    const refs = section[field];
-    if (!Array.isArray(refs)) continue;
-    section[field] = refs.filter(
-      (ref): ref is string =>
-        typeof ref === "string" &&
-        ref.trim().length > 0 &&
-        evidenceIds.has(ref),
-    );
+      if (normalized.length > 0) section[field] = normalized;
+      else delete section[field];
+    }
+    for (const field of ["evidenceRefs", "evidence_refs"]) {
+      const refs = section[field];
+      if (!Array.isArray(refs)) continue;
+      section[field] = refs.filter((ref) => evidenceIds.has(ref));
+    }
   }
 }
 
@@ -2091,10 +2036,7 @@ function removeUnsupportedPersistedStrings(
   fields: string[],
 ): void {
   for (const field of fields) {
-    if (
-      field in section &&
-      (typeof section[field] !== "string" || section[field].trim().length === 0)
-    ) {
+    if (field in section && !isNonEmptyString(section[field])) {
       delete section[field];
     }
   }

@@ -24,8 +24,7 @@ type Finding = DeepReductionInput["findings"][number];
 
 interface ReducerDocuments {
   inputs: string;
-  findings: Map<string, Finding>;
-  serializedFindings: Map<string, string>;
+  findings: Map<string, Finding | string>;
 }
 
 // Each artifact server binds one immutable reducer assignment. Cache that
@@ -62,16 +61,14 @@ export async function getCodexSecurityDeepReducerInputsPage(
       throw new Error(
         "The requested findingRef is not assigned to this reducer.",
       );
-    const cached = snapshot.serializedFindings.get(input.findingRef);
-    json = cached ?? JSON.stringify(finding);
-    if (cached === undefined)
-      snapshot.serializedFindings.set(input.findingRef, json);
+    json = typeof finding === "string" ? finding : JSON.stringify(finding);
+    snapshot.findings.set(input.findingRef, json);
   }
   return pageDocument(json, input);
 }
 
 function createDocuments(sources: DeepReductionSources): ReducerDocuments {
-  const findings = new Map<string, Finding>();
+  const findings = new Map<string, Finding | string>();
   const discoveries = sources.discoveries.map((discovery) => ({
     workerId: discovery.workerId,
     result: {
@@ -107,7 +104,6 @@ function createDocuments(sources: DeepReductionSources): ReducerDocuments {
   return {
     inputs: JSON.stringify({ discoveries, previous }),
     findings,
-    serializedFindings: new Map(),
   };
 }
 

@@ -44,7 +44,8 @@ const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 const CONFIGURED_WORKBENCH_STATE_DIR =
   process.env.CODEX_SECURITY_STATE_DIR?.trim();
-const PLUGIN_ROOT = resolve(__dirname, "..");
+const PLUGIN_ROOT =
+  process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
 const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
   "resolve-scan-root",
@@ -55,7 +56,6 @@ const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
 ]);
 
 let fallbackWorkbenchStateDir: Promise<string> | undefined;
-let fallbackWorkbenchStateLogged = false;
 let persistentWorkbenchStateSucceeded = false;
 const workbenchStateSelectionLock = new AsyncLock();
 
@@ -1243,9 +1243,18 @@ export function createCodexSecurityServer(): McpServer {
         workspace = await runWorkbench(args);
       },
     );
-    if (!canceledLocally) workspace = await runWorkbench(args);
-    if (workspace === undefined) {
-      throw new Error(`Canceling scan ${scanId} did not return its workspace.`);
+    if (workspace === undefined && canceledLocally) {
+      workspace = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
+        "workspace"
+      ] as JsonObject;
+    }
+    const scan = workspace?.["results"];
+    const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+    if (
+      workspace === undefined ||
+      (isJsonObject(progress) && progress["status"] === "running")
+    ) {
+      workspace = await runWorkbench(args);
     }
     return workspaceResult(workspace as unknown as WorkspaceState);
   };
@@ -1472,6 +1481,32 @@ export function createCodexSecurityServer(): McpServer {
         "Loaded Codex Security scan context.",
       );
     },
+  );
+
+  server.registerTool(
+    "rename_codex_security_scan",
+    {
+      title: "Rename Codex Security Scan",
+      description: "App-only. Change the display name of a saved scan.",
+      inputSchema: { ...scanSchema, name: z.string() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: appMeta,
+    },
+    async ({ scanId, name }) =>
+      scanActionResult(
+        await runWorkbench([
+          "rename-scan",
+          "--scan-id",
+          scanId,
+          `--name=${name}`,
+        ]),
+        "Renamed Codex Security scan.",
+      ),
   );
 
   const updateRunningScanContext = async (input: {
@@ -2204,7 +2239,7 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
     content: [
       {
         type: "text" as const,
-        text: `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Author scan-manifest.json as an unsealed draft: omit scan.sealedAt and scan.artifacts because completion supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Then call complete_codex_security_scan once to index the completed findings.`,
+        text: `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
       },
     ],
     structuredContent: promptOnly,
@@ -2231,9 +2266,17 @@ function buildUserInputElicitation(
   const isSingleQuestion = questions.length === 1;
   return {
     mode: "form" as const,
-    message: isSingleQuestion
-      ? questions[0]!.question
-      : "Codex Security needs your input before it can continue.",
+    message: questions
+      .map((question) =>
+        [
+          ...(isSingleQuestion ? [] : [question.header]),
+          question.question,
+          ...question.options.map(
+            (option) => `- ${option.label}: ${option.description}`,
+          ),
+        ].join("\n"),
+      )
+      .join("\n\n"),
     requestedSchema: {
       type: "object" as const,
       properties: Object.fromEntries(
@@ -2242,6 +2285,7 @@ function buildUserInputElicitation(
           {
             type: "string" as const,
             title: question.header,
+            description: question.question,
             oneOf: question.options.map((option) => ({
               const: option.label,
               title: option.label,
@@ -2431,7 +2475,13 @@ async function executeWorkbenchWithStateSelection(
     } catch (error) {
       if (!isUnwritableSqliteOpenError(error)) throw error;
       const fallbackStateDir = await pinFallbackWorkbenchStateDir();
-      logWorkbenchStateFallback();
+      console.error(
+        JSON.stringify({
+          component: "codex_security_workbench",
+          event: "state_fallback_pinned",
+          reason: "persistent_sqlite_unwritable",
+        }),
+      );
       return await executeWorkbench(
         pythonCommand,
         args,
@@ -2456,43 +2506,47 @@ async function executeWorkbench(
     workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
   }
   const workbenchInput = input ?? userContext;
+  const timeout = [
+    "begin-deep-scan",
+    "cancel-scan",
+    "fail-scan",
+    "claim-deep-scan-dedup",
+    "commit-deep-scan-dedup",
+    "complete-scan",
+    "export-findings",
+    "finish-deep-scan",
+    "get-scan",
+    "get-deep-scan",
+    "get-workspace",
+    "inspect-setup",
+    "list-findings",
+    "preserve-scan-results",
+    "recover-scan-results",
+    "request-finding-remediation",
+    "request-finding-remediation-action",
+    "save-workspace",
+    "set-finding-triage",
+    "set-finding-remediation",
+    "start-headless-standard-scan",
+    "start-prompt-only-scan",
+    "start-scan",
+    "upsert-deep-scan-worker",
+  ].includes(args[0] ?? "")
+    ? 300_000
+    : 30_000;
   const execution = execFileAsync(
     pythonCommand,
     [workbenchScriptPath(), ...workbenchArgs],
     {
       cwd: PLUGIN_ROOT,
+      windowsHide: true,
       env: stateDir
         ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
         : process.env,
       encoding: "utf8" as const,
       // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
       maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
-      timeout: [
-        "begin-deep-scan",
-        "claim-deep-scan-dedup",
-        "commit-deep-scan-dedup",
-        "complete-scan",
-        "export-findings",
-        "finish-deep-scan",
-        "get-scan",
-        "get-deep-scan",
-        "get-workspace",
-        "inspect-setup",
-        "list-findings",
-        "preserve-scan-results",
-        "recover-scan-results",
-        "request-finding-remediation",
-        "request-finding-remediation-action",
-        "save-workspace",
-        "set-finding-triage",
-        "set-finding-remediation",
-        "start-headless-standard-scan",
-        "start-prompt-only-scan",
-        "start-scan",
-        "upsert-deep-scan-worker",
-      ].includes(args[0] ?? "")
-        ? 300_000
-        : 30_000,
+      timeout,
     },
   );
   if (workbenchInput !== undefined) {
@@ -2501,7 +2555,21 @@ async function executeWorkbench(
     });
     execution.child.stdin!.end(workbenchInput);
   }
-  const { stdout } = await execution;
+  const { stdout } = await execution.catch((error: unknown) => {
+    if (
+      error instanceof Error &&
+      "killed" in error &&
+      error.killed === true &&
+      "signal" in error &&
+      error.signal === "SIGTERM"
+    ) {
+      throw new Error(
+        `Codex Security workbench ${args[0]} timed out after ${timeout / 1000} seconds: ${error.message}`,
+        { cause: error },
+      );
+    }
+    throw error;
+  });
   const result = JSON.parse(stdout) as unknown;
   if (!isJsonObject(result)) {
     throw new Error("Codex Security workbench helper returned invalid JSON.");
@@ -2518,18 +2586,6 @@ async function pinFallbackWorkbenchStateDir(): Promise<string> {
     return stateDir;
   })();
   return await fallbackWorkbenchStateDir;
-}
-
-function logWorkbenchStateFallback(): void {
-  if (fallbackWorkbenchStateLogged) return;
-  fallbackWorkbenchStateLogged = true;
-  console.error(
-    JSON.stringify({
-      component: "codex_security_workbench",
-      event: "state_fallback_pinned",
-      reason: "persistent_sqlite_unwritable",
-    }),
-  );
 }
 
 function workbenchScriptPath(): string {

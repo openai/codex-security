@@ -212,23 +212,19 @@ test("mock scan CLI forwards the flag and never offers authentication or patchin
 test("mock scans bind clean Git, committed diff, and working-tree snapshots", async () => {
   const { root, repository, client } = await fixture();
   const git = async (...args: string[]) => {
-    const result = await runCommand(
-      "git",
-      [
-        "-C",
-        repository,
-        "-c",
-        `core.hooksPath=${join(root, "hooks")}`,
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "user.name=Example",
-        "-c",
-        "user.email=example@example.test",
-        ...args,
-      ],
-      { timeout: 10000 },
-    );
+    const result = await runCommand("git", [
+      "-C",
+      repository,
+      "-c",
+      `core.hooksPath=${join(root, "hooks")}`,
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.name=Example",
+      "-c",
+      "user.email=example@example.test",
+      ...args,
+    ]);
     expect(result.status).toBe(0);
   };
   try {
