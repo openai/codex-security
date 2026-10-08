@@ -85,14 +85,8 @@ export function scanProgressUpdatesFromEvent(
 
 export function scanProgressUpdatesFromText(output: string): ScanProgress[] {
   const updates: ScanProgress[] = [];
-  let fence: FenceState | null = null;
-  for (const line of output.split(/\r?\n/u)) {
-    const delimiter = fenceDelimiter(line);
-    if (delimiter !== null) {
-      fence = nextFenceState(fence, delimiter);
-      continue;
-    }
-    if (fence !== null || !line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
+  for (const line of linesOutsideFences(output)) {
+    if (!line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
     const progress = scanProgressFromMarker(line);
     if (progress !== null) updates.push(progress);
   }
