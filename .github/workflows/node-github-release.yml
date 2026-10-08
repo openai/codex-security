@@ -289,7 +289,7 @@ jobs:
                 "$RELEASE_VERSION" \
                 "$RELEASE_SHA" \
                 "$GITHUB_REPOSITORY" \
-                "$RELEASE_RUN_ID" 2>/dev/null
+                "$RELEASE_RUN_ID"
           )"; then
             verified_run_id="$RELEASE_RUN_ID"
             printf '%s\n' "$verified_provenance"

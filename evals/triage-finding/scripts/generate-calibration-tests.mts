@@ -2,6 +2,7 @@
 import type { CalibrationCase, CalibrationVariant } from "../types.ts";
 
 import fs from "node:fs";
+import { hash } from "node:crypto";
 import path from "node:path";
 
 export const DEFAULT_DATASET = path.join(
@@ -57,29 +58,28 @@ function indentedBlock(value: unknown) {
     .replace(/\n/g, "\n      ")}`;
 }
 
-function inputId(testCase: CalibrationCase, variant: CalibrationVariant) {
-  const base =
-    testCase.finding.input_id ||
-    testCase.finding.input_id_base ||
-    testCase.case_id;
-  return `${base}-${variant.variant_id}`;
+export function variantCaseId(
+  testCase: Pick<CalibrationCase, "case_id">,
+  variant: CalibrationVariant,
+) {
+  return `calibration-${hash("sha256", `${testCase.case_id}\0${variant.checkout_ref}`).slice(0, 16)}`;
 }
 
-function evidenceTerms(testCase: CalibrationCase, variant: CalibrationVariant) {
+function evidenceTerms(testCase: CalibrationCase) {
   const terms = (testCase.finding.anchor_locations || []).map(
     (location) => location.path,
   );
-  if (variant.variant_id === "fixed" && testCase.finding.fix_patch_ref) {
-    terms.push(variant.checkout_ref);
-  }
   return [...new Set(terms)];
 }
 
-function findingInput(testCase: CalibrationCase, variant: CalibrationVariant) {
+export function findingInput(
+  testCase: CalibrationCase,
+  variant: CalibrationVariant,
+) {
   const finding = testCase.finding;
   const lines = [
     `Source type: ${testCase.source_type}`,
-    `1. input_id: ${inputId(testCase, variant)}`,
+    `1. input_id: ${variantCaseId(testCase, variant)}`,
     `   title: ${finding.title}`,
   ];
 
@@ -101,12 +101,6 @@ function findingInput(testCase: CalibrationCase, variant: CalibrationVariant) {
       .join(", ");
     lines.push(`   anchor locations: ${anchors}`);
   }
-  if (finding.fix_patch_ref) {
-    lines.push(`   fix evidence: ${finding.fix_patch_ref}`);
-  }
-  lines.push(
-    `   repository state: checked out at ${variant.checkout_ref}. Triage whether the original finding affects this exact state.`,
-  );
 
   return lines.join("\n");
 }
@@ -116,8 +110,8 @@ function testYaml(
   variant: CalibrationVariant,
   repoRoot: string,
 ) {
-  const generatedCaseId = `${testCase.case_id}-${variant.variant_id}`;
-  const terms = evidenceTerms(testCase, variant);
+  const generatedCaseId = variantCaseId(testCase, variant);
+  const terms = evidenceTerms(testCase);
   const lines = [
     `- description: ${quote(`calibration ${variant.variant_id}: ${testCase.case_id}`)}`,
     "  metadata:",
@@ -129,9 +123,10 @@ function testYaml(
     `    expected_binary_label: ${variant.expected_binary_label}`,
     "  vars:",
     `    case_id: ${generatedCaseId}`,
-    `    target_repo: ${path.posix.join(repoRoot, testCase.case_id, variant.variant_id)}`,
+    `    calibration_repo: ${generatedCaseId}`,
+    `    calibration_repo_root: ${quote(repoRoot === DEFAULT_REPO_ROOT ? "" : path.resolve(repoRoot))}`,
     `    source_type_under_test: ${testCase.source_type}`,
-    `    expected_ids: ${inputId(testCase, variant)}`,
+    `    expected_ids: ${variantCaseId(testCase, variant)}`,
     `    expected_source_types: ${testCase.source_type}`,
     `    expected_verdicts: ${variant.expected_verdict}`,
     `    expected_binary_label: ${variant.expected_binary_label}`,
@@ -141,7 +136,7 @@ function testYaml(
     "    eval_instructions: |-",
     indentedBlock(
       `This is an automated OSS calibration eval. Do not ask follow-up questions.
-Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+Inspect only the supplied repository checkout, the named anchor locations and the smallest related static evidence needed for the verdict.
 Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
 Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
 The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.`,

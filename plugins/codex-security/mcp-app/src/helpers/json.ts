@@ -34,7 +34,7 @@ export function parseJson(source: string): unknown {
   }
 }
 
-export function stringifyJson(value: unknown): string {
+export function stringifyJson(value: unknown, space = 2): string {
   return JSON.stringify(
     value,
     (_key, item: unknown) =>
@@ -43,6 +43,6 @@ export function stringifyJson(value: unknown): string {
             String(item),
           )
         : item,
-    2,
+    space,
   );
 }

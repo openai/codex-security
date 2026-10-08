@@ -64,21 +64,12 @@ try {
         ? Object.values(result.decisions)
         : [result]) {
         decisions.add(decision.decision);
-        if (decision.decision === "SAME") {
-          if (model === "gpt-5.6-luna") {
-            assert.ok(!("canonicalFindingId" in decision));
-            assert.ok(!("mergedFinding" in decision));
-          } else {
-            assert.equal(typeof decision.canonicalFindingId, "string");
-            assert.equal(
-              decision.mergedFinding.findingId,
-              decision.canonicalFindingId,
-            );
-            assert.ok(
-              decision.mergedFinding.extensions.mergedOriginals.length > 0,
-            );
-          }
-        }
+        assert.deepEqual(Object.keys(decision).sort(), [
+          "decision",
+          "rationale",
+        ]);
+        assert.equal(typeof decision.rationale, "string");
+        assert.ok(decision.rationale.trim());
       }
     }
     assert.deepEqual(models, new Set(["gpt-5.6-luna", "gpt-5.6-sol"]));
