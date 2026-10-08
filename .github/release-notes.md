@@ -141,6 +141,8 @@
 - reuse artifact JSON schema definitions ([#1443](https://github.com/openai/codex-security/pull/1443))
 - reject standalone collections inside the target ([#1430](https://github.com/openai/codex-security/pull/1430))
 - preserve structured findings API errors ([#1081](https://github.com/openai/codex-security/pull/1081))
+- reuse object validation primitives ([#1452](https://github.com/openai/codex-security/pull/1452))
+- share MCP response and annotation construction ([#1444](https://github.com/openai/codex-security/pull/1444))
 
 <!-- release-section: highlights:end -->
 
