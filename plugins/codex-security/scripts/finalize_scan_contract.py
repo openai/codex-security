@@ -25,7 +25,7 @@ from urllib.parse import quote, urlsplit
 
 # Some hosts load this script with Python's safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench.json_numbers import JsonFloat, is_json_integer, json_number_key
+from workbench.json_numbers import JsonFloat, dumps_json, is_json_integer, json_number_key
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -356,7 +356,7 @@ def write_threat_model_projection_if_possible(
 
 def _json_bytes(payload: Any) -> bytes:
     try:
-        encoded = json.dumps(payload, allow_nan=False, indent=2, sort_keys=True)
+        encoded = dumps_json(payload, allow_nan=False, indent=2, sort_keys=True)
     except ValueError as exc:
         raise ContractError(f"cannot encode canonical JSON: {exc}") from exc
     return (encoded + "\n").encode("utf-8")

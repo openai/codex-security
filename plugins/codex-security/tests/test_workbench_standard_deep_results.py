@@ -1933,6 +1933,8 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     }:
         assert retained["locations"][0]["startLine"] == 1
         assert retained["severity"]["level"] == "critical"
+        # Represented history can map a different identity and location to this row.
+        assert retained["identity"]["anchor"] == "candidate-refined-location"
         assert any(
             item["locations"][0]["startLine"] == 1
             and item["severity"]["score"] == 9
