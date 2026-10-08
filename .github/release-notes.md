@@ -128,6 +128,7 @@
 - manage the findings service lifecycle ([#700](https://github.com/openai/codex-security/pull/700))
 - reject control characters in remote targets during finalization ([#1523](https://github.com/openai/codex-security/pull/1523))
 - validate canonical code-evidence and deferred paths ([#1522](https://github.com/openai/codex-security/pull/1522))
+- reject special filesystem path targets before scanning ([#1524](https://github.com/openai/codex-security/pull/1524))
 
 <!-- release-section: highlights:end -->
 
