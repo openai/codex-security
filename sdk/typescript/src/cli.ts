@@ -1706,7 +1706,15 @@ export async function runCodexSkillCommand(
       if (status !== 0) {
         await writeCliOutput(
           output.stderr,
-          `codex-security: ${skillCommandFailure(output.command, status, events?.error ?? diagnostic, authentication)}\n`,
+          `codex-security: ${skillCommandFailure(
+            output.command,
+            status,
+            events?.error ?? diagnostic,
+            authentication,
+          )
+            .split("\n")
+            .map(diagnosticValue)
+            .join("\n")}\n`,
         );
         return status;
       }

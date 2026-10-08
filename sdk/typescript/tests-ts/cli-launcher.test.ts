@@ -68,7 +68,8 @@ describe("CLI launcher", () => {
           join(packageRoot, "bin", "codex-security.mjs"),
           launcher,
         );
-        const detail = `EACCES: failed ${SYNTHETIC_CREDENTIALS}\u001b[31m\nnext line`;
+        const detail = `EACCES: failed ${SYNTHETIC_CREDENTIALS}\u001b[31m\rnext\nline café 🔒\u001b]52;c;U1lOVEhFVElD\u0007`;
+        const display = `EACCES: failed ${SYNTHETIC_CREDENTIALS} [31m next\nline café 🔒 ]52;c;U1lOVEhFVElD `;
         if (scenario !== "missing")
           await writeFile(
             join(root, "dist", "cli.js"),
@@ -91,7 +92,7 @@ describe("CLI launcher", () => {
           expect(child.stderr).toContain(join(root, "dist", "cli.js"));
         } else
           expect(child.stderr).toBe(
-            `codex-security: Failed to start Codex Security: ${detail}\n`,
+            `codex-security: Failed to start Codex Security: ${display}\n`,
           );
       } finally {
         await rm(root, { recursive: true, force: true });
