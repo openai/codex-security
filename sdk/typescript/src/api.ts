@@ -191,6 +191,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  codexExecutableReadPaths,
   createIsolatedHome,
   executablePathForSpawn,
   expandHome,
@@ -1018,7 +1019,7 @@ export class CodexSecurity {
       ].filter((path, index, roots) => roots.indexOf(path) === index);
       const policyFilesystem = policyFilesystemPermissions(
         inputs.gitMetadataPaths,
-        await realpath(this.#codexCommand().command),
+        await codexExecutableReadPaths(this.#codexCommand().command),
       );
       const { codex } = await this.#createSessionCodex(
         session,
@@ -4614,13 +4615,13 @@ export function scanRuntimeCodexConfig(
 
 function policyFilesystemPermissions(
   gitMetadataPaths: readonly string[] = [],
-  codexPath?: string,
+  codexPaths: readonly string[] = [],
 ): JsonObject {
   return {
     ":minimal": "read",
     ":workspace_roots": "read",
     // Linux's sandbox re-executes Codex, including installations outside /usr.
-    ...(codexPath === undefined ? {} : { [codexPath]: { ".": "read" } }),
+    ...Object.fromEntries(codexPaths.map((path) => [path, { ".": "read" }])),
     // A scoped "." keeps native permission paths literal, including glob characters.
     ...Object.fromEntries(
       gitMetadataPaths.map((path) => [path, { ".": "deny" }]),

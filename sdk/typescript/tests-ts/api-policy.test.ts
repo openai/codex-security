@@ -158,20 +158,56 @@ async function* events(
 }
 
 describe("CodexSecurity policy API", () => {
-  test.each([false, true])(
-    "grants only the resolved runtime executable to policy turns (configured alias: %p)",
-    async (configuredAlias) => {
+  test.each([
+    "bundled",
+    "symlink",
+    ...(process.platform === "win32" ? [] : ["npm", "npm-vendor"]),
+  ])(
+    "grants only the selected runtime files to policy turns (%s)",
+    async (installation) => {
       const executable = await realpath(
         runtime.resolveCodexCommand({}).command,
       );
       const runtimeFixture = await fixture();
-      const selected = join(
+      let selected = join(
         runtimeFixture.root,
         process.platform === "win32" ? "codex.exe" : "codex",
       );
-      if (configuredAlias) await symlink(executable, selected, "file");
+      let readPaths = [executable];
+      if (installation === "symlink")
+        await symlink(executable, selected, "file");
+      if (installation.startsWith("npm")) {
+        const modules = join(runtimeFixture.root, "node_modules", "@openai");
+        const packageRoot = join(modules, "codex");
+        selected = join(packageRoot, "bin", "codex.js");
+        await mkdir(dirname(selected), { recursive: true });
+        await writeFile(selected, "#!/usr/bin/env node\n");
+        await writeFile(
+          join(packageRoot, "package.json"),
+          JSON.stringify({
+            name: "@openai/codex",
+            bin: { codex: "bin/codex.js" },
+          }),
+        );
+        const platformPackage = `codex-${process.platform}-${process.arch}`;
+        const nativeRoot =
+          installation === "npm" ? join(modules, platformPackage) : packageRoot;
+        const architecture = process.arch === "arm64" ? "aarch64" : "x86_64";
+        const target = `${architecture}-${process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`;
+        const native = join(nativeRoot, "vendor", target, "bin", "codex");
+        await mkdir(dirname(native), { recursive: true });
+        await writeFile(native, "synthetic native executable\n");
+        if (installation === "npm-vendor")
+          await mkdir(join(nativeRoot, "vendor", "a-different-platform"));
+        if (installation === "npm")
+          await writeFile(
+            join(nativeRoot, "package.json"),
+            JSON.stringify({ name: `@openai/${platformPackage}` }),
+          );
+        readPaths = [await realpath(selected), await realpath(native)];
+      }
       const f = await setup({
-        ...(configuredAlias
+        ...(installation !== "bundled"
           ? { environment: { CODEX_CLI_PATH: selected } }
           : {}),
       });
@@ -189,18 +225,25 @@ describe("CodexSecurity policy API", () => {
             filesystem: {
               ":minimal": "read",
               ":workspace_roots": "read",
-              [executable]: { ".": "read" },
+              ...Object.fromEntries(
+                readPaths.map((path) => [path, { ".": "read" }]),
+              ),
             },
           },
         },
       });
       expect(f.threads).toHaveLength(3);
       for (const thread of f.threads) {
-        expect(thread.additionalDirectories).not.toContain(dirname(executable));
+        for (const path of readPaths)
+          expect(thread.additionalDirectories).not.toContain(dirname(path));
         expect(thread.additionalDirectories).not.toContain(f.runtime.codexHome);
         expect(thread.approvalPolicy).toBe("never");
         expect(thread.networkAccessEnabled).toBe(false);
       }
+      if (installation !== "bundled")
+        expect(f.configuration()!.codexPathOverride).toBe(
+          runtime.executablePathForSpawn(selected),
+        );
       expect(await readFile(sharedConfigPath, "utf8")).toBe(sharedConfig);
       await f.security.close();
     },

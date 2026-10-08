@@ -2767,15 +2767,29 @@ export function resolveCodexCommand(
     return { command: resolve(expanded) };
   }
 
+  return packagedCodexCommand(import.meta.url);
+}
+
+function packagedCodexCommand(
+  anchor: string,
+  vendorFallback = false,
+): CodexCommand {
   const platform = process.platform === "android" ? "linux" : process.platform;
   const packageName = `@openai/codex-${platform}-${process.arch}`;
   let packageJson: string;
+  let legacyVendor = false;
   try {
-    const require = createRequire(import.meta.url);
+    const require = createRequire(anchor);
     const codexPackageJson = require.resolve("@openai/codex/package.json");
-    packageJson = createRequire(codexPackageJson).resolve(
-      `${packageName}/package.json`,
-    );
+    try {
+      packageJson = createRequire(codexPackageJson).resolve(
+        `${packageName}/package.json`,
+      );
+    } catch (error) {
+      if (!vendorFallback) throw error;
+      packageJson = codexPackageJson;
+      legacyVendor = true;
+    }
   } catch (error) {
     throw new PluginBootstrapError(
       `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
@@ -2783,8 +2797,11 @@ export function resolveCodexCommand(
     );
   }
   const vendor = join(dirname(packageJson), "vendor");
-  const target = readdirSync(vendor, { withFileTypes: true }).find((entry) =>
-    entry.isDirectory(),
+  const architecture = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const legacyTarget = `${architecture}-${platform === "darwin" ? "apple-darwin" : platform === "win32" ? "pc-windows-msvc" : "unknown-linux-musl"}`;
+  const target = readdirSync(vendor, { withFileTypes: true }).find(
+    (entry) =>
+      entry.isDirectory() && (!legacyVendor || entry.name === legacyTarget),
   );
   const command = join(
     vendor,
@@ -2798,6 +2815,31 @@ export function resolveCodexCommand(
     );
   }
   return { command };
+}
+
+export async function codexExecutableReadPaths(
+  command: string,
+): Promise<string[]> {
+  const executable = await realpath(command);
+  const packageJson = resolve(dirname(executable), "..", "package.json");
+  let metadata;
+  try {
+    metadata = JSON.parse(await readFile(packageJson, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [executable];
+    throw error;
+  }
+  if (metadata.name !== "@openai/codex") return [executable];
+  const launcher = await realpath(
+    resolve(dirname(packageJson), metadata.bin.codex),
+  );
+  if (launcher !== executable) return [executable];
+
+  // npm's entrypoint launches a native binary, which Linux re-executes in the sandbox.
+  return [
+    executable,
+    await realpath(packagedCodexCommand(executable, true).command),
+  ];
 }
 
 export function executablePathForSpawn(command: string): string {
