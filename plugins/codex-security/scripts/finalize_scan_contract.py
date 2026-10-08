@@ -431,7 +431,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
     if (
         not value.strip()
         or (normalized == "." and not allow_dot)
-        or (len(value) >= 2 and value[0].isalpha() and value[1] == ":")
+        or re.match(r"^[A-Za-z]:", value)
         or "\\" in value
         or "\0" in value
         or any(ord(character) < 32 for character in value)

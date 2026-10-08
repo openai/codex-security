@@ -1291,6 +1291,7 @@ The extraction root is not enforced.
             "../../outside.ts",
             "/outside.ts",
             "C:/outside.ts",
+            "c:outside.ts",
             "src\\outside.ts",
             ".",
             "./",
@@ -1326,6 +1327,7 @@ The extraction root is not enforced.
             "src/extract.py",
             "src/module:helper.ts",
             "src:stream.ts",
+            "é:helper.ts",
             "./src/extract.py",
             "src//extract.py",
             "src/naïve file.ts",
@@ -1344,6 +1346,32 @@ The extraction root is not enforced.
                     before,
                     {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES},
                 )
+
+    @pytest.mark.cross_platform
+    def test_code_evidence_recovery_distinguishes_unicode_names_from_windows_drives(self) -> None:
+        for path, retained in (
+            ("é:helper.ts", True),
+            ("C:/outside.ts", False),
+            ("c:outside.ts", False),
+        ):
+            with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = self.code_evidence(path)
+                self.write_scan()
+                warnings: list[str] = []
+
+                _, _, _, findings, coverage, _, _ = FINALIZER._prepare_scan_finalization(
+                    self.scan_dir, completion_warnings=warnings
+                )
+
+                if retained:
+                    self.assertEqual(len(findings["findings"]), 1)
+                    self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+                    self.assertEqual(coverage["completeness"], "complete")
+                    self.assertEqual(warnings, [])
+                else:
+                    self.assertEqual(findings["findings"], [])
+                    self.assertEqual(coverage["completeness"], "partial")
+                    self.assertTrue(any("codeEvidence[0].path" in warning for warning in warnings))
 
     @pytest.mark.cross_platform
     def test_preserves_legacy_code_evidence_path_compatibility(self) -> None:
