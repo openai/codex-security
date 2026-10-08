@@ -21,6 +21,7 @@ import path from "node:path";
 import { testDeepScanLifecycle } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
+  WorkbenchDeepScanStore,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,
   AsyncLock,
@@ -2426,6 +2427,85 @@ async function testStaleMutationObservesReplacement() {
   );
 }
 
+async function testStoreConfirmedReplacementSurvivesReadFailure() {
+  for (const replaced of [false, true]) {
+    const fixture = await fixtureRun();
+    const run = { ...fixture.run, coordinatorGeneration: 2 };
+    let current: DeepScanRunState = run;
+    const diagnostic = replaced
+      ? "Deep Scan coordinator lease belongs to a newer generation."
+      : "Permission denied: /fixture/Deep Scan coordinator lease belongs to a newer generation./lock";
+    let reads = 0;
+    const failures: string[][] = [];
+    const store = new WorkbenchDeepScanStore(async (args: string[]) => {
+      switch (args[0]) {
+        case "claim-deep-scan-coordinator":
+          return { deepScan: current, coordinatorDisposition: "claimed" };
+        case "update-progress":
+          if (replaced) current = { ...current, coordinatorGeneration: 3 };
+          throw new Error(diagnostic);
+        case "get-deep-scan":
+          reads += 1;
+          if (reads === 2 || (!replaced && reads === 1))
+            throw new Error("sqlite3.OperationalError: database is locked");
+          if (replaced && reads >= 3)
+            current = {
+              ...current,
+              status: "succeeded",
+              terminalReason: "capped",
+            };
+          return { deepScan: current };
+        case "fail-deep-scan":
+          failures.push(args);
+          if (replaced)
+            throw new Error(
+              "Deep Scan mutation requires the current coordinator lease.",
+            );
+          current = {
+            ...current,
+            status: "failed",
+            error: args
+              .find((arg) => arg.startsWith("--message="))!
+              .slice("--message=".length),
+          };
+          return { deepScan: current };
+        default:
+          throw new Error(`Unexpected fixture operation: ${args[0]}`);
+      }
+    });
+    await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId: "fixture-thread",
+    });
+    const coordinator = new DeepScanCoordinatorRegistry().start({
+      run,
+      store,
+      executor: new FakeExecutor(),
+      pluginRoot: fixture.pluginRoot,
+      clock: immediateClock,
+      threadId: "fixture-thread",
+      heartbeatIntervalMs: 60_000,
+    });
+    const terminal = await coordinator.wait(undefined, 2_500);
+    assert.equal(terminal?.status, replaced ? "succeeded" : "failed");
+    assert.equal(terminal?.coordinatorGeneration, replaced ? 3 : 2);
+    assert.equal(current.status, terminal?.status);
+    assert.equal(failures.length, replaced ? 0 : 1);
+    if (replaced) {
+      assert.equal(
+        reads,
+        3,
+        "the confirmed handoff must enter the retrying observer",
+      );
+      assert.deepEqual(store.coordinatorLeaseArgs(run.scanId), []);
+    } else {
+      assert.equal(terminal?.error, diagnostic);
+      const generationFlag = failures[0].indexOf("--coordinator-generation");
+      assert.equal(failures[0][generationFlag + 1], "2");
+    }
+  }
+}
+
 async function testReducerDiagnosticDoesNotOverrideOwnership() {
   for (const failRead of [false, true])
     for (const reference of [
@@ -3903,6 +3983,7 @@ try {
   await testStoppedPublicationFailureBoundsPrefixedDiagnostic();
   await testTerminalReadFailureIsNotRecordedAsPublicationFailure();
   await testStaleMutationObservesReplacement();
+  await testStoreConfirmedReplacementSurvivesReadFailure();
   await testReducerDiagnosticDoesNotOverrideOwnership();
   await testCoordinatorHeartbeatsStopAfterOwnershipChanges();
   await testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead();
