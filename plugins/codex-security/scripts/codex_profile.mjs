@@ -240,6 +240,8 @@ async function* execute(options, args, input, signal, isCompleted) {
     lines.close();
     if (child.exitCode === null && child.signalCode === null)
       child.kill(isCompleted() ? "SIGKILL" : undefined);
+    child.stdout.destroy();
+    child.stderr.destroy();
     await closed;
   }
 }
