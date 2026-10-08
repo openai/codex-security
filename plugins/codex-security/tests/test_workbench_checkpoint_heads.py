@@ -2079,3 +2079,65 @@ def test_recovery_keeps_exclusions_without_published_string_ids(
     assert coverage_path.read_bytes() == frozen
     assert result.read_bytes() == original
     assert checkpoint.read_bytes() == raw
+
+
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions", "deferred"])
+@pytest.mark.parametrize("initial_plain", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_recovery_reserves_explicit_ids_before_matching_derived_ids(
+    tmp_path: Path, field: str, initial_plain: bool, reverse: bool
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    row = (
+        {
+            "id": "review",
+            "label": "Synthetic review",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [],
+        }
+        if field == "surfaces"
+        else {"id": "review", "reason": "Synthetic review."}
+    )
+    if field == "explicitExclusions":
+        row["pattern"] = "vendor/**"
+    named = {**row, "id": f"review-{saved._digest(row)[:16]}"}
+    initial = [named, row] if initial_plain else [named]
+    if reverse:
+        initial.reverse()
+    parent = saved_draft(scan_id)
+    parent["coverage"][field] = initial
+    write_saved_parent(scan_dir, parent, 100)
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan_dir / name, ns=(100, 100))
+    original = json.dumps(saved_draft(scan_id)).encode()
+    result.write_bytes(original)
+    os.utime(result, ns=(10, 10))
+    fail_deep_scan(state, codex_home, scan_id)
+    coverage_path = scan_dir / "coverage.json"
+    before = json.loads(coverage_path.read_text())[field]
+    assert all(item in before for item in initial)
+
+    another = {**row, "id": "another"}
+    incoming = [another] if initial_plain else [row, another]
+    if reverse:
+        incoming.reverse()
+    worker = saved_draft(scan_id)
+    worker["coverage"][field] = incoming
+    checkpoint = write_checkpoint(result.parent / "checkpoints", worker)
+    raw = checkpoint.read_bytes()
+    recovered = scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    after = json.loads(coverage_path.read_text())[field]
+    assert all(item in after for item in [*before, *incoming])
+    assert len(after) == len(before) + len(incoming)
+    assert len({item["id"] for item in after}) == len(after)
+    assert not recovered["scan"]["warnings"]
+    frozen = coverage_path.read_bytes()
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert coverage_path.read_bytes() == frozen
+    assert result.read_bytes() == original
+    assert checkpoint.read_bytes() == raw

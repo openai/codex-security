@@ -2125,32 +2125,38 @@ def merge_saved_results(
     for field in ("surfaces", "explicitExclusions", "deferred"):
         items = coverage.setdefault(field, [])
         rows = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        published_rows = (published_coverage or {}).get(field, [])
         for item in rows:
             if id(item) in canonical_rows:
                 continue
             item.setdefault("id", _saved_coverage_id(item))
-            if not isinstance(item["id"], str):
-                continue
-            for published in (published_coverage or {}).get(field, []):
-                identity = published.get("id")
-                if not isinstance(identity, str):
-                    continue
-                candidate = {**published, "id": item["id"]}
-                if _schema_values_equal(item, candidate) and identity in {
-                    item["id"],
-                    f"{item['id']}-{_digest(candidate)[:16]}",
-                    f"{item['id']}-{_semantic_digest(candidate)[:16]}",
-                }:
-                    item["id"] = identity
-                    canonical_rows.add(id(item))
-                    break
-        # Frozen recovery rebuilds raw checkpoints in hash order. Reserve the
-        # verified published bindings before a new observation can claim an old ID.
+            if isinstance(item["id"], str) and any(
+                _schema_values_equal(item, published) for published in published_rows
+            ):
+                canonical_rows.add(id(item))
+        # Explicit IDs can look like derived suffixes. Reserve all surviving
+        # exact bindings before recovering suffixes or allocating new collisions.
         used = {
             item["id"]
             for item in rows
             if id(item) in canonical_rows and isinstance(item.get("id"), str)
         }
+        for item in rows:
+            if id(item) in canonical_rows or not isinstance(item["id"], str):
+                continue
+            for published in published_rows:
+                identity = published.get("id")
+                if not isinstance(identity, str) or identity in used:
+                    continue
+                candidate = {**published, "id": item["id"]}
+                if _schema_values_equal(item, candidate) and identity in {
+                    f"{item['id']}-{_digest(candidate)[:16]}",
+                    f"{item['id']}-{_semantic_digest(candidate)[:16]}",
+                }:
+                    item["id"] = identity
+                    canonical_rows.add(id(item))
+                    used.add(identity)
+                    break
         for item in rows:
             if id(item) in canonical_rows:
                 continue
