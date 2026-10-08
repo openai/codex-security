@@ -201,6 +201,39 @@ describe("findings import formats", () => {
     expect(finding!.extensions).toEqual({ nested: [null, 1.5] });
   });
 
+  test.each(["array", "object"])(
+    "imports deeply nested %s extensions while checking numeric leaves",
+    async (kind) => {
+      const document = await sourceDocument();
+      document.findings[0]!.extensions = { deep: "nested-placeholder" };
+      const source = JSON.stringify(document);
+      const depth = 5_000;
+      const opening = kind === "array" ? "[" : '{"nested":';
+      const closing = kind === "array" ? "]" : "}";
+      const nestedSource = (number: string) =>
+        source.replace(
+          '"nested-placeholder"',
+          opening.repeat(depth) + number + closing.repeat(depth),
+        );
+      const [finding] = await parseImportedFindings(
+        nestedSource("1.5"),
+        "json",
+        PLUGIN_ROOT,
+      );
+      let value: unknown = finding!.extensions!["deep"];
+      for (let index = 0; index < depth; index++)
+        value =
+          kind === "array"
+            ? (value as unknown[])[0]
+            : (value as Record<string, unknown>)["nested"];
+      expect(value).toBe(1.5);
+      for (const number of ["1e400", "9007199254740993"])
+        await expect(
+          parseImportedFindings(nestedSource(number), "json", PLUGIN_ROOT),
+        ).rejects.toThrow("JSON numbers are not supported");
+    },
+  );
+
   test("binds separate source occurrences and retains source metadata without following report paths", async () => {
     const document = await sourceDocument();
     const finding = document.findings[0]!;

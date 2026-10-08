@@ -402,6 +402,33 @@ test.each([NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
   },
 );
 
+test("records number validation handles shared and cyclic extension values", async () => {
+  const data = input();
+  data.candidateRelationships = [];
+  const evidence: Record<string, unknown> = { value: 1.5 };
+  evidence["self"] = evidence;
+  data.observations[0]!.finding.extensions = {
+    first: evidence,
+    second: evidence,
+  };
+  const review = mock(async (request: DeduplicationReviewRequest) =>
+    answer(request),
+  );
+  expect(
+    await deduplicateRecords(data, { reviewRunner: { run: review } }),
+  ).toEqual({
+    version: 1,
+    status: "completed",
+    groups: [],
+    unresolved: [],
+  });
+  evidence["value"] = Infinity;
+  await expect(
+    deduplicateRecords(data, { reviewRunner: { run: review } }),
+  ).rejects.toThrow("JSON numbers are not supported");
+  expect(review).not.toHaveBeenCalled();
+});
+
 test("SDK aborts even while a host runner is stuck", async () => {
   const controller = new AbortController();
   await expect(
