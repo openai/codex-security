@@ -36,6 +36,17 @@ def json_number_key(value: int | float) -> tuple[int, str, int]:
     return value.exact if isinstance(value, JsonFloat) else _number_key(str(value))
 
 
+def compare_json_numbers(left: int | float, right: int | float) -> int:
+    """Order finite JSON numbers exactly without expanding their exponents."""
+    left_sign, left_digits, left_power = json_number_key(left)
+    right_sign, right_digits, right_power = json_number_key(right)
+    if left_sign != right_sign:
+        return left_sign - right_sign
+    left_magnitude = (len(left_digits) + left_power, left_digits)
+    right_magnitude = (len(right_digits) + right_power, right_digits)
+    return left_sign * ((left_magnitude > right_magnitude) - (left_magnitude < right_magnitude))
+
+
 def is_json_integer(value: object) -> bool:
     if isinstance(value, JsonFloat):
         return math.isfinite(value) and value.exact[2] >= 0

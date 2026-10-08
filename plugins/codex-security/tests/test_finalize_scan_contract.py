@@ -2292,6 +2292,83 @@ The extraction root is not enforced.
             with self.assertRaises(ValueError):
                 FINALIZER.dumps_json({"value": nonfinite}, allow_nan=False)
 
+    @pytest.mark.cross_platform
+    def test_exact_score_bounds_are_checked_before_sealing(self) -> None:
+        self.write_scan()
+        _, canonical, _ = FINALIZER.finalize_scan(self.scan_dir)
+        template = canonical["findings"][0]
+        for token, accepted in (
+            ("0", True),
+            ("-0.0", True),
+            ("10", True),
+            ("10.0", True),
+            ("1e1", True),
+            ("9.99999999999999999999999999999999999999", True),
+            ("1e-400", True),
+            ("1e-" + "9" * 5001, True),
+            ("10.0000000000000001", False),
+            ("10.00000000000000000000000000000000000001", False),
+            ("-1e-400", False),
+            ("-1e-" + "9" * 5001, False),
+            ("true", False),
+        ):
+            with self.subTest(token=token):
+                value = FINALIZER._loads_json(token)
+                finding = copy.deepcopy(template)
+                finding["severity"]["score"] = value
+                schema = {"type": "number", "minimum": 0, "maximum": 10}
+                if accepted:
+                    FINALIZER._validate_schema_node(value, schema, "score")
+                    FINALIZER._validate_finding(finding, "finding")
+                else:
+                    with self.assertRaises(FINALIZER.ContractError):
+                        FINALIZER._validate_schema_node(value, schema, "score")
+                    with self.assertRaises(FINALIZER.ContractError):
+                        FINALIZER._validate_finding(finding, "finding")
+                self.findings["findings"][0]["severity"].update(
+                    score="RAW_SCORE", scoringSystem="CVSS:3.1"
+                )
+                self.write_scan()
+                path = self.scan_dir / "findings.json"
+                raw = path.read_text().replace('"RAW_SCORE"', token).encode()
+                path.write_bytes(raw)
+                if accepted:
+                    manifest, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertTrue(manifest["scan"]["sealedAt"])
+                    written = FINALIZER._loads_json(path.read_bytes())
+                    self.assertTrue(
+                        FINALIZER._schema_values_equal(
+                            value, written["findings"][0]["severity"]["score"]
+                        )
+                    )
+                    self.assertEqual(len(findings["findings"]), 1)
+                else:
+                    with self.assertRaises(FINALIZER.ContractError):
+                        FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertEqual(path.read_bytes(), raw)
+                    self.assertNotIn(
+                        "sealedAt",
+                        json.loads((self.scan_dir / "scan-manifest.json").read_text())["scan"],
+                    )
+
+    def test_exact_numeric_bounds_order_negative_values_and_long_exponents(self) -> None:
+        for token, minimum, maximum, accepted in (
+            ("-1.0000000000000001", -1, 0, False),
+            ("-0.9999999999999999", -1, 0, True),
+            ("1.0000000000000001", 0, 1, False),
+            ("0.9999999999999999", 0, 1, True),
+            ("-1e-" + "9" * 5001, -1, 0, True),
+            ("1e-" + "9" * 5001, -1, 0, False),
+        ):
+            with self.subTest(token=token):
+                value = FINALIZER._loads_json(token)
+                schema = {"type": "number", "minimum": minimum, "maximum": maximum}
+                if accepted:
+                    FINALIZER._validate_schema_node(value, schema, "value")
+                else:
+                    with self.assertRaises(FINALIZER.ContractError):
+                        FINALIZER._validate_schema_node(value, schema, "value")
+
     def test_raw_large_exponents_keep_nonfinite_rejection(self) -> None:
         for token in ("1e400", "1e9999999999999999999", "-1e9999999999999999999"):
             with self.subTest(token=token):
