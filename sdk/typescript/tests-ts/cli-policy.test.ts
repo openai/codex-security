@@ -243,6 +243,8 @@ describe("policy CLI", () => {
       { args: ["--auth", "chatgpt"] },
       { args: ["--auth", "api-key"] },
       { args: ["--provider", "openrouter", "--model", "vendor/model"] },
+      { args: ["--provider", "minimax", "--model", "MiniMax-M3"] },
+      { args: ["--provider", "minimax-cn", "--model", "MiniMax-M3"] },
       { args: [], ci: true },
       { args: [], stored: false },
       { args: [], key: false },

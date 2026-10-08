@@ -141,7 +141,22 @@ codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export MINIMAX_API_KEY="<your-global-minimax-api-key>"
+codex-security scan . --provider minimax --model MiniMax-M3
+# Use the China API with a key for that region:
+export MINIMAX_API_KEY="<your-china-minimax-api-key>"
+codex-security scan . --provider minimax-cn --model MiniMax-M3
 ```
+
+The MiniMax presets use the native Responses API at `https://api.minimax.io/v1`
+(global) and `https://api.minimax.cn/v1` (China). They share the `MINIMAX_API_KEY`
+variable; supply the key for the selected region. The default provider remains
+OpenAI, and external provider presets require an explicit model.
+
+MiniMax cost estimates are unavailable. The current model-only estimator cannot
+distinguish regional pricing for the same model ID, so `--max-cost` rejects
+MiniMax models before model work starts. Token usage is still reported.
 
 ### Amazon Bedrock
 
@@ -521,6 +536,12 @@ For `dedupe --scan latest`, matching across worktrees or clones requires a Git
 executable outside all saved scan targets. If a historical target includes the
 available Git installation, use `codex-security dedupe --scan SCAN_ID` with an
 explicit saved scan ID. Exact-path `latest` lookup still works without Git.
+
+Saved scan recipes retain MiniMax preset retry counts, stream idle timeouts,
+websocket support, and display names when the provider endpoint and key source
+still match the preset. Literal credentials and custom provider headers, query
+parameters, endpoints, and authentication tables are not saved. Recipes using
+those custom settings require the original native Codex configuration for replay.
 
 Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
 `--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are

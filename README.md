@@ -179,11 +179,12 @@ ChatGPT login.
 
 ## Other providers
 
-Scans support OpenAI, Amazon Bedrock, OpenRouter, and Fireworks AI. Bedrock uses
+Scans support OpenAI, Amazon Bedrock, OpenRouter, Fireworks AI, and MiniMax (global
+and China). Bedrock uses
 AWS credentials and does not require a separate OpenAI login. See
 [Bedrock setup](docs/bedrock.md) for AWS profiles, regions, and model access.
 
-For OpenRouter and Fireworks AI, set the provider's API key and choose a supported
+For OpenRouter, Fireworks AI, and MiniMax, set the provider's API key and choose a supported
 model. See [provider configuration](sdk/typescript/docs/cli.md#native-command-authentication-and-other-providers)
 for examples.
 

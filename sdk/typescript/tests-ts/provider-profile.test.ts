@@ -18,7 +18,11 @@ import {
   providerPreflightCommand,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
-import { structuredCodexConfig } from "../src/config.js";
+import {
+  structuredCodexConfig,
+  MINIMAX_CODEX_PROVIDER,
+  MINIMAX_CN_CODEX_PROVIDER,
+} from "../src/config.js";
 import {
   bundledPluginRoot,
   resolveCodexCommand,
@@ -493,5 +497,39 @@ test.each([
     } finally {
       await profile?.cleanup();
     }
+  },
+);
+
+test.each([
+  ["minimax", MINIMAX_CODEX_PROVIDER],
+  ["minimax-cn", MINIMAX_CN_CODEX_PROVIDER],
+] as const)(
+  "native startup accepts %s Responses metadata without exposing provider details",
+  async (selection, provider) => {
+    const home = await temporaryDirectory();
+    const command = await providerPreflightCommand(
+      {
+        ...resolveCodexCommand({}),
+        args: [
+          "-c",
+          "features.api_key_model_discovery=false",
+          "-c",
+          "features.plugins=false",
+        ],
+      },
+      { model_provider: selection, model_providers: { [selection]: provider } },
+    );
+    const argumentsText = JSON.stringify(command.args);
+    expect(argumentsText).toContain(selection);
+    expect(argumentsText).not.toContain(provider.base_url);
+    expect(argumentsText).not.toContain(provider.env_key);
+    const result = await runCodexCommand(command, ["mcp", "list", "--json"], {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+      MINIMAX_API_KEY: "synthetic-regional-key",
+    });
+    expect(result.success, result.stderr).toBe(true);
+    expect(JSON.parse(result.stdout)).toEqual([]);
   },
 );

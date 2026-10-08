@@ -69,6 +69,7 @@ import {
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
+  scanAuthenticationProvider,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -823,7 +824,7 @@ export class CodexSecurity {
       authentication: scanAuthentication(
         this.#dependencies.environment,
         options.auth,
-        modelProvider,
+        scanAuthenticationProvider(configuration),
         hasCommandAuth(configuration),
       ),
       ...model,
@@ -1315,7 +1316,8 @@ export class CodexSecurity {
         environment: selectedScanEnvironment(
           runtime.environment,
           options.auth,
-          modelProvider,
+          scanAuthenticationProvider(effectiveConfig),
+          effectiveConfig,
         ),
       };
       for (const root of [
@@ -1366,7 +1368,8 @@ export class CodexSecurity {
           selectedScanEnvironment(
             runtime.environment,
             options.auth,
-            modelProvider,
+            scanAuthenticationProvider(effectiveConfig),
+            effectiveConfig,
           ),
         ),
         ...(session.apiKey === null
@@ -2707,7 +2710,6 @@ export class CodexSecurity {
       runtime,
       runtimeHome,
       python,
-      modelProvider,
       externalProvider,
       apiKey,
       sessionConfig,
@@ -2723,7 +2725,8 @@ export class CodexSecurity {
                 ? withoutOpenAiApiKeys(runtime.environment)
                 : runtime.environment,
               auth,
-              modelProvider,
+              scanAuthenticationProvider(sessionConfig),
+              sessionConfig,
             ),
           ),
         ),
@@ -2841,26 +2844,32 @@ export class CodexSecurity {
       );
       const commandAuth = hasCommandAuth(requestedConfig);
       const modelProvider = scanModelProvider(requestedConfig);
+      const authenticationProvider =
+        scanAuthenticationProvider(requestedConfig);
       const externalProvider =
-        !commandAuth && isExternalModelProvider(modelProvider)
-          ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+        !commandAuth && isExternalModelProvider(authenticationProvider)
+          ? EXTERNAL_CODEX_PROVIDERS[authenticationProvider]
           : null;
       let authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
-        modelProvider,
+        authenticationProvider,
         commandAuth,
       );
       const apiKey =
         authentication.method === "api_key"
-          ? environmentApiKey(this.#dependencies.environment, modelProvider)
+          ? environmentApiKey(
+              this.#dependencies.environment,
+              authenticationProvider,
+            )
           : null;
       const scanEnvironment = selectedScanEnvironment(
         commandAuth
           ? withoutOpenAiApiKeys(this.#dependencies.environment)
           : this.#dependencies.environment,
         options.auth,
-        modelProvider,
+        authenticationProvider,
+        requestedConfig,
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -3002,7 +3011,7 @@ export class CodexSecurity {
           this.#dependencies.environment,
           runtime.codexHome,
           options.auth,
-          modelProvider,
+          authenticationProvider,
         );
       if (
         options.safetyIdentifier !== undefined &&
@@ -3519,13 +3528,14 @@ export class CodexSecurity {
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
-    const modelProvider = scanModelProvider(requestedConfig);
+    const authenticationProvider = scanAuthenticationProvider(requestedConfig);
     const processEnvironment = selectedScanEnvironment(
       hasCommandAuth(requestedConfig)
         ? withoutOpenAiApiKeys(this.#dependencies.environment)
         : this.#dependencies.environment,
       auth,
-      modelProvider,
+      authenticationProvider,
+      requestedConfig,
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -3578,8 +3588,8 @@ export class CodexSecurity {
           : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
-        isExternalModelProvider(modelProvider) ||
-        modelProvider === "amazon-bedrock"
+        isExternalModelProvider(authenticationProvider) ||
+        authenticationProvider === "amazon-bedrock"
           ? false
           : await initialCredentialsAvailable(
               processEnvironment,
@@ -4399,7 +4409,12 @@ export function selectedScanEnvironment(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
+  config?: JsonObject,
 ): ProcessEnvironment {
+  if (config !== undefined && hasCommandAuth(config)) {
+    // Native auth commands can consume inputs not declared as provider keys.
+    return withoutOpenAiApiKeys(environment);
+  }
   const selectedProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
@@ -4407,10 +4422,25 @@ export function selectedScanEnvironment(
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
+  const configuredKeys = new Set(
+    configuredProviderEnvironmentNames(config ?? {}).map((name) =>
+      process.platform === "win32" ? name.toUpperCase() : name,
+    ),
+  );
   return Object.fromEntries(
     Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
+      if (
+        configuredKeys.has(
+          process.platform === "win32" ? name.toUpperCase() : name,
+        )
+      )
+        return true;
       const key = name.toUpperCase();
-      if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
+      if (
+        Object.values(EXTERNAL_CODEX_PROVIDERS).some(
+          (provider) => provider.env_key === key,
+        )
+      ) {
         return (
           !bedrockProvider &&
           (selectedProviderKey === null || key === selectedProviderKey)
@@ -4448,11 +4478,7 @@ function environmentApiKeyEntry(
   environment: ProcessEnvironment,
   modelProvider?: unknown,
 ): {
-  source:
-    | "OPENAI_API_KEY"
-    | "CODEX_API_KEY"
-    | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY";
+  source: string;
   value: string;
 } | null {
   const keys = isExternalModelProvider(modelProvider)
@@ -4795,9 +4821,49 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   }
   const modelProvider = scanModelProvider(result);
   if (isExternalModelProvider(modelProvider)) {
-    result["model_providers"] = {
-      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
-    };
+    const preset = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+    const providers = resolved["model_providers"];
+    const provider = isRecord(providers) ? providers[modelProvider] : undefined;
+    if (modelProvider === "openrouter" || modelProvider === "fireworks") {
+      result["model_providers"] = { [modelProvider]: { ...preset } };
+    } else if (
+      isRecord(provider) &&
+      scanAuthenticationProvider(config) === modelProvider
+    ) {
+      const projected: JsonObject = { ...preset };
+      const replayable = Object.entries(provider).every(([key, value]) => {
+        if (key === "name" && safeString(value)) {
+          projected[key] = value;
+          return true;
+        }
+        if (Object.hasOwn(preset, key))
+          return value === (preset as JsonObject)[key];
+        if (
+          [
+            "request_max_retries",
+            "stream_max_retries",
+            "stream_idle_timeout_ms",
+          ].includes(key) &&
+          safeInteger(value)
+        ) {
+          projected[key] = value;
+          return true;
+        }
+        if (
+          (key === "supports_websockets" && typeof value === "boolean") ||
+          (key === "requires_openai_auth" && value === false)
+        ) {
+          projected[key] = value;
+          return true;
+        }
+        return (
+          (key === "auth" || key === "experimental_bearer_token") &&
+          value == null
+        );
+      });
+      if (replayable)
+        result["model_providers"] = { [modelProvider]: projected };
+    }
   } else if (modelProvider === "amazon-bedrock") {
     const providers = config["model_providers"];
     const provider = isRecord(providers) ? providers[modelProvider] : undefined;
@@ -4874,6 +4940,24 @@ async function pluginForwardsWorkerProviderSelection(
   );
 }
 
+function configuredProviderEnvironmentNames(config: JsonObject): string[] {
+  const providers = resolveCodexProfile(config)["model_providers"];
+  return isRecord(providers)
+    ? Object.values(providers)
+        .flatMap((provider) =>
+          isRecord(provider)
+            ? [
+                provider["env_key"],
+                ...(isRecord(provider["env_http_headers"])
+                  ? Object.values(provider["env_http_headers"])
+                  : []),
+              ]
+            : [],
+        )
+        .filter((name): name is string => typeof name === "string")
+    : [];
+}
+
 function selectedWorkerRuntimeConfig(
   config: JsonObject,
   selectedProvider: unknown,
@@ -4884,20 +4968,7 @@ function selectedWorkerRuntimeConfig(
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   const providers = resolved["model_providers"];
-  const providerEnvironmentNames = isRecord(providers)
-    ? Object.values(providers)
-        .flatMap((providerConfig) =>
-          isRecord(providerConfig)
-            ? [
-                providerConfig["env_key"],
-                ...(isRecord(providerConfig["env_http_headers"])
-                  ? Object.values(providerConfig["env_http_headers"])
-                  : []),
-              ]
-            : [],
-        )
-        .filter((name): name is string => typeof name === "string")
-    : [];
+  const providerEnvironmentNames = configuredProviderEnvironmentNames(config);
   const providerEnvironment = Object.fromEntries(
     providerEnvironmentNames.flatMap((name) => {
       const key =

@@ -36,9 +36,24 @@ export const FIREWORKS_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const MINIMAX_CODEX_PROVIDER = {
+  name: "MiniMax",
+  base_url: "https://api.minimax.io/v1",
+  env_key: "MINIMAX_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const MINIMAX_CN_CODEX_PROVIDER = {
+  ...MINIMAX_CODEX_PROVIDER,
+  name: "MiniMax China",
+  base_url: "https://api.minimax.cn/v1",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
+  minimax: MINIMAX_CODEX_PROVIDER,
+  "minimax-cn": MINIMAX_CN_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
@@ -106,6 +121,32 @@ export function scanModel(config: Readonly<JsonObject>): unknown {
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
+}
+
+/** @internal Preserve native configuration when adding provider presets. */
+export function scanAuthenticationProvider(
+  config: Readonly<JsonObject>,
+): unknown {
+  const selected = scanModelProvider(config);
+  if (
+    !isExternalModelProvider(selected) ||
+    selected === "openrouter" ||
+    selected === "fireworks"
+  ) {
+    return selected;
+  }
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  const preset = EXTERNAL_CODEX_PROVIDERS[selected];
+  return isObject(provider) &&
+    provider["base_url"] === preset.base_url &&
+    provider["env_key"] === preset.env_key &&
+    provider["wire_api"] === preset.wire_api &&
+    provider["requires_openai_auth"] !== true &&
+    provider["experimental_bearer_token"] == null &&
+    provider["auth"] == null
+    ? selected
+    : undefined;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */

@@ -16,8 +16,9 @@ import {
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
+import { EXTERNAL_CODEX_PROVIDERS } from "../src/config.js";
 import {
   CodexSecurityError,
   type JsonObject,
@@ -1324,6 +1325,12 @@ describe("skill authentication", () => {
     ["verify-fix", "auto", "gateway"],
     ["verify-fix", "api-key", "gateway"],
     ["patch", "api-key", "openrouter"],
+    ["validate", "auto", "minimax"],
+    ["patch", "api-key", "minimax"],
+    ["verify-fix", "api-key", "minimax"],
+    ["validate", "auto", "minimax-cn"],
+    ["patch", "api-key", "minimax-cn"],
+    ["verify-fix", "api-key", "minimax-cn"],
   ] as const)(
     "%s uses the custom provider env_key with %s auth (%s)",
     async (command, auth, provider) => {
@@ -1736,6 +1743,8 @@ describe("skill authentication", () => {
     ["fireworks", "api-key"],
     ["openrouter", "chatgpt"],
     ["fireworks", "chatgpt"],
+    ["minimax", "api-key"],
+    ["minimax-cn", "api-key"],
   ] as const)(
     "preserves OPENAI_API_KEY when configured as the %s provider key with %s auth",
     async (provider, auth) => {
@@ -1757,6 +1766,9 @@ describe("skill authentication", () => {
       expect(result.status, result.stderr).toBe(0);
       expect(result.launch.environment).toEqual({
         OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+        ...(provider === "minimax" || provider === "minimax-cn"
+          ? { CODEX_API_KEY: "SYNTHETIC_CODEX_KEY" }
+          : {}),
       });
       expect(result.requests.map((request) => request.method)).not.toContain(
         "account/login/start",
@@ -1764,15 +1776,25 @@ describe("skill authentication", () => {
     },
   );
 
-  test.each([
-    ["validate", "override"],
-    ["patch", "override"],
-    ["verify-fix", "override"],
-    ["patch", "ambient"],
-    ["verify-fix", "ambient"],
-  ] as const)(
-    "%s uses native provider bearer authentication from %s without an OpenAI login",
-    async (command, source) => {
+  test.each(
+    (
+      [
+        ["validate", "override"],
+        ["patch", "override"],
+        ["verify-fix", "override"],
+        ["patch", "ambient"],
+        ["verify-fix", "ambient"],
+      ] as const
+    ).flatMap(([command, source]) =>
+      ["gateway", "minimax", "minimax-cn"].flatMap((provider) =>
+        (["auto", "chatgpt", "api-key"] as const).map(
+          (auth) => [command, source, provider, auth] as const,
+        ),
+      ),
+    ),
+  )(
+    "%s preserves native provider bearer authentication from %s (%s, %s)",
+    async (command, source, provider, auth) => {
       const providerConfig = {
         name: "Synthetic gateway",
         base_url: "https://gateway.example.test/v1",
@@ -1785,35 +1807,254 @@ describe("skill authentication", () => {
       );
       const result = await runProviderSkill(stateDirectory, {
         command,
-        auth: "auto",
+        auth,
+        storedCredentials: auth === "chatgpt",
+        environment:
+          auth === "api-key" ? { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" } : {},
         overrides: [
-          'model_provider="gateway"',
+          `model_provider=${JSON.stringify(provider)}`,
           ...(source === "override"
-            ? settings.map((setting) => `model_providers.gateway.${setting}`)
+            ? settings.map(
+                (setting) => `model_providers.${provider}.${setting}`,
+              )
             : []),
         ],
         ...(source === "ambient"
           ? {
-              ambientConfig: ["[model_providers.gateway]", ...settings].join(
-                "\n",
-              ),
+              ambientConfig: [
+                `[model_providers.${provider}]`,
+                ...settings,
+              ].join("\n"),
             }
           : {}),
       });
       expect(result.status, result.stderr).toBe(0);
-      expect(result.launch.environment).toEqual({});
-      if (source === "override") {
-        const override = result.launch.args.findLast((arg: string) =>
+      expect(result.launch.environment).toEqual(
+        auth === "api-key" ? { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" } : {},
+      );
+      const override = result.launch.args.findLast((arg: string) =>
+        arg.startsWith("model_providers="),
+      );
+      const homeProviders = parseToml(result.launch.config)[
+        "model_providers"
+      ] as Record<string, JsonObject> | undefined;
+      const argumentProviders =
+        override === undefined
+          ? undefined
+          : (parseToml(override)["model_providers"] as Record<
+              string,
+              JsonObject
+            >);
+      const { experimental_bearer_token: _token, ...storedProvider } =
+        providerConfig;
+      expect({
+        ...homeProviders?.[provider],
+        ...argumentProviders?.[provider],
+      }).toEqual(auth === "chatgpt" ? storedProvider : providerConfig);
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each(
+    (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      (["minimax", "minimax-cn"] as const).flatMap((provider) =>
+        [false, true].map(
+          (withBearer) => [command, provider, withBearer] as const,
+        ),
+      ),
+    ),
+  )(
+    "%s retains the %s preset key with native bearer configured=%p",
+    async (command, provider, withBearer) => {
+      const providerConfig = {
+        ...EXTERNAL_CODEX_PROVIDERS[provider],
+        ...(withBearer
+          ? { experimental_bearer_token: "SYNTHETIC_FALLBACK_TOKEN" }
+          : {}),
+      };
+      const result = await runProviderSkill(stateDirectory, {
+        command,
+        auth: "auto",
+        overrides: [
+          `model_provider=${JSON.stringify(provider)}`,
+          ...Object.entries(providerConfig).map(
+            ([key, value]) =>
+              `model_providers.${provider}.${key}=${JSON.stringify(value)}`,
+          ),
+        ],
+        environment: {
+          MINIMAX_API_KEY: "SYNTHETIC_MINIMAX_KEY",
+          OPENAI_API_KEY: "SYNTHETIC_OTHER_OPENAI",
+          CODEX_API_KEY: "SYNTHETIC_OTHER_CODEX",
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        MINIMAX_API_KEY: "SYNTHETIC_MINIMAX_KEY",
+        ...(withBearer
+          ? {
+              OPENAI_API_KEY: "SYNTHETIC_OTHER_OPENAI",
+              CODEX_API_KEY: "SYNTHETIC_OTHER_CODEX",
+            }
+          : {}),
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each(
+    (["minimax", "minimax-cn"] as const).flatMap((provider) =>
+      (["patch", "verify-fix"] as const).flatMap((command) =>
+        (["preset-key", "custom-key", "command"] as const).map(
+          (kind) => [provider, command, kind] as const,
+        ),
+      ),
+    ),
+  )(
+    "preserves the ambient %s definition for %s with %s auth",
+    async (provider, command, kind) => {
+      const definition = {
+        name: "Synthetic native gateway",
+        base_url: "https://gateway.example.test/v1",
+        wire_api: "responses",
+        ...(kind === "command"
+          ? { auth: { command: "synthetic-auth", args: [] } }
+          : {
+              env_key:
+                kind === "preset-key" ? "MINIMAX_API_KEY" : "GATEWAY_API_KEY",
+            }),
+      };
+      const result = await runProviderSkill(stateDirectory, {
+        command,
+        auth: "api-key",
+        overrides: [`model_provider=${JSON.stringify(provider)}`],
+        ambientConfig: stringifyToml({
+          model_providers: { [provider]: definition },
+        }),
+        environment:
+          kind === "custom-key"
+            ? { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" }
+            : { MINIMAX_API_KEY: "SYNTHETIC_MINIMAX_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const native = parseToml(result.launch.config)[
+        "model_providers"
+      ] as Record<string, JsonObject>;
+      expect(native[provider]).toEqual(definition);
+      expect(
+        result.launch.args.some((arg: string) =>
           arg.startsWith("model_providers="),
-        );
-        expect(parseToml(override)["model_providers"]).toEqual({
-          gateway: providerConfig,
-        });
-      } else {
-        expect(parseToml(result.launch.config)["model_providers"]).toEqual({
-          gateway: providerConfig,
-        });
-      }
+        ),
+      ).toBe(false);
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each(["minimax", "minimax-cn"] as const)(
+    "preserves explicit ChatGPT selection for native %s custom keys",
+    async (provider) => {
+      const result = await runProviderSkill(stateDirectory, {
+        command: "patch",
+        auth: "chatgpt",
+        storedCredentials: true,
+        overrides: [
+          `model_provider=${JSON.stringify(provider)}`,
+          `model_providers.${provider}.name="Synthetic gateway"`,
+          `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
+          `model_providers.${provider}.wire_api="responses"`,
+          `model_providers.${provider}.env_key="OPENAI_API_KEY"`,
+        ],
+        environment: { OPENAI_API_KEY: "SYNTHETIC_IGNORED_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({});
+      const override = result.launch.args.findLast((arg: string) =>
+        arg.startsWith("model_providers="),
+      );
+      expect(
+        (parseToml(override)["model_providers"] as Record<string, JsonObject>)[
+          provider
+        ],
+      ).toEqual({
+        name: "Synthetic gateway",
+        base_url: "https://gateway.example.test/v1",
+        wire_api: "responses",
+        requires_openai_auth: true,
+      });
+    },
+  );
+
+  test.each(
+    (["minimax", "minimax-cn"] as const).flatMap((provider) =>
+      (
+        [
+          ["validate", "override"],
+          ["patch", "override"],
+          ["verify-fix", "override"],
+          ["patch", "ambient"],
+          ["verify-fix", "ambient"],
+        ] as const
+      ).flatMap(([command, source]) =>
+        [false, true].map(
+          (hasKey) => [provider, command, source, hasKey] as const,
+        ),
+      ),
+    ),
+  )(
+    "%s native auth honors ChatGPT for %s %s configuration with matching preset key present=%p",
+    async (provider, command, source, hasKey) => {
+      const definition = {
+        ...EXTERNAL_CODEX_PROVIDERS[provider],
+        requires_openai_auth: true,
+      };
+      const result = await runProviderSkill(stateDirectory, {
+        command,
+        auth: "chatgpt",
+        storedCredentials: true,
+        overrides: [
+          `model_provider=${JSON.stringify(provider)}`,
+          ...(source === "override"
+            ? Object.entries(definition).map(
+                ([key, value]) =>
+                  `model_providers.${provider}.${key}=${JSON.stringify(value)}`,
+              )
+            : []),
+        ],
+        ...(source === "ambient"
+          ? {
+              ambientConfig: stringifyToml({
+                model_providers: { [provider]: definition },
+              }),
+            }
+          : {}),
+        environment: hasKey ? { MINIMAX_API_KEY: "SYNTHETIC_IGNORED_KEY" } : {},
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({});
+      const homeProviders = parseToml(result.launch.config)[
+        "model_providers"
+      ] as Record<string, JsonObject> | undefined;
+      const override = result.launch.args.findLast((arg: string) =>
+        arg.startsWith("model_providers="),
+      );
+      const argumentProviders =
+        override === undefined
+          ? undefined
+          : (parseToml(override)["model_providers"] as Record<
+              string,
+              JsonObject
+            >);
+      const { env_key: _key, ...expected } = definition;
+      expect({
+        ...homeProviders?.[provider],
+        ...argumentProviders?.[provider],
+      }).toEqual(expected);
       expect(result.requests.map((request) => request.method)).not.toContain(
         "account/login/start",
       );
@@ -2208,12 +2449,14 @@ describe("skill authentication", () => {
       });
     },
   );
-  test.each(["patch", "verify-fix"] as const)(
+  test.each(["validate", "patch", "verify-fix"] as const)(
     "%s requires the selected external provider key",
     async (command) => {
       for (const [provider, key] of [
         ["fireworks", "FIREWORKS_API_KEY"],
         ["openrouter", "OPENROUTER_API_KEY"],
+        ["minimax", "MINIMAX_API_KEY"],
+        ["minimax-cn", "MINIMAX_API_KEY"],
       ] as const) {
         for (const auth of ["api-key", "auto", "chatgpt"] as const) {
           await expect(
@@ -2223,6 +2466,12 @@ describe("skill authentication", () => {
                 command,
                 auth,
                 modelProvider: provider,
+                codexOverrides: {
+                  model_provider: provider,
+                  model_providers: {
+                    [provider]: EXTERNAL_CODEX_PROVIDERS[provider],
+                  },
+                },
                 stdout: capture().stream,
                 stderr: capture().stream,
               },

@@ -1277,6 +1277,9 @@ async function testWorkerRuntimeSettings() {
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
+    "MINIMAX_API_KEY",
+    "OPENROUTER_API_KEY",
+    "FIREWORKS_API_KEY",
     "SYNTHETIC_HEADER_VALUE",
     "CODEX_SQLITE_HOME",
     "XDG_CACHE_HOME",
@@ -1286,6 +1289,9 @@ async function testWorkerRuntimeSettings() {
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
     delete process.env.SYNTHETIC_GATEWAY_KEY;
+    delete process.env.MINIMAX_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.FIREWORKS_API_KEY;
     delete process.env.SYNTHETIC_HEADER_VALUE;
     delete process.env.CODEX_SQLITE_HOME;
     for (const [configuration, expected] of cases) {
@@ -1340,6 +1346,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         { model: "fixture-future-model", reasoningEffort: "future-effort" },
         // Omitted settings preserve the model and effort in the Codex home.
         {},
+        { model: "MiniMax-M3", reasoningEffort: "high" },
+        { model: "MiniMax-M2.7", reasoningEffort: "medium" },
+        { model: "synthetic-openrouter-model", reasoningEffort: "high" },
+        { model: "synthetic-fireworks-model", reasoningEffort: "high" },
       ];
       const providerKeys = settings.map((_, index) =>
         index === 0 ? undefined : ` synthetic-gateway-key-${index} `,
@@ -1402,28 +1412,87 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             literalFilesystemDenies: [deepPath, codexHome],
             globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
           };
-          const provider = index === 0 ? undefined : "synthetic.gateway";
-          const providerConfig =
+          const minimax = index === 6 || index === 7;
+          const crossPreset = index >= 8;
+          const nativeBearer = minimax && expected === "auto";
+          const nativeKey = minimax && expected === "concise";
+          const provider =
+            index === 0
+              ? undefined
+              : crossPreset
+                ? index === 8
+                  ? "openrouter"
+                  : "fireworks"
+                : minimax
+                  ? index === 6
+                    ? "minimax"
+                    : "minimax-cn"
+                  : "synthetic.gateway";
+          const providerKey =
+            crossPreset || (minimax && !nativeKey)
+              ? "MINIMAX_API_KEY"
+              : "SYNTHETIC_GATEWAY_KEY";
+          const providerConfig: Record<string, unknown> | undefined =
+            index === 0
+              ? undefined
+              : minimax
+                ? {
+                    name: index === 6 ? "MiniMax" : "MiniMax China",
+                    base_url:
+                      index === 6
+                        ? "https://api.minimax.io/v1"
+                        : "https://api.minimax.cn/v1",
+                    wire_api: "responses",
+                    request_max_retries: 5,
+                    stream_max_retries: 4,
+                    stream_idle_timeout_ms: 12345,
+                    supports_websockets: false,
+                    ...(nativeBearer
+                      ? {
+                          experimental_bearer_token: `synthetic-bearer-${index}`,
+                        }
+                      : { env_key: providerKey }),
+                  }
+                : {
+                    name: `Synthetic gateway ${index}`,
+                    base_url: `https://gateway-${index}.example.test/v1`,
+                    wire_api: "responses",
+                    env_key: providerKey,
+                    env_http_headers: {
+                      "X-Synthetic": "SYNTHETIC_HEADER_VALUE",
+                    },
+                    ...(index === 3
+                      ? {}
+                      : { requires_openai_auth: index === 2 }),
+                    experimental_bearer_token: `synthetic-bearer-${index}`,
+                    auth: {
+                      type: "command",
+                      command: "synthetic-auth",
+                      cwd: path.join(
+                        fixture.root,
+                        `selected helper home ${index}`,
+                      ),
+                      args: [String(index)],
+                      env: {
+                        CLIENT_SECRET: `synthetic-client-secret-${index}`,
+                      },
+                    },
+                  };
+          const environment: Record<string, string | undefined> | undefined =
             index === 0
               ? undefined
               : {
-                  name: `Synthetic gateway ${index}`,
-                  base_url: `https://gateway-${index}.example.test/v1`,
-                  wire_api: "responses",
-                  env_key: "SYNTHETIC_GATEWAY_KEY",
-                  env_http_headers: { "X-Synthetic": "SYNTHETIC_HEADER_VALUE" },
-                  ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
-                  experimental_bearer_token: `synthetic-bearer-${index}`,
-                  auth: {
-                    type: "command",
-                    command: "synthetic-auth",
-                    cwd: path.join(
-                      fixture.root,
-                      `selected helper home ${index}`,
-                    ),
-                    args: [String(index)],
-                    env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
-                  },
+                  ...(nativeBearer
+                    ? {}
+                    : { [providerKey]: providerKeys[index] }),
+                  SYNTHETIC_HEADER_VALUE: providerHeaders[index],
+                  ...(crossPreset
+                    ? { OPENROUTER_API_KEY: `synthetic-helper-input-${index}` }
+                    : {}),
+                  CODEX_SQLITE_HOME: path.join(
+                    fixture.root,
+                    `native-state-${index}`,
+                  ),
                 };
           return {
             knowledgePath: path.join(fixture.root, `knowledge-${index}`),
@@ -1445,17 +1514,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             },
             provider,
             providerConfig,
-            environment:
-              index === 0
-                ? undefined
-                : {
-                    SYNTHETIC_GATEWAY_KEY: providerKeys[index],
-                    SYNTHETIC_HEADER_VALUE: providerHeaders[index],
-                    CODEX_SQLITE_HOME: path.join(
-                      fixture.root,
-                      `native-state-${index}`,
-                    ),
-                  },
+            environment,
             endpoint,
             serviceTier,
             instructionsFile,
@@ -1701,7 +1760,26 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
-            assert.equal(invocation.providerKey, providerKeys[index]);
+            const minimax = index === 6 || index === 7;
+            const crossPreset = index >= 8;
+            assert.equal(
+              invocation.providerKey,
+              crossPreset || (minimax && expected !== "concise")
+                ? undefined
+                : providerKeys[index],
+            );
+            assert.equal(
+              invocation.minimaxKey,
+              crossPreset ||
+                (minimax && expected !== "auto" && expected !== "concise")
+                ? providerKeys[index]
+                : undefined,
+            );
+            assert.equal(process.env.MINIMAX_API_KEY, undefined);
+            assert.equal(
+              workerLaunch.environment!.OPENROUTER_API_KEY,
+              crossPreset ? `synthetic-helper-input-${index}` : undefined,
+            );
             assert.equal(invocation.providerHeader, providerHeaders[index]);
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
@@ -1852,6 +1930,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               preflight.providerKey,
               selectedProvider.environment?.SYNTHETIC_GATEWAY_KEY,
+            );
+            assert.equal(
+              preflight.minimaxKey,
+              selectedProvider.environment?.MINIMAX_API_KEY,
             );
             assert.equal(
               preflight.providerHeader,
@@ -2827,7 +2909,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, minimaxKey: process.env.MINIMAX_API_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2876,7 +2958,7 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, minimaxKey: process.env.MINIMAX_API_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

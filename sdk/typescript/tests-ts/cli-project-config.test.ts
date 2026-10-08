@@ -1188,3 +1188,45 @@ test.each([
     expect(onRun).not.toHaveBeenCalled();
   },
 );
+
+test.each(["minimax", "minimax-cn"])(
+  "rejects --max-cost for %s during dry-run",
+  async (provider) => {
+    const input = await fixture({});
+    const environment = { MINIMAX_API_KEY: "synthetic-regional-key" };
+    const prepareRuntime = mock(rejecting("No runtime"));
+    const createCodex = mock(throwing("No inference"));
+    const deps = dependencies({
+      currentDirectory: input.repository,
+      environment,
+    });
+    deps.createSecurity = cliClientFactory({
+      environment,
+      prepareRuntime,
+      createCodex,
+    });
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        [
+          "scan",
+          input.repository,
+          "--provider",
+          provider,
+          "--model",
+          "MiniMax-M3",
+          "--max-cost",
+          "5",
+          "--dry-run",
+          "--json",
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "cost limit is not available for the configured model",
+    );
+    expect(prepareRuntime).not.toHaveBeenCalled();
+    expect(createCodex).not.toHaveBeenCalled();
+  },
+);

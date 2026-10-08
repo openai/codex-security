@@ -52,6 +52,9 @@ import {
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
+  MINIMAX_CODEX_PROVIDER,
+  MINIMAX_CN_CODEX_PROVIDER,
+  EXTERNAL_CODEX_PROVIDERS,
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
   type JsonObject,
@@ -313,6 +316,20 @@ const EXTERNAL_PROVIDER_CASES = [
     "FIREWORKS_API_KEY",
     "accounts/fireworks/models/qwen3-235b-a22b",
     FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "MiniMax",
+    "minimax",
+    "MINIMAX_API_KEY",
+    "MiniMax-M3",
+    MINIMAX_CODEX_PROVIDER,
+  ],
+  [
+    "MiniMax China",
+    "minimax-cn",
+    "MINIMAX_API_KEY",
+    "MiniMax-M2.7",
+    MINIMAX_CN_CODEX_PROVIDER,
   ],
 ] as const;
 const BEDROCK_AUTHENTICATION_CASES = [
@@ -1115,6 +1132,49 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each([
+    ["minimax", MINIMAX_CODEX_PROVIDER],
+    ["minimax-cn", MINIMAX_CN_CODEX_PROVIDER],
+  ] as const)(
+    "rejects unpriced %s budgets before model work",
+    async (provider, providerConfig) => {
+      for (const model of ["MiniMax-M3", "MiniMax-M2.7"]) {
+        const { repository, codexHome, scanDir } = await scanDirectories();
+        const prepareRuntime = mock(async () => preparedRuntime(codexHome));
+        const createCodex = mock(throwing("model must not start"));
+        const client = new TestClient(
+          {
+            codexOverrides: {
+              model,
+              model_provider: provider,
+              model_providers: { [provider]: providerConfig },
+            },
+          },
+          {
+            environment: { MINIMAX_API_KEY: "synthetic-regional-key" },
+            ...scanRuntimeDependencies(codexHome, scanDir),
+            prepareRuntime,
+            createCodex,
+          },
+        );
+        try {
+          for (const operation of ["preflight", "run"] as const) {
+            await expect(
+              client[operation](repository, { maxCostUsd: 5 }),
+            ).rejects.toThrow(
+              "cost limit is not available for the configured model",
+            );
+            if (operation === "preflight")
+              expect(prepareRuntime).not.toHaveBeenCalled();
+          }
+          expect(createCodex).not.toHaveBeenCalled();
+        } finally {
+          await client.close();
+        }
+      }
+    },
+  );
+
   test("validates deep scan settings before initializing the runtime", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1432,9 +1492,14 @@ describe("CodexSecurity orchestration", () => {
         {
           environment: {
             OPENAI_API_KEY: "synthetic-openai-key",
-            [provider === "openrouter"
-              ? "FIREWORKS_API_KEY"
-              : "OPENROUTER_API_KEY"]: "synthetic-competing-provider-key",
+            ...Object.fromEntries(
+              Object.values(EXTERNAL_CODEX_PROVIDERS)
+                .filter((candidate) => candidate.env_key !== apiKey)
+                .map((candidate) => [
+                  candidate.env_key,
+                  "synthetic-competing-provider-key",
+                ]),
+            ),
           },
           prepareRuntime,
         },
@@ -1456,11 +1521,17 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const createCodex = mock(completedCodex(root));
       const onAuthentication = mock<(selected: ScanAuthentication) => void>();
-      const competingApiKey =
-        provider === "openrouter" ? "FIREWORKS_API_KEY" : "OPENROUTER_API_KEY";
+      const competingApiKeys = Object.values(EXTERNAL_CODEX_PROVIDERS)
+        .map((candidate) => candidate.env_key)
+        .filter((key) => key !== apiKey);
       const environment = {
         OPENAI_API_KEY: "synthetic-openai-key",
-        [competingApiKey]: "synthetic-competing-provider-key",
+        ...Object.fromEntries(
+          competingApiKeys.map((key) => [
+            key,
+            "synthetic-competing-provider-key",
+          ]),
+        ),
         [apiKey]: `synthetic-${provider}-key`,
       };
       const client = new TestClient(
@@ -1510,9 +1581,8 @@ describe("CodexSecurity orchestration", () => {
       expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
         "OPENAI_API_KEY",
       );
-      expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
-        competingApiKey,
-      );
+      for (const key of competingApiKeys)
+        expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(key);
       expect(createCodex.mock.lastCall?.[0]?.apiKey).toBeUndefined();
       await client.close();
     },
@@ -1529,6 +1599,7 @@ describe("CodexSecurity orchestration", () => {
         CODEX_API_KEY: "synthetic-codex-key",
         OPENROUTER_API_KEY: "synthetic-openrouter-key",
         FIREWORKS_API_KEY: "synthetic-fireworks-key",
+        MINIMAX_API_KEY: "synthetic-minimax-key",
         ...credentials,
       };
       const client = new TestClient(
@@ -5889,6 +5960,8 @@ describe("CodexSecurity orchestration", () => {
         [
           ["OPENAI_API_KEY", "gpt-5.6-sol", undefined],
           ["OPENROUTER_API_KEY", "anthropic/claude-sonnet-4.5", "openrouter"],
+          ["MINIMAX_API_KEY", "MiniMax-M3", "minimax"],
+          ["MINIMAX_API_KEY", "MiniMax-M3", "minimax-cn"],
         ] as const
       ).map(async ([apiKey, model, provider], index) => {
         const scanDir = join(root, `parallel-api-key-scan-${index}`);
@@ -5903,7 +5976,7 @@ describe("CodexSecurity orchestration", () => {
                 : {
                     model_provider: provider,
                     model_providers: {
-                      [provider]: OPENROUTER_CODEX_PROVIDER,
+                      [provider]: EXTERNAL_CODEX_PROVIDERS[provider],
                     },
                   }),
             },
@@ -5938,14 +6011,16 @@ describe("CodexSecurity orchestration", () => {
                     ),
                   ),
                 ).toEqual({
-                  model_providers: { [provider]: OPENROUTER_CODEX_PROVIDER },
+                  model_providers: {
+                    [provider]: EXTERNAL_CODEX_PROVIDERS[provider],
+                  },
                 });
               }
               return {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
-                    if (++scansStarted === 2) concurrentScans.resolve();
+                    if (++scansStarted === 4) concurrentScans.resolve();
                     await concurrentScans.promise;
                     const workerConfig = parseToml(
                       await readFile(
@@ -5954,9 +6029,26 @@ describe("CodexSecurity orchestration", () => {
                       ),
                     );
                     expect(workerConfig["model_provider"]).toBe(provider);
+                    expect(
+                      provider === undefined
+                        ? options.apiKey
+                        : options.env?.[apiKey],
+                    ).toBe(`synthetic-key-${index}`);
+                    if (provider !== undefined) {
+                      const deep = parseToml(
+                        await readFile(
+                          options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                          "utf8",
+                        ),
+                      );
+                      expect(deep["worker_runtime"]).toMatchObject({
+                        model_provider: provider,
+                        environment: { [apiKey]: `synthetic-key-${index}` },
+                      });
+                    }
                     if (provider !== undefined) {
                       expect(workerConfig["model_providers"]).toEqual({
-                        [provider]: OPENROUTER_CODEX_PROVIDER,
+                        [provider]: EXTERNAL_CODEX_PROVIDERS[provider],
                       });
                     }
                     throw new Error("parallel API-key scan reached");
@@ -5972,7 +6064,9 @@ describe("CodexSecurity orchestration", () => {
     try {
       const results = await Promise.allSettled(
         clients.map((client) =>
-          client.run(repository).finally(concurrentScans.resolve),
+          client
+            .run(repository, { mode: "deep" })
+            .finally(concurrentScans.resolve),
         ),
       );
       for (const result of results) {
@@ -5983,7 +6077,7 @@ describe("CodexSecurity orchestration", () => {
           }),
         });
       }
-      expect(scansStarted).toBe(2);
+      expect(scansStarted).toBe(4);
     } finally {
       concurrentScans.resolve();
       await Promise.all(clients.map(async (client) => await client.close()));

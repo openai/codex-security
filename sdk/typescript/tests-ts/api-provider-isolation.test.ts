@@ -1,7 +1,16 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { resolveCodexProfile, type JsonObject } from "../src/config.js";
+import {
+  EXTERNAL_CODEX_PROVIDERS,
+  resolveCodexProfile,
+  type JsonObject,
+} from "../src/config.js";
+import {
+  selectedScanEnvironment,
+  scanPreflightCodexConfig,
+} from "../src/api.js";
+import { preparedRuntime } from "./support/api-events.js";
 import * as childProcess from "node:child_process";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -955,13 +964,15 @@ for await (const line of createInterface({ input: process.stdin })) {
 }
 
 test.each([
-  "SYNTHETIC_CUSTOM_API_KEY",
-  "CODEX_API_KEY",
-  "OPENROUTER_API_KEY",
-  "FIREWORKS_API_KEY",
-])(
-  "native plugin workers recover the selected %s and other provider variables",
-  async (providerKey) => {
+  ["SYNTHETIC_CUSTOM_API_KEY", "synthetic.gateway", false],
+  ["CODEX_API_KEY", "synthetic.gateway", false],
+  ["OPENROUTER_API_KEY", "openrouter", true],
+  ["FIREWORKS_API_KEY", "fireworks", true],
+  ["MINIMAX_API_KEY", "minimax", false],
+  ["MINIMAX_API_KEY", "minimax-cn", false],
+] as const)(
+  "native plugin workers recover the selected %s for %s and other provider variables",
+  async (providerKey, providerId, external) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -971,12 +982,6 @@ test.each([
     await mkdir(scan, { mode: 0o700 });
     await mkdir(sourceHome, { mode: 0o700 });
     const plugin = await createPluginProbe(root, report);
-    const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
-      providerKey,
-    );
-    const providerId = external
-      ? providerKey.split("_")[0]!.toLowerCase()
-      : "synthetic.gateway";
     const headerKey =
       process.platform === "win32"
         ? "synthetic_custom_header"
@@ -1105,4 +1110,382 @@ test.each([
     }
   },
   30_000,
+);
+
+test.each(
+  (["minimax", "minimax-cn"] as const).flatMap((provider) =>
+    (
+      [
+        [false, "bearer"],
+        [true, "bearer"],
+        [false, "preset-key"],
+        [false, "preset-options"],
+        [true, "preset-options"],
+        [false, "saved-options"],
+        [true, "saved-options"],
+        [false, "native-preset-key"],
+        [true, "native-preset-key"],
+        [false, "custom-key"],
+        [true, "custom-key"],
+        [false, "openai"],
+      ] as const
+    ).flatMap(([profile, nativeForm]) =>
+      (["auto", "chatgpt", "api-key"] as const).map(
+        (auth) => [provider, profile, nativeForm, auth] as const,
+      ),
+    ),
+  ),
+)(
+  "SDK auth preserves native %s configuration and worker profiles (selected profile=%p, native form=%s, auth=%s)",
+  async (provider, profile, nativeForm, auth) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    const scan = join(root, "scan");
+    for (const directory of [repository, home, scan])
+      await mkdir(directory, { mode: 0o700 });
+    await writeFile(
+      join(home, "auth.json"),
+      JSON.stringify({
+        auth_mode: "apikey",
+        OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+      }),
+      { mode: 0o600 },
+    );
+    const bearerToken = `synthetic-bearer-${provider}`;
+    const presetAuthentication =
+      nativeForm === "preset-key" ||
+      nativeForm === "preset-options" ||
+      nativeForm === "saved-options";
+    const definition = presetAuthentication
+      ? {
+          ...EXTERNAL_CODEX_PROVIDERS[provider],
+          ...(["preset-options", "saved-options"].includes(nativeForm)
+            ? {
+                name: "Synthetic tuned provider",
+                request_max_retries: 5,
+                stream_max_retries: 4,
+                stream_idle_timeout_ms: 12345,
+                ...(nativeForm === "preset-options"
+                  ? { http_headers: { "X-Synthetic": "synthetic-value" } }
+                  : { supports_websockets: false }),
+              }
+            : {}),
+        }
+      : {
+          name: "Synthetic regional provider",
+          base_url:
+            provider === "minimax"
+              ? "https://api.minimax.io/v1"
+              : "https://api.minimax.cn/v1",
+          wire_api: "responses",
+          ...(nativeForm === "openai" || nativeForm === "native-preset-key"
+            ? { requires_openai_auth: true }
+            : { experimental_bearer_token: bearerToken }),
+          ...(nativeForm === "native-preset-key"
+            ? { env_key: "MINIMAX_API_KEY" }
+            : {}),
+          ...(nativeForm === "custom-key"
+            ? { env_key: "SYNTHETIC_GATEWAY_KEY" }
+            : {}),
+        };
+    const selected = {
+      model: "MiniMax-M3",
+      model_provider: provider,
+      model_providers: { [provider]: definition },
+    };
+    const workerSettings = await loadWorkerSettings(root);
+    const runtimeEnvironment: Record<string, string> =
+      nativeForm === "custom-key"
+        ? { SYNTHETIC_GATEWAY_KEY: "synthetic-custom-provider-key" }
+        : nativeForm === "native-preset-key"
+          ? { MINIMAX_API_KEY: "synthetic-explicit-provider-key" }
+          : {};
+    let checked = false;
+    const client = new TestClient(
+      {
+        codexOverrides: (nativeForm === "saved-options"
+          ? scanPreflightCodexConfig
+          : (value: JsonObject) => value)({
+          features: { api_key_model_discovery: false },
+          ...(profile
+            ? {
+                model_provider: "openai",
+                profile: "regional",
+                profiles: { regional: selected },
+              }
+            : selected),
+        }),
+      },
+      {
+        environment: {
+          CODEX_HOME: home,
+          ...(auth === "api-key"
+            ? { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" }
+            : {}),
+          ...(presetAuthentication || nativeForm === "native-preset-key"
+            ? { MINIMAX_API_KEY: "synthetic-explicit-provider-key" }
+            : {}),
+          ...(nativeForm === "custom-key"
+            ? { SYNTHETIC_GATEWAY_KEY: "synthetic-custom-provider-key" }
+            : {}),
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(home),
+          environment: runtimeEnvironment,
+          configPath: join(root, "preflight.toml"),
+          deepScanConfigPath: join(home, "deep-scan.toml"),
+        }),
+        resolvePluginPython: async () => "/synthetic/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "synthetic-revision",
+        createCodex: async (
+          options: import("@openai/codex-sdk").CodexOptions & {
+            nativeProfile?: string;
+          },
+        ) => {
+          const environment = options.env!;
+          expect(options.apiKey).toBe(
+            !presetAuthentication && auth === "api-key"
+              ? "SYNTHETIC_OPENAI_KEY"
+              : undefined,
+          );
+          const preflight = await readFile(
+            environment["CODEX_SECURITY_CONFIG_PATH"]!,
+            "utf8",
+          );
+          expect(preflight.includes("MINIMAX_API_KEY")).toBe(
+            nativeForm === "preset-key" || nativeForm === "saved-options",
+          );
+          expect(preflight).not.toContain(bearerToken);
+          const settings = await workerSettings(environment);
+          expect(settings.config["model_provider"]).toBe(provider);
+          expect(settings.nativeProfile).toBe(options.nativeProfile);
+          expect(settings.environment?.["MINIMAX_API_KEY"]).toBe(
+            presetAuthentication || nativeForm === "native-preset-key"
+              ? "synthetic-explicit-provider-key"
+              : undefined,
+          );
+          expect(settings.environment?.["SYNTHETIC_GATEWAY_KEY"]).toBe(
+            nativeForm === "custom-key"
+              ? "synthetic-custom-provider-key"
+              : undefined,
+          );
+          const nativeProfile = parseToml(
+            await readFile(
+              join(home, `${settings.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          );
+          expect(nativeProfile["model_providers"]).toEqual({
+            [provider]: definition,
+          });
+          expect(
+            await effectiveProvider(
+              environment,
+              scan,
+              profileConfigOverrides(settings.config),
+              settings.nativeProfile,
+            ),
+          ).toEqual(definition);
+          expect(
+            JSON.stringify({
+              config: options.config,
+              overrides: options.configOverrides,
+            }),
+          ).not.toContain(bearerToken);
+          checked = true;
+          throw new Error("native provider configuration checked");
+        },
+      },
+    );
+    try {
+      const expectedMethod =
+        presetAuthentication || auth === "api-key"
+          ? "api_key"
+          : "stored_credentials";
+      expect(
+        (await client.preflight(repository, { auth })).authentication.method,
+      ).toBe(expectedMethod);
+      expect(
+        (await client.preflightPolicy(repository, { auth })).authentication
+          .method,
+      ).toBe(expectedMethod);
+      await expect(
+        client.run(repository, { mode: "deep", auth }),
+      ).rejects.toThrow("native provider configuration checked");
+      expect(checked).toBe(true);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each(["openrouter", "fireworks"] as const)(
+  "preserves existing %s preset authentication with a native bearer table",
+  async (provider) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    await mkdir(repository);
+    await mkdir(home, { mode: 0o700 });
+    const key =
+      provider === "openrouter" ? "OPENROUTER_API_KEY" : "FIREWORKS_API_KEY";
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: provider,
+          model_providers: {
+            [provider]: {
+              name: "Synthetic native gateway",
+              base_url: "https://gateway.example.test/v1",
+              wire_api: "responses",
+              experimental_bearer_token: "SYNTHETIC_BEARER_TOKEN",
+            },
+          },
+        },
+      },
+      { environment: { CODEX_HOME: home, [key]: "synthetic-provider-key" } },
+    );
+    try {
+      for (const auth of ["auto", "api-key"] as const) {
+        expect(
+          (await client.preflight(repository, { auth })).authentication,
+        ).toMatchObject({ method: "api_key", source: key });
+        expect(
+          (await client.preflightPolicy(repository, { auth })).authentication,
+        ).toMatchObject({ method: "api_key", source: key });
+      }
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each(
+  (["openrouter", "fireworks"] as const).flatMap((provider) =>
+    (["env_key", "header", "command"] as const).flatMap((reference) =>
+      [false, true].map((profile) => [provider, reference, profile] as const),
+    ),
+  ),
+)(
+  "preserves %s native %s credentials through parent and worker settings (profile=%p)",
+  async (provider, reference, profile) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository"),
+      home = join(root, "home"),
+      scan = join(root, "scan");
+    for (const path of [repository, home, scan])
+      await mkdir(path, { mode: 0o700 });
+    const definition: JsonObject = {
+      ...EXTERNAL_CODEX_PROVIDERS[provider],
+      ...(reference === "env_key"
+        ? { env_key: "MINIMAX_API_KEY" }
+        : reference === "header"
+          ? { env_http_headers: { "X-Synthetic": "MINIMAX_API_KEY" } }
+          : {}),
+      ...(reference === "command"
+        ? {
+            auth: {
+              type: "command",
+              command: process.execPath,
+              cwd: home,
+              args: ["-e", "process.exit(1)"],
+            },
+          }
+        : {}),
+    };
+    if (reference === "command") delete definition["env_key"];
+    const selection = {
+      model_provider: provider,
+      model_providers: { [provider]: definition },
+    };
+    const configuration = profile
+      ? { profile: "selected", profiles: { selected: selection } }
+      : selection;
+    const environment = {
+      CODEX_HOME: home,
+      OPENAI_API_KEY: "synthetic-openai-key",
+      CODEX_API_KEY: "synthetic-codex-key",
+      OPENROUTER_API_KEY: "synthetic-openrouter-key",
+      FIREWORKS_API_KEY: "synthetic-fireworks-key",
+      MINIMAX_API_KEY: "synthetic-referenced-key",
+      SYNTHETIC_OPAQUE_INPUT: "synthetic-helper-input",
+    };
+    expect(
+      selectedScanEnvironment(environment, "auto", provider, configuration)[
+        "MINIMAX_API_KEY"
+      ],
+    ).toBe("synthetic-referenced-key");
+    const workerSettings = await loadWorkerSettings(root);
+    let checked = false;
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          features: { api_key_model_discovery: false },
+          ...configuration,
+        },
+      },
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(home),
+          environment,
+          configPath: join(root, "preflight.toml"),
+          deepScanConfigPath: join(home, "deep.toml"),
+        }),
+        resolvePluginPython: async () => "/synthetic/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "synthetic-revision",
+        createCodex: async (options) => {
+          expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
+          expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
+          expect(options.env?.["MINIMAX_API_KEY"]).toBe(
+            "synthetic-referenced-key",
+          );
+          expect(
+            options.env?.[
+              provider === "openrouter"
+                ? "FIREWORKS_API_KEY"
+                : "OPENROUTER_API_KEY"
+            ],
+          ).toBe(
+            reference === "command"
+              ? provider === "openrouter"
+                ? "synthetic-fireworks-key"
+                : "synthetic-openrouter-key"
+              : undefined,
+          );
+          expect(options.env?.["SYNTHETIC_OPAQUE_INPUT"]).toBe(
+            "synthetic-helper-input",
+          );
+          const settings = await workerSettings(options.env!);
+          expect(
+            settings.environment?.["SYNTHETIC_OPAQUE_INPUT"],
+          ).toBeUndefined();
+          expect(settings.environment?.["MINIMAX_API_KEY"]).toBe(
+            reference === "command" ? undefined : "synthetic-referenced-key",
+          );
+          expect(
+            await effectiveProvider(
+              options.env!,
+              scan,
+              profileConfigOverrides(settings.config),
+              settings.nativeProfile,
+            ),
+          ).toEqual(definition);
+          checked = true;
+          throw new Error("referenced native credential checked");
+        },
+      },
+    );
+    try {
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "referenced native credential checked",
+      );
+      expect(checked).toBe(true);
+    } finally {
+      await client.close();
+    }
+  },
 );

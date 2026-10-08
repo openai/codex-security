@@ -1591,3 +1591,50 @@ test("CLI rejects ambiguous component selection", async () => {
     expect(result.stderr).toContain("Choose exactly one");
   }
 });
+
+test.each(
+  ["minimax", "minimax-cn"].flatMap((provider) =>
+    (["auto", "chatgpt", "api-key"] as const).map(
+      (auth) => [provider, auth] as const,
+    ),
+  ),
+)(
+  "component planning preserves native %s bearer configuration with %s auth",
+  async (provider, auth) => {
+    const paths = await fixture();
+    const config = {
+      codexOverrides: {
+        model: "MiniMax-M3",
+        model_provider: provider,
+        model_providers: {
+          [provider]: {
+            name: "Synthetic native provider",
+            wire_api: "responses",
+            experimental_bearer_token: "SYNTHETIC_BEARER_TOKEN",
+          },
+        },
+      },
+    };
+    const environment =
+      auth === "api-key" ? { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" } : {};
+    const plan = mock(
+      async (_repository: string, options?: ComponentPlanningOptions) => {
+        expect(options?.config).toEqual(config);
+        expect(options?.auth).toBe(auth);
+        expect(options?.environment).toEqual(environment);
+        return { components };
+      },
+    );
+    const result = await scan(paths, {
+      components: undefined,
+      auto: true,
+      planOnly: true,
+      environment,
+      config,
+      scanOptions: { auth },
+      planComponents: plan,
+    });
+    expect(result.total).toBe(components.length);
+    expect(plan).toHaveBeenCalledTimes(1);
+  },
+);

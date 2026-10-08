@@ -44,6 +44,8 @@ import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
+  MINIMAX_CODEX_PROVIDER,
+  MINIMAX_CN_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelConfiguration,
 } from "../src/config.js";
@@ -141,6 +143,31 @@ async function multiscanInventory(root: string): Promise<void> {
 }
 
 describe("CLI", () => {
+  test.each(["scan", "bulk-scan", "scan-components", "policy"])(
+    "exposes both MiniMax presets with the unchanged default in %s",
+    async (command) => {
+      const output = captureCli(main, "stdout");
+      expect(
+        await output.run(
+          [command, "--schema", "--format", "json"],
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(
+        JSON.parse(output.text()).options.properties.provider,
+      ).toMatchObject({
+        enum: [
+          "openai",
+          "openrouter",
+          "fireworks",
+          "minimax",
+          "minimax-cn",
+          "amazon-bedrock",
+        ],
+        default: "openai",
+      });
+    },
+  );
   test("preserves typed local plugin failure origin and diagnostic details", async () => {
     const cause = new Error("Synthetic plugin preparation detail.");
     const localFailure = new LocalPluginBootstrapError(
@@ -246,7 +273,14 @@ describe("CLI", () => {
             minLength: 1,
           },
           provider: {
-            enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
+            enum: [
+              "openai",
+              "openrouter",
+              "fireworks",
+              "minimax",
+              "minimax-cn",
+              "amazon-bedrock",
+            ],
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           patch: { type: "boolean" },
@@ -856,6 +890,8 @@ describe("CLI", () => {
       "accounts/fireworks/models/qwen3-235b-a22b",
       FIREWORKS_CODEX_PROVIDER,
     ],
+    ["MiniMax", "minimax", "MiniMax-M3", MINIMAX_CODEX_PROVIDER],
+    ["MiniMax China", "minimax-cn", "MiniMax-M3", MINIMAX_CN_CODEX_PROVIDER],
   ] as const)(
     "routes bulk scans through %s",
     async (_name, provider, model, providerConfig) => {
@@ -2464,6 +2500,20 @@ describe("CLI", () => {
       "accounts/fireworks/models/llama-v3p3-70b-instruct",
       FIREWORKS_CODEX_PROVIDER,
     ],
+    [
+      "MiniMax",
+      "minimax",
+      "MiniMax-M3",
+      "MiniMax-M2.7",
+      MINIMAX_CODEX_PROVIDER,
+    ],
+    [
+      "MiniMax China",
+      "minimax-cn",
+      "MiniMax-M3",
+      "MiniMax-M2.7",
+      MINIMAX_CN_CODEX_PROVIDER,
+    ],
   ] as const)(
     "routes scans through %s",
     async (_name, provider, selectedModel, codexModel, providerConfig) => {
@@ -2493,6 +2543,43 @@ describe("CLI", () => {
           model_providers: { [provider]: providerConfig },
         });
       }
+    },
+  );
+
+  test.each(["minimax", "minimax-cn"] as const)(
+    "keeps %s API-key authentication with native provider options",
+    async (provider) => {
+      let config: CodexSecurityConfig | undefined;
+      expect(
+        await runCapturedCli(
+          main,
+          [
+            "scan",
+            ".",
+            "--provider",
+            provider,
+            "--model",
+            "MiniMax-M3",
+            "--auth",
+            "api-key",
+            "--codex",
+            `model_providers.${provider}.request_max_retries=5`,
+            "--codex",
+            `model_providers.${provider}.stream_idle_timeout_ms=12345`,
+          ],
+          dependencies({
+            environment: { MINIMAX_API_KEY: "synthetic-provider-key" },
+            onConfig: (value) => (config = value),
+          }),
+        ),
+      ).toBe(0);
+      expect(config?.codexOverrides?.["model_providers"]).toMatchObject({
+        [provider]: {
+          env_key: "MINIMAX_API_KEY",
+          request_max_retries: 5,
+          stream_idle_timeout_ms: 12345,
+        },
+      });
     },
   );
 
@@ -2641,6 +2728,8 @@ describe("CLI", () => {
     for (const provider of [
       "openrouter",
       "fireworks",
+      "minimax",
+      "minimax-cn",
       "amazon-bedrock",
     ] as const) {
       expect(() =>
@@ -3243,6 +3332,20 @@ describe("CLI", () => {
       "accounts/fireworks/models/qwen3-235b-a22b",
       FIREWORKS_CODEX_PROVIDER,
       { FIREWORKS_API_KEY: "synthetic-fireworks-key" },
+    ],
+    [
+      "MiniMax",
+      "minimax",
+      "MiniMax-M3",
+      MINIMAX_CODEX_PROVIDER,
+      { MINIMAX_API_KEY: "synthetic-global-key" },
+    ],
+    [
+      "MiniMax China",
+      "minimax-cn",
+      "MiniMax-M3",
+      MINIMAX_CN_CODEX_PROVIDER,
+      { MINIMAX_API_KEY: "synthetic-regional-key" },
     ],
   ] as const)(
     "reruns profile-selected %s scans with their saved provider configuration",

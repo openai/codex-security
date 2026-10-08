@@ -128,6 +128,20 @@ test.each([
 });
 
 describe("scan cost", () => {
+  test.each(["MiniMax-M3", "MiniMax-M2.7"])(
+    "keeps %s estimates unavailable without regional pricing",
+    (model) => {
+      expect(
+        estimateScanCost(model, {
+          input_tokens: 1_000_000,
+          cached_input_tokens: 200_000,
+          cache_write_input_tokens: 100_000,
+          output_tokens: 1_000_000,
+        }),
+      ).toBeNull();
+    },
+  );
+
   test("shows distinct token categories without adding cached input twice", () => {
     expect(
       formatTokenUsage({

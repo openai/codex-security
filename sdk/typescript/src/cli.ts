@@ -132,6 +132,7 @@ import {
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
+  scanAuthenticationProvider,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -425,7 +426,14 @@ const VALUE_OPTIONS = new Set([
   "--linear-assignee",
 ]);
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
+  .enum([
+    "openai",
+    "openrouter",
+    "fireworks",
+    "minimax",
+    "minimax-cn",
+    "amazon-bedrock",
+  ])
   .default("openai")
   .describe("Inference provider for scans.");
 const SHOW_COST_OPTION = z
@@ -1378,11 +1386,21 @@ export async function runCodexSkillCommand(
           ? providerConfiguration["env_key"]
           : undefined;
       const commandAuth = providerConfiguration?.["auth"] != null;
-      const explicitChatgpt =
-        output.auth === "chatgpt" && !isExternalModelProvider(provider);
       const providerBearer =
         typeof providerConfiguration?.["experimental_bearer_token"] ===
         "string";
+      const authenticationProvider =
+        typeof provider === "string"
+          ? scanAuthenticationProvider({
+              model_provider: provider,
+              ...(providerConfiguration === undefined
+                ? {}
+                : { model_providers: { [provider]: providerConfiguration } }),
+            })
+          : provider;
+      const explicitChatgpt =
+        output.auth === "chatgpt" &&
+        !isExternalModelProvider(authenticationProvider);
       const providerKeyConfigured =
         providerEnvKey !== undefined || providerBearer;
       const requiresOpenAiAuth =
@@ -1411,15 +1429,16 @@ export async function runCodexSkillCommand(
         authentication = scanAuthentication(
           processEnvironment,
           output.auth,
-          provider,
+          authenticationProvider,
           commandAuth,
         );
       }
       if (
         authentication.method === "stored_credentials" &&
-        isExternalModelProvider(provider)
+        isExternalModelProvider(authenticationProvider)
       ) {
-        const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
+        const externalProvider =
+          EXTERNAL_CODEX_PROVIDERS[authenticationProvider];
         throw new AuthenticationRequiredError(
           `Set ${providerEnvKey ?? externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
         );
@@ -1427,7 +1446,8 @@ export async function runCodexSkillCommand(
       let selected = selectedScanEnvironment(
         processEnvironment,
         authentication.method === "command" ? "chatgpt" : output.auth,
-        provider,
+        authenticationProvider,
+        config,
       );
       if (
         explicitChatgpt &&
@@ -1538,13 +1558,13 @@ export async function runCodexSkillCommand(
           selected,
           codexHome,
           output.auth,
-          provider,
+          authenticationProvider,
         );
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
         selected = {
-          ...selectedScanEnvironment(selected, "chatgpt"),
+          ...selectedScanEnvironment(selected, "chatgpt", undefined, config),
           CODEX_API_KEY: apiKey,
         };
         if (output.appServer !== undefined) {
@@ -3420,7 +3440,7 @@ export async function main(
                   chooseInteractiveAuthentication(
                     {
                       auth,
-                      provider: scanModelProvider({
+                      provider: scanAuthenticationProvider({
                         ...DEFAULT_CODEX_CONFIG,
                         ...config.codexOverrides,
                       }),
@@ -7445,7 +7465,7 @@ async function runSkill(
       : ((
           overrides["model_providers"] as Record<string, JsonObject> | undefined
         )?.[provider] ??
-        (isExternalModelProvider(provider)
+        (provider === "openrouter" || provider === "fireworks"
           ? EXTERNAL_CODEX_PROVIDERS[provider]
           : undefined)));
   const effectiveOverrides = resolveCommandAuthConfig(
@@ -8301,7 +8321,7 @@ async function executeScan(
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
-              provider,
+              provider: scanAuthenticationProvider(effectiveConfiguration),
               command: "scan",
               signal: preparationAbortController.signal,
             },
@@ -8317,7 +8337,7 @@ async function executeScan(
             effectiveConfiguration["model_providers"] as
               Record<string, JsonObject> | undefined
           )?.[provider] ??
-          (isExternalModelProvider(provider)
+          (provider === "openrouter" || provider === "fireworks"
             ? EXTERNAL_CODEX_PROVIDERS[provider]
             : undefined),
       };
@@ -8327,7 +8347,7 @@ async function executeScan(
       : scanAuthentication(
           dependencies.environment,
           auth,
-          provider,
+          scanAuthenticationProvider(effectiveConfiguration),
           hasCommandAuth(effectiveConfiguration),
         );
     diagnostic("scan.configuration", {

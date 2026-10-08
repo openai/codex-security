@@ -9,6 +9,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
+  EXTERNAL_CODEX_PROVIDERS,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelProvider,
@@ -967,6 +968,52 @@ describe("CodexSecurity preflight configuration", () => {
       });
       expect(scanModelProvider(config)).toBe(provider);
       expect(JSON.stringify(config)).not.toContain("synthetic-");
+    },
+  );
+
+  test.each(["minimax", "minimax-cn"] as const)(
+    "preserves reconstructible %s provider tuning in saved recipes",
+    (provider) => {
+      const definition = {
+        ...EXTERNAL_CODEX_PROVIDERS[provider],
+        name: "Tuned provider",
+        request_max_retries: 5,
+        stream_max_retries: 4,
+        stream_idle_timeout_ms: 12345,
+        supports_websockets: false,
+        requires_openai_auth: false,
+      };
+      const config = scanPreflightCodexConfig({
+        profile: "selected",
+        profiles: {
+          selected: {
+            model_provider: provider,
+            model_providers: { [provider]: definition },
+          },
+        },
+      });
+      expect(config["model_providers"]).toEqual({ [provider]: definition });
+      expect(scanPreflightCodexConfig(config)).toEqual(config);
+      const customDefinitions: JsonObject[] = [
+        { base_url: "https://gateway.example.test/v1" },
+        { env_key: "CUSTOM_API_KEY" },
+        { requires_openai_auth: true },
+        { experimental_bearer_token: "synthetic-bearer" },
+        { auth: { command: "synthetic-helper" } },
+        { http_headers: { Authorization: "synthetic-header" } },
+        { env_http_headers: { Authorization: "CUSTOM_AUTHORIZATION" } },
+        { query_params: { token: "synthetic-token" } },
+      ];
+      for (const custom of customDefinitions) {
+        const projected = scanPreflightCodexConfig({
+          model_provider: provider,
+          model_providers: { [provider]: { ...definition, ...custom } },
+        });
+        expect(projected).toEqual({ model_provider: provider });
+      }
+      expect(scanPreflightCodexConfig({ model_provider: provider })).toEqual({
+        model_provider: provider,
+      });
     },
   );
 

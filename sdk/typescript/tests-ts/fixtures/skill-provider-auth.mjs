@@ -16,6 +16,7 @@ record({
     GATEWAY_API_KEY: process.env.GATEWAY_API_KEY,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     CODEX_API_KEY: process.env.CODEX_API_KEY,
+    MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
   },
 });
 

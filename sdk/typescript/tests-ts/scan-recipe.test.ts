@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { runWorkbench } from "../src/runtime.js";
-import { dependencies } from "./cli-fixtures.js";
+import { capture, dependencies } from "./cli-fixtures.js";
+import { EXTERNAL_CODEX_PROVIDERS, type JsonObject } from "../src/config.js";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -87,5 +88,125 @@ test.each(["standard", "deep"])(
     expect(saved["recipe"]).toMatchObject({ mode, postScanPrompt });
     expect(JSON.stringify(saved)).not.toContain(promptFile);
     expect(JSON.stringify(saved)).not.toContain("synthetic-launch-key");
+  },
+);
+
+test.each(
+  (["minimax", "minimax-cn"] as const).flatMap((provider) =>
+    (["standard", "deep"] as const).flatMap((mode) =>
+      [false, true].map((tuned) => [provider, mode, tuned] as const),
+    ),
+  ),
+)(
+  "replays registered %s %s recipes with provider tuning=%p",
+  async (provider, mode, tuned) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    const scanDir = join(root, "scan");
+    for (const directory of [repository, home, scanDir])
+      await mkdir(directory, { mode: 0o700 });
+    await writeFile(join(repository, "source.py"), "# synthetic source\n");
+    const environment = {
+      PATH: process.env["PATH"],
+      MINIMAX_API_KEY: "synthetic-recipe-key",
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    let recipe: JsonObject | undefined;
+    const deps = dependencies({ environment, currentDirectory: repository });
+    deps.createSecurity = (config) =>
+      new TestClient(config, {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(home),
+          deepScanConfigPath: join(home, "deep.toml"),
+        }),
+        resolvePluginPython: async () => process.execPath,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => null,
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "register-cli-scan") {
+            recipe = JSON.parse(input!).recipe;
+            throw new Error("Synthetic stop after recipe registration");
+          }
+          return {};
+        },
+      });
+    const args = [
+      "scan",
+      repository,
+      "--provider",
+      provider,
+      "--model",
+      "MiniMax-M3",
+      "--auth",
+      "api-key",
+      "--mode",
+      mode,
+      "--json",
+    ];
+    if (tuned)
+      for (const [key, value] of Object.entries({
+        request_max_retries: 5,
+        stream_max_retries: 4,
+        stream_idle_timeout_ms: 12345,
+        supports_websockets: false,
+      }))
+        args.push("--codex", `model_providers.${provider}.${key}=${value}`);
+    const initialError = capture();
+    expect(await main(args, capture().stream, initialError.stream, deps)).toBe(
+      2,
+    );
+    expect(initialError.text()).toContain(
+      "Synthetic stop after recipe registration",
+    );
+    if (recipe === undefined)
+      throw new Error("Registration did not save a recipe.");
+    const savedRecipe = recipe;
+    const definition = {
+      ...EXTERNAL_CODEX_PROVIDERS[provider],
+      ...(tuned
+        ? {
+            request_max_retries: 5,
+            stream_max_retries: 4,
+            stream_idle_timeout_ms: 12345,
+            supports_websockets: false,
+          }
+        : {}),
+    };
+    expect(recipe?.["config"]).toHaveProperty("model_providers", {
+      [provider]: definition,
+    });
+    expect(JSON.stringify(recipe)).not.toContain("synthetic-recipe-key");
+    for (const command of mode === "deep" ? ["rerun", "resume"] : ["rerun"]) {
+      let reachedRun = false;
+      const stderr = capture();
+      const replay = dependencies({
+        environment,
+        currentDirectory: repository,
+        onWorkbench: () => ({
+          scanId: "synthetic-scan",
+          scanDir,
+          recipe: savedRecipe,
+        }),
+        onConfig: (config) =>
+          expect(config.codexOverrides?.["model_providers"]).toEqual({
+            [provider]: definition,
+          }),
+        onRun: () => {
+          reachedRun = true;
+        },
+      });
+      expect(
+        await main(
+          ["scans", command, "synthetic-scan", "--json"],
+          capture().stream,
+          stderr.stream,
+          replay,
+        ),
+        stderr.text(),
+      ).toBe(0);
+      expect(reachedRun).toBe(true);
+    }
   },
 );
