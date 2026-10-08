@@ -38,6 +38,7 @@ import {
   join,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -156,6 +157,7 @@ export interface PluginInstall {
 
 export interface CodexCommand {
   command: string;
+  args?: readonly string[];
 }
 
 interface CodexCommandResult {
@@ -180,6 +182,8 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
+  stateDirectory?: string;
+  protectedRoot?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -191,14 +195,15 @@ export interface ScanArtifactRestorer {
 function environmentValue(
   environment: ProcessEnvironment,
   requested: string,
+  preserveWhitespace = false,
 ): string | undefined {
-  const exact = environment[requested]?.trim();
-  if (exact) return exact;
-  return Object.entries(environment)
-    .find(
-      ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-    )?.[1]
-    ?.trim();
+  const exact = environment[requested];
+  const value = exact?.trim()
+    ? exact
+    : Object.entries(environment).find(
+        ([name, value]) => name.toUpperCase() === requested && value?.trim(),
+      )?.[1];
+  return preserveWhitespace ? value : value?.trim();
 }
 
 export function codexSecurityStateDirectory(
@@ -210,7 +215,7 @@ export function codexSecurityStateDirectory(
       ? resolve(expandHome(configured, environment))
       : resolve(
           expandHome(
-            environmentValue(environment, "CODEX_HOME") ??
+            environmentValue(environment, "CODEX_HOME", true) ??
               join(homedir(), ".codex"),
             environment,
           ),
@@ -684,14 +689,10 @@ function windowsAceAllowsAncestorReplacement(
   if (/^0x[\da-f]+$/iu.test(rights)) {
     return (BigInt(rights) & 0x100d0040n) !== 0n;
   }
-  for (let index = 0; index < rights.length; index += 2) {
-    if (
-      ["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(
-        rights.slice(index, index + 2),
-      )
-    ) {
+  // Rights tokens stay aligned to pairs of UTF-16 code units.
+  for (const [right] of rights.matchAll(/[\s\S]{2}/g)) {
+    if (["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(right))
       return true;
-    }
   }
   return false;
 }
@@ -1133,6 +1134,22 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   }
 }
 
+export async function withCredentialHomeLock<T>(
+  codexHome: string,
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const release = await acquireCodexSecurityCredentialHomeLock(
+    codexHome,
+    signal,
+  );
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
+}
+
 export async function acquireCodexSecurityCredentialHomeLock(
   codexHome: string,
   signal?: AbortSignal,
@@ -1548,27 +1565,97 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+const ARCHIVE_READY = "codex-security-archive-ready\n";
+const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
+import io, json, runpy, sys
+control = sys.stdin
+payload = json.loads(control.readline())
+sys.stdin = io.TextIOWrapper(io.BytesIO(payload.encode("utf-8")), encoding="utf-8")
+sys.argv = sys.argv[1:]
+workbench = runpy.run_path(sys.argv[0])
+def before_archive():
+    sys.stdout.buffer.write(b"codex-security-archive-ready\n")
+    sys.stdout.buffer.flush()
+    if control.readline() != "\n":
+        raise SystemExit("Scan registration canceled before archival.")
+workbench["main"](before_archive=before_archive)
+`;
+
 const workbenchComparisonSupport = new Map<
   string,
   { stdin: boolean; related: boolean }
 >();
 
 export async function runWorkbench(
-  options: WorkbenchCommandOptions,
+  options: Omit<WorkbenchCommandOptions, "python"> & { python?: string },
   args: readonly string[],
   input?: string,
 ): Promise<JsonObject> {
   const script = join(options.pluginRoot, "scripts", "workbench_db.py");
+  let signal = options.signal;
   const run = async (
     arguments_: readonly string[],
     input?: string,
+    archiveHandshake = false,
   ): Promise<string> => {
+    const native = [
+      "database-info",
+      "store-findings",
+      "list-stored-findings",
+      "find-potential-duplicates",
+      "store-dedupe-groups",
+      "list-dedupe-groups",
+      "dashboard",
+    ].includes(arguments_[0] ?? "");
+    const node =
+      native && process.versions["bun"]
+        ? await resolveTrustedExecutable(
+            "node",
+            options.environment,
+            options.protectedRoot ?? process.cwd(),
+          )
+        : undefined;
+    if (node === null) {
+      throw new Error("Node.js is not available on a trusted PATH.");
+    }
+    const command = native
+      ? (node?.executable ?? process.execPath)
+      : (options.python ??= await resolvePluginPython({
+          environment: options.environment,
+          protectedRoot: options.protectedRoot,
+          signal: options.signal,
+        }));
+    const stateDirectory = native
+      ? (options.stateDirectory ??
+        codexSecurityStateDirectory(options.environment))
+      : undefined;
     const result = await runCodexCommand(
-      { command: options.python },
-      ["-I", "-X", "utf8", "-B", script, ...arguments_],
-      pluginHelperEnvironment(options.environment),
-      input,
-      options.signal,
+      { command },
+      native
+        ? [join(options.pluginRoot, "mcp", "helpers.mjs"), ...arguments_]
+        : [
+            "-I",
+            "-X",
+            "utf8",
+            "-B",
+            ...(archiveHandshake ? ["-c", ARCHIVE_REGISTRATION_PROGRAM] : []),
+            script,
+            ...arguments_,
+          ],
+      pluginHelperEnvironment(node?.environment ?? options.environment),
+      // The SDK owns configuration normalization; the helper receives its resolved location.
+      native
+        ? JSON.stringify(
+            arguments_[0] === "database-info"
+              ? stateDirectory
+              : {
+                  stateDirectory,
+                  payload: input === undefined ? undefined : JSON.parse(input),
+                },
+          )
+        : input,
+      signal,
+      archiveHandshake,
     );
     if (!result.success) {
       throw new Error(
@@ -1580,8 +1667,69 @@ export async function runWorkbench(
     return result.stdout;
   };
   let stdout: string;
+  const savedScanIdentities = async (scanDir: string): Promise<string> => {
+    const result: unknown = JSON.parse(
+      await run(["list-scans", "--scan-root", scanDir]),
+    );
+    if (!isRecord(result) || !Array.isArray(result["scans"])) {
+      throw new Error(
+        "The workbench returned an invalid scan history response.",
+      );
+    }
+    return JSON.stringify(
+      result["scans"]
+        .map((scan: unknown) => {
+          if (
+            !isRecord(scan) ||
+            typeof scan["scanId"] !== "string" ||
+            typeof scan["scanDir"] !== "string"
+          ) {
+            throw new Error(
+              "The workbench returned an invalid scan history entry.",
+            );
+          }
+          return JSON.stringify([scan["scanId"], scan["scanDir"]]);
+        })
+        .sort(),
+    );
+  };
+  let legacyArchive:
+    { scanDir: string; archiveDir: string; savedScans: string } | undefined;
   try {
     const arguments_ = [...args];
+    let archiveHandshake = false;
+    if (
+      arguments_[0] === "register-cli-scan" &&
+      arguments_.includes("--archive-existing") &&
+      !arguments_.includes("--archived-scan-dir")
+    ) {
+      const help = (await run(["register-cli-scan", "--help"])).replace(
+        /\s+/gu,
+        " ",
+      );
+      if (help.includes("Supports cancellable archival preparation.")) {
+        archiveHandshake = signal !== undefined;
+      } else if (
+        help.includes("Archive output in the registration transaction.")
+      ) {
+        // Earlier transactional helpers cannot acknowledge the safe cancellation
+        // boundary. Keep their move and database commit together.
+        signal?.throwIfAborted();
+        signal = undefined;
+      } else {
+        const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
+        const archiveDir = await planOutputArchive(scanDir);
+        if (archiveDir !== null) {
+          const savedScans = await savedScanIdentities(scanDir);
+          signal?.throwIfAborted();
+          await rename(scanDir, archiveDir);
+          legacyArchive = { scanDir, archiveDir, savedScans };
+          await mkdir(scanDir, { mode: 0o700 });
+          if ((process.umask() & 0o700) !== 0) await chmod(scanDir, 0o700);
+          arguments_.push("--archived-scan-dir", archiveDir);
+        }
+      }
+    }
     const matchesStdinIndex = arguments_.indexOf("--matches-json-stdin");
     if (
       arguments_[0] === "save-scan-comparison" &&
@@ -1611,8 +1759,33 @@ export async function runWorkbench(
         input = undefined;
       }
     }
-    stdout = await run(arguments_, input);
+    stdout = await run(arguments_, input, archiveHandshake);
   } catch (error) {
+    if (legacyArchive !== undefined) {
+      // Cancellation can stop legacy registration; recovery must still settle.
+      signal = undefined;
+      try {
+        // A helper can commit registration and lose its response. Restore only
+        // when saved identities prove that registration did not change them.
+        if (
+          (await savedScanIdentities(legacyArchive.scanDir)) ===
+          legacyArchive.savedScans
+        ) {
+          await rmdir(legacyArchive.scanDir).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code !== "ENOENT") throw error;
+            },
+          );
+          await rename(legacyArchive.archiveDir, legacyArchive.scanDir);
+        }
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `Scan registration failed: ${processErrorDetail(error)}. Previous output remains at ${legacyArchive.archiveDir}; restoration could not be verified or completed: ${processErrorDetail(restoreError)}`,
+          { cause: error },
+        );
+      }
+    }
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
     const databaseFailure =
@@ -1624,7 +1797,8 @@ export async function runWorkbench(
     throw new CodexSecurityError(
       databaseFailure
         ? `${failure}: cannot open the workbench database at ${join(
-            codexSecurityStateDirectory(options.environment),
+            options.stateDirectory ??
+              codexSecurityStateDirectory(options.environment),
             "workbench.sqlite3",
           )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
         : `${failure}: ${detail}`,
@@ -1645,6 +1819,8 @@ export async function runWorkbench(
       "The Codex Security workbench returned an invalid response.",
     );
   }
+  if (legacyArchive !== undefined)
+    result["archivedScanDir"] = legacyArchive.archiveDir;
   return result as JsonObject;
 }
 
@@ -1674,8 +1850,8 @@ export async function validateOutputDir(
   if (outputDirectory === undefined) {
     return null;
   }
-  requireModelSafeOutputDir(outputDirectory);
   const path = resolve(expandHome(outputDirectory));
+  requireModelSafeOutputDir(path);
   try {
     const metadata = await lstat(path).catch(nullIfMissingFileError);
     if (metadata !== null) {
@@ -1888,11 +2064,49 @@ export async function prepareOutputDir(
   archiveExisting = false,
   onOutputArchived?: (archiveDir: string) => void,
 ): Promise<string> {
+  return prepareOutputDirectory(
+    outputDirectory,
+    repositoryName,
+    temporaryRoot,
+    validateLocation,
+    archiveExisting ? "archive" : "reject",
+    onOutputArchived,
+  );
+}
+
+/** Leave archival to the scan registration transaction. */
+export async function prepareScanRegistrationOutput(
+  outputDirectory: string | undefined,
+  repositoryName: string,
+  temporaryRoot: string = tmpdir(),
+  validateLocation?: (path: string) => void,
+  archiveExisting = false,
+): Promise<string> {
+  return prepareOutputDirectory(
+    outputDirectory,
+    repositoryName,
+    temporaryRoot,
+    validateLocation,
+    archiveExisting ? "preserve" : "reject",
+  );
+}
+
+async function prepareOutputDirectory(
+  outputDirectory: string | undefined,
+  repositoryName: string,
+  temporaryRoot: string,
+  validateLocation: ((path: string) => void) | undefined,
+  existingOutput: "reject" | "archive" | "preserve",
+  onOutputArchived?: (archiveDir: string) => void,
+): Promise<string> {
   if (outputDirectory === undefined) {
     requireModelSafeOutputDir(temporaryRoot);
     requireModelSafeOutputDir(await realpath(temporaryRoot));
   }
-  const path = await validateOutputDir(outputDirectory, archiveExisting);
+  const path = await validateOutputDir(
+    outputDirectory,
+    existingOutput !== "reject",
+  );
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
     const created = await mkdtemp(
@@ -1909,7 +2123,7 @@ export async function prepareOutputDir(
   let createdRoot: string | undefined;
   try {
     let existing = await lstat(path).catch(nullIfMissingFileError);
-    if (existing !== null && archiveExisting) {
+    if (existing !== null && existingOutput === "archive") {
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
         await rename(path, archiveDir);
@@ -1921,7 +2135,11 @@ export async function prepareOutputDir(
       createdRoot = await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
-    return await validatePreparedOutputDir(path, validateLocation);
+    return await validatePreparedOutputDir(
+      path,
+      validateLocation,
+      existingOutput === "preserve",
+    );
   } catch (error) {
     if (createdRoot !== undefined) {
       await removeEmptyDirectories(path, createdRoot);
@@ -1939,6 +2157,7 @@ export async function prepareOutputDir(
 export async function validatePreparedOutputDir(
   path: string,
   validateLocation?: (path: string) => void,
+  allowNonempty = false,
 ): Promise<string> {
   const metadata = await lstat(path);
   if (!metadata.isDirectory()) {
@@ -1948,7 +2167,7 @@ export async function validatePreparedOutputDir(
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
   const entries = await readdir(canonical);
-  if (entries.length !== 0) {
+  if (!allowNonempty && entries.length !== 0) {
     throw new OutputDirectoryError(
       `Scan output directory must be empty: ${path}`,
     );
@@ -2369,6 +2588,13 @@ export async function createMarketplace(
   const marketplace = join(codexHome, "sdk-marketplace");
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
   await copyPluginTree(root, pluginDestination, signal);
+  const projection = await legacyPluginProjection(pluginDestination, signal);
+  for (const [path, file] of projection?.files ?? []) {
+    const destination = join(pluginDestination, path);
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, file.contents, { mode: file.mode, signal });
+    if (file.mode !== undefined) await chmod(destination, file.mode);
+  }
   await writeMarketplaceManifest(marketplace, signal);
   return marketplace;
 }
@@ -2405,6 +2631,108 @@ async function writeMarketplaceManifest(
   } finally {
     await rm(temporary, { force: true });
   }
+}
+
+type LegacyPluginProjection = {
+  root: string;
+  files: Map<string, { contents: Buffer; mode?: number }>;
+};
+
+async function legacyPluginProjection(
+  root: string,
+  signal?: AbortSignal,
+): Promise<LegacyPluginProjection | undefined> {
+  const path = join(root, ".mcp.json");
+  // Keep the source link checks ahead of any configuration read.
+  if (!(await lstat(path).catch(nullIfMissingFileError))?.isFile()) return;
+  const configuration: unknown = JSON.parse(
+    await readFile(path, { encoding: "utf8", signal }),
+  );
+  const servers = isRecord(configuration)
+    ? configuration["mcpServers"]
+    : undefined;
+  const server = isRecord(servers) ? servers[PLUGIN_NAME] : undefined;
+  if (
+    !isRecord(server) ||
+    (server["command"] !== "./scripts/launch_codex_security_mcp" &&
+      server["command"] !== "./scripts/launch_codex_security_mcp.cmd" &&
+      !isLegacyNodeMcpServer(server))
+  ) {
+    return;
+  }
+  const environment = server["env_vars"];
+  if (environment !== undefined && !Array.isArray(environment)) return;
+  const directNode = isLegacyNodeMcpServer(server);
+  if (
+    !Array.isArray(environment) ||
+    !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
+  ) {
+    server["env_vars"] = [
+      ...(Array.isArray(environment) ? environment : []),
+      "CODEX_SECURITY_PLUGIN_ROOT",
+    ];
+  }
+  const files: LegacyPluginProjection["files"] = new Map();
+  if (directNode) {
+    const args = [...(server["args"] as string[])];
+    args[args.findIndex(isLegacyNodeMcpEntry)] =
+      "./mcp/codex_security_sdk_bridge.mjs";
+    server["args"] = args;
+    files.set("mcp/codex_security_sdk_bridge.mjs", {
+      contents: Buffer.from(
+        'import { runMain } from "node:module";\n' +
+          'import { dirname, join } from "node:path";\n' +
+          'import { fileURLToPath } from "node:url";\n' +
+          "const root = process.env.CODEX_SECURITY_PLUGIN_ROOT;\n" +
+          'process.argv[1] = root ? join(root, "mcp", "server.mjs") : join(dirname(fileURLToPath(import.meta.url)), "server.mjs");\n' +
+          "runMain(process.argv[1]);\n",
+      ),
+      mode: 0o644,
+    });
+  } else {
+    server["command"] =
+      server["command"] === "./scripts/launch_codex_security_mcp.cmd"
+        ? "./scripts/launch_codex_security_mcp_sdk.cmd"
+        : "./scripts/launch_codex_security_mcp_sdk";
+    files.set("scripts/launch_codex_security_mcp_sdk", {
+      contents: Buffer.from(
+        "#!/bin/sh\n" +
+          'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
+          '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
+          "fi\n" +
+          'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+      ),
+      mode: 0o755,
+    });
+    files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
+      contents: Buffer.from(
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
+          "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
+          '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
+          "exit /b\r\n:codex_security_sdk_original\r\n" +
+          '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
+      ),
+      mode: 0o755,
+    });
+  }
+  files.set(".mcp.json", {
+    contents: Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`),
+  });
+  return { root, files };
+}
+
+function isLegacyNodeMcpEntry(argument: unknown): boolean {
+  return argument === "./mcp/server.mjs" || argument === "mcp/server.mjs";
+}
+
+function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
+  const command = server["command"];
+  return (
+    typeof command === "string" &&
+    ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
+    Array.isArray(server["args"]) &&
+    server["args"].some(isLegacyNodeMcpEntry)
+  );
 }
 
 export function resolveCodexCommand(
@@ -2480,6 +2808,7 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
+  const projection = await legacyPluginProjection(root, options.signal);
   const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
   const command =
@@ -2505,7 +2834,13 @@ export async function bootstrapPlugin(
   const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
   const stagedMatches =
     staged?.version === version &&
-    (await pluginContentsMatch(root, stagedRoot, options.signal));
+    (await pluginContentsMatch(
+      root,
+      stagedRoot,
+      options.signal,
+      false,
+      projection,
+    ));
 
   if (!stagedMatches) {
     if (existing !== null) {
@@ -2578,6 +2913,7 @@ export async function bootstrapPlugin(
       previous["installedPath"],
       options.signal,
       true,
+      projection,
     ))
   ) {
     return {
@@ -2641,6 +2977,7 @@ async function pluginContentsMatch(
   destination: string,
   signal?: AbortSignal,
   allowExtraFiles = false,
+  projection?: LegacyPluginProjection,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 
@@ -2657,19 +2994,23 @@ async function pluginContentsMatch(
   if (destinationMetadata === null) return false;
 
   if (sourceMetadata.isFile() && destinationMetadata.isFile()) {
+    const projected = projection?.files.get(
+      relative(projection.root, source).split(sep).join("/"),
+    );
     if (
-      sourceMetadata.size !== destinationMetadata.size ||
-      (sourceMetadata.mode & 0o111) !== (destinationMetadata.mode & 0o111)
+      (projected === undefined &&
+        sourceMetadata.size !== destinationMetadata.size) ||
+      ((projected?.mode === undefined || process.platform !== "win32") &&
+        ((projected?.mode ?? sourceMetadata.mode) & 0o111) !==
+          (destinationMetadata.mode & 0o111))
     ) {
       return false;
     }
-
     const [sourceBytes, destinationBytes] = await Promise.all([
       readFile(source, { signal }),
       readFile(destination, { signal }),
     ]);
-
-    return sourceBytes.equals(destinationBytes);
+    return (projected?.contents ?? sourceBytes).equals(destinationBytes);
   }
 
   if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory()) {
@@ -2677,12 +3018,31 @@ async function pluginContentsMatch(
   }
 
   const entries = await readdir(source);
-
+  const projectedDirectory =
+    projection === undefined
+      ? undefined
+      : relative(projection.root, source).split(sep).join("/") || ".";
+  const generated = [...(projection?.files ?? [])].filter(
+    ([path]) =>
+      dirname(path) === projectedDirectory && !entries.includes(basename(path)),
+  );
   if (
     !allowExtraFiles &&
-    entries.length !== (await readdir(destination)).length
+    entries.length + generated.length !== (await readdir(destination)).length
   ) {
     return false;
+  }
+  for (const [path, file] of generated) {
+    const generatedPath = join(destination, basename(path));
+    const metadata = await lstat(generatedPath).catch(nullIfMissingFileError);
+    if (
+      !metadata?.isFile() ||
+      (process.platform !== "win32" &&
+        (metadata.mode & 0o111) !== ((file.mode ?? 0o644) & 0o111)) ||
+      !file.contents.equals(await readFile(generatedPath, { signal }))
+    ) {
+      return false;
+    }
   }
 
   for (const entry of entries) {
@@ -2692,6 +3052,7 @@ async function pluginContentsMatch(
         join(destination, entry),
         signal,
         allowExtraFiles,
+        projection,
       ))
     ) {
       return false;
@@ -2756,8 +3117,11 @@ export async function resolvePluginPython(
   }
 
   const home = options.homeDirectory ?? homedir();
+  const cacheDirectory =
+    environmentValue(environment, "XDG_CACHE_HOME", true) ||
+    join(home, ".cache");
   const managedRoots = options.managedRuntimeRoots ?? [
-    join(home, ".cache", "codex-runtimes", "codex-primary-runtime"),
+    join(cacheDirectory, "codex-runtimes", "codex-primary-runtime"),
   ];
   const relativeCandidates =
     process.platform === "win32"
@@ -2862,13 +3226,21 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
+  archiveHandshake = false,
 ): Promise<CodexCommandResult> {
-  const child = spawn(executablePathForSpawn(command.command), [...args], {
-    env: environment,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    signal,
-  });
+  const cancellation = archiveHandshake ? new AbortController() : undefined;
+  const abort = () => cancellation?.abort(signal?.reason);
+  let awaitingArchive = archiveHandshake;
+  const child = spawn(
+    executablePathForSpawn(command.command),
+    [...(command.args ?? []), ...args],
+    {
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      signal: cancellation?.signal ?? signal,
+    },
+  );
   let stdout = "";
   let stderr = "";
   let processError: Error | undefined;
@@ -2876,6 +3248,15 @@ export async function runCodexCommand(
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     stdout += chunk;
+    if (awaitingArchive && stdout.startsWith(ARCHIVE_READY)) {
+      awaitingArchive = false;
+      stdout = stdout.slice(ARCHIVE_READY.length);
+      signal?.removeEventListener("abort", abort);
+      // The helper cannot rename until this acknowledgement. Detach and check
+      // cancellation before allowing the filesystem/database transaction.
+      if (signal?.aborted) abort();
+      else child.stdin.end("\n");
+    }
   });
   child.stderr.on("data", (chunk: string) => {
     stderr += chunk;
@@ -2898,8 +3279,17 @@ export async function runCodexCommand(
         : reject(processError),
     );
   });
-  child.stdin.end(input);
-  return await completion;
+  if (archiveHandshake) {
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  }
+  try {
+    if (archiveHandshake) child.stdin.write(`${JSON.stringify(input ?? "")}\n`);
+    else child.stdin.end(input);
+    return await completion;
+  } finally {
+    if (archiveHandshake) signal?.removeEventListener("abort", abort);
+  }
 }
 
 export async function probeCodexSandbox(
@@ -3135,7 +3525,8 @@ async function hasPluginManifest(root: string): Promise<boolean> {
   );
 }
 
-function sameFile(left: string, right: string): Promise<boolean> {
+/** @internal Compare filesystem identity without depending on path spelling. */
+export function sameFile(left: string, right: string): Promise<boolean> {
   // NTFS file IDs can exceed JavaScript's safe integer range.
   return Promise.all([
     stat(left, { bigint: true }),

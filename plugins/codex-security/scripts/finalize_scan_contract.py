@@ -18,7 +18,6 @@ import secrets
 import stat
 import struct
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
@@ -91,7 +90,11 @@ class ContractError(ValueError):
 
 
 class RecoverableContractError(ContractError):
-    """Raised when report projection can safely be retried before publication."""
+    """Raised when scan completion can safely be retried before publication."""
+
+
+class SealedArtifactError(ContractError):
+    """Raised when an export would overwrite a sealed scan artifact."""
 
 
 def _reject_non_finite_json(value: str) -> None:
@@ -128,21 +131,10 @@ def _generate_report_projection(
         raise ContractError(f"could not load report projection helper: {script}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    attempts = (
-        getattr(sys.modules.get("workbench_constants"), "SQLITE_RETRY_ATTEMPTS", 1)
-        if coverage.get("mode") == "deep_repository"
-        else 1
-    )
-    for attempt in range(attempts):
-        try:
-            return module.generate_report_markdown(manifest, findings, coverage)
-        except OSError as exc:
-            if attempt == attempts - 1:
-                raise RecoverableContractError(f"report projection failed: {exc}") from exc
-            time.sleep(0.05 * (2**attempt))
-        except ValueError as exc:
-            raise ContractError(f"report projection failed: {exc}") from exc
-    raise AssertionError("Report projection retry loop exhausted unexpectedly.")
+    try:
+        return module.generate_report_markdown(manifest, findings, coverage)
+    except ValueError as exc:
+        raise ContractError(f"report projection failed: {exc}") from exc
 
 
 def _threat_model_renderer() -> Any:
@@ -575,6 +567,7 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
                 try:
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
                 except FileExistsError:
+                    # The open below verifies that an existing entry is a real directory.
                     pass
             next_descriptor = os.open(
                 part,
@@ -589,15 +582,23 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
         raise
 
 
-def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context: str) -> int:
-    return _open_scan_local_file_with_path(scan_dir, relative_path, context)[0]
+def open_scan_local_file_descriptor(
+    scan_dir: Path, relative_path: str, context: str, *, portable: bool = True
+) -> int:
+    return _open_scan_local_file_with_path(scan_dir, relative_path, context, portable=portable)[0]
 
 
 def _open_scan_local_file_with_path(
-    scan_dir: Path, relative_path: str, context: str, *, resolve_spelling: bool = False
+    scan_dir: Path,
+    relative_path: str,
+    context: str,
+    *,
+    resolve_spelling: bool = False,
+    portable: bool = True,
 ) -> tuple[int, str]:
     scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_portable_relative_path(relative_path, context)
+    validate_path = _require_portable_relative_path if portable else _require_safe_relative_path
+    relative_path = validate_path(relative_path, context)
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
@@ -823,6 +824,7 @@ def write_scan_local_bytes(
                                 ):
                                     return
                         except OSError:
+                            # A failed content comparison still allows an atomic replacement.
                             pass
                 finally:
                     if existing_fd >= 0:
@@ -843,6 +845,7 @@ def write_scan_local_bytes(
             try:
                 os.unlink(temp_name, dir_fd=parent_fd)
             except FileNotFoundError:
+                # The temporary file is already gone, so cleanup is complete.
                 pass
         if parent_fd is not None:
             os.close(parent_fd)
@@ -1489,17 +1492,6 @@ def _normalize_unsealed_open_questions(coverage: dict[str, Any]) -> None:
     coverage["openQuestions"] = normalized
 
 
-def _normalize_unsealed_deep_repository_inventory_strategy(
-    coverage: dict[str, Any],
-    *,
-    expected_coverage_mode: str | None,
-) -> None:
-    """Label whole-repository Deep scans as using the repository inventory."""
-
-    if expected_coverage_mode == "deep_repository":
-        coverage["inventoryStrategy"] = "repository"
-
-
 def _validate_completion_binding(
     manifest: dict[str, Any],
     findings: dict[str, Any],
@@ -2085,29 +2077,20 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             continue
         _remove_unsupported_legacy_scalar_fields(attack_path, ("summary",))
         for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
-            if field not in attack_path:
-                continue
             detail = attack_path.get(field)
-            if detail is None:
-                attack_path.pop(field)
-                continue
-            if not isinstance(detail, (str, dict)):
-                attack_path.pop(field)
-                continue
-            if isinstance(detail, str):
-                if detail == "":
-                    attack_path.pop(field)
-                continue
-            detail_scalar_fields = ("summary", "source", "sink", "outcome")
-            if field == "reachability":
-                detail_scalar_fields += ("attacker", "entrypoint")
-            _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
-            _normalize_legacy_string_list_fields(
-                detail, ("evidenceRefs", "evidence_refs", "transformations")
-            )
-            _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
-            if field == "reachability":
-                _normalize_legacy_string_list_fields(detail, ("preconditions",))
+            if isinstance(detail, dict):
+                detail_scalar_fields = ("summary", "source", "sink", "outcome")
+                if field == "reachability":
+                    detail_scalar_fields += ("attacker", "entrypoint")
+                _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
+                _normalize_legacy_string_list_fields(
+                    detail, ("evidenceRefs", "evidence_refs", "transformations")
+                )
+                _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
+                if field == "reachability":
+                    _normalize_legacy_string_list_fields(detail, ("preconditions",))
+            elif not isinstance(detail, str) or detail == "":
+                attack_path.pop(field, None)
         for field in ("impact", "likelihood"):
             detail = attack_path.get(field)
             if isinstance(detail, dict):
@@ -2271,7 +2254,7 @@ def _open_source_file(source_root: Path, relative_path: str) -> TextIO | None:
     file_fd: int | None = None
     try:
         file_fd = open_scan_local_file_descriptor(
-            source_root, relative_path, f"source file {relative_path}"
+            source_root, relative_path, f"source file {relative_path}", portable=False
         )
         handle = os.fdopen(file_fd, "r", encoding="utf-8", errors="replace")
         file_fd = None
@@ -2456,7 +2439,7 @@ def _github_line_hash_cache(
     return line_hash_cache
 
 
-def _sarif_location(location: dict[str, Any], location_id: int | None = None) -> dict[str, Any]:
+def _sarif_location(location: dict[str, Any]) -> dict[str, Any]:
     sarif_location: dict[str, Any] = {
         "physicalLocation": {
             "artifactLocation": {
@@ -2468,8 +2451,6 @@ def _sarif_location(location: dict[str, Any], location_id: int | None = None) ->
             },
         }
     }
-    if location_id is not None:
-        sarif_location["id"] = location_id
     if location.get("role"):
         sarif_location["message"] = {"text": location["role"]}
     return sarif_location
@@ -2498,7 +2479,7 @@ def _sarif_result(
     line_hash = _github_primary_location_line_hash(finding, source_root, line_hash_cache)
     if line_hash is not None:
         partial_fingerprints["primaryLocationLineHash"] = line_hash
-    result = {
+    return {
         "ruleId": finding["ruleId"],
         "ruleIndex": rule_index,
         "level": SARIF_LEVELS[finding["severity"]["level"]],
@@ -2507,7 +2488,6 @@ def _sarif_result(
         "partialFingerprints": partial_fingerprints,
         "properties": properties,
     }
-    return result
 
 
 def build_sarif(
@@ -2763,11 +2743,7 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
     )
     writer.writerow(finding_csv_columns(deep_scan))
     for finding in findings["findings"]:
-        locations = finding["locations"]
-        location = next(
-            (candidate for candidate in locations if candidate.get("role") == "root_control"),
-            locations[0],
-        )
+        location = _sarif_primary_location(finding)
         writer.writerow(
             (
                 csv_cell(finding["occurrenceId"]),
@@ -2867,7 +2843,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
         raise ContractError(f"{relative_output}: unable to inspect export output") from exc
     for artifact_path in artifact_paths:
         if artifact_path == relative_output:
-            raise ContractError(
+            raise SealedArtifactError(
                 f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
             )
         if output_metadata is None:
@@ -2880,7 +2856,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
         finally:
             os.close(descriptor)
         if os.path.samestat(output_metadata, artifact_metadata):
-            raise ContractError(
+            raise SealedArtifactError(
                 f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
             )
     write_scan_local_bytes(
@@ -2949,10 +2925,9 @@ def _prepare_scan_finalization(
         findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
     if not was_sealed:
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, completion_binding)
-        _normalize_unsealed_deep_repository_inventory_strategy(
-            coverage,
-            expected_coverage_mode=expected_coverage_mode,
-        )
+        # Label whole-repository Deep scans as using the repository inventory.
+        if expected_coverage_mode == "deep_repository":
+            coverage["inventoryStrategy"] = "repository"
         _normalize_unsealed_open_questions(coverage)
 
     if manifest.get("schemaVersion") != SCHEMA_VERSION:
@@ -3109,6 +3084,7 @@ def main() -> int:
     parser.add_argument("--write-threat-model", action="store_true")
     args = parser.parse_args()
     try:
+        args.scan_dir = args.scan_dir.resolve()
         if args.describe_threat_model:
             sys.stdout.buffer.write(
                 _json_bytes(describe_threat_model(args.scan_dir, args.schema_dir))

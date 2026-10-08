@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -264,13 +264,39 @@ export async function resolveArtifactExportOutput(
           );
   if (arguments_.output !== "-") {
     const outputFromCurrent = relative(currentDirectory, arguments_.output);
-    if (!isOutsidePath(outputFromCurrent)) {
+    if (outputFromCurrent !== "" && !isOutsidePath(outputFromCurrent)) {
+      let existingParent: string | undefined;
+      for (
+        let directory = dirname(arguments_.output);
+        relative(currentDirectory, directory) !== "";
+        directory = dirname(directory)
+      ) {
+        const metadata = await lstat(directory).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return undefined;
+            throw error;
+          },
+        );
+        if (metadata?.isSymbolicLink()) {
+          throw new CodexSecurityError(
+            "The export output path cannot traverse a repository symlink.",
+          );
+        }
+        if (metadata !== undefined) existingParent ??= directory;
+      }
       const canonicalCurrent = await realpath(currentDirectory).catch(
         () => currentDirectory,
       );
+      const expectedOutput =
+        existingParent === undefined
+          ? resolve(canonicalCurrent, outputFromCurrent)
+          : resolve(
+              await realpath(existingParent),
+              relative(existingParent, arguments_.output),
+            );
       if (
-        relative(resolve(canonicalCurrent, outputFromCurrent), outputPath) !==
-        ""
+        isOutsidePath(relative(canonicalCurrent, outputPath)) ||
+        relative(expectedOutput, outputPath) !== ""
       ) {
         throw new CodexSecurityError(
           "The export output path cannot traverse a repository symlink.",
