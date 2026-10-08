@@ -56,6 +56,7 @@ export async function createAuthenticatedGitHub(
   } = {},
 ): Promise<Octokit> {
   options.signal?.throwIfAborted();
+  host = host.toLowerCase();
   let token = options.token;
   if (token === undefined) {
     const trusted = await resolveTrustedExecutable(
@@ -87,7 +88,10 @@ export async function createAuthenticatedGitHub(
   }
   return new Octokit({
     auth: token,
-    ...(host === "github.com" ? {} : { baseUrl: `https://${host}/api/v3` }),
+    baseUrl:
+      host === "github.com" || host.endsWith(".ghe.com")
+        ? `https://api.${host}`
+        : `https://${host}/api/v3`,
   });
 }
 

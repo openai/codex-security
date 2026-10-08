@@ -302,6 +302,40 @@ describe("GitHub code scanning import", () => {
       createAuthenticatedGitHub("github.com", { token: " " }),
     ).rejects.toThrow("must not be empty");
   });
+
+  test.each([
+    ["github.com", "https://api.github.com", "/graphql"],
+    ["GITHUB.COM", "https://api.github.com", "/graphql"],
+    ["GitHub.Com", "https://api.github.com", "/graphql"],
+    ["example.ghe.com", "https://api.example.ghe.com", "/graphql"],
+    ["Example.GHE.COM", "https://api.example.ghe.com", "/graphql"],
+    [
+      "GitHub.Example.Com:8443",
+      "https://github.example.com:8443/api/v3",
+      "/api/graphql",
+    ],
+  ])(
+    "selects the REST and GraphQL endpoints for hostname %s",
+    async (host, baseUrl, graphqlPath) => {
+      const client = await createAuthenticatedGitHub(host, {
+        token: "SYNTHETIC_SDK_TOKEN",
+        environment: {},
+      });
+      expect(client.request.endpoint("GET /user")).toMatchObject({
+        url: `${baseUrl}/user`,
+      });
+      await client.graphql("query { viewer { login } }", {
+        request: {
+          fetch: async (url: string | URL | Request) => {
+            expect(String(url)).toBe(
+              `${new URL(baseUrl).origin}${graphqlPath}`,
+            );
+            return Response.json({ data: { viewer: { login: "synthetic" } } });
+          },
+        },
+      });
+    },
+  );
 });
 
 describe("GitHub import CLI", () => {
