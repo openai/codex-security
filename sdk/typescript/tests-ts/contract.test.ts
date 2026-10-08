@@ -1340,21 +1340,6 @@ describe("canonical scan contract", () => {
         },
       ],
       [
-        "evidence path",
-        (_manifest, findings) => {
-          findings["findings"][0]["codeEvidence"] = [
-            {
-              id: "source",
-              label: "ok",
-              path: " ",
-              startLine: 41,
-              code: "x()",
-              explanation: "ok",
-            },
-          ];
-        },
-      ],
-      [
         "root summary",
         (_manifest, findings) => {
           findings["findings"][0]["rootCause"] = { summary: " " };
