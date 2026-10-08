@@ -1904,7 +1904,7 @@ export async function main(
         await dependencies.runWorkbench(args, undefined, undefined, pythonPath),
       );
     } catch (error) {
-      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
       exitCode = 2;
       throw error;
     }
@@ -1980,7 +1980,7 @@ export async function main(
           : interrupted === "SIGTERM"
             ? "Finding matching terminated by SIGTERM. Saved comparisons are preserved."
             : errorMessage(error);
-      errorOutput.write(`codex-security: ${message}\n`);
+      errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
       throw error;
     } finally {
       removeListeners();
@@ -2343,7 +2343,7 @@ export async function main(
           scanArguments.showCost = options.showCost;
         } catch (error) {
           const message = errorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
           return finishScan(
             { exitCode: 2, error: message },
             format,
@@ -2402,7 +2402,8 @@ export async function main(
           scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
         } catch (error) {
           const message = errorMessage(error);
-          if (exitCode === 0) errorOutput.write(`codex-security: ${message}\n`);
+          if (exitCode === 0)
+            errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
           return finishScan(
             { exitCode: 2, error: message },
             format,
@@ -2485,7 +2486,7 @@ export async function main(
           scanArguments.showCost = options.showCost;
         } catch (error) {
           const message = errorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
           return finishScan(
             { exitCode: 2, error: message },
             format,
@@ -3747,7 +3748,7 @@ export async function main(
           );
         } catch (error) {
           const message = errorMessage(error);
-          errorOutput.write(`${message}\n`);
+          errorOutput.write(`${diagnosticLines(message)}\n`);
           outcome = { exitCode: 2, error: message };
         }
 
@@ -3830,7 +3831,7 @@ export async function main(
             failOnSeverity: options.failOnSeverity,
           };
         } catch (error) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 2;
           return undefined;
         }
@@ -4440,7 +4441,7 @@ export async function main(
         } catch (error) {
           stopDashboard();
           exitCode = interruptedExitCode(controller.signal) ?? 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         } finally {
           stopDashboard();
           signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
@@ -4761,7 +4762,7 @@ export async function main(
             (error instanceof Error && error.name === "ExitPromptError"
               ? 130
               : 2);
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         } finally {
           removeSignals();
         }
@@ -4883,7 +4884,7 @@ export async function main(
           );
         } catch (error) {
           if (exitCode !== 2) {
-            errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+            errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           }
           exitCode = 2;
         }
@@ -5664,7 +5665,7 @@ export async function main(
             output,
           );
         } catch (error) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 1;
         }
       },
@@ -5696,7 +5697,7 @@ export async function main(
           return { path };
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         }
       },
     })
@@ -5982,7 +5983,7 @@ export async function main(
     } else {
       if (exitCode !== 0) return exitCode;
       errorOutput.write(
-        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+        `codex-security: ${diagnosticLines(incurErrorMessage(frameworkOutput))}\n`,
       );
       return 2;
     }
@@ -6032,7 +6033,7 @@ export async function main(
     );
     return exitCode;
   } catch (error) {
-    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
     return 2;
   }
 }
@@ -8127,7 +8128,7 @@ async function runExport(
     }
     return 0;
   } catch (error) {
-    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
     return 2;
   }
 }
@@ -9903,7 +9904,7 @@ if (invokedAsMain()) {
       process.exitCode = exitCode;
     },
     (error: unknown) => {
-      process.stderr.write(`codex-security: ${errorMessage(error)}\n`);
+      process.stderr.write(`codex-security: ${diagnosticLines(error)}\n`);
       process.exitCode = 2;
     },
   );
