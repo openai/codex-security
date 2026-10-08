@@ -53,6 +53,7 @@ export interface ExternalPublicationDependencies {
 interface SavedSubmission {
   accountId: string;
   requests: FindingImportRequest[];
+  receipts?: FindingImportReceipt[];
 }
 
 export interface ExternalPublicationPreview extends VendorFindings {
@@ -81,6 +82,35 @@ function canonicalJson(value: unknown): string {
     }
     return child;
   });
+}
+
+function sameSubmission(
+  left: SavedSubmission,
+  right: SavedSubmission,
+): boolean {
+  return (
+    left.accountId === right.accountId &&
+    canonicalJson(left.requests) === canonicalJson(right.requests)
+  );
+}
+
+async function checkpointSubmission(
+  path: string,
+  submission: SavedSubmission,
+): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    const file = await open(temporary, "wx", 0o600);
+    try {
+      await file.writeFile(JSON.stringify(submission));
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 function sourcePath(repository: ImportRepository): string {
@@ -283,7 +313,11 @@ export async function prepareExternalPublication(
               throw error;
             },
           );
-          if (current === serialized) await rm(pendingPath);
+          if (
+            current !== undefined &&
+            sameSubmission(JSON.parse(current) as SavedSubmission, content)
+          )
+            await rm(pendingPath);
         });
         throw new CloudImportError(
           409,
@@ -394,6 +428,7 @@ export async function prepareExternalPublication(
         } finally {
           await pendingFile.close();
         }
+        let receipts: FindingImportReceipt[] = [];
         try {
           await link(pendingTemporary, pendingPath);
         } catch (error) {
@@ -401,19 +436,24 @@ export async function prepareExternalPublication(
           const other = JSON.parse(
             await readFile(pendingPath, "utf8"),
           ) as SavedSubmission;
-          if (canonicalJson(other) !== canonicalJson(submission)) {
+          if (!sameSubmission(other, submission)) {
             throw new CodexSecurityError(
               "Another publication prepared this input. Run the command again to review and resume that saved request.",
             );
           }
+          receipts = (other.receipts ?? []).map(validateImportReceipt);
+          if (receipts.length > requests.length)
+            throw new CodexSecurityError(
+              "Saved publication has more receipts than requests.",
+            );
         } finally {
           await rm(pendingTemporary, { force: true });
         }
-        const receipts: FindingImportReceipt[] = [];
         try {
-          for (const batch of requests) {
+          for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validateImportReceipt(
-              await request("/finding_imports", batch),
+              receipts[batchIndex] ??
+                (await request("/finding_imports", batch)),
             );
             if (
               receipt.id !== batch.request_id ||
@@ -459,7 +499,15 @@ export async function prepareExternalPublication(
               throw new CodexSecurityError(
                 "Cloud returned inconsistent publication counts.",
               );
-            receipts.push(receipt);
+            if (batchIndex === receipts.length) {
+              receipts.push(receipt);
+              // Acknowledged batches must not consume another POST quota on retry.
+              // Readback can still resume after this checkpoint without replaying writes.
+              await checkpointSubmission(pendingPath, {
+                ...submission,
+                receipts,
+              });
+            }
           }
           // Verify readable source records without mistaking a newer concurrent
           // observation for failure of the original, immutable import receipt.

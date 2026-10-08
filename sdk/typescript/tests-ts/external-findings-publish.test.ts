@@ -1,5 +1,6 @@
 import { createServer, type ServerResponse } from "node:http";
 import { hash } from "node:crypto";
+import * as fs from "node:fs/promises";
 import {
   mkdtemp,
   mkdir,
@@ -78,6 +79,7 @@ async function fixture(records: unknown = [normalized()]) {
     loseResponse: false,
     brokenReadback: false,
     throttle: false,
+    postBudget: Infinity,
     finalError: false,
   };
   const destination = () => ({
@@ -159,10 +161,11 @@ async function fixture(records: unknown = [normalized()]) {
         for await (const chunk of incoming) body += chunk;
         posts.push(body);
         const request = validateImportRequest(JSON.parse(body));
-        if (state.throttle) {
+        if (state.throttle || state.postBudget === 0) {
           response.setHeader("Retry-After", "1");
           return json(response, { error: { message: "Slow down" } }, 429);
         }
+        state.postBudget--;
         if (request.repository.reset_marker !== state.marker)
           return json(
             response,
@@ -505,7 +508,8 @@ test.each([false, true])(
     f.state.holdReadback = null;
     const second = await run().result;
     expect(second.code).toBe(0);
-    expect(f.posts[1]).toBe(firstBody);
+    if (abrupt) expect(f.posts).toHaveLength(1);
+    else expect(f.posts[1]).toBe(firstBody);
     expect(f.receipts.size).toBe(1);
     expect(JSON.parse(second.stdout).counts.created).toBe(1);
   },
@@ -532,25 +536,34 @@ function observeLockContention() {
   return { contended: contended.promise, restore: () => spy.mockRestore() };
 }
 
-async function pauseAtReadback(f: Awaited<ReturnType<typeof fixture>>) {
+async function pauseAtPublication(
+  f: Awaited<ReturnType<typeof fixture>>,
+  stage: "receipt" | "readback" = "readback",
+) {
   const arrived = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const completion = (
     await prepareExternalPublication(f.file, options, {
       ...f.deps,
       fetch: async (url, init) => {
-        if (new URL(url).pathname.includes("/source_reports/")) {
+        const response =
+          stage === "receipt" ? await f.deps.fetch(url, init) : undefined;
+        if (
+          (stage === "receipt" && init.method === "POST") ||
+          (stage === "readback" &&
+            new URL(url).pathname.includes("/source_reports/"))
+        ) {
           arrived.resolve();
           await release.promise;
         }
-        return f.deps.fetch(url, init);
+        return response ?? f.deps.fetch(url, init);
       },
     })
   ).publish();
   await Promise.race([
     arrived.promise,
     completion.then(() => {
-      throw new Error("Publication completed without a source readback.");
+      throw new Error("Publication completed without reaching the pause.");
     }),
   ]);
   return { completion, release };
@@ -563,7 +576,7 @@ test("overlapping retries cannot delete a newer pending submission or roll back 
     (await prepareExternalPublication(f.file, options, f.deps)).publish(),
   ).rejects.toThrow("resume the saved request");
   f.state.brokenReadback = false;
-  const { completion: first, release } = await pauseAtReadback(f);
+  const { completion: first, release } = await pauseAtPublication(f);
   const observer = observeLockContention();
   const second = (
     await prepareExternalPublication(f.file, options, f.deps)
@@ -575,7 +588,7 @@ test("overlapping retries cannot delete a newer pending submission or roll back 
         throw new Error("Concurrent publication skipped the active lock.");
       }),
     ]);
-    expect(f.posts).toHaveLength(2);
+    expect(f.posts).toHaveLength(1);
     release.resolve();
     await Promise.all([first, second]);
   } finally {
@@ -600,9 +613,12 @@ test("overlapping retries cannot delete a newer pending submission or roll back 
   expect(f.reports.get("vendor-1")?.evidence.severity).toBe("critical");
 });
 
-test("reset retirement waits for the active publisher before removing its saved request", async () => {
+test("reset retirement tolerates a checkpoint written while waiting for the active publisher", async () => {
   const f = await fixture();
-  const { completion: active, release } = await pauseAtReadback(f);
+  const { completion: active, release } = await pauseAtPublication(
+    f,
+    "receipt",
+  );
   f.state.marker = "generation-2";
   f.state.environmentId = "replacement-environment";
   f.state.brokenReadback = true;
@@ -637,7 +653,7 @@ test("reset retirement waits for the active publisher before removing its saved 
 
 test("canceling a waiting publisher preserves the active request", async () => {
   const f = await fixture();
-  const { completion: active, release } = await pauseAtReadback(f);
+  const { completion: active, release } = await pauseAtPublication(f);
   const controller = new AbortController();
   const observer = observeLockContention();
   const waiting = (
@@ -670,7 +686,7 @@ test("canceling a waiting publisher preserves the active request", async () => {
   }
 });
 
-test("readback failure retains the accepted request; a retry replays its outcome", async () => {
+test("readback failure retries acknowledged receipts without another POST", async () => {
   const f = await fixture();
   f.state.brokenReadback = true;
   const prepared = await prepareExternalPublication(f.file, options, f.deps);
@@ -679,7 +695,7 @@ test("readback failure retains the accepted request; a retry replays its outcome
   const retry = await prepareExternalPublication(f.file, options, f.deps);
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).counts.created).toBe(1);
-  expect(f.posts[0]).toBe(f.posts[1]);
+  expect(f.posts).toHaveLength(1);
 });
 
 test("an older pending receipt can resume after newer evidence without rolling it back", async () => {
@@ -783,3 +799,113 @@ test("local receipts contain no credential and pending bodies match transmitted 
     ),
   ).toBe(f.posts[0]!);
 });
+
+test("a restarted large publication resumes after the ten-request rate window", async () => {
+  const f = await fixture(
+    Array.from({ length: 1001 }, (_, i) => normalized(`bulk-${i}`)),
+  );
+  const runner = join(f.root, "run-batched-cli.ts");
+  const cliUrl = pathToFileURL(join(import.meta.dir, "../src/cli.ts")).href;
+  const fixturesUrl = pathToFileURL(
+    join(import.meta.dir, "cli-fixtures.ts"),
+  ).href;
+  await writeFile(
+    runner,
+    `import { main } from ${JSON.stringify(cliUrl)};\nimport { dependencies } from ${JSON.stringify(fixturesUrl)};\nprocess.exitCode = await main(process.argv.slice(2), process.stdout, process.stderr, { ...dependencies({ environment: process.env }), cloudFetch: (url, init) => fetch('http://127.0.0.1:${f.port}' + new URL(url).pathname + new URL(url).search, init) });\n`,
+  );
+  async function run() {
+    const child = Bun.spawn(
+      [Bun.which("bun")!, runner, ...f.command, "--yes"],
+      {
+        env: f.environment,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    return { code, stdout, stderr };
+  }
+  f.state.postBudget = 10;
+  const first = await run();
+  expect(first.code).toBe(2);
+  expect(first.stderr).toContain("HTTP 429");
+  expect(f.reports.size).toBe(1000);
+  expect(f.posts).toHaveLength(11);
+  const rejectedBody = f.posts[10];
+  f.state.postBudget = 10;
+  const second = await run();
+  expect(second.code).toBe(0);
+  expect(JSON.parse(second.stdout).counts.created).toBe(1001);
+  expect(f.posts).toHaveLength(12);
+  expect(f.posts[11]).toBe(rejectedBody);
+  expect(f.reports.size).toBe(1001);
+  expect(f.receipts.size).toBe(11);
+});
+
+test("a failed checkpoint leaves the original pending request recoverable", async () => {
+  const f = await fixture();
+  const rename = fs.rename;
+  const checkpoint = spyOn(fs, "rename").mockImplementation(
+    async (source, destination) => {
+      if (String(destination).endsWith(".pending.json"))
+        throw new Error("Checkpoint interrupted");
+      return rename(source, destination);
+    },
+  );
+  try {
+    await expect(
+      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+    ).rejects.toThrow("Checkpoint interrupted");
+  } finally {
+    checkpoint.mockRestore();
+  }
+  const directory = join(f.root, "state", "external-finding-publications");
+  const name = (await readdir(directory)).find((name) =>
+    name.endsWith(".pending.json"),
+  )!;
+  const saved = JSON.parse(await readFile(join(directory, name), "utf8"));
+  expect(saved.receipts).toBeUndefined();
+  expect(JSON.stringify(saved.requests[0])).toBe(f.posts[0]!);
+  await writeFile(join(directory, `${name}.orphan.tmp`), "{");
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, options, f.deps)
+      ).publish()
+    ).counts.created,
+  ).toBe(1);
+  expect(f.posts).toHaveLength(2);
+  expect(f.posts[1]).toBe(f.posts[0]);
+  expect(f.receipts.size).toBe(1);
+});
+
+test.each(["request", "counts", "length"])(
+  "cached receipts retain publication validation (%s)",
+  async (invalid) => {
+    const f = await fixture();
+    f.state.brokenReadback = true;
+    await expect(
+      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+    ).rejects.toThrow("resume the saved request");
+    const directory = join(f.root, "state", "external-finding-publications");
+    const name = (await readdir(directory)).find((name) =>
+      name.endsWith(".pending.json"),
+    )!;
+    const pending = join(directory, name);
+    const saved = JSON.parse(await readFile(pending, "utf8"));
+    if (invalid === "request")
+      saved.receipts[0].id = "00000000-0000-4000-8000-000000000000";
+    if (invalid === "counts") saved.receipts[0].counts.error = 1;
+    if (invalid === "length") saved.receipts.push(saved.receipts[0]);
+    await writeFile(pending, JSON.stringify(saved));
+    f.state.brokenReadback = false;
+    await expect(
+      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+    ).rejects.toThrow();
+    expect(f.posts).toHaveLength(1);
+  },
+);
