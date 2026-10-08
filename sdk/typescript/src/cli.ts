@@ -3243,6 +3243,9 @@ export async function main(
               "Publication needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.",
             );
           if (structured) showPreview();
+          errorOutput.write(
+            `Selected findings and evidence:\n${JSON.stringify(preview.findings, null, 2).split("\n").map(diagnosticValue).join("\n")}\n`,
+          );
           if (
             !(await prompt.confirm(
               `Publish these ${preview.findings.length} findings?`,

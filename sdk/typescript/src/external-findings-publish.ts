@@ -422,28 +422,30 @@ export async function prepareExternalPublication(
         // Install a fully written file atomically. A crash during serialization
         // must not leave a partial request that cannot be resumed.
         const pendingTemporary = `${pendingPath}.${randomUUID()}.tmp`;
-        const pendingFile = await open(pendingTemporary, "wx", 0o600);
-        try {
-          await pendingFile.writeFile(JSON.stringify(submission));
-          await pendingFile.sync();
-        } finally {
-          await pendingFile.close();
-        }
         let receipts: FindingImportReceipt[] = [];
         try {
-          receipts = (submission.receipts ?? []).map(validateImportReceipt);
-          await link(pendingTemporary, pendingPath);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-          const other = JSON.parse(
-            await readFile(pendingPath, "utf8"),
-          ) as SavedSubmission;
-          if (!sameSubmission(other, submission)) {
-            throw new CodexSecurityError(
-              "Another publication prepared this input. Run the command again to review and resume that saved request.",
-            );
+          const pendingFile = await open(pendingTemporary, "wx", 0o600);
+          try {
+            await pendingFile.writeFile(JSON.stringify(submission));
+            await pendingFile.sync();
+          } finally {
+            await pendingFile.close();
           }
-          receipts = (other.receipts ?? []).map(validateImportReceipt);
+          try {
+            receipts = (submission.receipts ?? []).map(validateImportReceipt);
+            await link(pendingTemporary, pendingPath);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            const other = JSON.parse(
+              await readFile(pendingPath, "utf8"),
+            ) as SavedSubmission;
+            if (!sameSubmission(other, submission)) {
+              throw new CodexSecurityError(
+                "Another publication prepared this input. Run the command again to review and resume that saved request.",
+              );
+            }
+            receipts = (other.receipts ?? []).map(validateImportReceipt);
+          }
         } finally {
           await rm(pendingTemporary, { force: true });
         }
@@ -559,14 +561,18 @@ export async function prepareExternalPublication(
           cloudUrl: `https://chatgpt.com/codex/cloud/security/findings?repo=${encodeURIComponent(destination.url)}&source=imported&provider=${source.provider}`,
         };
         const temporary = `${pendingPath}.${randomUUID()}.tmp`;
-        const file = await open(temporary, "wx", 0o600);
         try {
-          await file.writeFile(JSON.stringify(result));
-          await file.sync();
+          const file = await open(temporary, "wx", 0o600);
+          try {
+            await file.writeFile(JSON.stringify(result));
+            await file.sync();
+          } finally {
+            await file.close();
+          }
+          await rename(temporary, join(state, `${key}.result.json`));
         } finally {
-          await file.close();
+          await rm(temporary, { force: true });
         }
-        await rename(temporary, join(state, `${key}.result.json`));
         await rm(pendingPath, { force: true });
         return result;
       });
