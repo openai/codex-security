@@ -38,8 +38,8 @@ importers:
         specifier: 0.8.3
         version: 0.8.3
       incur:
-        specifier: 0.5.1
-        version: 0.5.1
+        specifier: 0.6.1
+        version: 0.6.1
       ink:
         specifier: 7.1.1
         version: 7.1.1(@types/react@19.3.0)(react@19.3.0)
@@ -114,8 +114,8 @@ importers:
         specifier: 16.0.0
         version: 16.0.0
       katex:
-        specifier: 0.18.9
-        version: 0.18.9
+        specifier: 0.18.10
+        version: 0.18.10
       minimatch:
         specifier: 10.2.6
         version: 10.2.6
@@ -2224,8 +2224,8 @@ packages:
   import-meta-resolve@4.2.0:
     resolution: {integrity: sha512-Iqv2fzaTQN28s/FwZAoFq0ZSs/7hMAHJVX+w8PZl3cY19Pxk6jFFalxQoIfW2826i/fDLXv8IiEZRIT0lDuWcg==}
 
-  incur@0.5.1:
-    resolution: {integrity: sha512-gEwPg0Rwf+Oi8pwySLumYgWk//Xiv2wRJhwsOwVskt7ZHrfwFTR7oQmANnyDqudRYhqK3I5/dp489kPehPjIww==}
+  incur@0.6.1:
+    resolution: {integrity: sha512-QgaPKsKH+/3SLdUTSkCYwMWzL56vO3wn7iheEwKE0jOtWSa9Irzn8KeyhkRIkTzHW0ReiQwo0EtT8bBGR9PpMw==}
     engines: {node: '>=22'}
     hasBin: true
 
@@ -2340,6 +2340,10 @@ packages:
   json5@2.2.3:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
+    hasBin: true
+
+  katex@0.18.10:
+    resolution: {integrity: sha512-/B6p9eY9DX7aHBfpkHdpirDTZ5QH9xTwL9y837PWuzuv41O5jFdqNQwVQEQsimY0/iVNkwBY4+4hMfhQ7d4Dbw==}
     hasBin: true
 
   katex@0.18.9:
@@ -5167,7 +5171,7 @@ snapshots:
 
   import-meta-resolve@4.2.0: {}
 
-  incur@0.5.1:
+  incur@0.6.1:
     dependencies:
       '@cfworker/json-schema': 4.1.1
       '@modelcontextprotocol/server': 2.0.0-alpha.4
@@ -5284,6 +5288,10 @@ snapshots:
   json-with-bigint@3.5.12: {}
 
   json5@2.2.3: {}
+
+  katex@0.18.10:
+    dependencies:
+      commander: 15.0.0
 
   katex@0.18.9:
     dependencies:
