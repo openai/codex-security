@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { shardTestFiles } from "./test-shards.mts";
 
 const selection = /^([1-9]\d*)\/([1-9]\d*)$/.exec(process.argv[2] ?? "");
 const shard = Number(selection?.[1]);
@@ -15,23 +14,9 @@ const tests = (await readdir(new URL("../tests-ts/", import.meta.url))).filter(
   (file) =>
     file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
 );
-const timings = JSON.parse(
-  await readFile(new URL("./ci-test-durations.json", import.meta.url), "utf8"),
-);
 const windows = process.platform === "win32";
 const defaultTestTimeoutMs = windows ? "120000" : "30000";
-const assignments = shardTestFiles(
-  tests,
-  count,
-  timings[windows ? "windows" : "unix"],
-);
-const selected = assignments[shard - 1]!;
-if (selected.files.length === 0) {
-  throw new Error(`Test shard ${shard}/${count} is empty.`);
-}
-console.log(
-  `Test shard ${shard}/${count} (estimated ${selected.seconds.toFixed(1)}s): ${selected.files.join(" ")}`,
-);
+console.log(`Test shard ${shard}/${count} (Bun native sharding)`);
 await mkdir(new URL("../reports/", import.meta.url), { recursive: true }).catch(
   () => {
     // Bun warns about report write failures without changing the test result.
@@ -39,12 +24,13 @@ await mkdir(new URL("../reports/", import.meta.url), { recursive: true }).catch(
 );
 const testArguments = [
   "test",
+  `--shard=${shard}/${count}`,
   "--timeout",
   defaultTestTimeoutMs,
   "--reporter=junit",
   `--reporter-outfile=reports/junit-${shard}.xml`,
   ...process.argv.slice(3),
-  ...selected.files.map((file) => `./tests-ts/${file}`),
+  ...tests.map((file) => `./tests-ts/${file}`),
 ];
 // Keep arities aligned with the pinned Bun's test_params:
 // https://github.com/oven-sh/bun/blob/bun-v1.3.14/src/cli/Arguments.zig
