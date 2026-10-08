@@ -446,6 +446,7 @@
           "title": "Url"
         },
         "advisory_ids": {
+          "default": [],
           "items": {
             "maxLength": 512,
             "minLength": 1,
@@ -456,6 +457,7 @@
           "type": "array"
         },
         "packages": {
+          "default": [],
           "items": {
             "$ref": "#/$defs/ImportedPackage"
           },
@@ -464,6 +466,7 @@
           "type": "array"
         },
         "locations": {
+          "default": [],
           "items": {
             "$ref": "#/$defs/ImportedLocation"
           },
@@ -514,6 +517,7 @@
           "title": "Source Scan Id"
         },
         "image_digests": {
+          "default": [],
           "items": {
             "maxLength": 512,
             "minLength": 1,
@@ -538,6 +542,7 @@
         },
         "source_data": {
           "additionalProperties": true,
+          "default": {},
           "title": "Source Data",
           "type": "object"
         }
@@ -624,6 +629,7 @@
           "title": "Manifest Path"
         },
         "fixed_versions": {
+          "default": [],
           "items": {
             "maxLength": 512,
             "minLength": 1,

@@ -3248,7 +3248,7 @@ export async function main(
         const { preview } = prepared;
         const showPreview = () => {
           errorOutput.write(
-            `Source: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+            `Account: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${diagnosticValue(preview.destination.import_environment_id)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
           );
           for (const excluded of preview.excluded)
             errorOutput.write(

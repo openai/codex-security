@@ -962,9 +962,10 @@ codex-security publish findings selected-wiz.json \
 This command reads the authorized destination and current source versions during
 preview. It uses the same saved ChatGPT file login as scan publication. The Cloud
 repository needs an existing environment; no native scan is required. Review the
-destination, findings, and exclusions, then rerun without `--dry-run`. The default
-terminal prompt is No; `--yes` confirms a previously reviewed input for scripts or
-the plugin. Without a terminal or `--yes`, no upload occurs.
+account, repository, environment, findings, and exclusions, then rerun without
+`--dry-run`. The default terminal prompt is No; `--yes` confirms a previously
+reviewed input for scripts or the plugin. Without a terminal or `--yes`, no upload
+occurs.
 
 Input can be a Wiz vulnerability finding, an array, a complete
 `data.vulnerabilityFindings.nodes` response, or JSONL with one vendor record per

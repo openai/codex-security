@@ -71,6 +71,8 @@ async function fixture(records: unknown = [normalized()]) {
   const posts: string[] = [];
   const state = {
     marker: "generation-1",
+    environmentId: "environment-example" as string | null,
+    materializeDefaults: false,
     loseResponse: false,
     brokenReadback: false,
     throttle: false,
@@ -83,7 +85,7 @@ async function fixture(records: unknown = [normalized()]) {
     url: "https://github.com/example/project",
     default_branch: "main",
     reset_marker: state.marker,
-    import_environment_id: "environment-example",
+    import_environment_id: state.environmentId,
   });
   function json(response: ServerResponse, value: unknown, status = 200) {
     response.writeHead(status, { "Content-Type": "application/json" });
@@ -132,6 +134,21 @@ async function fixture(records: unknown = [normalized()]) {
           (item) =>
             item.id === decodeURIComponent(url.pathname.split("/").at(-1)!),
         );
+        if (report && state.materializeDefaults)
+          return json(response, {
+            ...report,
+            evidence: {
+              advisory_ids: [],
+              locations: [],
+              image_digests: [],
+              source_data: {},
+              ...report.evidence,
+              packages: (report.evidence.packages ?? []).map((entry) => ({
+                fixed_versions: [],
+                ...entry,
+              })),
+            },
+          });
         return json(response, report, report ? 200 : 404);
       }
       if (url.pathname.endsWith("/finding_imports")) {
@@ -341,7 +358,11 @@ test("CLI preview and rejected confirmation never POST or persist an upload", as
   expect({ code, error: cli.stderr.text() }).toEqual({ code: 0, error: "" });
   expect(JSON.parse(cli.stdout.text())).toMatchObject({
     dryRun: true,
-    destination: { id: options.repository },
+    accountId: "synthetic-account",
+    destination: {
+      id: options.repository,
+      import_environment_id: "environment-example",
+    },
     read: 1,
   });
   expect(f.posts).toHaveLength(0);
@@ -380,6 +401,33 @@ test("CLI creates, reimports unchanged, and updates the same canonical finding",
   });
 });
 
+test("normalized input accepts server-materialized optional evidence defaults", async () => {
+  const f = await fixture([
+    {
+      source_finding_id: "vendor-1",
+      evidence: {
+        title: "Example vulnerable package",
+        severity: "high",
+        packages: [{ name: "example-package" }],
+      },
+    },
+  ]);
+  f.state.materializeDefaults = true;
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  expect((await prepared.publish()).counts.created).toBe(1);
+  expect(f.reports.get("vendor-1")?.evidence).toMatchObject({
+    advisory_ids: [],
+    packages: [{ name: "example-package", fixed_versions: [] }],
+    locations: [],
+    image_digests: [],
+    source_data: {},
+  });
+  const stateFiles = await readdir(
+    join(f.root, "state", "external-finding-publications"),
+  );
+  expect(stateFiles.some((name) => name.endsWith(".pending.json"))).toBe(false);
+});
+
 test("interactive JSON publication shows the destination and exclusions before confirmation", async () => {
   const f = await fixture([normalized(), normalized("unsupported", "unknown")]);
   const cli = createCliTest(main);
@@ -396,7 +444,10 @@ test("interactive JSON publication shows the destination and exclusions before c
             "https://github.com/example/project",
           );
           expect(cli.stderr.text()).toContain(options.sourceKey);
+          expect(cli.stderr.text()).toContain("synthetic-account");
+          expect(cli.stderr.text()).toContain("environment-example");
           expect(cli.stderr.text()).toContain("Excluded: 1");
+          expect(cli.stderr.text()).not.toContain("synthetic-token");
           expect(f.posts).toHaveLength(0);
           return true;
         },
@@ -486,24 +537,40 @@ test("an older pending receipt can resume after newer evidence without rolling i
   });
 });
 
-test("repository reset never republishes a pending old submission", async () => {
-  const f = await fixture();
-  f.state.throttle = true;
-  await expect(
-    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-  ).rejects.toThrow("Retry-After: 1");
-  f.state.marker = "generation-2";
-  await expect(
-    prepareExternalPublication(f.file, options, f.deps),
-  ).rejects.toThrow("retired without uploading");
-  expect(f.posts).toHaveLength(1);
-  f.state.throttle = false;
-  const fresh = await prepareExternalPublication(f.file, options, f.deps);
-  expect(fresh.preview.resumed).toBe(false);
-  expect(fresh.preview.requests[0]!.repository.reset_marker).toBe(
-    "generation-2",
-  );
-});
+test.each(["environment-example", "replacement-environment", null])(
+  "repository reset retires a pending request with environment %p",
+  async (environmentId) => {
+    const f = await fixture();
+    f.state.throttle = true;
+    await expect(
+      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+    ).rejects.toThrow("Retry-After: 1");
+    f.state.marker = "generation-2";
+    f.state.environmentId = environmentId;
+    await expect(
+      prepareExternalPublication(f.file, options, f.deps),
+    ).rejects.toThrow("retired without uploading");
+    expect(f.posts).toHaveLength(1);
+    if (environmentId === null) {
+      await expect(
+        prepareExternalPublication(f.file, options, f.deps),
+      ).rejects.toThrow("Configure an authorized Cloud environment");
+      f.state.environmentId = "replacement-environment";
+    }
+    f.state.throttle = false;
+    const fresh = await prepareExternalPublication(f.file, options, f.deps);
+    expect(fresh.preview.resumed).toBe(false);
+    expect(fresh.preview.requests[0]!.repository).toMatchObject({
+      reset_marker: "generation-2",
+      environment_id: f.state.environmentId,
+    });
+    expect((await fresh.publish()).counts.created).toBe(1);
+    expect(f.posts).toHaveLength(2);
+    expect(JSON.parse(f.posts[1]!).request_id).not.toBe(
+      JSON.parse(f.posts[0]!).request_id,
+    );
+  },
+);
 
 test("batching preserves item order and keeps final item errors visible", async () => {
   const f = await fixture(

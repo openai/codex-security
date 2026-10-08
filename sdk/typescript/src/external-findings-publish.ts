@@ -45,6 +45,7 @@ interface SavedSubmission {
 }
 
 export interface ExternalPublicationPreview extends VendorFindings {
+  accountId: string;
   destination: ImportRepository;
   source: FindingImportRequest["source"];
   resumed: boolean;
@@ -167,10 +168,6 @@ export async function prepareExternalPublication(
         : "The destination repository is not available to this Cloud account.",
     );
   const destination = destinations[0]!;
-  if (destination.import_environment_id == null)
-    throw new CodexSecurityError(
-      "Configure an authorized Cloud environment for this repository before importing findings.",
-    );
   const source = { provider: options.provider, source_key: options.sourceKey };
   const state = join(
     codexSecurityStateDirectory(environment),
@@ -221,14 +218,6 @@ export async function prepareExternalPublication(
         canonicalJson(submission.source) !== canonicalJson(source)
       )
         throw new Error("Saved import destination does not match.");
-      if (
-        submission.repository.environment_id !==
-        destination.import_environment_id
-      ) {
-        throw new Error(
-          "The Cloud environment changed since this submission. Restore the original destination before resuming the saved request.",
-        );
-      }
       if (submission.repository.reset_marker !== destination.reset_marker) {
         // The old request is never sent after reset. A subsequent explicit
         // invocation prepares a fresh submission and asks for approval again.
@@ -238,11 +227,23 @@ export async function prepareExternalPublication(
           "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
         );
       }
+      if (
+        submission.repository.environment_id !==
+        destination.import_environment_id
+      ) {
+        throw new Error(
+          "The Cloud environment changed since this submission. Restore the original destination before resuming the saved request.",
+        );
+      }
     }
     saved = content;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  if (destination.import_environment_id == null)
+    throw new CodexSecurityError(
+      "Configure an authorized Cloud environment for this repository before importing findings.",
+    );
   let requests = saved?.requests;
   if (!requests) {
     const repository = {
@@ -310,6 +311,7 @@ export async function prepareExternalPublication(
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,
+    accountId: credentials.account_id,
     destination,
     source,
     resumed: saved !== undefined,
