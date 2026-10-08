@@ -56,6 +56,7 @@ if (args.join(" ") === "login --with-api-key") {
   console.error("Listening on http://[::ffff:127.0.0.1]:1455.");
   console.error("Listening on http://[::ffff:0.0.0.0]:1455.");
   console.error("Listening on http://[::127.0.0.1]:1455.");
+  console.error("Open http://insecure.example.test/device");
   console.error('Open "\\u001b[32mhttps://127.auth.example.test/device\\u001b[0m"');
   console.error("Enter this one-time code");
   console.error("\\u001b[36m8356-V2EGR\\u001b[0m");
@@ -145,6 +146,29 @@ describe("Codex authentication process boundary", () => {
     expect(handle.verificationUrl).toBe("https://127.auth.example.test/device");
     expect(handle.userCode).toBe("8356-V2EGR");
     expect(observeSucceeded).toHaveBeenCalled();
+  });
+
+  test("ignores external plaintext HTTP verification URLs", async () => {
+    const root = await temporaryDirectory("codex-security-auth-insecure-");
+    const script = join(root, "login.mjs");
+    await writeFile(
+      script,
+      [
+        'console.error("Open http://auth.example.test/device");',
+        'console.error("User code: ABCD-EFGH");',
+        "process.exit(0);",
+        "",
+      ].join("\n"),
+    );
+    const handle = new CodexLoginHandle(
+      nodeCommand(),
+      [script],
+      process.env,
+      () => {},
+    );
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
+    expect(handle.verificationUrl).toBeNull();
+    expect(handle.userCode).toBe("ABCD-EFGH");
   });
 
   test.each(["User code: RIGHT-CODE", "Code: RIGHT-CODE", "RIGHT-CODE"])(

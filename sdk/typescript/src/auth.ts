@@ -325,25 +325,32 @@ function preferredAuthUrl(value: string): string | null {
   )) {
     const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
     try {
-      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-      if (
-        hostname !== "localhost" &&
-        !hostname.endsWith(".localhost") &&
-        !(isIP(hostname) === 4 && hostname.startsWith("127.")) &&
-        hostname !== "0.0.0.0" &&
-        hostname !== "[::1]" &&
-        hostname !== "[::]" &&
-        hostname !== "[::ffff:0:0]" &&
-        !hostname.startsWith("[::ffff:7f") &&
-        !hostname.startsWith("[::7f")
-      ) {
-        return url;
-      }
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+      if (isLocalAuthenticationHost(hostname)) continue;
+      // Remote authentication destinations must not be plaintext HTTP;
+      // keep scanning so a later HTTPS verification URL is retained.
+      if (parsed.protocol !== "https:") continue;
+      return url;
     } catch {
       continue;
     }
   }
   return null;
+}
+
+function isLocalAuthenticationHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    (isIP(hostname) === 4 && hostname.startsWith("127.")) ||
+    hostname === "0.0.0.0" ||
+    hostname === "[::1]" ||
+    hostname === "[::]" ||
+    hostname === "[::ffff:0:0]" ||
+    hostname.startsWith("[::ffff:7f") ||
+    hostname.startsWith("[::7f")
+  );
 }
 
 function userCodeFromOutput(value: string): string | null {
