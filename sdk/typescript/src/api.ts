@@ -359,12 +359,10 @@ const VALIDATION_DISPOSITIONS = [
   "deferred",
 ] as const;
 
-const validationResponseSchema = z
-  .object({
-    disposition: z.enum(VALIDATION_DISPOSITIONS),
-    report: z.string().trim().min(1),
-  })
-  .strict();
+const validationResponseSchema = z.strictObject({
+  disposition: z.enum(VALIDATION_DISPOSITIONS),
+  report: z.string().trim().min(1),
+});
 
 export interface ValidationResult {
   disposition: (typeof VALIDATION_DISPOSITIONS)[number];
