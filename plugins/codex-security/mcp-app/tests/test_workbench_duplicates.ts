@@ -182,6 +182,7 @@ for (const body of [
   "changed",
   "prototype-id",
   "signed-zero",
+  "rounded-exponent",
 ]) {
   test(`saved source context follows semantically matching occurrence bodies: ${body}`, (t) => {
     const database = open(t);
@@ -189,6 +190,8 @@ for (const body of [
       ...finding(database, body === "prototype-id" ? "__proto__" : 1),
       occurrenceId: "occurrence-a",
     };
+    if (body === "rounded-exponent")
+      document.extensions.opaqueId = 9007199254740992n;
     database
       .prepare("UPDATE findings SET details_json = ? WHERE id = ?")
       .run(stringifyJson(document), document.findingId);
@@ -206,9 +209,14 @@ for (const body of [
         ? stringifyJson(document)
         : body === "signed-zero"
           ? stringifyJson(document).replace('"score": 0', '"score": -0.0')
-          : body === "changed"
-            ? stringifyJson({ ...document, title: "A different observation" })
-            : `{\n  "extensions": ${stringifyJson(document.extensions)},\n  "occurrenceId": "occurrence-a",\n  "findingId": ${JSON.stringify(document.findingId)}\n}`;
+          : body === "rounded-exponent"
+            ? stringifyJson(document).replace(
+                "9007199254740992",
+                "9.007199254740993e15",
+              )
+            : body === "changed"
+              ? stringifyJson({ ...document, title: "A different observation" })
+              : `{\n  "extensions": ${stringifyJson(document.extensions)},\n  "occurrenceId": "occurrence-a",\n  "findingId": ${JSON.stringify(document.findingId)}\n}`;
     database
       .prepare(
         `INSERT INTO finding_occurrences
@@ -234,7 +242,7 @@ for (const body of [
         findPotentialDuplicates(database, document.findingId, undefined, {
           [document.findingId]: "cache",
         }).sourceSnapshots,
-        body === "changed"
+        body === "changed" || body === "rounded-exponent"
           ? {}
           : {
               [document.findingId]: {
