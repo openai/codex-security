@@ -23,7 +23,11 @@ import {
   repositoryRevision,
   type ScanTarget,
 } from "../src/index.js";
-import { enclosingGitWorktreeRoot, gitMarkerRoot } from "../src/targets.js";
+import {
+  enclosingGitWorktreeRoot,
+  gitMarkerRoot,
+  gitProtectionRoots,
+} from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
@@ -166,6 +170,18 @@ describe("scan target normalization", () => {
       "outside the repository",
     );
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects special filesystem targets the scan scope resolver cannot read",
+    async () => {
+      const repo = await repository();
+      const fifo = join(repo, "src", "pending.fifo");
+      execFileSync("mkfifo", [fifo]);
+      await expect(normalizeTarget(repo, [fifo])).rejects.toThrow(
+        "not a regular file or directory",
+      );
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "rejects NTFS alternate streams before runtime initialization",
@@ -712,6 +728,37 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
   expect(await gitMarkerRoot(alias, undefined, "nearest")).toBe(nested);
   expect(await gitMarkerRoot(alias, undefined, "outermost")).toBe(repo);
   expect(
+    await gitMarkerRoot(
+      join(alias, "removed", "child"),
+      undefined,
+      "outermost",
+    ),
+  ).toBe(repo);
+  expect(
+    await gitMarkerRoot(
+      join(alias, "context.md", "child"),
+      undefined,
+      "outermost",
+    ),
+  ).toBe(repo);
+  expect(
     await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
   ).toBe(repo);
+});
+
+test("executable protection retains lexical and canonical checkout roots", async () => {
+  const lexical = await repository();
+  const canonical = await repository("destination");
+  const alias = join(lexical, "linked-target");
+  await symlink(
+    canonical,
+    alias,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  expect(await gitProtectionRoots(alias)).toEqual(
+    expect.arrayContaining([lexical, canonical]),
+  );
+  expect(await gitProtectionRoots(join(alias, "missing", "child"))).toEqual(
+    expect.arrayContaining([lexical, canonical]),
+  );
 });
