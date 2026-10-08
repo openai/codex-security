@@ -1,16 +1,38 @@
+import fs from "node:fs";
 import path from "node:path";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
+const sourceRoot = path.resolve(evalRoot, "../..");
 
-// Resolve target paths for each execution, including persisted retries.
-// The provider binds runtime and executable settings after case overrides.
-export default (vars: Record<string, unknown>) => ({
-  ...vars,
-  target_repo: vars.calibration_repo
-    ? path.join(
-        (vars.calibration_repo_root ||
-          path.join(evalRoot, "artifacts", "calibration-repos")) as string,
-        vars.calibration_repo as string,
-      )
-    : vars.target_repo,
-});
+// Preserve the stable bindings used by saved native-provider configs, including
+// viewer replay, which does not rerun transforms. Current configs bind their
+// temporary runtime through the beforeAll extension instead.
+export default (vars: Record<string, unknown>) => {
+  const nodePath = fs.realpathSync(process.execPath);
+  let targetRepo = vars.target_repo;
+  if (vars.calibration_repo) {
+    targetRepo = path.join(
+      (vars.calibration_repo_root ||
+        path.join(evalRoot, "artifacts", "calibration-repos")) as string,
+      vars.calibration_repo as string,
+    );
+  } else if (
+    typeof targetRepo === "string" &&
+    targetRepo.startsWith("evals/triage-finding/fixtures/")
+  ) {
+    targetRepo = path.join(sourceRoot, targetRepo);
+  }
+  return {
+    ...vars,
+    target_repo: targetRepo,
+    triage_runtime_root: path.join(sourceRoot, "plugins", "codex-security"),
+    triage_fixture_root: path.join(evalRoot, "fixtures"),
+    triage_node_path: nodePath,
+    triage_node_root: path.dirname(nodePath),
+    sastbench_git_cache_root: path.join(
+      evalRoot,
+      "artifacts",
+      "sastbench-git-cache",
+    ),
+  };
+};

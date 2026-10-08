@@ -7,10 +7,50 @@ import runtimeVars from "./runtime-vars.mts";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
 
-// Fixture paths remain relative to the provider's freshly staged working root.
+// Saved native configs have no startup hook during viewer replay. Their
+// plugin-relative working directory and fixture bindings must stay usable.
+const originalRuntime = process.env.TRIAGE_RUNTIME_ROOT;
+try {
+  for (const staged of [
+    undefined,
+    path.join(evalRoot, "synthetic staged runtime"),
+  ]) {
+    if (staged === undefined) delete process.env.TRIAGE_RUNTIME_ROOT;
+    else process.env.TRIAGE_RUNTIME_ROOT = staged;
+    const root = path.resolve(evalRoot, "../..");
+    const bindings = runtimeVars({ triage_runtime_root: "old runtime" });
+    assert.equal(
+      bindings.triage_runtime_root,
+      path.join(root, "plugins", "codex-security"),
+    );
+    assert.equal(
+      bindings.triage_fixture_root,
+      path.join(root, "evals", "triage-finding", "fixtures"),
+    );
+    assert.equal(bindings.triage_node_path, fs.realpathSync(process.execPath));
+    assert.equal(
+      bindings.triage_node_root,
+      path.dirname(bindings.triage_node_path),
+    );
+    assert.equal(
+      bindings.sastbench_git_cache_root,
+      path.join(evalRoot, "artifacts", "sastbench-git-cache"),
+    );
+    for (const target of [
+      "evals/triage-finding/fixtures/repo",
+      "evals/triage-finding/fixtures/policy-repo",
+    ]) {
+      assert.equal(
+        runtimeVars({ target_repo: target }).target_repo,
+        path.join(root, target),
+      );
+    }
+  }
+} finally {
+  if (originalRuntime === undefined) delete process.env.TRIAGE_RUNTIME_ROOT;
+  else process.env.TRIAGE_RUNTIME_ROOT = originalRuntime;
+}
 for (const target of [
-  "evals/triage-finding/fixtures/repo",
-  "evals/triage-finding/fixtures/policy-repo",
   path.join(evalRoot, "artifacts", "sastbench-targets", "opaque-target"),
   "https://github.com/example/repository",
   "No explicit repository supplied by the user.",
