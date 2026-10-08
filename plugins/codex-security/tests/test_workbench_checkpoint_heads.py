@@ -7,6 +7,7 @@ import os
 import sqlite3
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -1783,3 +1784,200 @@ def test_equivalent_sibling_updates_keep_published_identity_and_triage(
             )
         assert checkpoint.read_bytes() == raw
     assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("field", ["deferred", "surfaces"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "tokens",
+    [("1", "2"), ("1.00000000000000001", "1.00000000000000002"), ("1.0", "1e0")],
+)
+def test_tied_parent_coverage_survives_registered_publication_retry(
+    tmp_path: Path, field: str, reverse: bool, tokens: tuple[str, str]
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    result.write_text(json.dumps(saved_draft(scan_id, complete=True)))
+    os.utime(result, ns=(10, 10))
+    left, right = reversed(tokens) if reverse else tokens
+    row = (
+        {"id": "review", "reason": "Synthetic pending review."}
+        if field == "deferred"
+        else {
+            "id": "review",
+            "label": "Synthetic pending review",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [],
+        }
+    )
+    row["extensions"] = {"observation": "RAW_NUMBER"}
+    parent = saved_draft(scan_id, complete=False)
+    parent["coverage"][field] = [row]
+    write_saved_parent(scan_dir, parent, 100)
+    coverage_path = scan_dir / "coverage.json"
+    coverage_path.write_text(coverage_path.read_text().replace('"RAW_NUMBER"', left))
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan_dir / name, ns=(100, 100))
+    raw = json.dumps(parent).replace('"RAW_NUMBER"', right).encode()
+    directory = scan_dir / "checkpoints"
+    directory.mkdir(exist_ok=True)
+    checkpoint = directory / f"{hashlib.sha256(raw).hexdigest()}.json"
+    checkpoint.write_bytes(raw)
+    os.utime(checkpoint, ns=(100, 100))
+    select(scan_dir, checkpoint, 100)
+    observed = tmp_path / "prepared-coverage.json"
+    failed = run_workbench_with_fault(
+        tmp_path / "fail_publication.py",
+        state,
+        codex_home,
+        "from pathlib import Path\n"
+        "from finalize_scan_contract import _json_bytes\n"
+        f"observed = Path({str(observed)!r})\n"
+        "def fail_publication(prepared, *args, **kwargs):\n"
+        "    observed.write_bytes(_json_bytes(prepared[4]))\n"
+        "    raise OSError('Synthetic publication failure.')\n"
+        "workbench_saved_results._write_prepared_scan_finalization = fail_publication\n",
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Synthetic worker stop.",
+    )
+    assert failed.returncode == 0, failed.stderr
+    before = finalize_scan_contract._loads_json(observed.read_bytes())
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    after = finalize_scan_contract._loads_json(coverage_path.read_bytes())
+    assert finalize_scan_contract._schema_values_equal(before, after)
+    values = [item["extensions"]["observation"] for item in after[field] if "extensions" in item]
+    expected = [finalize_scan_contract._loads_json(token) for token in (left, right)]
+    if finalize_scan_contract._schema_values_equal(*expected):
+        expected.pop()
+    assert finalize_scan_contract._schema_values_equal(values, expected)
+    assert checkpoint.read_bytes() == raw
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "tokens",
+    [("1", "2"), ("1.00000000000000001", "1.00000000000000002"), ("1.0", "1e0")],
+)
+def test_tied_parent_findings_keep_exact_history_order(
+    tmp_path: Path, reverse: bool, tokens: tuple[str, str]
+) -> None:
+    example = Path(__file__).resolve().parents[1] / "examples" / "completed-scan"
+    finding = json.loads((example / "findings.json").read_text())["findings"][0]
+    finding.pop("writeup", None)
+    finding["extensions"] = {"observation": "RAW_NUMBER"}
+    scan_id = "tied-parent-findings"
+    parent = saved_draft(scan_id, findings=[finding], complete=False)
+    left, right = reversed(tokens) if reverse else tokens
+    write_saved_parent(tmp_path, parent, 100)
+    path = tmp_path / "findings.json"
+    path.write_text(path.read_text().replace('"RAW_NUMBER"', left))
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(tmp_path / name, ns=(100, 100))
+    raw = json.dumps(parent).replace('"RAW_NUMBER"', right).encode()
+    directory = tmp_path / "checkpoints"
+    directory.mkdir()
+    checkpoint = directory / f"{hashlib.sha256(raw).hexdigest()}.json"
+    checkpoint.write_bytes(raw)
+    select(tmp_path, checkpoint, 100)
+    binding = {
+        **saved_binding(),
+        "allowedTargetKinds": ["git_worktree"],
+        "target": json.loads((example / "scan-manifest.json").read_text())["scan"]["target"],
+    }
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], [], stopped=True, reason="Synthetic interruption."
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding)
+    expected = [finalize_scan_contract._loads_json(token) for token in (left, right)]
+    if finalize_scan_contract._schema_values_equal(*expected):
+        expected.pop()
+    for documents in (first, replay):
+        values = [
+            historical["extensions"]["observation"]
+            for finding in documents[1]["findings"]
+            for historical in saved._retained_findings(finding)
+        ]
+        assert finalize_scan_contract._schema_values_equal(values, expected)
+    assert checkpoint.read_bytes() == raw
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("initial_third", [False, True])
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ("1", "2", "2.00000000000000001", "2.00000000000000002"),
+        (
+            "1.00000000000000001",
+            "1.00000000000000002",
+            "1.00000000000000003",
+            "1.00000000000000004",
+        ),
+    ],
+)
+def test_exact_surface_collisions_keep_published_ids_when_sources_grow(
+    tmp_path: Path, reverse: bool, initial_third: bool, tokens: tuple[str, ...]
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    row = {
+        "id": "review",
+        "label": "Synthetic pending review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+        "extensions": {"observation": "RAW_NUMBER"},
+    }
+    template = saved_draft(scan_id, surfaces=[row], complete=False)
+
+    def source(token: str) -> bytes:
+        return json.dumps(template).replace('"RAW_NUMBER"', token).encode()
+
+    left, right = reversed(tokens[:2]) if reverse else tokens[:2]
+    write_saved_parent(scan_dir, template, 100)
+    coverage_path = scan_dir / "coverage.json"
+    coverage_path.write_text(coverage_path.read_text().replace('"RAW_NUMBER"', left))
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan_dir / name, ns=(100, 100))
+    raw = source(right)
+    directory = scan_dir / "checkpoints"
+    directory.mkdir(exist_ok=True)
+    checkpoint = directory / f"{hashlib.sha256(raw).hexdigest()}.json"
+    checkpoint.write_bytes(raw)
+    select(scan_dir, checkpoint, 100)
+    result.write_bytes(
+        source(tokens[2]) if initial_third else json.dumps(saved_draft(scan_id)).encode()
+    )
+    os.utime(result, ns=(10, 10))
+    original = {path: path.read_bytes() for path in (checkpoint, result)}
+    fail_deep_scan(state, codex_home, scan_id)
+
+    def published():
+        document = json.loads(coverage_path.read_text(), parse_float=Decimal)
+        return {
+            Decimal(item["extensions"]["observation"]): item["id"] for item in document["surfaces"]
+        }
+
+    before = published()
+    assert len(before) == (3 if initial_third else 2)
+    assert len(set(before.values())) == len(before)
+    directory = result.parent / "checkpoints"
+    directory.mkdir(exist_ok=True)
+    for token in (tokens[2], tokens[2] + "0", tokens[3]):
+        raw = source(token)
+        path = directory / f"{hashlib.sha256(raw).hexdigest()}.json"
+        path.write_bytes(raw)
+        original[path] = raw
+        scan_command(
+            state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+        )
+        after = published()
+        assert set(after) == set(before) | {Decimal(token)}
+        assert all(after[value] == identity for value, identity in before.items())
+        assert len(set(after.values())) == len(after)
+        before = after
+    assert all(path.read_bytes() == raw for path, raw in original.items())

@@ -749,7 +749,7 @@ def _merge_tied_parent_observations(
 ) -> dict[str, Any]:
     merged = copy.deepcopy(current)
     for finding in previous["findings"]:
-        if finding not in merged["findings"]:
+        if not any(_schema_values_equal(finding, item) for item in merged["findings"]):
             merged["findings"].append(copy.deepcopy(finding))
     coverage = merged["coverage"]
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
@@ -757,7 +757,7 @@ def _merge_tied_parent_observations(
         output = coverage.setdefault(field, [])
         if isinstance(rows, list) and isinstance(output, list):
             for row in rows:
-                if row not in output:
+                if not any(_schema_values_equal(row, item) for item in output):
                     output.append(copy.deepcopy(row))
     pending_ids = {
         identity
@@ -870,7 +870,9 @@ def _generic_surface_updates(
             # Older writers could assign one ID to distinct surfaces in a draft.
             # A closure cannot identify which of those observations it replaces.
             by_source = dict(matches)
-            if any(row != by_source[saved_path] for saved_path, row in matches):
+            if any(
+                not _schema_values_equal(row, by_source[saved_path]) for saved_path, row in matches
+            ):
                 continue
             if any(
                 "candidateId" in row or "candidate" in row or "finding" in row for _, row in matches
@@ -932,7 +934,7 @@ def _generic_surface_updates(
                 if reopening
                 or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
             )
-            if update not in updates:
+            if not any(_schema_values_equal(update, item) for item in updates):
                 updates.append(update)
     return replaced, updates
 
@@ -1034,7 +1036,7 @@ def merge_saved_results(
                     previous_parent, _, _ = _read_saved_result(
                         scan_dir, f"checkpoints/{previous_head['checkpoint']}", scan_id
                     )
-                    if previous_parent != parent:
+                    if not _schema_values_equal(previous_parent, parent):
                         # Tied observations cannot decide which pending work came last.
                         parent = _merge_tied_parent_observations(parent, previous_parent)
                         parent_is_canonical = False
@@ -1245,7 +1247,8 @@ def merge_saved_results(
     for worker, result_path, checkpoint_paths, attempt in reducer_outputs:
         result = drafts_by_path.get(result_path)
         if result is None or not any(
-            drafts_by_path.get(checkpoint_path) == result for checkpoint_path in checkpoint_paths
+            _schema_values_equal(drafts_by_path.get(checkpoint_path), result)
+            for checkpoint_path in checkpoint_paths
         ):
             continue
         current_results.add(result_path)
@@ -1265,7 +1268,7 @@ def merge_saved_results(
                 parent = draft
                 parent_modified = modified
                 parent_is_canonical = False
-            elif modified == parent_modified and draft != parent:
+            elif modified == parent_modified and not _schema_values_equal(draft, parent):
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
@@ -1304,11 +1307,13 @@ def merge_saved_results(
                         named["id"]
                         for named in named_rows[owner]
                         if named["id"] not in reserved
-                        and {
-                            **({"receiptRefs": []} if field == "surfaces" else {}),
-                            **{key: value for key, value in named.items() if key != "id"},
-                        }
-                        == content
+                        and _schema_values_equal(
+                            {
+                                **({"receiptRefs": []} if field == "surfaces" else {}),
+                                **{key: value for key, value in named.items() if key != "id"},
+                            },
+                            content,
+                        )
                     ),
                     None,
                 )
@@ -1455,7 +1460,9 @@ def merge_saved_results(
                 continue
             if any(key in row for key in ("candidateId", "candidate", "finding")):
                 continue
-            if identity in candidate_aliases or (identity in by_id and row != by_id[identity]):
+            if identity in candidate_aliases or (
+                identity in by_id and not _schema_values_equal(row, by_id[identity])
+            ):
                 ambiguous_deferred.add((owner, identity))
             by_id[identity] = row
     current_drafts = ([("parent", parent, None)] if parent else []) + [
@@ -1535,7 +1542,10 @@ def merge_saved_results(
                 and isinstance(identity := row.get("id"), str)
                 and (owner, identity) in ambiguous_deferred
                 and not any(key in row for key in ("candidateId", "candidate", "finding"))
-                and (owner, row) not in reopened_rows
+                and not any(
+                    owner == saved_owner and _schema_values_equal(row, saved_row)
+                    for saved_owner, saved_row in reopened_rows
+                )
             ):
                 reopened_rows.append((owner, row))
     parent_closures = [
@@ -1673,10 +1683,14 @@ def merge_saved_results(
             previous = parent["coverage"].get(field, [])
             if isinstance(previous, list):
                 removed_parent = [row for row in previous if id(row) in replaced]
-                coverage[field] = [row for row in coverage[field] if row not in removed_parent]
+                coverage[field] = [
+                    row
+                    for row in coverage[field]
+                    if not any(_schema_values_equal(row, removed) for removed in removed_parent)
+                ]
     if isinstance(coverage.get("surfaces"), list):
         for surface in surface_updates:
-            if surface not in coverage["surfaces"]:
+            if not any(_schema_values_equal(surface, item) for item in coverage["surfaces"]):
                 coverage["surfaces"].append(surface)
         for surface in coverage["surfaces"]:
             if isinstance(surface, dict):
@@ -1691,7 +1705,9 @@ def merge_saved_results(
         ) in resolved:
             continue
         pending = coverage.setdefault("deferred", [])
-        if isinstance(pending, list) and item not in pending:
+        if isinstance(pending, list) and not any(
+            _schema_values_equal(item, row) for row in pending
+        ):
             pending.append(copy.deepcopy(item))
     ambiguous_surface_ids = {
         (owner, identity)
@@ -1711,7 +1727,7 @@ def merge_saved_results(
         for surface in surfaces if isinstance(surfaces, list) else []:
             if not isinstance(surface, dict) or not isinstance(identity := surface.get("id"), str):
                 continue
-            if identity in by_id and surface != by_id[identity]:
+            if identity in by_id and not _schema_values_equal(surface, by_id[identity]):
                 ambiguous_surface_ids.add((owner, identity))
             by_id[identity] = surface
     for _, draft, owner in all_sources:
@@ -1726,7 +1742,9 @@ def merge_saved_results(
                 and isinstance(coverage.get("surfaces"), list)
             ):
                 retained_surface = {**surface, "receiptRefs": surface.get("receiptRefs", [])}
-                if retained_surface not in coverage["surfaces"]:
+                if not any(
+                    _schema_values_equal(retained_surface, item) for item in coverage["surfaces"]
+                ):
                     coverage["surfaces"].append(copy.deepcopy(retained_surface))
     selected_terminal_orders: dict[str, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
@@ -2078,12 +2096,14 @@ def merge_saved_results(
                     semantic_item = dict(item)
                     if any(
                         isinstance(existing, dict)
-                        and {key: value for key, value in existing.items() if key != "id"}
-                        == semantic_item
+                        and _schema_values_equal(
+                            {key: value for key, value in existing.items() if key != "id"},
+                            semantic_item,
+                        )
                         for existing in output
                     ):
                         continue
-                if item not in output:
+                if not any(_schema_values_equal(item, existing) for existing in output):
                     output.append(copy.deepcopy(item))
 
     identities: dict[str, str] = {}
@@ -2116,7 +2136,11 @@ def merge_saved_results(
                 # Preserve malformed rows for per-record recovery, including frozen replay.
                 continue
             if item["id"] in used:
-                item["id"] = f"{item['id']}-{_digest(item)[:16]}"
+                suffix = _digest(item)
+                # Distinct exact values can share the legacy writer's rounded hash.
+                if f"{item['id']}-{suffix[:16]}" in used:
+                    suffix = _semantic_digest(item)
+                item["id"] = f"{item['id']}-{suffix[:16]}"
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
