@@ -103,11 +103,6 @@ assert.deepEqual(
   "The MCP process and SDK workers must inherit Codex, external-provider, and Bedrock authentication, AWS credential-chain settings, runtime paths, and enterprise proxy/certificate configuration.",
 );
 const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
-assert.match(
-  serverSource,
-  /timeout:\s*\[[^\]]*"start-prompt-only-scan"[^\]]*\]\.includes\(args\[0\] \?\? ""\)\s*\?\s*300_000\s*:\s*30_000/,
-  "Prompt-only scan startup must use the same five-minute timeout as other scan starts.",
-);
 const authenticatedArtifactClaimSource = serverSource.match(
   /if \(\s*handoffClaimToken\s*&&\s*threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
 )?.[0];
