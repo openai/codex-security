@@ -6,12 +6,13 @@ import JSON5 from "json5";
 import { parse } from "yaml";
 import { isMain } from "./is-main.mjs";
 
-const lockPath = ".devcontainer/devcontainer-lock.json";
-const manifestPath = ".devcontainer/devcontainer.json";
+const configurationDirectories = [".devcontainer", ".ona"];
 const policyPath = ".github/dependabot.yml";
 const guardPaths = new Set([
   policyPath,
-  manifestPath,
+  ...configurationDirectories.map(
+    (directory) => `${directory}/devcontainer.json`,
+  ),
   ".github/workflows/node-ci.yml",
   "sdk/typescript/scripts/check-devcontainer-cooldown.mts",
 ]);
@@ -94,6 +95,45 @@ export function featuresToCheck(
   return selected;
 }
 
+export async function configuredFeatureChanges(
+  root: string,
+  days: number,
+  previousLock: (path: string) => Lockfile,
+  changedPaths: readonly string[],
+): Promise<
+  Array<{ manifestPath: string; features: Array<[string, Feature]> }>
+> {
+  const changes: Array<{
+    manifestPath: string;
+    features: Array<[string, Feature]>;
+  }> = [];
+  if (days === 0) return changes;
+  for (const directory of configurationDirectories) {
+    const manifestPath = `${directory}/devcontainer.json`;
+    const lockPath = `${directory}/devcontainer-lock.json`;
+    const current: Lockfile = await readFile(join(root, lockPath), "utf8")
+      .then((source) => JSON.parse(source))
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return { features: {} };
+        throw error;
+      });
+    const source = await readFile(join(root, manifestPath), "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return "{}";
+        throw error;
+      },
+    );
+    const features = featuresToCheck(
+      previousLock(lockPath),
+      current,
+      configuredFeatures(source),
+      changedPaths,
+    );
+    if (features.length > 0) changes.push({ manifestPath, features });
+  }
+  return changes;
+}
+
 export async function publicationTime(
   name: string,
   feature: Feature,
@@ -167,33 +207,17 @@ if (isMain(import.meta.url)) {
     const paths = git("diff", "--name-only", "HEAD^1", "HEAD")
       .trim()
       .split("\n");
-    const previous: Lockfile = git(
-      "ls-tree",
-      "--name-only",
-      "HEAD^1",
-      "--",
-      lockPath,
-    ).trim()
-      ? JSON.parse(git("show", `HEAD^1:${lockPath}`))
-      : { features: {} };
-    const current: Lockfile = await readFile(join(root, lockPath), "utf8")
-      .then((source) => JSON.parse(source))
-      .catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return { features: {} };
-        throw error;
-      });
     const days = cooldownDays(await readFile(join(root, policyPath), "utf8"));
-    const source = await readFile(join(root, manifestPath), "utf8").catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return "{}";
-        throw error;
-      },
+    const changes = await configuredFeatureChanges(
+      root,
+      days,
+      (lockPath) =>
+        git("ls-tree", "--name-only", "HEAD^1", "--", lockPath).trim()
+          ? JSON.parse(git("show", `HEAD^1:${lockPath}`))
+          : { features: {} },
+      paths,
     );
-    const features =
-      days === 0
-        ? []
-        : featuresToCheck(previous, current, configuredFeatures(source), paths);
-    if (features.length === 0 || days === 0) {
+    if (changes.length === 0) {
       console.log("No devcontainer feature digests need a cooldown check.");
     } else {
       const token = process.env["GH_TOKEN"];
@@ -201,12 +225,14 @@ if (isMain(import.meta.url)) {
         throw new Error(
           "GH_TOKEN with packages:read is required for the devcontainer cooldown check.",
         );
-      for (const message of await checkCooldown(
-        features,
-        days,
-        (name, feature) => publicationTime(name, feature, token),
-      )) {
-        console.log(message);
+      for (const { manifestPath, features } of changes) {
+        for (const message of await checkCooldown(
+          features,
+          days,
+          (name, feature) => publicationTime(name, feature, token),
+        )) {
+          console.log(`${manifestPath}: ${message}`);
+        }
       }
     }
   } catch (error) {

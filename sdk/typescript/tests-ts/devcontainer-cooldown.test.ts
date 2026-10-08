@@ -1,9 +1,12 @@
-import { readFile } from "node:fs/promises";
-import { expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
 import {
   checkCooldown,
   cooldownDays,
+  configuredFeatureChanges,
   configuredFeatures,
   featuresToCheck,
   publicationTime,
@@ -28,6 +31,125 @@ const previous = {
 };
 const current = { features: { [name]: feature } };
 const published = new Date("2026-01-01T12:00:00.000Z");
+const fixtureRoots = new Set<string>();
+
+afterEach(async () => {
+  await Promise.all(
+    [...fixtureRoots].map((root) => rm(root, { recursive: true, force: true })),
+  );
+  fixtureRoots.clear();
+});
+
+async function configurationFixture(ona = previous) {
+  const root = await mkdtemp(join(tmpdir(), "devcontainer-cooldown-"));
+  fixtureRoots.add(root);
+  for (const [directory, lock] of [
+    [".devcontainer", previous],
+    [".ona", ona],
+  ] as const) {
+    await mkdir(join(root, directory));
+    await writeFile(
+      join(root, directory, "devcontainer.json"),
+      JSON.stringify({ features: { [name]: {} } }),
+    );
+    await writeFile(
+      join(root, directory, "devcontainer-lock.json"),
+      JSON.stringify(lock),
+    );
+  }
+  return root;
+}
+
+test("rejects a young Ona-only feature update while leaving unchanged root pins unselected", async () => {
+  const root = await configurationFixture(current);
+  const changes = await configuredFeatureChanges(root, 7, () => previous, [
+    ".ona/devcontainer-lock.json",
+  ]);
+  expect(changes).toEqual([
+    { manifestPath: ".ona/devcontainer.json", features: [[name, feature]] },
+  ]);
+  await expect(
+    checkCooldown(
+      changes[0]!.features,
+      7,
+      async () => published,
+      new Date("2026-01-02T12:00:00.000Z"),
+    ),
+  ).rejects.toThrow("2026-01-08T12:00:00.000Z");
+});
+
+test("requires the adjacent Ona lockfile for its configured features", async () => {
+  const root = await configurationFixture();
+  await rm(join(root, ".ona/devcontainer-lock.json"));
+  await expect(
+    configuredFeatureChanges(root, 7, () => previous, [
+      ".ona/devcontainer-lock.json",
+    ]),
+  ).rejects.toThrow("matching lockfile entry");
+});
+
+test("rejects an Ona manifest-only tag change without matching lock coverage", async () => {
+  const root = await configurationFixture();
+  await writeFile(
+    join(root, ".ona/devcontainer.json"),
+    JSON.stringify({ features: { "ghcr.io/example/features/node:3": {} } }),
+  );
+  await expect(
+    configuredFeatureChanges(root, 7, () => previous, [
+      ".ona/devcontainer.json",
+    ]),
+  ).rejects.toThrow("matching lockfile entry");
+});
+
+test("binds Ona's resolved resource to its effective integrity digest", async () => {
+  const root = await configurationFixture({
+    features: { [name]: { ...feature, integrity: oldDigest } },
+  });
+  await expect(
+    configuredFeatureChanges(root, 7, () => previous, [
+      ".ona/devcontainer-lock.json",
+    ]),
+  ).rejects.toThrow("same immutable digest");
+});
+
+test("skips unchanged pins in both active configurations", async () => {
+  const root = await configurationFixture();
+  expect(
+    await configuredFeatureChanges(root, 7, () => previous, ["README.md"]),
+  ).toEqual([]);
+});
+
+test("disabled cooldown skips both configurations and previous-lock lookup", async () => {
+  const root = await configurationFixture();
+  await rm(join(root, ".ona/devcontainer-lock.json"));
+  expect(
+    await configuredFeatureChanges(
+      root,
+      0,
+      () => {
+        throw new Error("unexpected previous-lock lookup");
+      },
+      [".ona/devcontainer-lock.json"],
+    ),
+  ).toEqual([]);
+});
+
+test("policy changes select the current pins from both active configurations", async () => {
+  const root = await configurationFixture();
+  const changes = await configuredFeatureChanges(root, 7, () => previous, [
+    ".github/dependabot.yml",
+  ]);
+  expect(changes).toEqual([
+    {
+      manifestPath: ".devcontainer/devcontainer.json",
+      features: [[name, previous.features[name]]],
+    },
+    {
+      manifestPath: ".ona/devcontainer.json",
+      features: [[name, previous.features[name]]],
+    },
+  ]);
+});
 
 test("reads configured features from JSONC while excluding local source directories", () => {
   expect(
@@ -103,6 +225,7 @@ test("checks new and changed digests, including rollback pins, and skips unchang
 test.each([
   ".github/dependabot.yml",
   ".devcontainer/devcontainer.json",
+  ".ona/devcontainer.json",
   ".github/workflows/node-ci.yml",
   "sdk/typescript/scripts/check-devcontainer-cooldown.mts",
 ])("validates existing pins when %s changes", (path) => {
