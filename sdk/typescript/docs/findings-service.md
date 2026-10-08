@@ -137,6 +137,10 @@ model, including `findingId`, `occurrenceId`, and `fingerprints`. A complete
 exported `findings.json` document is also accepted; only its `findings` array is
 imported. The service does not open files or source paths referenced by a finding.
 
+JSON numbers, including those in nested fields, are checked after JavaScript
+decoding. Decoded numbers must be finite, and integer-valued numbers must be safe
+integers.
+
 Include `repositoryId` beside `findings` to associate every imported finding
 with that repository. For SDK/CLI scans, use `scan.target.targetId` from
 `scan-manifest.json`. IDs match exactly; the service does not infer them from

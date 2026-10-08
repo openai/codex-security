@@ -29,6 +29,7 @@ from finalize_scan_contract import (
     _read_scan_local_json,
     _read_scan_local_json_bytes,
     _read_scan_local_json_with_metadata,
+    _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _schema_values_equal,
@@ -2126,7 +2127,22 @@ def merge_saved_results(
         items = coverage.setdefault(field, [])
         rows = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
         published_rows = (published_coverage or {}).get(field, [])
-        explicit_ids = {item["id"] for item in rows if isinstance(item.get("id"), str)}
+        explicit_ids: set[str] = set()
+        for item in rows:
+            if not isinstance(identity := item.get("id"), str):
+                continue
+            recovered = {
+                "completeness": "partial",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [],
+                field: [copy.deepcopy(item)],
+            }
+            _recover_unsealed_coverage(
+                recovered, Path(__file__).resolve().parent.parent / "schemas", scan_dir, [], []
+            )
+            if recovered[field]:
+                explicit_ids.add(identity)
         for item in rows:
             if id(item) in canonical_rows:
                 continue

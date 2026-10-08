@@ -271,3 +271,122 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
     assert second["openFindingsCount"] == 1
     assert second["scanCount"] == 1
+
+
+@pytest.mark.parametrize(
+    "token", ["9007199254740991.1", "1.0000000000000001", "1e-400", "1e-10000000000000000000"]
+)
+def test_completion_preserves_exact_numeric_values_in_finding_indexes(tmp_path: Path, token: str):
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repo"
+    target.mkdir()
+    workspace = create_saved_workspace(state_dir, target)
+    for _ in range(2):
+        started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
+        scan_id = str(started["results"]["scanId"])
+        scan_dir = Path(str(started["results"]["scanDir"]))
+        write_completed_contract(scan_dir, scan_id, target)
+        findings_path = scan_dir / "findings.json"
+        document = json.loads(findings_path.read_text())
+        document["findings"][0]["extensions"] = {"observation": "EXACT_NUMBER"}
+        findings_path.write_text(json.dumps(document).replace('"EXACT_NUMBER"', token))
+        scan_command(state_dir, "complete-scan", scan_id)
+        finding = json.loads(findings_path.read_text(), parse_float=str)["findings"][0]
+        assert finding["extensions"]["observation"] == token
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            for table, identity in (
+                ("findings", "findingId"),
+                ("finding_occurrences", "occurrenceId"),
+            ):
+                stored = json.loads(
+                    connection.execute(
+                        f"SELECT details_json FROM {table} WHERE id = ?", (finding[identity],)
+                    ).fetchone()[0],
+                    parse_float=str,
+                )
+                assert stored == finding
+            connection.execute(
+                "UPDATE finding_occurrences SET details_json = '{}' WHERE scan_id = ?", (scan_id,)
+            )
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            stored = json.loads(
+                connection.execute(
+                    "SELECT details_json FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
+                ).fetchone()[0],
+                parse_float=str,
+            )
+            assert stored == finding
+
+
+@pytest.mark.parametrize("digits", [4300, 4301])
+def test_index_refresh_accepts_large_integer_tokens_from_native_storage(workbench_db, digits):
+    from workbench_finding_index import upsert_finding
+
+    finding = {
+        "findingId": "synthetic-finding",
+        "fingerprints": {"primary": "synthetic-fingerprint"},
+        "ruleId": "synthetic-rule",
+        "identity": {"anchor": "synthetic-anchor"},
+        "extensions": {"value": 1},
+    }
+    timestamp = "2026-01-01T00:00:00Z"
+    upsert_finding(workbench_db, finding, timestamp)
+    # The native writer retains arbitrary-precision JSON integer tokens.
+    stored = json.dumps(finding).replace('"value": 1', '"value": ' + "9" * digits)
+    workbench_db.execute("UPDATE findings SET details_json = ?", (stored,))
+    upsert_finding(workbench_db, finding, timestamp)
+    assert (
+        json.loads(workbench_db.execute("SELECT details_json FROM findings").fetchone()[0])
+        == finding
+    )
+
+
+def test_overlapping_scans_mark_findings_present_in_latest_started_scan(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repo"
+    target.mkdir()
+    first = complete_scan(state_dir, target, identity_anchor="recurring-finding")
+    second = complete_scan(state_dir, target, identity_anchor="recurring-finding")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            ("2026-01-01T00:00:00Z", first["scanId"]),
+        )
+        connection.execute(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            ("2026-01-02T00:00:00Z", second["scanId"]),
+        )
+        connection.execute(
+            "UPDATE finding_occurrences SET created_at = ? WHERE scan_id = ?",
+            ("2026-01-04T00:00:00Z", first["scanId"]),
+        )
+        connection.execute(
+            "UPDATE finding_occurrences SET created_at = ? WHERE scan_id = ?",
+            ("2026-01-03T00:00:00Z", second["scanId"]),
+        )
+    finding = run_workbench(state_dir, "list-global-findings")["findings"][0]
+    assert finding["confirmedInLatestScan"] is True
+    assert set(finding["knownScanIds"]) == {first["scanId"], second["scanId"]}
+
+
+@pytest.mark.parametrize("query", ["strasse", "STRAẞE", "éclair", "ÉCLAIR"])
+def test_scan_and_finding_search_casefold_unicode(tmp_path: Path, query: str) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "Straße ÉCLAIR"
+    target.mkdir()
+    first = complete_scan(state_dir, target, identity_anchor="first-finding")
+    complete_scan(state_dir, target, identity_anchor="second-finding")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE finding_occurrences SET title = ?", ("Straße ÉCLAIR",))
+    page = run_workbench(state_dir, "list-scans", "--query", query, "--limit", "1")
+    assert len(page["scans"]) == 1
+    assert page["nextOffset"] == 1
+    next_page = run_workbench(
+        state_dir, "list-scans", "--query", query, "--limit", "1", "--offset", "1"
+    )
+    assert len(next_page["scans"]) == 1
+    findings = run_workbench(
+        state_dir, "list-findings", "--scan-id", str(first["scanId"]), "--query", query
+    )
+    assert len(findings["findingsPage"]["findings"]) == 1
