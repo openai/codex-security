@@ -53,6 +53,23 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test.each([
+    ["unknown-model", false],
+    ["gpt-5.6-cyber", true],
+  ] as const)("shows a cost row only when %s has pricing", (model, priced) => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, {
+      model: { model, reasoningEffort: "xhigh" },
+      showCost: true,
+    });
+    dashboard.start();
+    const frame = lastFrame(stderr);
+    expect(/^\s*COST\b/m.test(frame)).toBe(priced);
+    if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
+    expect(frame).not.toContain("model pricing missing");
+    dashboard.stop();
+  });
+
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
     const dashboard = createDashboard(
@@ -577,6 +594,8 @@ describe("live scan dashboard", () => {
       filesCompleted: 0,
       filesTotal: 1_258,
     });
+    expect(lastFrame(stderr)).toContain("1,258 in scope");
+    expect(lastFrame(stderr)).not.toContain("reviewed");
     dashboard.record({
       id: "read-1",
       kind: "command",
@@ -591,6 +610,13 @@ describe("live scan dashboard", () => {
         output_tokens: 236,
       }).cost!,
     );
+    dashboard.setFiles({
+      phase: "discovery",
+      filesCompleted: 3,
+      filesTotal: 1_258,
+    });
+    expect(lastFrame(stderr)).toContain("3 / 1,258 reviewed");
+    expect(lastFrame(stderr)).not.toContain("in scope");
     dashboard.stop();
 
     const text = stripVTControlCharacters(stderr.text());
@@ -606,7 +632,6 @@ describe("live scan dashboard", () => {
     expect(text).toContain("               routes/login.ts");
     expect(text).not.toContain("[09:41:19]   routes/login.ts");
     expect(text).toContain("routes/login.ts");
-    expect(text).toContain("0 / 1,258 reviewed");
     expect(text).not.toContain("opened");
     expect(text).not.toContain("3 / 6 active");
     expect(text.replace(/\s+/gu, " ")).toContain(

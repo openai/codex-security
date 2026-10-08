@@ -6,8 +6,6 @@ import path from "node:path";
 
 import {
   DEFAULT_INSTALL_ROOT,
-  EXPECTED_CASE_COUNT,
-  EXPECTED_LABEL_COUNTS,
   SASTBENCH_COMMIT,
   SASTBENCH_DATASET_RELATIVE_PATH,
   SASTBENCH_DATASET_SHA256,
@@ -84,19 +82,6 @@ export function verifyInstallation(
     throw new Error(
       `SastBench dataset SHA-256 mismatch: expected ${SASTBENCH_DATASET_SHA256}, got ${inspection.datasetSha256}`,
     );
-  }
-  if (inspection.caseCount !== EXPECTED_CASE_COUNT) {
-    throw new Error(
-      `SastBench case count mismatch: expected ${EXPECTED_CASE_COUNT}, got ${inspection.caseCount}`,
-    );
-  }
-  for (const [label, expected] of Object.entries(EXPECTED_LABEL_COUNTS)) {
-    const actual = inspection.labelCounts?.[label];
-    if (actual !== expected) {
-      throw new Error(
-        `SastBench ${label} count mismatch: expected ${expected}, got ${actual}`,
-      );
-    }
   }
   return inspection;
 }

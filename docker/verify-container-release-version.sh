@@ -2,14 +2,14 @@
 
 set -eu
 
-if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-    printf '%s\n' 'Usage: verify-container-release-version.sh PACKAGE_ENDPOINT VERSION [EXPECTED_DIGEST]' >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    printf '%s\n' 'Usage: verify-container-release-version.sh PACKAGE_ENDPOINT VERSION [VERIFIED_DIGEST]' >&2
     exit 2
 fi
 
 endpoint=$1
 version=$2
-expected_digest=${3:-}
+verified_digest=${3:-}
 
 if ! versions="$(gh api --paginate "$endpoint/versions?per_page=100")"; then
     printf '%s\n' "::error::Unable to verify whether container version $version already exists; refusing to publish." >&2
@@ -18,21 +18,22 @@ fi
 
 if ! version_status="$(
     printf '%s\n' "$versions" |
-        jq --raw-output --slurp --arg version "$version" --arg expected_digest "$expected_digest" '
+        jq --raw-output --slurp --arg version "$version" --arg digest "$verified_digest" '
             def stable_version:
                 select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) |
                 split(".") | map(tonumber);
             if length == 0 or any(.[]; type != "array") then
                 error("Container package versions must contain at least one JSON array.")
-            elif any(.[]; any(.[];
-                any(.metadata.container.tags[]?; . == $version) and
-                ($expected_digest == "" or .name != $expected_digest))) then
-                "published"
-            elif any(.[]; any(.[]; any(.metadata.container.tags[]?;
-                stable_version > ($version | stable_version)))) then
-                "backfill"
             else
-                "latest"
+                [.[][] | select(any(.metadata.container.tags[]?; . == $version))] as $existing |
+                if ($existing | length) > 0 and (
+                    ($digest | test("^sha256:[a-fA-F0-9]{64}$") | not) or
+                    any($existing[]; .name != $digest)
+                ) then "published"
+                elif any(.[]; any(.[]; any(.metadata.container.tags[]?;
+                    stable_version > ($version | stable_version)))) then "backfill"
+                else "latest"
+                end
             end
         '
 )"; then

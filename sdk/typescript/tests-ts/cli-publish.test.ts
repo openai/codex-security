@@ -1,5 +1,5 @@
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, test, mock } from "bun:test";
@@ -9,6 +9,7 @@ import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
 import {
+  selectionPrompt,
   createCliTest,
   captureCli,
   runCapturedCli,
@@ -241,69 +242,77 @@ describe("publish scan to custom", () => {
 });
 
 describe("publish check", () => {
-  test("resolves the shared destination options without invoking publication", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
+  test.each(["completed-scan", "~/completed-scan"])(
+    "resolves %s and shared options without invoking publication",
+    async (scanDir) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-    const currentDirectory = join(tmpdir(), "codex-security-check-current");
-    const result: CheckScanPublicationResult = {
-      scanId: "scan-example",
-      destination: {
-        type: "linear",
-        teamId: "team-from-flags",
-        projectId: "project-from-flags",
-      },
-      recorded: [],
-      counts: { findings: 2, recorded: 0, pending: 2 },
-      access: {
-        transport: "linear-api",
-        authentication: "verified",
-        team: "verified",
-        project: "verified",
-        assignee: "verified",
-        issueCreation: "not-tested",
-      },
-    };
-    const deps = dependencies({
-      currentDirectory,
-      environment: {
-        CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
-        CODEX_SECURITY_LINEAR_TEAM: "environment-team",
-      },
-    });
-    deps.publishScan = async () => fail("Check must not publish.");
-    deps.checkScanPublication = async (directory, options) => {
-      expect(directory).toBe(resolve(currentDirectory, "completed-scan"));
-      expect(options).toEqual({
-        destination: "linear",
-        teamId: "team-from-flags",
-        projectId: "project-from-flags",
-        linearApiKey: "explicit-key",
-        assigneeId: "teammate@example.com",
-        signal: expect.any(AbortSignal),
+      const currentDirectory = join(tmpdir(), "codex-security-check-current");
+      const result: CheckScanPublicationResult = {
+        scanId: "scan-example",
+        destination: {
+          type: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+        },
+        recorded: [],
+        counts: { findings: 2, recorded: 0, pending: 2 },
+        access: {
+          transport: "linear-api",
+          authentication: "verified",
+          team: "verified",
+          project: "verified",
+          assignee: "verified",
+          issueCreation: "not-tested",
+        },
+      };
+      const deps = dependencies({
+        currentDirectory,
+        environment: {
+          CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
+          CODEX_SECURITY_LINEAR_TEAM: "environment-team",
+        },
       });
-      return result;
-    };
-    expect(
-      await runCli(
-        [
-          "publish",
-          "check",
-          "completed-scan",
-          ...DESTINATION_OPTIONS,
-          "--linear-api-key",
-          "explicit-key",
-          "--linear-assignee",
-          "teammate@example.com",
-          "--json",
-        ],
-        deps,
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(result);
-    expect(stderr.text()).toBe("");
-    expect(stdout.text()).not.toContain("explicit-key");
-    expect(stdout.text()).not.toContain("teammate@example.com");
-  });
+      deps.publishScan = async () => fail("Check must not publish.");
+      deps.checkScanPublication = async (directory, options) => {
+        expect(directory).toBe(
+          resolve(
+            scanDir.startsWith("~/") ? homedir() : currentDirectory,
+            "completed-scan",
+          ),
+        );
+        expect(options).toEqual({
+          destination: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+          linearApiKey: "explicit-key",
+          assigneeId: "teammate@example.com",
+          signal: expect.any(AbortSignal),
+        });
+        return result;
+      };
+      expect(
+        await runCli(
+          [
+            "publish",
+            "check",
+            scanDir,
+            ...DESTINATION_OPTIONS,
+            "--linear-api-key",
+            "explicit-key",
+            "--linear-assignee",
+            "teammate@example.com",
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(result);
+      expect(stderr.text()).toBe("");
+      expect(stdout.text()).not.toContain("explicit-key");
+      expect(stdout.text()).not.toContain("teammate@example.com");
+    },
+  );
 
   test("reports a failed check without publishing or returning a successful result", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -1252,19 +1261,14 @@ describe("publish scan", () => {
       },
     });
     deps.now = () => Date.parse("2026-08-15T02:17:00Z");
-    deps.publishPrompt = {
-      isInteractive: () => true,
-      select: async <Value extends string>(
-        message: string,
-        options: readonly { label: string; short?: string; value: Value }[],
-        presentation?: { header?: string },
-      ): Promise<Value> => {
+    deps.publishPrompt = selectionPrompt(
+      async (message, options, presentation) => {
         question = message;
         choices = options;
         header = presentation?.header;
         return options[1]!.value;
       },
-    };
+    );
     deps.publishScan = publishScan;
 
     expect(
@@ -1421,18 +1425,13 @@ describe("publish scan", () => {
         }),
       });
       deps.now = () => currentTime;
-      deps.publishPrompt = {
-        isInteractive: () => true,
-        select: async <Value extends string>(
-          _message: string,
-          options: readonly { label: string; short?: string; value: Value }[],
-          presentation?: { header?: string },
-        ): Promise<Value> => {
+      deps.publishPrompt = selectionPrompt(
+        async (_message, options, presentation) => {
           header = presentation?.header;
           choices = options;
           return options[0]!.value;
         },
-      };
+      );
       deps.publishScan = successfulPublication<[]>;
 
       expect(
@@ -1566,16 +1565,10 @@ describe("publish scan", () => {
         }),
       });
       deps.now = () => Date.parse("2026-08-15T01:01:00Z");
-      deps.publishPrompt = {
-        isInteractive: () => true,
-        select: async <Value extends string>(
-          _message: string,
-          options: readonly { label: string; value: Value }[],
-        ): Promise<Value> => {
-          choice = options[0]!.label;
-          return options[0]!.value;
-        },
-      };
+      deps.publishPrompt = selectionPrompt(async (_message, options) => {
+        choice = options[0]!.label;
+        return options[0]!.value;
+      });
       deps.publishScan = successfulPublication<[]>;
 
       expect(
@@ -2006,16 +1999,10 @@ describe("publish scan", () => {
         })),
       }),
     });
-    deps.publishPrompt = {
-      isInteractive: () => true,
-      select: async <Value extends string>(
-        _message: string,
-        choices: readonly { label: string; value: Value }[],
-      ): Promise<Value> => {
-        offered = choices;
-        return choices[1]!.value;
-      },
-    };
+    deps.publishPrompt = selectionPrompt(async (_message, choices) => {
+      offered = choices;
+      return choices[1]!.value;
+    });
     deps.publishScan = publishScan;
 
     expect(
@@ -2047,13 +2034,10 @@ describe("publish scan", () => {
     const deps = dependencies({
       onWorkbench,
     });
-    deps.publishPrompt = {
-      isInteractive: () => false,
-      select: async <Value extends string>(
-        _message: string,
-        options: readonly { label: string; value: Value }[],
-      ): Promise<Value> => options[0]!.value,
-    };
+    deps.publishPrompt = selectionPrompt(
+      async (_message, options) => options[0]!.value,
+      () => false,
+    );
     deps.publishScan = publishScan;
 
     expect(
@@ -2074,16 +2058,10 @@ describe("publish scan", () => {
     let prompted = false;
     const publishScan = mock(successfulPublication<[]>);
     const deps = dependencies({ onWorkbench: () => ({ scans: [] }) });
-    deps.publishPrompt = {
-      isInteractive: () => true,
-      select: async <Value extends string>(
-        _message: string,
-        options: readonly { label: string; value: Value }[],
-      ): Promise<Value> => {
-        prompted = true;
-        return options[0]!.value;
-      },
-    };
+    deps.publishPrompt = selectionPrompt(async (_message, options) => {
+      prompted = true;
+      return options[0]!.value;
+    });
     deps.publishScan = publishScan;
 
     expect(
@@ -2125,16 +2103,10 @@ describe("publish scan", () => {
         })),
       }),
     });
-    deps.publishPrompt = {
-      isInteractive: () => true,
-      select: async <Value extends string>(
-        _message: string,
-        choices: readonly { value: Value }[],
-      ): Promise<Value> => {
-        prompted = true;
-        return choices[0]!.value;
-      },
-    };
+    deps.publishPrompt = selectionPrompt(async (_message, choices) => {
+      prompted = true;
+      return choices[0]!.value;
+    });
     deps.publishScan = publishScan;
 
     expect(

@@ -6,34 +6,14 @@ import { delimiter, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 const testPosix = process.platform === "win32" ? test.skip : test;
-const publicEntrypoint = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "docker",
-  "entrypoint.sh",
-);
-const entrypoint = existsSync(publicEntrypoint)
-  ? publicEntrypoint
-  : join(import.meta.dir, "..", "public-repo", "docker", "entrypoint.sh");
-const publicVersionVerifier = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "docker",
-  "verify-container-release-version.sh",
-);
-const versionVerifier = existsSync(publicVersionVerifier)
-  ? publicVersionVerifier
-  : join(
-      import.meta.dir,
-      "..",
-      "public-repo",
-      "docker",
-      "verify-container-release-version.sh",
-    );
+function dockerScript(name: string): string {
+  const canonical = join(import.meta.dir, "..", "..", "..", "docker", name);
+  return existsSync(canonical)
+    ? canonical
+    : join(import.meta.dir, "..", "public-repo", "docker", name);
+}
+const entrypoint = dockerScript("entrypoint.sh");
+const versionVerifier = dockerScript("verify-container-release-version.sh");
 async function runEntrypoint(
   args: readonly string[],
   overrides: Record<string, string> = {},
@@ -68,7 +48,7 @@ async function runEntrypoint(
 async function runVersionVerifier(
   response: string,
   failure = false,
-  expectedDigest?: string,
+  digest?: string,
 ): Promise<SpawnSyncReturns<string> & { workflowOutput: string }> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-container-version-")),
@@ -103,7 +83,7 @@ async function runVersionVerifier(
         versionVerifier,
         endpoint,
         "0.1.4",
-        ...(expectedDigest ? [expectedDigest] : []),
+        ...(digest === undefined ? [] : [digest]),
       ],
       {
         encoding: "utf8",
@@ -156,6 +136,14 @@ describe("customer container entrypoint", () => {
   testPosix("accepts CSVs after global and bulk-scan options", async () => {
     for (const arguments_ of [
       ["bulk-scan", "--workers", "2", "/input/repositories.csv"],
+      ["bulk-scan", "--config", "settings.json", "/input/repositories.csv"],
+      ["bulk-scan", "-c", "settings.json", "/input/repositories.csv"],
+      [
+        "bulk-scan",
+        "--validation-prompt-file",
+        "prompt.md",
+        "/input/repositories.csv",
+      ],
       ["bulk-scan", "--max-cost", "12.50", "/input/repositories.csv"],
       ["bulk-scan", "bulk-scan", "--output-dir", "/output"],
       [
@@ -206,6 +194,9 @@ describe("customer container entrypoint", () => {
       for (const arguments_ of [
         ["bulk-scan"],
         ["bulk-scan", "--workers", "8"],
+        ["bulk-scan", "--config", "settings.json"],
+        ["bulk-scan", "-c", "settings.json"],
+        ["bulk-scan", "--validation-prompt-file", "prompt.md"],
         ["bulk-scan", "--max-cost", "12.50"],
         ["bulk-scan", "--scan-prompt-file", "prompt.md"],
         ["bulk-scan", "--post-scan-prompt-file", "post-prompt.md"],
@@ -250,6 +241,7 @@ describe("immutable customer container releases", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Synthetic package lookup failed.");
     expect(result.stderr).toContain("refusing to publish");
+    expect(result.workflowOutput).toBe("");
   });
 
   testPosix("rejects an existing immutable release version", async () => {
@@ -264,6 +256,7 @@ describe("immutable customer container releases", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Container version 0.1.4 already exists");
+    expect(result.workflowOutput).toBe("");
   });
 
   testPosix(
@@ -334,7 +327,12 @@ describe("immutable customer container releases", () => {
   testPosix(
     "publishes older stable versions without moving latest backwards",
     async () => {
-      for (const tags of [["0.1.5", "latest"], ["0.10.0"], ["1.0.0"]]) {
+      for (const tags of [
+        ["0.1.5", "latest"],
+        ["0.1.10"],
+        ["0.10.0"],
+        ["1.0.0"],
+      ]) {
         const result = await runVersionVerifier(
           `[]\n${JSON.stringify([{ metadata: { container: { tags } } }])}`,
         );
@@ -350,5 +348,25 @@ describe("immutable customer container releases", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("refusing to publish");
+    expect(result.workflowOutput).toBe("");
   });
 });
+
+testPosix(
+  "retries promotion only for the same verified manifest digest",
+  async () => {
+    const digest = `sha256:${"a".repeat(64)}`;
+    const response = JSON.stringify([
+      { name: digest, metadata: { container: { tags: ["0.1.4", "latest"] } } },
+    ]);
+    expect((await runVersionVerifier(response, false, digest)).status).toBe(0);
+    expect(
+      (await runVersionVerifier(response, false, `sha256:${"b".repeat(64)}`))
+        .status,
+    ).toBe(1);
+    expect((await runVersionVerifier(response, false, "invalid")).status).toBe(
+      1,
+    );
+    expect((await runVersionVerifier(response, true, digest)).status).toBe(1);
+  },
+);

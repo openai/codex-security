@@ -21,6 +21,10 @@ function run(command, args, options) {
   });
 }
 
+/**
+ * @param {string} consumer
+ * @param {NodeJS.ProcessEnv} environment
+ */
 export async function verifyInstalledPackage(consumer, environment) {
   const installedRoot = join(
     consumer,
