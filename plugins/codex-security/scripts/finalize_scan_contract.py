@@ -1592,6 +1592,10 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
                 raise ContractError(f"{evidence_context}.id: duplicate code-evidence id")
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
+            if evidence_key == "codeEvidence":
+                _require_safe_relative_path(
+                    _require_str(evidence, "path", evidence_context), f"{evidence_context}.path"
+                )
 
     referenced_sections = [
         (section_name, finding.get(section_name))

@@ -457,6 +457,10 @@ function validateCanonicalContract(
       }
     }
 
+    for (const [index, evidence] of (finding.codeEvidence ?? []).entries()) {
+      safeRelativePath(evidence.path, `${context}.codeEvidence[${index}].path`);
+    }
+
     const fingerprint = `codex-security/v1:sha256:${hash(
       "sha256",
       [
