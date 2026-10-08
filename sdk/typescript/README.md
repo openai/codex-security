@@ -340,9 +340,10 @@ const result = await security.validate({
 console.log(result.disposition, result.report);
 ```
 
-Pass finding text or a JSON-serializable object, not a file path. Validation uses
-the client's settings and credentials without changing repository files or
-adding a scan to history.
+Pass finding text or a JSON-serializable object, not a file path. Standalone
+validation uses source evidence in a read-only, offline session. It does not build
+the target, execute application code, run tests or PoCs, or add a scan to history.
+The assessment is returned directly; no reports or runtime artifacts are created.
 
 The disposition is `reportable`, `suppressed`, `not_applicable`, or `deferred`.
 `reportable` can rely on static analysis; `deferred` means there is insufficient

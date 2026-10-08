@@ -541,10 +541,29 @@ describe("CodexSecurity finding validation", () => {
           model: "test-model",
           model_reasoning_effort: "high",
           features: { plugins: false },
+          default_permissions: "codex_security_validation",
+          web_search: "disabled",
+          approval_policy: "never",
           analytics: { enabled: false },
           responses_api_metadata: { codex_security_surface: "sdk" },
         },
       });
+      expect(
+        captured.codex?.configOverrides?.map((override) => parseToml(override)),
+      ).toEqual([
+        {
+          permissions: {
+            codex_security_validation: {
+              filesystem: {
+                ":root": "read",
+                ":workspace_roots": "read",
+                [captured.codex!.env!["CODEX_HOME"]!]: { ".": "deny" },
+              },
+              network: { enabled: false },
+            },
+          },
+        },
+      ]);
       expect(captured.codex?.env?.["OPENAI_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(

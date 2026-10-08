@@ -1170,7 +1170,8 @@ codex-security scan . --diff origin/main \
 | `130` / `143` | Interrupt / termination.                                              |
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
-`--json`. For GitHub Actions setup, see the
+`--json`. Use `validate --output-schema FILE` for a schema-checked JSON assessment.
+For GitHub Actions setup, see the
 [Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md)
 or the [Bedrock workflow](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md).
 
@@ -1255,16 +1256,31 @@ The token needs code-scanning read access; access failures reject the import.
 
 ## Validate and patch findings
 
-`validate` assesses candidates; `patch` fixes and verifies them. Both accept files
+`validate` assesses candidates from local source evidence without building the
+target, executing application code, running tests or PoCs, or contacting services.
+It uses a read-only sandbox. Standard and Deep scans retain their existing
+validation, and `patch` still fixes and verifies findings. Both commands accept files
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
 
 ```bash
 codex-security validate "Possible SQL injection" --effort high
+codex-security validate findings.json --context-file context.md --output-schema result.schema.json > assessment.json
 codex-security patch OCCURRENCE_ID
 codex-security patch --scan SCAN_ID --severity high --json
 codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 ```
+
+`--context-file PATH` reads a UTF-8 file containing security policy, deployment
+facts, or reviewer feedback. Context is passed separately from findings and checked
+against source evidence. Feedback alone does not dismiss a finding.
+
+By default, `validate` prints a readable assessment. `--output-schema PATH` asks
+Codex for JSON matching a self-contained JSON Schema 2020-12 file and checks the
+completed response against that schema before writing stdout. Invalid JSON or a
+schema mismatch fails the command. Relative paths resolve from the current
+directory. There is no runtime-validation fallback: missing facts are reported as
+proof gaps, and a source-supported finding does not require runtime reproduction.
 
 `--scan latest` uses the current repository's latest completed scan. Patching
 supports JSON for saved findings, literal text, and files. Each finding gets a
