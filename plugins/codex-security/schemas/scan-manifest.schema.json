@@ -3,11 +3,7 @@
   "$id": "https://openai.com/codex-security/schemas/scan-manifest.schema.json",
   "title": "Codex Security sealed scan manifest",
   "type": "object",
-  "required": [
-    "documentType",
-    "schemaVersion",
-    "scan"
-  ],
+  "required": ["documentType", "schemaVersion", "scan"],
   "properties": {
     "documentType": {
       "const": "codex-security.scan-manifest"
@@ -37,10 +33,7 @@
         },
         "producer": {
           "type": "object",
-          "required": [
-            "name",
-            "version"
-          ],
+          "required": ["name", "version"],
           "properties": {
             "name": {
               "type": "string",
@@ -69,11 +62,7 @@
         },
         "target": {
           "type": "object",
-          "required": [
-            "kind",
-            "targetId",
-            "displayName"
-          ],
+          "required": ["kind", "targetId", "displayName"],
           "properties": {
             "kind": {
               "enum": [
@@ -119,37 +108,26 @@
                 }
               },
               "then": {
-                "required": [
-                  "revision"
-                ]
+                "required": ["revision"]
               }
             },
             {
               "if": {
                 "properties": {
                   "kind": {
-                    "enum": [
-                      "git_worktree",
-                      "git_diff",
-                      "directory_snapshot"
-                    ]
+                    "enum": ["git_worktree", "git_diff", "directory_snapshot"]
                   }
                 }
               },
               "then": {
-                "required": [
-                  "snapshotDigest"
-                ]
+                "required": ["snapshotDigest"]
               }
             }
           ]
         },
         "scope": {
           "type": "object",
-          "required": [
-            "includePaths",
-            "excludePaths"
-          ],
+          "required": ["includePaths", "excludePaths"],
           "properties": {
             "includePaths": {
               "type": "array",
@@ -196,57 +174,102 @@
           }
         },
         "threatModel": {
-          "type": "object",
-          "required": [
-            "summary"
-          ],
-          "properties": {
-            "summary": {
-              "type": "string",
-              "minLength": 1
-            },
-            "assets": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
+          "description": "Retained threat-model content. Existing structured models remain supported; Markdown documents preserve their complete original body.",
+          "anyOf": [
+            {
+              "type": "object",
+              "required": ["summary"],
+              "properties": {
+                "summary": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "assets": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "trustBoundaries": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "attackerCapabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "securityObjectives": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "assumptions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
               }
             },
-            "trustBoundaries": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "attackerCapabilities": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "securityObjectives": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "assumptions": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
+            {
+              "type": "object",
+              "properties": {
+                "format": {
+                  "const": "markdown"
+                },
+                "content": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"
+                },
+                "scope": {
+                  "type": "object",
+                  "description": "The modeled source scope, which may differ from the scan scope. Omit when unknown.",
+                  "properties": {
+                    "includePaths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "excludePaths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "summary": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": ["includePaths"],
+                  "additionalProperties": true
+                },
+                "origin": {
+                  "enum": ["generated", "provided", "reconciled", "recovered"]
+                }
+              },
+              "required": ["format", "content"],
+              "additionalProperties": true
             }
-          }
+          ]
         },
         "hardening": {
           "type": "object",
-          "required": [
-            "portfolioPath"
-          ],
+          "required": ["portfolioPath"],
           "properties": {
             "portfolioPath": {
               "const": "hardening/hardening.md"
@@ -264,11 +287,7 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": [
-              "path",
-              "sha256",
-              "mediaType"
-            ],
+            "required": ["path", "sha256", "mediaType"],
             "properties": {
               "path": {
                 "type": "string",
@@ -293,9 +312,7 @@
             "artifacts": {
               "contains": {
                 "type": "object",
-                "required": [
-                  "path"
-                ],
+                "required": ["path"],
                 "properties": {
                   "path": {
                     "const": "findings.json"
@@ -312,9 +329,7 @@
             "artifacts": {
               "contains": {
                 "type": "object",
-                "required": [
-                  "path"
-                ],
+                "required": ["path"],
                 "properties": {
                   "path": {
                     "const": "coverage.json"

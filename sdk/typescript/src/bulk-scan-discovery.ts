@@ -17,6 +17,7 @@ const GITHUB_REPOSITORIES_QUERY = `
         after: $cursor
         isArchived: false
         isFork: false
+        ownerAffiliations: [OWNER]
         orderBy: { field: PUSHED_AT, direction: DESC }
       ) {
         nodes {
@@ -297,8 +298,7 @@ async function discoverGitHubRepositories(
 function repositoryId(fullName: string): string {
   const id = fullName.replace("/", "--");
   if (id.length <= 128) return id;
-  const hash = createHash("sha256").update(fullName).digest("hex").slice(0, 16);
-  return `${id.slice(0, 111)}-${hash}`;
+  return `${id.slice(0, 111)}-${createHash("sha256").update(fullName).digest("hex").slice(0, 16)}`;
 }
 
 async function validateWizardOutput(outputDir: string): Promise<void> {
@@ -326,7 +326,7 @@ async function validateWizardOutput(outputDir: string): Promise<void> {
   }
 }
 
-function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
+export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
   const context = (signal?: AbortSignal) => {
     const stream = new Writable({
       write(chunk: Buffer, _encoding, callback) {

@@ -23,6 +23,15 @@ from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json
 
 
+def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
+    name = name.strip()
+    if not name:
+        raise SystemExit("Scan name cannot be empty.")
+    connection.execute("UPDATE scans SET name = ? WHERE id = ?", (name, scan["id"]))
+    connection.commit()
+    return {"scanId": scan["id"], "name": name}
+
+
 def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
     if scan["recipe_json"] is None:
         raise SystemExit("This scan does not have a saved launch recipe.")
@@ -48,16 +57,10 @@ def preserve_sealed_completion(
 
 
 def cli_scan_resume(
+    wb: Any,
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     workspace: sqlite3.Row,
-    *,
-    parse_scan_recipe: Callable[[str, Path], dict[str, Any]],
-    scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
-    require_scan_directory: Callable[[Path], Path],
-    artifact_path: Callable[..., Path | None],
-    read_json_object: Callable[[Path], dict[str, Any]],
-    workbench_completion_binding: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     if scan["mode"] != "deep" or scan["recipe_json"] is None:
         raise SystemExit("Resume requires a Deep Scan with a saved CLI launch recipe.")
@@ -94,13 +97,13 @@ def cli_scan_resume(
         scan["target_inode"],
     ):
         raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
-    recipe = parse_scan_recipe(scan["recipe_json"], repository)
-    scan_dir = require_scan_directory(Path(scan["scan_dir"]))
+    recipe = wb.parse_scan_recipe(scan["recipe_json"], repository)
+    scan_dir = wb.require_canonical_scan_directory(Path(scan["scan_dir"]))
     progress = connection.execute(
         "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan["id"],)
     ).fetchone()
     result = {
-        "contract": scan_contract(scan),
+        "contract": wb.scan_contract(scan),
         "recipe": recipe,
         "scanDir": str(scan_dir),
         "scanId": scan["id"],
@@ -114,16 +117,16 @@ def cli_scan_resume(
     # Active coordinators may still be writing drafts. Validate sealed results
     # before attaching to a coordinator that has finished.
     if run is not None and run["status"] == "succeeded":
-        manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+        manifest_path = wb.artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
         if manifest_path is not None:
-            manifest = read_json_object(manifest_path)
+            manifest = wb.read_json_object(manifest_path)
             manifest_scan = manifest.get("scan")
             if isinstance(manifest_scan, dict) and (
                 manifest_scan.get("sealedAt") is not None
                 or manifest_scan.get("artifacts") is not None
             ):
                 try:
-                    binding = workbench_completion_binding(scan, scan["started_at"], manifest)
+                    binding = wb.workbench_completion_binding(scan, scan["started_at"], manifest)
                     _prepare_scan_finalization(
                         scan_dir,
                         expected_coverage_mode=binding["coverageMode"],
@@ -201,6 +204,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
+    connection.create_function("casefold", 1, str.casefold, deterministic=True)
     if os.name == "nt":
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
@@ -261,12 +265,13 @@ def list_scans(
         query = args.query.strip().casefold()
         if query:
             clauses.append(
-                "(instr(lower(scans.target_path), ?) > 0 "
-                "OR instr(lower(COALESCE(scans.target_summary, '')), ?) > 0 "
-                "OR instr(lower(scans.scope), ?) > 0 "
-                "OR instr(lower(scans.mode), ?) > 0)"
+                "(instr(casefold(scans.target_path), ?) > 0 "
+                "OR instr(casefold(COALESCE(scans.name, '')), ?) > 0 "
+                "OR instr(casefold(COALESCE(scans.target_summary, '')), ?) > 0 "
+                "OR instr(casefold(scans.scope), ?) > 0 "
+                "OR instr(casefold(scans.mode), ?) > 0)"
             )
-            values.extend((query, query, query, query))
+            values.extend((query, query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     paginated = args is not None and (args.limit is not None or args.offset != 0)
     limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX) if paginated else None
@@ -309,6 +314,7 @@ def list_scans(
                 "handoffStatus": row["handoff_status"],
                 "mode": row["mode"],
                 "model": row["model"],
+                "name": row["name"],
                 "parentScanId": row["parent_scan_id"],
                 "progress": {
                     "candidates": {"reportable": row["reportable_findings_count"]},
@@ -1087,6 +1093,7 @@ def finding_occurrence_rows(
     severity: str | None = None,
     status: str | None = None,
 ) -> list[sqlite3.Row]:
+    connection.create_function("casefold", 1, str.casefold, deterministic=True)
     conditions, values = finding_occurrence_conditions(
         scan_id, query=query, severity=severity, status=status
     )
@@ -1141,12 +1148,12 @@ def finding_occurrence_conditions(
         search = query.strip().casefold()
         if search:
             conditions.append(
-                "(instr(lower(occurrences.title), ?) > 0 "
-                "OR instr(lower(occurrences.summary), ?) > 0 "
+                "(instr(casefold(occurrences.title), ?) > 0 "
+                "OR instr(casefold(occurrences.summary), ?) > 0 "
                 "OR EXISTS ("
                 "SELECT 1 FROM finding_locations AS locations "
                 "WHERE locations.occurrence_id = occurrences.id "
-                "AND instr(lower(locations.relative_path), ?) > 0))"
+                "AND instr(casefold(locations.relative_path), ?) > 0))"
             )
             values.extend((search, search, search))
     return " AND ".join(conditions), values

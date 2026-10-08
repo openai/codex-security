@@ -1,12 +1,5 @@
-import {
-  lstat,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { once } from "node:events";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Octokit } from "@octokit/core";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -15,24 +8,16 @@ import {
   type BulkScanDiscoveryDependencies,
   type BulkScanPrompt,
 } from "../src/bulk-scan-discovery.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-bulk-discovery-",
+  false,
+);
 const NOW = Date.parse("2026-07-22T12:00:00.000Z");
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-bulk-discovery-"));
-  temporaryDirectories.push(root);
-  return root;
-}
+afterEach(cleanup);
 
 class FakePrompt implements BulkScanPrompt {
   public readonly messages: string[] = [];
@@ -97,6 +82,7 @@ class FakePrompt implements BulkScanPrompt {
 
 interface Repository {
   fullName: string;
+  affiliation?: "OWNER" | "COLLABORATOR";
   visibility?: "private" | "internal" | "public";
   archived?: boolean;
   fork?: boolean;
@@ -206,7 +192,13 @@ function discoveryDependencies(
               }
 
               const visible = repositories.filter(
-                ({ archived, fork }) => !archived && !fork,
+                ({ archived, fork, affiliation }) =>
+                  !archived &&
+                  !fork &&
+                  !(
+                    affiliation === "COLLABORATOR" &&
+                    /ownerAffiliations:\s*\[OWNER\]/u.test(body.query)
+                  ),
               );
               const start = Number(body.variables?.cursor ?? 0);
               const page = visible.slice(start, start + 100);
@@ -395,16 +387,23 @@ describe("bulk scan repository discovery", () => {
     const root = await temporaryDirectory();
     const { dependencies, prompt, requests } = discoveryDependencies(root, {
       organizations: ["acme"],
+      repositories: [
+        { fullName: "personal-account/owned", affiliation: "OWNER" },
+        { fullName: "another-owner/collaborated", affiliation: "COLLABORATOR" },
+      ],
     });
     prompt.confirms = [true];
     prompt.choices = ["personal-account"];
 
-    await runBulkScanWizard(dependencies);
+    const result = await runBulkScanWizard(dependencies);
 
     expect(prompt.searchOptions[0]).toEqual(["acme", "personal-account"]);
     expect(
       requests.find(({ path }) => path === "/graphql")?.variables?.owner,
     ).toBe("personal-account");
+    const csv = await readFile(result!.inputPath, "utf8");
+    expect(csv).toContain("personal-account/owned");
+    expect(csv).not.toContain("another-owner/collaborated");
   });
 
   test("includes organizations beyond the first GitHub results page", async () => {
@@ -509,12 +508,10 @@ describe("bulk scan repository discovery", () => {
     const canceled = new Error("Setup canceled");
     prompt.beforeAnswer = async (signal) => {
       if (prompt.signals.length !== stage) return;
-      await new Promise<void>((_resolve, reject) => {
-        signal?.addEventListener("abort", () => reject(signal.reason), {
-          once: true,
-        });
-        started.resolve();
-      });
+      const waiting = once(signal!, "abort");
+      started.resolve();
+      await waiting;
+      throw signal!.reason;
     };
 
     const wizard = runBulkScanWizard(dependencies, controller.signal);

@@ -1,24 +1,14 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 from pathlib import Path
-from types import ModuleType
 
 import pytest
+from workbench_test_support import load_script
 
+pytestmark = pytest.mark.native_windows
 
-def load_windows_scan_local_files() -> ModuleType:
-    script = Path(__file__).resolve().parent.parent / "scripts" / "windows_scan_local_files.py"
-    spec = importlib.util.spec_from_file_location("windows_scan_local_files", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-WINDOWS_FILES = load_windows_scan_local_files()
+WINDOWS_FILES = load_script("windows_scan_local_files")
 
 
 @pytest.mark.parametrize(
@@ -57,6 +47,13 @@ def test_native_windows_backend_writes_reads_replaces_and_deletes(tmp_path: Path
     )
     with os.fdopen(descriptor, "rb") as handle:
         assert handle.read() == b"first"
+
+    descriptor, filename = WINDOWS_FILES.open_read_fd_with_path(
+        scan_dir, "exports/RESULTS.sarif", "native Windows spelling test"
+    )
+    with os.fdopen(descriptor, "rb") as handle:
+        assert handle.read() == b"first"
+    assert filename == "exports/results.sarif"
 
     WINDOWS_FILES.atomic_write(scan_dir, "exports/results.sarif", b"replacement")
     assert (scan_dir / "exports" / "results.sarif").read_bytes() == b"replacement"

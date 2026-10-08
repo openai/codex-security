@@ -1,23 +1,31 @@
-use napi::bindgen_prelude::{BigInt, Buffer};
+use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::{
-    ffi::OsString,
-    fs::{self, File, TryLockError},
-    io::{self, Read, Seek, SeekFrom, Write},
+    ffi::{CStr, OsString},
+    fs::{self, File},
+    io::{self, Read, Write},
     mem::{offset_of, size_of, MaybeUninit},
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
         fs::FileTypeExt,
-        io::{AsRawHandle, FromRawHandle},
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     ptr::{copy_nonoverlapping, null, null_mut},
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, SetLastError, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
-        ERROR_LOCK_VIOLATION, HANDLE, INVALID_HANDLE_VALUE,
+        GetLastError, LocalFree, SetLastError, ERROR_INVALID_HANDLE, HANDLE, INVALID_HANDLE_VALUE,
+    },
+    Security::{
+        Authorization::{
+            ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            SDDL_REVISION_1,
+        },
+        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, TOKEN_QUERY,
+        TOKEN_USER,
     },
     Storage::FileSystem::*,
+    System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 
 fn invalid(message: &str) -> napi::Error {
@@ -230,12 +238,6 @@ pub struct IdentityResult {
 }
 
 #[napi(object)]
-pub struct PositionResult {
-    pub error: u32,
-    pub value: String,
-}
-
-#[napi(object)]
 pub struct PathResult {
     pub error: u32,
     pub path: Buffer,
@@ -280,14 +282,72 @@ pub fn open_windows_file(
 }
 
 #[napi]
-pub fn create_windows_directory(path: Buffer) -> napi::Result<u32> {
-    let path = wide_path(path)?;
-    Ok(status(unsafe { CreateDirectoryW(path.as_ptr(), null()) }))
+pub fn create_windows_directories(path: Buffer) -> napi::Result<u32> {
+    Ok(io_status(fs::create_dir_all(os_string(path)?)))
 }
 
 #[napi]
-pub fn create_windows_directories(path: Buffer) -> napi::Result<u32> {
-    Ok(io_status(fs::create_dir_all(os_string(path)?)))
+pub fn create_private_windows_directory(path: Buffer) -> napi::Result<u32> {
+    let path = wide_path(path)?;
+    let mut token = null_mut();
+    let error = status(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) });
+    if error != 0 {
+        return Ok(error);
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    // TOKEN_USER is followed by the SID; use Windows' defined maximum SID size.
+    #[repr(C)]
+    struct TokenUserBuffer {
+        user: TOKEN_USER,
+        sid: [u8; SECURITY_MAX_SID_SIZE as usize],
+    }
+    let mut user = TokenUserBuffer {
+        user: TOKEN_USER::default(),
+        sid: [0; SECURITY_MAX_SID_SIZE as usize],
+    };
+    let mut length = 0;
+    let error = status(unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            (&mut user as *mut TokenUserBuffer).cast(),
+            size_of::<TokenUserBuffer>() as u32,
+            &mut length,
+        )
+    });
+    if error != 0 {
+        return Ok(error);
+    }
+    let mut sid = null_mut();
+    let error = status(unsafe { ConvertSidToStringSidA(user.user.User.Sid, &mut sid) });
+    if error != 0 {
+        return Ok(error);
+    }
+    let descriptor = format!(
+        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{})",
+        unsafe { CStr::from_ptr(sid.cast()) }.to_str().unwrap()
+    );
+    unsafe { LocalFree(sid.cast()) };
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        ..Default::default()
+    };
+    // Match the credential-home policy: current user, SYSTEM and administrators.
+    let descriptor = descriptor.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let error = status(unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor.as_ptr(),
+            SDDL_REVISION_1,
+            &mut attributes.lpSecurityDescriptor,
+            null_mut(),
+        )
+    });
+    if error != 0 {
+        return Ok(error);
+    }
+    let error = status(unsafe { CreateDirectoryW(path.as_ptr(), &attributes) });
+    unsafe { LocalFree(attributes.lpSecurityDescriptor) };
+    Ok(error)
 }
 
 #[napi]
@@ -366,11 +426,7 @@ impl WindowsHandle {
             if length < capacity {
                 return Ok(PathResult {
                     error: 0,
-                    path: path[..length as usize]
-                        .iter()
-                        .flat_map(|unit| unit.to_le_bytes())
-                        .collect::<Vec<_>>()
-                        .into(),
+                    path: wide_bytes(path[..length as usize].iter().copied()),
                 });
             }
             path.resize(length as usize + 1, 0);
@@ -396,56 +452,6 @@ impl WindowsHandle {
         Ok(io_count(self.file().and_then(|mut file| {
             file.write(&buffer[offset..offset + length as usize])
         })))
-    }
-
-    #[napi]
-    pub fn seek(&self, distance: BigInt, origin: u32) -> napi::Result<PositionResult> {
-        let (distance, lossless) = distance.get_i64();
-        if !lossless {
-            return Err(invalid("Seek offset must fit a signed 64-bit integer"));
-        }
-        let result = self.file().and_then(|mut file| {
-            let position = match origin {
-                FILE_BEGIN => SeekFrom::Start(distance as u64),
-                FILE_CURRENT => SeekFrom::Current(distance),
-                FILE_END => SeekFrom::End(distance),
-                _ => return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32)),
-            };
-            file.seek(position)
-        });
-        Ok(match result {
-            Ok(value) => PositionResult {
-                error: 0,
-                value: (value as i64).to_string(),
-            },
-            Err(error) => PositionResult {
-                error: io_error(error),
-                value: "0".to_owned(),
-            },
-        })
-    }
-
-    #[napi]
-    pub fn size(&self) -> PositionResult {
-        let mut value = 0;
-        let error = status(unsafe { GetFileSizeEx(self.raw(), &mut value) });
-        PositionResult {
-            error,
-            value: value.to_string(),
-        }
-    }
-
-    #[napi]
-    pub fn set_end_of_file(&self) -> u32 {
-        io_status(self.file().and_then(|mut file| {
-            let position = file.stream_position()?;
-            file.set_len(position)
-        }))
-    }
-
-    #[napi]
-    pub fn flush(&self) -> u32 {
-        io_status(self.file().and_then(File::sync_all))
     }
 
     #[napi]
@@ -492,26 +498,5 @@ impl WindowsHandle {
                 size_of::<FILE_DISPOSITION_INFO>() as u32,
             )
         })
-    }
-
-    #[napi]
-    pub fn lock(&self, nonblocking: bool) -> u32 {
-        io_status(self.file().and_then(|file| {
-            if nonblocking {
-                file.try_lock().map_err(|error| match error {
-                    TryLockError::WouldBlock => {
-                        io::Error::from_raw_os_error(ERROR_LOCK_VIOLATION as i32)
-                    }
-                    TryLockError::Error(error) => error,
-                })
-            } else {
-                file.lock()
-            }
-        }))
-    }
-
-    #[napi]
-    pub fn unlock(&self) -> u32 {
-        io_status(self.file().and_then(File::unlock))
     }
 }

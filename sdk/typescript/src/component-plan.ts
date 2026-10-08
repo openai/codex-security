@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
-import type { ScanAuthMode } from "./api.js";
+import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import {
   runReadOnlyCodex,
@@ -12,6 +12,7 @@ import {
 } from "./scan-comparison.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import {
+  nullIfMissingFile,
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
@@ -21,28 +22,28 @@ import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 /** @internal */
-export const componentPlanSchema = z
-  .object({
-    components: z
-      .array(
-        z
-          .object({
-            name: z.string().trim().min(1),
-            paths: z.array(z.string().min(1)).min(1),
-          })
-          .strict(),
-      )
-      .min(1),
-  })
-  .strict();
+export const componentPlanSchema = z.strictObject({
+  components: z
+    .array(
+      z.strictObject({
+        name: z.string().trim().min(1),
+        paths: z.array(z.string().min(1)).min(1),
+      }),
+    )
+    .min(1),
+});
 
 export interface ComponentPlan {
   components: Array<{ name: string; paths: string[] }>;
 }
 
 export interface ComponentPlanningOptions {
+  /** @internal Calling surface, inherited from the component scan. */
+  surface?: CodexSecuritySurface;
   /** @internal Authentication already selected by the calling scan. */
   auth?: ScanAuthMode;
+  /** @internal Cyber access program already selected by the calling scan. */
+  cyberAccessProgram?: ReadOnlyCodexOptions["cyberAccessProgram"];
   config?: CodexSecurityConfig;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -80,7 +81,8 @@ export async function planComponents(
       z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
       { ...options, config: options.config ?? {}, workingDirectory: tmpdir() },
       {
-        surface: "cli",
+        surface: options.surface ?? "sdk",
+        command: "scan-components",
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
       },
     );
@@ -292,10 +294,7 @@ async function inventoryFiles(
     for (const path of stdout.split("\0").filter(Boolean)) {
       signal?.throwIfAborted();
       const metadata = await lstat(join(repository, path)).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        },
+        nullIfMissingFile,
       );
       if (metadata?.isFile()) files.push(join(repository, path));
     }

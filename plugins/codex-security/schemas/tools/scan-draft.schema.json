@@ -40,10 +40,7 @@
           "$ref": "#/$defs/text"
         }
       },
-      "required": [
-        "path",
-        "startLine"
-      ],
+      "required": ["path", "startLine"],
       "additionalProperties": true
     },
     "identity": {
@@ -58,22 +55,14 @@
           "pattern": "^[a-z0-9][a-z0-9._/-]*$"
         }
       },
-      "required": [
-        "anchor"
-      ],
+      "required": ["anchor"],
       "additionalProperties": true
     },
     "severity": {
       "type": "object",
       "properties": {
         "level": {
-          "enum": [
-            "critical",
-            "high",
-            "medium",
-            "low",
-            "informational"
-          ]
+          "enum": ["critical", "high", "medium", "low", "informational"]
         },
         "score": {
           "type": "number",
@@ -93,29 +82,20 @@
           "$ref": "#/$defs/text"
         }
       },
-      "required": [
-        "level"
-      ],
+      "required": ["level"],
       "additionalProperties": true
     },
     "confidence": {
       "type": "object",
       "properties": {
         "level": {
-          "enum": [
-            "high",
-            "medium",
-            "low"
-          ]
+          "enum": ["high", "medium", "low"]
         },
         "rationale": {
           "$ref": "#/$defs/text"
         }
       },
-      "required": [
-        "level",
-        "rationale"
-      ],
+      "required": ["level", "rationale"],
       "additionalProperties": true
     },
     "taxonomy": {
@@ -130,10 +110,7 @@
           "description": "Copy the reviewed candidate's exact cwe_ids array. Use an empty array when no CWE is established; do not invent one."
         }
       },
-      "required": [
-        "category",
-        "cwe"
-      ],
+      "required": ["category", "cwe"],
       "additionalProperties": true
     },
     "codeEvidence": {
@@ -171,14 +148,7 @@
           "$ref": "#/$defs/text"
         }
       },
-      "required": [
-        "id",
-        "label",
-        "path",
-        "startLine",
-        "code",
-        "explanation"
-      ],
+      "required": ["id", "label", "path", "startLine", "code", "explanation"],
       "additionalProperties": true
     },
     "legacyCodeEvidence": {
@@ -191,10 +161,7 @@
           "$ref": "#/$defs/text"
         }
       },
-      "required": [
-        "id",
-        "code"
-      ],
+      "required": ["id", "code"],
       "additionalProperties": true
     },
     "findingAssessment": {
@@ -469,9 +436,7 @@
               "pattern": "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$"
             }
           },
-          "required": [
-            "reportPath"
-          ],
+          "required": ["reportPath"],
           "additionalProperties": true
         },
         "codeEvidence": {
@@ -507,9 +472,7 @@
                   "$ref": "#/$defs/textList"
                 }
               },
-              "required": [
-                "summary"
-              ],
+              "required": ["summary"],
               "additionalProperties": true
             }
           ]
@@ -576,7 +539,9 @@
           "properties": {
             "sourceFindingIds": {
               "type": "array",
-              "items": { "$ref": "#/$defs/text" },
+              "items": {
+                "$ref": "#/$defs/text"
+              },
               "uniqueItems": true,
               "description": "Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once."
             },
@@ -585,8 +550,13 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "id": { "$ref": "#/$defs/text" },
-                  "finding": { "type": "object", "additionalProperties": true }
+                  "id": {
+                    "$ref": "#/$defs/text"
+                  },
+                  "finding": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
                 },
                 "required": ["id", "finding"],
                 "additionalProperties": false
@@ -598,9 +568,7 @@
               "description": "The actual finding producer. Use local_plugin only for a finding discovered by this plugin."
             }
           },
-          "required": [
-            "source"
-          ],
+          "required": ["source"],
           "additionalProperties": true
         },
         "extensions": {
@@ -648,31 +616,76 @@
       "additionalProperties": true
     },
     "threatModel": {
-      "type": "object",
-      "properties": {
-        "summary": {
-          "$ref": "#/$defs/text"
+      "description": "Retained threat-model content. Existing structured models remain supported; Markdown documents preserve their complete original body.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "#/$defs/text"
+            },
+            "assets": {
+              "$ref": "#/$defs/textList"
+            },
+            "trustBoundaries": {
+              "$ref": "#/$defs/textList"
+            },
+            "attackerCapabilities": {
+              "$ref": "#/$defs/textList"
+            },
+            "securityObjectives": {
+              "$ref": "#/$defs/textList"
+            },
+            "assumptions": {
+              "$ref": "#/$defs/textList"
+            }
+          },
+          "required": ["summary"],
+          "additionalProperties": true
         },
-        "assets": {
-          "$ref": "#/$defs/textList"
-        },
-        "trustBoundaries": {
-          "$ref": "#/$defs/textList"
-        },
-        "attackerCapabilities": {
-          "$ref": "#/$defs/textList"
-        },
-        "securityObjectives": {
-          "$ref": "#/$defs/textList"
-        },
-        "assumptions": {
-          "$ref": "#/$defs/textList"
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "const": "markdown"
+            },
+            "content": {
+              "$ref": "#/$defs/text"
+            },
+            "scope": {
+              "type": "object",
+              "description": "The modeled source scope, which may differ from the scan scope. Omit when unknown.",
+              "properties": {
+                "includePaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "excludePaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "summary": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": ["includePaths"],
+              "additionalProperties": true
+            },
+            "origin": {
+              "enum": ["generated", "provided", "reconciled", "recovered"]
+            }
+          },
+          "required": ["format", "content"],
+          "additionalProperties": true
         }
-      },
-      "required": [
-        "summary"
-      ],
-      "additionalProperties": true
+      ]
     },
     "surface": {
       "type": "object",
@@ -710,10 +723,7 @@
           "$ref": "#/$defs/text"
         }
       },
-      "required": [
-        "label",
-        "disposition"
-      ],
+      "required": ["label", "disposition"],
       "additionalProperties": true
     },
     "coverage": {
@@ -728,11 +738,7 @@
         "receiptRefs": false,
         "completeness": {
           "description": "Use partial if any work is deferred or any surface needs follow-up; use complete only when no such work remains.",
-          "enum": [
-            "complete",
-            "partial",
-            "unknown"
-          ]
+          "enum": ["complete", "partial", "unknown"]
         },
         "inventoryStrategy": false,
         "surfaces": {
@@ -753,14 +759,12 @@
                 "$ref": "#/$defs/text"
               }
             },
-            "required": [
-              "pattern",
-              "reason"
-            ],
+            "required": ["pattern", "reason"],
             "additionalProperties": true
           }
         },
         "deferred": {
+          "description": "Each supplied id identifies one task and must be unique within this draft. Reuse saved IDs in later updates.",
           "type": "array",
           "items": {
             "type": "object",
@@ -781,10 +785,28 @@
                 "$ref": "#/$defs/textList"
               }
             },
+            "required": ["reason"],
+            "additionalProperties": true
+          }
+        },
+        "resolvedDeferred": {
+          "description": "On final Standard or diff drafts, close generic tasks by saved ID and completion reason. Reuse saved surface IDs for updates. Candidate tasks need findings or dispositions; redundant closure entries for those outcomes are ignored.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/text"
+              },
+              "reason": {
+                "$ref": "#/$defs/text"
+              }
+            },
             "required": [
+              "id",
               "reason"
             ],
-            "additionalProperties": true
+            "additionalProperties": false
           }
         },
         "openQuestions": {
@@ -804,9 +826,7 @@
                     "$ref": "#/$defs/text"
                   }
                 },
-                "required": [
-                  "question"
-                ],
+                "required": ["question"],
                 "additionalProperties": true
               }
             ]
@@ -850,11 +870,7 @@
           "$ref": "#/$defs/coverage"
         }
       },
-      "required": [
-        "scanId",
-        "findings",
-        "coverage"
-      ],
+      "required": ["scanId", "findings", "coverage"],
       "additionalProperties": false
     },
     "completedScanInput": {
@@ -867,9 +883,7 @@
           "$ref": "#/$defs/handoffClaimToken"
         }
       },
-      "required": [
-        "scanId"
-      ],
+      "required": ["scanId"],
       "additionalProperties": false
     }
   },

@@ -1,50 +1,25 @@
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import ModuleType
+
+from workbench_test_support import ScanFixtureTestCase, load_script
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SCAN = PLUGIN_ROOT / "examples" / "completed-scan"
 
 
-def load_validator() -> ModuleType:
-    script = PLUGIN_ROOT / "scripts" / "validate_scan_contract.py"
-    spec = importlib.util.spec_from_file_location("validate_scan_contract", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+VALIDATOR = load_script("validate_scan_contract")
 
 
-VALIDATOR = load_validator()
-
-
-class ValidateScanContractTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.scan_dir = Path(self.temp_dir.name) / "scan"
-        shutil.copytree(EXAMPLE_SCAN, self.scan_dir)
-        manifest = json.loads((self.scan_dir / "scan-manifest.json").read_text())
-        findings = json.loads((self.scan_dir / "findings.json").read_text())
-        coverage = json.loads((self.scan_dir / "coverage.json").read_text())
-        report = VALIDATOR.FINALIZER._generate_report_projection(manifest, findings, coverage)
-        (self.scan_dir / "report.md").write_bytes(report)
-
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
-
-    def read_json(self, name: str) -> dict[str, object]:
-        return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
+class ValidateScanContractTest(ScanFixtureTestCase):
+    validator = VALIDATOR
+    example_scan = EXAMPLE_SCAN
 
     def write_json(self, name: str, payload: object) -> None:
         (self.scan_dir / name).write_text(json.dumps(payload, indent=2) + "\n")
@@ -71,9 +46,7 @@ class ValidateScanContractTest(unittest.TestCase):
             for artifact in manifest["scan"]["artifacts"]
             if artifact["path"] == "findings.json"
         )
-        findings_artifact["sha256"] = VALIDATOR.FINALIZER._sha256_file(
-            self.scan_dir / "findings.json"
-        )
+        findings_artifact["sha256"] = self.sha256_file("findings.json")
         self.write_json("scan-manifest.json", manifest)
 
         validated = VALIDATOR.validate_contract(self.scan_dir)
@@ -105,9 +78,7 @@ class ValidateScanContractTest(unittest.TestCase):
                 manifest = self.read_json("scan-manifest.json")
                 for artifact in manifest["scan"]["artifacts"]:
                     if artifact["path"] == "findings.json":
-                        artifact["sha256"] = VALIDATOR.FINALIZER._sha256_file(
-                            self.scan_dir / "findings.json"
-                        )
+                        artifact["sha256"] = self.sha256_file("findings.json")
                         break
                 self.write_json("scan-manifest.json", manifest)
 

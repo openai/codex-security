@@ -1,3 +1,6 @@
+import { isRecord } from "./record.js";
+import { isSafeNonNegativeInteger } from "./value.js";
+
 export interface ScanCost {
   model: string;
   inputTokens: number;
@@ -49,6 +52,38 @@ export interface ScanTokenUsage {
   total_tokens: number;
 }
 
+const BEDROCK_MODEL_PRICING: Readonly<
+  Record<
+    string,
+    {
+      short: ModelPricing;
+      long?: ModelPricing;
+      unitsPerUsd: number;
+      source: string;
+      asOf: string;
+    }
+  >
+> = {
+  // AWS commercial in-region Standard prices already include the 10% fee.
+  "openai.gpt-daybreak-blue-5.6-sol": {
+    short: [4_400, 440, 5_500, 22_000],
+    long: [8_800, 880, 11_000, 33_000],
+    unitsPerUsd: 1_000_000_000,
+    source:
+      "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
+    asOf: "2026-10-01",
+  },
+  "openai.gpt-5.6-cyber": {
+    // Half-nanodollar units preserve the $17.1875/M cache-write rate exactly,
+    // including an odd number of cache-write tokens.
+    short: [27_500, 2_750, 34_375, 165_000],
+    unitsPerUsd: 2_000_000_000,
+    source:
+      "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html",
+    asOf: "2026-10-01",
+  },
+};
+
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   // GPT-5.5 has no additional cache-write charge.
   "gpt-5.5": [5_000, 500, 5_000, 30_000],
@@ -61,6 +96,7 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
   "gpt-5.6-luna": [200, 20, 250, 1_200],
   // https://developers.openai.com/api/docs/pricing#cyber-models
+  "gpt-5.6-cyber": [12_500, 1_250, 15_625, 75_000],
   "gpt-daybreak-blue-latest": [4_000, 400, 5_000, 20_000],
   "gpt-daybreak-red-latest": [12_500, 1_250, 15_625, 75_000],
 };
@@ -84,13 +120,17 @@ const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
     "gpt-daybreak-blue-latest": [8_000, 800, 10_000, 30_000],
   };
 
-function usdPerMillionTokens(pricing: ModelPricing): TokenPrices {
+function usdPerMillionTokens(
+  pricing: ModelPricing,
+  unitsPerUsd: number,
+): TokenPrices {
   const [input, cacheRead, cacheWrite, output] = pricing;
+  const unitsPerMillion = unitsPerUsd / 1_000_000;
   return {
-    input: input / 1_000,
-    cacheRead: cacheRead / 1_000,
-    cacheWrite: cacheWrite / 1_000,
-    output: output / 1_000,
+    input: input / unitsPerMillion,
+    cacheRead: cacheRead / unitsPerMillion,
+    cacheWrite: cacheWrite / unitsPerMillion,
+    output: output / unitsPerMillion,
   };
 }
 
@@ -102,9 +142,9 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   const legacyCacheWrite = value["cache_write_tokens"];
   const cacheWrite =
     canonicalCacheWrite === 0 &&
-    isTokenCount(input) &&
-    isTokenCount(cached) &&
-    isTokenCount(legacyCacheWrite) &&
+    isSafeNonNegativeInteger(input) &&
+    isSafeNonNegativeInteger(cached) &&
+    isSafeNonNegativeInteger(legacyCacheWrite) &&
     legacyCacheWrite > 0 &&
     cached + legacyCacheWrite <= input
       ? legacyCacheWrite
@@ -112,11 +152,11 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   const output = value["output_tokens"];
   const reasoning = value["reasoning_output_tokens"] ?? 0;
   if (
-    !isTokenCount(input) ||
-    !isTokenCount(cached) ||
-    !isTokenCount(cacheWrite) ||
-    !isTokenCount(output) ||
-    !isTokenCount(reasoning) ||
+    !isSafeNonNegativeInteger(input) ||
+    !isSafeNonNegativeInteger(cached) ||
+    !isSafeNonNegativeInteger(cacheWrite) ||
+    !isSafeNonNegativeInteger(output) ||
+    !isSafeNonNegativeInteger(reasoning) ||
     cached + cacheWrite > input ||
     reasoning > output
   ) {
@@ -141,10 +181,13 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
+  const bedrockPricing = BEDROCK_MODEL_PRICING[model];
+  const unitsPerUsd = bedrockPricing?.unitsPerUsd ?? 1_000_000_000;
   const pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
-  const pricing = MODEL_PRICING_NANODOLLARS[pricingModel];
+  const pricing =
+    bedrockPricing?.short ?? MODEL_PRICING_NANODOLLARS[pricingModel];
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;
@@ -155,15 +198,17 @@ export function estimateScanCost(
     output_tokens: outputTokens,
   } = normalized;
 
-  const nanodollars =
+  const costUnits =
     (inputTokens - cachedInputTokens - cacheWriteInputTokens) * inputRate +
     cachedInputTokens * cachedInputRate +
     cacheWriteInputTokens * cacheWriteInputRate +
     outputTokens * outputRate;
-  if (!Number.isSafeInteger(nanodollars)) return null;
+  if (!Number.isSafeInteger(costUnits)) return null;
 
-  const longPricing = LONG_CONTEXT_PRICING_NANODOLLARS[pricingModel];
-  let maximumNanodollars: number | null = null;
+  const longPricing = bedrockPricing
+    ? bedrockPricing.long
+    : LONG_CONTEXT_PRICING_NANODOLLARS[pricingModel];
+  let maximumUnits: number | null = null;
   if (longPricing !== undefined) {
     const [longInput, longRead, longWrite, longOutput] = longPricing;
     // Unclassified input may include additional cache writes. Preserve the
@@ -177,7 +222,7 @@ export function estimateScanCost(
       cachedInputTokens * longRead +
       cacheWriteInputTokens * longWrite +
       outputTokens * longOutput;
-    if (Number.isSafeInteger(maximum)) maximumNanodollars = maximum;
+    if (Number.isSafeInteger(maximum)) maximumUnits = maximum;
   }
 
   return {
@@ -189,27 +234,36 @@ export function estimateScanCost(
       ? { cacheWriteInputTokensReported: false }
       : {}),
     outputTokens,
-    estimatedUsd: nanodollars / 1_000_000_000,
+    estimatedUsd: costUnits / unitsPerUsd,
     estimatedUsdRange: {
-      min: nanodollars / 1_000_000_000,
-      max:
-        maximumNanodollars === null ? null : maximumNanodollars / 1_000_000_000,
+      min: costUnits / unitsPerUsd,
+      max: maximumUnits === null ? null : maximumUnits / unitsPerUsd,
       context: "unknown",
     },
     pricing: {
-      source: pricingModel.startsWith("gpt-5.5")
-        ? "https://developers.openai.com/api/docs/models/gpt-5.5"
-        : "https://developers.openai.com/api/docs/pricing",
-      asOf:
-        pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
-          ? "2026-09-30"
-          : "2026-09-14",
+      source: bedrockPricing
+        ? bedrockPricing.source
+        : pricingModel.startsWith("gpt-5.5")
+          ? "https://developers.openai.com/api/docs/models/gpt-5.5"
+          : "https://developers.openai.com/api/docs/pricing",
+      asOf: bedrockPricing
+        ? bedrockPricing.asOf
+        : pricingModel === "gpt-5.6-cyber"
+          ? "2026-10-06"
+          : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
+            ? "2026-09-30"
+            : "2026-09-14",
       serviceTier: "standard",
       context: "short",
-      usdPerMillionTokens: usdPerMillionTokens(pricing),
+      usdPerMillionTokens: usdPerMillionTokens(pricing, unitsPerUsd),
       ...(longPricing === undefined
         ? {}
-        : { longContextUsdPerMillionTokens: usdPerMillionTokens(longPricing) }),
+        : {
+            longContextUsdPerMillionTokens: usdPerMillionTokens(
+              longPricing,
+              unitsPerUsd,
+            ),
+          }),
     },
   };
 }
@@ -288,12 +342,4 @@ export function formatUsd(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 9,
   }).format(value);
-}
-
-function isTokenCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

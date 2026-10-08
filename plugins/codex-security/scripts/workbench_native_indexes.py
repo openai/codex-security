@@ -160,8 +160,10 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         findings.append(
             {
                 **dict(latest),
-                "confirmed_in_latest_scan": latest_scan_by_target.get(latest["target_id"])
-                == latest["scan_id"],
+                "confirmed_in_latest_scan": any(
+                    row["scan_id"] == latest_scan_by_target.get(row["target_id"])
+                    for row in occurrences
+                ),
                 "known_since": scans[0][0],
                 "known_scan_ids": [scan_id for _, scan_id in scans],
                 "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),
@@ -192,10 +194,7 @@ def list_repositories(
 ) -> dict[str, Any]:
     scans = scan_history.list_scans(connection)["scans"]
     scans_by_id = {scan["scanId"]: scan for scan in scans}
-    scan_count_by_target: dict[str, int] = {}
-    for scan in scans:
-        target_id = scan["targetId"]
-        scan_count_by_target[target_id] = scan_count_by_target.get(target_id, 0) + 1
+    scan_count_by_target = dict(Counter(scan["targetId"] for scan in scans))
 
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(

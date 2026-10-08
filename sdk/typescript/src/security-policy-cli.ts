@@ -1,3 +1,4 @@
+import { listenForAbort } from "./cli-signals.js";
 import type { CodexSecurity, ScanAuthMode } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
@@ -73,30 +74,11 @@ export async function runPolicyCommand(
       errorOutput.write(`${message}\n`);
     } catch {}
   };
-  let firstSignalAt = 0;
-  const signalListener = (signal: SignalName) => () => {
-    if (controller.signal.aborted) {
-      // Match scan's handling of duplicate initial signals from launchers.
-      if (
-        controller.signal.reason === signal &&
-        dependencies.now() - firstSignalAt < 500
-      )
-        return;
-      removeSignalListeners();
-      dependencies.forceExit(signal);
-      return;
-    }
-    firstSignalAt = dependencies.now();
-    controller.abort(signal);
-  };
-  const interrupt = signalListener("SIGINT");
-  const terminate = signalListener("SIGTERM");
-  const removeSignalListeners = () => {
-    dependencies.removeSignalListener("SIGINT", interrupt);
-    dependencies.removeSignalListener("SIGTERM", terminate);
-  };
-  dependencies.addSignalListener("SIGINT", interrupt);
-  dependencies.addSignalListener("SIGTERM", terminate);
+  const removeSignalListeners = listenForAbort(
+    dependencies,
+    controller,
+    (signal) => dependencies.forceExit(signal),
+  );
   try {
     const auth =
       interactive && !options.dryRun
@@ -191,7 +173,8 @@ export async function runPolicyCommand(
     if (humanOutput) {
       write(`\nDraft: ${display(draft.draftPath)}`);
       write(`Architecture: ${display(draft.specificationPath)}`);
-      write(`Threat model: ${display(draft.threatModelPath)}`);
+      if (draft.threatModelPath !== null)
+        write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
           "No repository files changed. Review the saved SECURITY.md before copying it into the repository.",
@@ -213,6 +196,7 @@ export async function runPolicyCommand(
         draftPath: draft.draftPath,
         specificationPath: draft.specificationPath,
         threatModelPath: draft.threatModelPath,
+        threatModel: draft.threatModel,
         customPlugin: draft.customPlugin,
         reviewNotes: draft.reviewNotes,
         cost,

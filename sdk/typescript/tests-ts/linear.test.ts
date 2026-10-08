@@ -1,3 +1,4 @@
+import { emptyPage } from "./support/linear-pagination.js";
 import { AuthenticationLinearError, RatelimitedLinearError } from "@linear/sdk";
 import { describe, expect, test } from "bun:test";
 import {
@@ -74,10 +75,7 @@ describe("Linear issue intake", () => {
               title: "Recheck a completed issue",
               description: null,
               url: "https://linear.app/example/issue/SEC-123",
-              comments: async () => ({
-                nodes: [],
-                pageInfo: { hasNextPage: false },
-              }),
+              comments: emptyPage,
             },
           ],
           (value) => (filter = value),
@@ -112,10 +110,7 @@ describe("Linear issue intake", () => {
                 title: "Synthetic finding",
                 description: "Synthetic evidence",
                 url,
-                comments: async () => ({
-                  nodes: [],
-                  pageInfo: { hasNextPage: false },
-                }),
+                comments: emptyPage,
               };
             },
           }) as unknown as LinearImportClient,
@@ -177,9 +172,7 @@ describe("Linear issue intake", () => {
                 comments: async () => ({
                   nodes: [],
                   pageInfo: { hasNextPage: true },
-                  fetchNext: async () => {
-                    throw error;
-                  },
+                  fetchNext: (Promise.reject<never>).bind(Promise, error),
                 }),
               }),
             }) as unknown as LinearImportClient,

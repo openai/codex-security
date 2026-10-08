@@ -5,6 +5,10 @@ export const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
 const internalMarker =
   /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket\x2dfirewall\x2dregistry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef\x2dProprietary|\/Users\/|\/home\/dev-user|flow\.apps\.openai\.org|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
 
+/**
+ * @param {Map<string, Buffer>} archiveFiles
+ * @param {Buffer} [archiveMetadata]
+ */
 export function assertPublicPackageContents(
   archiveFiles,
   archiveMetadata = Buffer.alloc(0),
