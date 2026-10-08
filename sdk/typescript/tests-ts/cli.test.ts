@@ -23,6 +23,8 @@ import type {
 import {
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
+  LocalPluginBootstrapError,
+  PluginBootstrapError,
   DiffTarget,
   InvalidTargetError,
   OutputDirectoryError,
@@ -183,6 +185,45 @@ describe("CLI", () => {
       if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
       else process.env["XDG_DATA_HOME"] = previousDataHome;
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves typed local plugin failure origin and diagnostic details", async () => {
+    const cause = new Error("Synthetic plugin preparation detail.");
+    const localFailure = new LocalPluginBootstrapError(
+      "Synthetic plugin preparation failed.",
+      { cause },
+    );
+    const installerFailure = new PluginBootstrapError(
+      "Synthetic plugin connection failed.",
+    );
+    expect(localFailure).toBeInstanceOf(PluginBootstrapError);
+    expect(localFailure.cause).toBe(cause);
+    expect(installerFailure).not.toBeInstanceOf(LocalPluginBootstrapError);
+    for (const [failure, classification] of [
+      [localFailure, "local"],
+      [installerFailure, "network_error"],
+    ] as const) {
+      for (const format of ["json", "jsonl"] as const) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const deps = dependencies({
+          onRun: () => {
+            throw failure;
+          },
+        });
+        expect(
+          await runCli(["scan", ".", "--verbose", "--format", format], deps),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          status: "failed",
+          code: "SCAN_FAILED",
+        });
+        expect(stderr.text()).toContain(failure.message);
+        expect(stderr.text()).toContain(
+          `scan.failed classification="${classification}"`,
+        );
+        expect(JSON.parse(stdout.text()).message).toContain(failure.message);
+      }
     }
   });
 

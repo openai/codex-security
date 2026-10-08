@@ -1299,6 +1299,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
     "SYNTHETIC_HEADER_VALUE",
+    "CODEX_SQLITE_HOME",
     "XDG_CACHE_HOME",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
@@ -1307,6 +1308,7 @@ async function testWorkerRuntimeSettings() {
     delete process.env.CODEX_API_KEY;
     delete process.env.SYNTHETIC_GATEWAY_KEY;
     delete process.env.SYNTHETIC_HEADER_VALUE;
+    delete process.env.CODEX_SQLITE_HOME;
     for (const [configuration, expected] of cases) {
       const fixture = await fakeCodexFixture(
         deniedWorkerPermissionProfile,
@@ -1470,6 +1472,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 : {
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
+                    CODEX_SQLITE_HOME: path.join(
+                      fixture.root,
+                      `native-state-${index}`,
+                    ),
                   },
             endpoint,
             serviceTier,
@@ -1719,6 +1725,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(invocation.providerHeader, providerHeaders[index]);
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
+            assert.equal(
+              workerLaunch.environment!.CODEX_SQLITE_HOME,
+              workerConfigurations[index].environment?.CODEX_SQLITE_HOME,
+            );
             assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
             assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
             assertConfigOverrides(invocation.argv, {
@@ -2171,6 +2181,9 @@ async function testBedrockCredentialsReachWorker() {
     });
     for (const kind of ["discovery", "dedup"] as const) {
       for (const resumeThreadId of [undefined, "fixture-bedrock-resume"]) {
+        awsEnvironment.AWS_BEARER_TOKEN_BEDROCK = `synthetic-${kind}-${resumeThreadId ?? "fresh"}`;
+        awsEnvironment.AWS_REGION = resumeThreadId ? "us-west-2" : "us-east-2";
+        Object.assign(process.env, awsEnvironment);
         const result = await executor.run(
           workerRequest(promptPath, workingDirectory, { kind, resumeThreadId }),
         );

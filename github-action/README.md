@@ -15,6 +15,10 @@ save this workflow in `.github/workflows/codex-security.yml`.
 Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full SHA of an Action commit.
 When using a fork, replace `openai` with the fork owner.
 
+This example requests Daybreak Blue. Use an API key from a project with Blue
+enabled; without Daybreak access, omit `cyber-access-program` or set it to
+`standard`. See [Daybreak access and refusals](#daybreak-access-and-refusals).
+
 ```yaml
 name: Codex Security repository
 on:
@@ -29,6 +33,7 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
+      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
       - name: Set up the Ubuntu sandbox
         run: |
           sudo apt-get update
@@ -41,6 +46,7 @@ jobs:
         with:
           model: gpt-5.6-sol
           effort: high
+          cyber-access-program: daybreak_blue
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
@@ -50,6 +56,48 @@ The workflow runs weekly on Mondays at 07:23 UTC. To run it manually, use
 Findings are report-only by default. Valid partial results produce a warning;
 scanner and required reporting errors fail the job. Set `fail-on-severity` to
 fail on findings at or above a selected severity when the scan is complete.
+
+### Ubuntu sandbox setup
+
+Codex Security runs commands inside a sandbox to limit their filesystem and
+network access. On the Ubuntu 24.04 runner used above, that sandbox uses
+Bubblewrap (`bwrap`), and Ubuntu's AppArmor policy must allow it to create the
+required isolated environment.
+
+The setup step installs `bubblewrap` and `apparmor-profiles`, then uses
+`apparmor_parser -r` to load the supplied `bwrap-userns-restrict` profile. The
+profile permits Bubblewrap's sandbox setup while retaining Ubuntu's broader
+AppArmor restrictions. Keep this step before the Action: the CLI checks that
+its sandbox works before scanning and fails if it cannot start, for example
+with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.
+
+This setup is specific to the Linux runner. Local macOS scans use the built-in
+Seatbelt sandbox and do not need Bubblewrap. See the
+[sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
+
+## Daybreak access and refusals
+
+Daybreak is optional. You can use the Action with a general-purpose model your
+API key can access under standard safeguards. Some security tasks may trigger
+model refusals or API cybersecurity safety blocks. **If a refusal or safety
+block aborts the scan, the Action fails**, even with `fail-on-severity: none`.
+That setting controls failures caused by findings; it does not suppress scanner
+errors. Check the job summary and logs for the reason. A failed scan does not
+mean the repository has no vulnerabilities.
+
+For authorized security work that needs reduced refusals,
+[request Daybreak access](https://openai.com/form/enterprise-trusted-access-for-cyber/).
+After organization approval, enable the required program for the API project
+and use a key from that project. Daybreak reduces some refusals but does not
+remove every safeguard or guarantee that a scan will complete.
+
+To explicitly select an approved Cyber access program, add
+`cyber-access-program: daybreak_blue` to the scan step's `with` settings.
+The input also accepts `standard` and `daybreak_red`; choose a program supported
+by your model and API project. Leaving it unset preserves CLI defaults.
+Selecting `standard` does not require Daybreak approval. Selecting a Daybreak
+program does not grant access; an unavailable program or incompatible model
+causes the scan to fail.
 
 ## Scan pull requests
 
@@ -76,6 +124,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
       - name: Set up the Ubuntu sandbox
         run: |
           sudo apt-get update
@@ -277,25 +326,26 @@ validation. Verify report compatibility when adopting a new release.
 
 Inputs are strings. Quote booleans and use newline-separated literal paths for lists.
 
-| Input              | Default                   | Meaning                                                                                                                                  |
-| ------------------ | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `repository`       | `${{ github.workspace }}` | Checkout root. Use paths to select folders within the checkout.                                                                          |
-| `scope`            | `repository`              | repository or diff. Select diff for PR changes only; repository scans the full checkout.                                                 |
-| `paths`            | Unset                     | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion.                            |
-| `diff-base`        | Unset                     | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.                                              |
-| `mode`             | `standard`                | standard or deep. Deep supports repository scans, including selected paths; not diff scans.                                              |
-| `model`            | `gpt-5.6-sol`             | Model with access through your API key. Cost limits require CLI pricing support for the model.                                           |
-| `effort`           | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                  |
-| `max-cost`         | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                       |
-| `max-time-hours`   | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.              |
-| `fail-on-severity` | `none`                    | none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail. |
-| `verbose`          | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                           |
-| `dry-run`          | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job. |
-| `summary`          | `true`                    | Write a human-readable job summary.                                                                                                      |
-| `annotations`      | `true`                    | Emit up to 50 source finding annotations; complete findings remain in reports.                                                           |
-| `upload-artifacts` | `false`                   | Upload an allowlist of validated reports. Reports may contain source and vulnerability details.                                          |
-| `artifact-name`    | `codex-security`          | Report artifact name; choose distinct names for matrix jobs and multiple invocations.                                                    |
-| `retention-days`   | `7`                       | Artifact retention, 1–90 days (subject to repository limits).                                                                            |
+| Input                  | Default                   | Meaning                                                                                                                                                                                                                      |
+| ---------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repository`           | `${{ github.workspace }}` | Checkout root. Use paths to select folders within the checkout.                                                                                                                                                              |
+| `scope`                | `repository`              | repository or diff. Select diff for PR changes only; repository scans the full checkout.                                                                                                                                     |
+| `paths`                | Unset                     | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion.                                                                                                                |
+| `diff-base`            | Unset                     | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.                                                                                                                                  |
+| `mode`                 | `standard`                | standard or deep. Deep supports repository scans, including selected paths; not diff scans.                                                                                                                                  |
+| `model`                | `gpt-5.6-sol`             | Model with access through your API key. Cost limits require CLI pricing support for the model.                                                                                                                               |
+| `cyber-access-program` | Unset                     | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
+| `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
+| `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |
+| `max-time-hours`       | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.                                                                                                  |
+| `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail.                                                                                     |
+| `verbose`              | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                                                                                                               |
+| `dry-run`              | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job.                                                                                     |
+| `summary`              | `true`                    | Write a human-readable job summary.                                                                                                                                                                                          |
+| `annotations`          | `true`                    | Emit up to 50 source finding annotations; complete findings remain in reports.                                                                                                                                               |
+| `upload-artifacts`     | `false`                   | Upload an allowlist of validated reports. Reports may contain source and vulnerability details.                                                                                                                              |
+| `artifact-name`        | `codex-security`          | Report artifact name; choose distinct names for matrix jobs and multiple invocations.                                                                                                                                        |
+| `retention-days`       | `7`                       | Artifact retention, 1–90 days (subject to repository limits).                                                                                                                                                                |
 
 ## Outputs
 

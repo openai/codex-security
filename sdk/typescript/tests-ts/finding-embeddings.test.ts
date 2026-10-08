@@ -28,6 +28,33 @@ function vector(axis = 0): number[] {
   return values;
 }
 
+test.each(["headers", "body"])(
+  "preserves cancellation during embedding response %s",
+  async (stage) => {
+    const controller = new AbortController();
+    const canceled = new Error("Synthetic cancellation");
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async (_url, init) => {
+        expect(init.signal).toBe(controller.signal);
+        if (stage === "body") {
+          const response = new Response();
+          response.json = async () => {
+            controller.abort(canceled);
+            throw new TypeError("Canceled body read");
+          };
+          return response;
+        }
+        controller.abort(canceled);
+        throw new TypeError("Canceled transport");
+      },
+      undefined,
+      controller.signal,
+    );
+    await expect(embedder.embed([example])).rejects.toBe(canceled);
+  },
+);
+
 test("uses the configured embedding model and preserves response indexes", async () => {
   const findings = [
     example,
