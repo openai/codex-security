@@ -3,6 +3,30 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test.each([false, true])(
+    "strips terminal controls from severity count labels with color=%p",
+    (color) => {
+      const output = renderScanHistory(
+        {
+          scanId: "synthetic-scan",
+          targetPath: "/synthetic/repository",
+          mode: "standard",
+          progress: { status: "complete" },
+          severityCounts: { critical: 1, ["future\u001b[2J\u001b[H"]: 2 },
+          findings: [],
+        },
+        "show",
+        { color },
+      );
+
+      expect(output).not.toContain("\u001b[2J");
+      expect(output).not.toContain("\u001b[H");
+      const text = stripVTControlCharacters(output);
+      expect(text).toContain("1 CRITICAL");
+      expect(text).toContain("2 FUTURE");
+    },
+  );
+
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {

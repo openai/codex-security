@@ -263,7 +263,7 @@ export function renderScanHistory(
         `  ${Object.entries(summary)
           .filter(([, count]) => count)
           .map(([severity, count]) => {
-            const label = severity.toUpperCase();
+            const label = clean(severity).toUpperCase();
             return paint(
               `${clean(count)} ${label}`,
               SEVERITY_COLORS[label] ?? 37,
