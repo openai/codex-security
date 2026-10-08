@@ -120,7 +120,8 @@ export function findPotentialDuplicates(
                 CASE WHEN scans.id IS NOT NULL THEN json_object(
                   'repositoryId', scans.target_id,
                   'revision', scans.target_revision,
-                  'snapshotDigest', scans.target_snapshot_digest
+                  'snapshotDigest', CASE WHEN scans.diff_target_kind = 'working_tree'
+                    THEN scans.diff_content_digest ELSE scans.target_snapshot_digest END
                 ) END AS source_json,
                 occurrence.details_json AS occurrence_json
          FROM finding_repositories AS repositories

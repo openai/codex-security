@@ -210,20 +210,30 @@ for (const body of ["identical", "reformatted", "changed", "prototype-id"]) {
         "INSERT INTO local_finding_embeddings VALUES (?, 'local-model', '[1, 0]', 'cache')",
       )
       .run(document.findingId);
-    assert.deepEqual(
-      findPotentialDuplicates(database, document.findingId, undefined, {
-        [document.findingId]: "cache",
-      }).sourceSnapshots,
-      body === "changed"
-        ? {}
-        : {
-            [document.findingId]: {
-              repositoryId: "synthetic-repository",
-              revision: "recorded-revision",
-              snapshotDigest: "recorded-snapshot",
+    for (const kind of [null, "working_tree", "commit", "range"]) {
+      const snapshot = kind === null ? "recorded-snapshot" : null;
+      const diffSnapshot =
+        kind === "working_tree" ? "recorded-diff-snapshot" : null;
+      database
+        .prepare(
+          "UPDATE scans SET target_snapshot_digest = ?, diff_target_kind = ?, diff_content_digest = ? WHERE id = 'scan-a'",
+        )
+        .run(snapshot, kind, diffSnapshot);
+      assert.deepEqual(
+        findPotentialDuplicates(database, document.findingId, undefined, {
+          [document.findingId]: "cache",
+        }).sourceSnapshots,
+        body === "changed"
+          ? {}
+          : {
+              [document.findingId]: {
+                repositoryId: "synthetic-repository",
+                revision: "recorded-revision",
+                snapshotDigest: diffSnapshot ?? snapshot,
+              },
             },
-          },
-    );
+      );
+    }
   });
 }
 
