@@ -11,7 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { prepareExternalPublication } from "../src/external-findings-publish.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import { validateImportRequest } from "../src/external-import-contract.js";
@@ -73,6 +74,7 @@ async function fixture(records: unknown = [normalized()]) {
     marker: "generation-1",
     environmentId: "environment-example" as string | null,
     materializeDefaults: false,
+    holdReadback: null as (() => void) | null,
     loseResponse: false,
     brokenReadback: false,
     throttle: false,
@@ -124,6 +126,7 @@ async function fixture(records: unknown = [normalized()]) {
         });
       }
       if (url.pathname.includes("/source_reports/")) {
+        if (state.holdReadback) return state.holdReadback();
         if (state.brokenReadback)
           return json(
             response,
@@ -458,44 +461,213 @@ test("interactive JSON publication shows the destination and exclusions before c
   expect(JSON.parse(cli.stdout.text()).counts.created).toBe(1);
 });
 
-test("saved request survives an actual publisher process restart after a committed response is lost", async () => {
-  const f = await fixture();
-  const runner = join(f.root, "run-cli.ts");
-  const cliUrl = pathToFileURL(join(import.meta.dir, "../src/cli.ts")).href;
-  const fixturesUrl = pathToFileURL(
-    join(import.meta.dir, "cli-fixtures.ts"),
-  ).href;
-  await writeFile(
-    runner,
-    `import { main } from ${JSON.stringify(cliUrl)};\nimport { dependencies } from ${JSON.stringify(fixturesUrl)};\nprocess.exitCode = await main(process.argv.slice(2), process.stdout, process.stderr, { ...dependencies({ environment: process.env }), cloudFetch: (url, init) => fetch('http://127.0.0.1:${f.port}' + new URL(url).pathname + new URL(url).search, init) });\n`,
-  );
-  async function run() {
-    const process = Bun.spawn(
-      [Bun.which("bun")!, runner, ...f.command, "--yes"],
-      { env: f.environment, stdout: "pipe", stderr: "pipe" },
+test.each([false, true])(
+  "saved request survives a publisher process restart (abrupt: %p)",
+  async (abrupt) => {
+    const f = await fixture();
+    const runner = join(f.root, "run-cli.ts");
+    const cliUrl = pathToFileURL(join(import.meta.dir, "../src/cli.ts")).href;
+    const fixturesUrl = pathToFileURL(
+      join(import.meta.dir, "cli-fixtures.ts"),
+    ).href;
+    await writeFile(
+      runner,
+      `import { main } from ${JSON.stringify(cliUrl)};\nimport { dependencies } from ${JSON.stringify(fixturesUrl)};\nprocess.exitCode = await main(process.argv.slice(2), process.stdout, process.stderr, { ...dependencies({ environment: process.env }), cloudFetch: (url, init) => fetch('http://127.0.0.1:${f.port}' + new URL(url).pathname + new URL(url).search, init) });\n`,
     );
-    const [code, stdout, stderr] = await Promise.all([
-      process.exited,
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
+    function run() {
+      const process = Bun.spawn(
+        [Bun.which("bun")!, runner, ...f.command, "--yes"],
+        { env: f.environment, stdout: "pipe", stderr: "pipe" },
+      );
+      const result = Promise.all([
+        process.exited,
+        new Response(process.stdout).text(),
+        new Response(process.stderr).text(),
+      ]).then(([code, stdout, stderr]) => ({ code, stdout, stderr }));
+      return { process, result };
+    }
+    const readback = Promise.withResolvers<void>();
+    if (abrupt) f.state.holdReadback = () => readback.resolve();
+    else f.state.loseResponse = true;
+    const first = run();
+    if (abrupt) {
+      await readback.promise;
+      first.process.kill("SIGKILL");
+    }
+    const lost = await first.result;
+    expect(lost.code).not.toBe(0);
+    if (!abrupt) {
+      expect(lost.code).toBe(2);
+      expect(lost.stderr).toContain("resume the saved request");
+    }
+    expect(f.reports.size).toBe(1);
+    const firstBody = f.posts[0];
+    f.state.holdReadback = null;
+    const second = await run().result;
+    expect(second.code).toBe(0);
+    expect(f.posts[1]).toBe(firstBody);
+    expect(f.receipts.size).toBe(1);
+    expect(JSON.parse(second.stdout).counts.created).toBe(1);
+  },
+);
+
+function observeLockContention() {
+  const contended = Promise.withResolvers<void>();
+  const original = Database.prototype.exec;
+  const spy = spyOn(Database.prototype, "exec").mockImplementation(function (
+    this: Database,
+    ...args: Parameters<typeof original>
+  ) {
+    try {
+      return original.apply(this, args);
+    } catch (error) {
+      if (
+        args[0] === "BEGIN EXCLUSIVE" &&
+        (error as { code?: string }).code === "SQLITE_BUSY"
+      )
+        contended.resolve();
+      throw error;
+    }
+  });
+  return { contended: contended.promise, restore: () => spy.mockRestore() };
+}
+
+async function pauseAtReadback(f: Awaited<ReturnType<typeof fixture>>) {
+  const arrived = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const completion = (
+    await prepareExternalPublication(f.file, options, {
+      ...f.deps,
+      fetch: async (url, init) => {
+        if (new URL(url).pathname.includes("/source_reports/")) {
+          arrived.resolve();
+          await release.promise;
+        }
+        return f.deps.fetch(url, init);
+      },
+    })
+  ).publish();
+  await Promise.race([
+    arrived.promise,
+    completion.then(() => {
+      throw new Error("Publication completed without a source readback.");
+    }),
+  ]);
+  return { completion, release };
+}
+
+test("overlapping retries cannot delete a newer pending submission or roll back newer evidence", async () => {
+  const f = await fixture();
+  f.state.brokenReadback = true;
+  await expect(
+    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+  ).rejects.toThrow("resume the saved request");
+  f.state.brokenReadback = false;
+  const { completion: first, release } = await pauseAtReadback(f);
+  const observer = observeLockContention();
+  const second = (
+    await prepareExternalPublication(f.file, options, f.deps)
+  ).publish();
+  try {
+    await Promise.race([
+      observer.contended,
+      second.then(() => {
+        throw new Error("Concurrent publication skipped the active lock.");
+      }),
     ]);
-    return { code, stdout, stderr };
+    expect(f.posts).toHaveLength(2);
+    release.resolve();
+    await Promise.all([first, second]);
+  } finally {
+    release.resolve();
+    observer.restore();
+    await Promise.allSettled([first, second]);
   }
+  const newer = await prepareExternalPublication(f.file, options, f.deps);
   f.state.loseResponse = true;
-  const lost = await run();
-  expect(lost.code).toBe(2);
-  expect({
-    size: f.reports.size,
-    error: lost.stderr.includes("resume the saved request")
-      ? "resumable"
-      : lost.stderr,
-  }).toEqual({ size: 1, error: "resumable" });
-  const firstBody = f.posts[0];
-  const second = await run();
-  expect(second.code).toBe(0);
-  expect(f.posts[1]).toBe(firstBody);
-  expect(f.receipts.size).toBe(1);
-  expect(JSON.parse(second.stdout).counts.created).toBe(1);
+  await expect(newer.publish()).rejects.toThrow("resume the saved request");
+  const acceptedBody = f.posts.at(-1);
+  await writeFile(f.file, JSON.stringify([normalized("vendor-1", "critical")]));
+  await (await prepareExternalPublication(f.file, options, f.deps)).publish();
+  await writeFile(f.file, JSON.stringify([normalized()]));
+  const retry = await prepareExternalPublication(f.file, options, f.deps);
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.requests[0]!.request_id).toBe(
+    newer.preview.requests[0]!.request_id,
+  );
+  await retry.publish();
+  expect(f.posts.at(-1)).toBe(acceptedBody);
+  expect(f.reports.get("vendor-1")?.evidence.severity).toBe("critical");
+});
+
+test("reset retirement waits for the active publisher before removing its saved request", async () => {
+  const f = await fixture();
+  const { completion: active, release } = await pauseAtReadback(f);
+  f.state.marker = "generation-2";
+  f.state.environmentId = "replacement-environment";
+  f.state.brokenReadback = true;
+  const observer = observeLockContention();
+  const reset = prepareExternalPublication(f.file, options, f.deps);
+  const resetResult = reset.then(
+    () => "unexpected-success",
+    (error: Error) => error.message,
+  );
+  try {
+    await Promise.race([
+      observer.contended,
+      resetResult.then(() => {
+        throw new Error("Reset skipped the active publication lock.");
+      }),
+    ]);
+    expect(f.posts).toHaveLength(1);
+    release.resolve();
+    await expect(active).rejects.toThrow("resume the saved request");
+    expect(await resetResult).toContain("retired without uploading");
+  } finally {
+    release.resolve();
+    observer.restore();
+    await Promise.allSettled([active, resetResult]);
+  }
+  f.state.brokenReadback = false;
+  f.reports.clear();
+  const fresh = await prepareExternalPublication(f.file, options, f.deps);
+  expect(fresh.preview.resumed).toBe(false);
+  expect((await fresh.publish()).counts.created).toBe(1);
+});
+
+test("canceling a waiting publisher preserves the active request", async () => {
+  const f = await fixture();
+  const { completion: active, release } = await pauseAtReadback(f);
+  const controller = new AbortController();
+  const observer = observeLockContention();
+  const waiting = (
+    await prepareExternalPublication(f.file, options, {
+      ...f.deps,
+      signal: controller.signal,
+    })
+  ).publish();
+  try {
+    await Promise.race([
+      observer.contended,
+      waiting.then(() => {
+        throw new Error("Concurrent publication skipped the active lock.");
+      }),
+    ]);
+    controller.abort();
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    expect(f.posts).toHaveLength(1);
+    const retry = await prepareExternalPublication(f.file, options, f.deps);
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests[0]!.request_id).toBe(
+      JSON.parse(f.posts[0]!).request_id,
+    );
+    release.resolve();
+    expect((await active).counts.created).toBe(1);
+  } finally {
+    release.resolve();
+    observer.restore();
+    await Promise.allSettled([active, waiting]);
+  }
 });
 
 test("readback failure retains the accepted request; a retry replays its outcome", async () => {

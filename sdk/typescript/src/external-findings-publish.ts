@@ -1,6 +1,17 @@
 import { hash, randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { chmodSync } from "node:fs";
+import {
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+} from "node:fs/promises";
+import { createRequire } from "node:module";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { readCloudCredentials } from "./cloud-publish.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -82,6 +93,51 @@ class CloudImportError extends CodexSecurityError {
     message: string,
   ) {
     super(message);
+  }
+}
+
+async function withImportLock<T>(
+  state: string,
+  key: string,
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await mkdir(state, { recursive: true, mode: 0o700 });
+  await validatePreparedOutputDir(state, undefined, true);
+  const path = join(state, `${key}.lock.sqlite`);
+  const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (metadata && !metadata.isFile())
+    throw new CodexSecurityError("The publication lock is not a regular file.");
+  const require = createRequire(import.meta.url);
+  const Database = (
+    process.versions["bun"]
+      ? require("bun:sqlite").Database
+      : require("node:sqlite").DatabaseSync
+  ) as new (path: string) => { exec(sql: string): void; close(): void };
+  const guard = new Database(path);
+  try {
+    if (process.platform !== "win32") chmodSync(path, 0o600);
+    guard.exec("PRAGMA busy_timeout = 0");
+    for (;;) {
+      signal?.throwIfAborted();
+      try {
+        // Keep this inode across invocations. SQLite releases the transaction
+        // on process exit, so a paused publisher cannot lose its lock to a lease.
+        guard.exec("BEGIN EXCLUSIVE");
+        break;
+      } catch (error) {
+        const sqliteError = error as { code?: string; errcode?: number };
+        if (sqliteError.errcode !== 5 && sqliteError.code !== "SQLITE_BUSY")
+          throw error;
+        await delay(50, undefined, { signal });
+      }
+    }
+    return await operation();
+  } finally {
+    guard.close();
   }
 }
 
@@ -186,9 +242,8 @@ export async function prepareExternalPublication(
   const pendingPath = join(state, `${key}.pending.json`);
   let saved: SavedSubmission | undefined;
   try {
-    const content = JSON.parse(
-      await readFile(pendingPath, "utf8"),
-    ) as SavedSubmission;
+    const serialized = await readFile(pendingPath, "utf8");
+    const content = JSON.parse(serialized) as SavedSubmission;
     if (
       content.accountId !== credentials.account_id ||
       !Array.isArray(content.requests) ||
@@ -221,7 +276,15 @@ export async function prepareExternalPublication(
       if (submission.repository.reset_marker !== destination.reset_marker) {
         // The old request is never sent after reset. A subsequent explicit
         // invocation prepares a fresh submission and asks for approval again.
-        await rm(pendingPath);
+        await withImportLock(state, key, dependencies.signal, async () => {
+          const current = await readFile(pendingPath, "utf8").catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return undefined;
+              throw error;
+            },
+          );
+          if (current === serialized) await rm(pendingPath);
+        });
         throw new CloudImportError(
           409,
           "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
@@ -320,142 +383,143 @@ export async function prepareExternalPublication(
   return {
     preview,
     async publish() {
-      await mkdir(state, { recursive: true, mode: 0o700 });
-      await validatePreparedOutputDir(state, undefined, true);
-      // Install a fully written file atomically. A crash during serialization
-      // must not leave a partial request that cannot be resumed.
-      const pendingTemporary = `${pendingPath}.${randomUUID()}.tmp`;
-      const pendingFile = await open(pendingTemporary, "wx", 0o600);
-      try {
-        await pendingFile.writeFile(JSON.stringify(submission));
-        await pendingFile.sync();
-      } finally {
-        await pendingFile.close();
-      }
-      try {
-        await link(pendingTemporary, pendingPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const other = JSON.parse(
-          await readFile(pendingPath, "utf8"),
-        ) as SavedSubmission;
-        if (canonicalJson(other) !== canonicalJson(submission)) {
-          throw new CodexSecurityError(
-            "Another publication prepared this input. Run the command again to review and resume that saved request.",
-          );
+      return await withImportLock(state, key, dependencies.signal, async () => {
+        // Install a fully written file atomically. A crash during serialization
+        // must not leave a partial request that cannot be resumed.
+        const pendingTemporary = `${pendingPath}.${randomUUID()}.tmp`;
+        const pendingFile = await open(pendingTemporary, "wx", 0o600);
+        try {
+          await pendingFile.writeFile(JSON.stringify(submission));
+          await pendingFile.sync();
+        } finally {
+          await pendingFile.close();
         }
-      } finally {
-        await rm(pendingTemporary, { force: true });
-      }
-      const receipts: FindingImportReceipt[] = [];
-      try {
-        for (const batch of requests) {
-          const receipt = validateImportReceipt(
-            await request("/finding_imports", batch),
-          );
-          if (
-            receipt.id !== batch.request_id ||
-            canonicalJson(receipt.repository) !==
-              canonicalJson(batch.repository) ||
-            canonicalJson(receipt.source) !== canonicalJson(batch.source) ||
-            receipt.item_count !== batch.items.length ||
-            receipt.results.length !== batch.items.length ||
-            receipt.results.some(
-              (item, index) => item.client_id !== batch.items[index]!.client_id,
-            )
-          )
+        try {
+          await link(pendingTemporary, pendingPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const other = JSON.parse(
+            await readFile(pendingPath, "utf8"),
+          ) as SavedSubmission;
+          if (canonicalJson(other) !== canonicalJson(submission)) {
             throw new CodexSecurityError(
-              "Cloud returned a receipt for a different publication.",
+              "Another publication prepared this input. Run the command again to review and resume that saved request.",
             );
-          const actual = { created: 0, updated: 0, unchanged: 0, error: 0 };
-          for (const result of receipt.results) {
-            actual[result.outcome]++;
-            if (result.outcome === "error") {
-              if (
-                !result.error ||
-                result.source_report_id !== null ||
-                result.observation_id !== null ||
-                result.canonical_finding_id !== null ||
-                result.version !== null
-              )
-                throw new CodexSecurityError(
-                  "Cloud returned inconsistent item error fields.",
-                );
-            } else if (
-              result.error !== null ||
-              !result.source_report_id ||
-              !result.observation_id ||
-              !result.canonical_finding_id ||
-              result.version === null
-            )
-              throw new CodexSecurityError(
-                "Cloud returned an incomplete saved finding.",
-              );
           }
-          if (canonicalJson(receipt.counts) !== canonicalJson(actual))
-            throw new CodexSecurityError(
-              "Cloud returned inconsistent publication counts.",
-            );
-          receipts.push(receipt);
+        } finally {
+          await rm(pendingTemporary, { force: true });
         }
-        // Verify readable source records without mistaking a newer concurrent
-        // observation for failure of the original, immutable import receipt.
-        for (const [batchIndex, receipt] of receipts.entries()) {
-          for (const [index, item] of receipt.results.entries()) {
-            if (item.outcome === "error") continue;
-            const report = validateSourceReport(
-              await request(
-                `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
-              ),
+        const receipts: FindingImportReceipt[] = [];
+        try {
+          for (const batch of requests) {
+            const receipt = validateImportReceipt(
+              await request("/finding_imports", batch),
             );
             if (
-              report.canonical_finding_id !== item.canonical_finding_id ||
-              report.version < item.version! ||
-              (report.version === item.version &&
-                (report.observation_id !== item.observation_id ||
-                  canonicalJson(report.evidence) !==
-                    canonicalJson(
-                      requests[batchIndex]!.items[index]!.evidence,
-                    ))) ||
-              report.source_finding_id !==
-                requests[batchIndex]!.items[index]!.source_finding_id ||
-              report.repo_id !== destination.id ||
-              report.repo_connector_id !== destination.repo_connector_id ||
-              canonicalJson(report.source) !== canonicalJson(source)
+              receipt.id !== batch.request_id ||
+              canonicalJson(receipt.repository) !==
+                canonicalJson(batch.repository) ||
+              canonicalJson(receipt.source) !== canonicalJson(batch.source) ||
+              receipt.item_count !== batch.items.length ||
+              receipt.results.length !== batch.items.length ||
+              receipt.results.some(
+                (item, index) =>
+                  item.client_id !== batch.items[index]!.client_id,
+              )
             )
               throw new CodexSecurityError(
-                "Cloud readback did not match the saved finding identity.",
+                "Cloud returned a receipt for a different publication.",
               );
+            const actual = { created: 0, updated: 0, unchanged: 0, error: 0 };
+            for (const result of receipt.results) {
+              actual[result.outcome]++;
+              if (result.outcome === "error") {
+                if (
+                  !result.error ||
+                  result.source_report_id !== null ||
+                  result.observation_id !== null ||
+                  result.canonical_finding_id !== null ||
+                  result.version !== null
+                )
+                  throw new CodexSecurityError(
+                    "Cloud returned inconsistent item error fields.",
+                  );
+              } else if (
+                result.error !== null ||
+                !result.source_report_id ||
+                !result.observation_id ||
+                !result.canonical_finding_id ||
+                result.version === null
+              )
+                throw new CodexSecurityError(
+                  "Cloud returned an incomplete saved finding.",
+                );
+            }
+            if (canonicalJson(receipt.counts) !== canonicalJson(actual))
+              throw new CodexSecurityError(
+                "Cloud returned inconsistent publication counts.",
+              );
+            receipts.push(receipt);
           }
+          // Verify readable source records without mistaking a newer concurrent
+          // observation for failure of the original, immutable import receipt.
+          for (const [batchIndex, receipt] of receipts.entries()) {
+            for (const [index, item] of receipt.results.entries()) {
+              if (item.outcome === "error") continue;
+              const report = validateSourceReport(
+                await request(
+                  `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
+                ),
+              );
+              if (
+                report.canonical_finding_id !== item.canonical_finding_id ||
+                report.version < item.version! ||
+                (report.version === item.version &&
+                  (report.observation_id !== item.observation_id ||
+                    canonicalJson(report.evidence) !==
+                      canonicalJson(
+                        requests[batchIndex]!.items[index]!.evidence,
+                      ))) ||
+                report.source_finding_id !==
+                  requests[batchIndex]!.items[index]!.source_finding_id ||
+                report.repo_id !== destination.id ||
+                report.repo_connector_id !== destination.repo_connector_id ||
+                canonicalJson(report.source) !== canonicalJson(source)
+              )
+                throw new CodexSecurityError(
+                  "Cloud readback did not match the saved finding identity.",
+                );
+            }
+          }
+        } catch (error) {
+          if (error instanceof CloudImportError && error.status === 409)
+            await rm(pendingPath, { force: true });
+          throw new CodexSecurityError(
+            `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}`}`,
+            { cause: error },
+          );
         }
-      } catch (error) {
-        if (error instanceof CloudImportError && error.status === 409)
-          await rm(pendingPath, { force: true });
-        throw new CodexSecurityError(
-          `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}`}`,
-          { cause: error },
-        );
-      }
-      const counts = { created: 0, updated: 0, unchanged: 0, error: 0 };
-      for (const receipt of receipts)
-        for (const outcome of Object.keys(counts) as (keyof typeof counts)[])
-          counts[outcome] += receipt.counts[outcome] ?? 0;
-      const result = {
-        receipts,
-        counts,
-        cloudUrl: `https://chatgpt.com/codex/cloud/security/findings?repo=${encodeURIComponent(destination.url)}&source=imported&provider=${source.provider}`,
-      };
-      const temporary = `${pendingPath}.${randomUUID()}.tmp`;
-      const file = await open(temporary, "wx", 0o600);
-      try {
-        await file.writeFile(JSON.stringify(result));
-        await file.sync();
-      } finally {
-        await file.close();
-      }
-      await rename(temporary, join(state, `${key}.result.json`));
-      await rm(pendingPath, { force: true });
-      return result;
+        const counts = { created: 0, updated: 0, unchanged: 0, error: 0 };
+        for (const receipt of receipts)
+          for (const outcome of Object.keys(counts) as (keyof typeof counts)[])
+            counts[outcome] += receipt.counts[outcome] ?? 0;
+        const result = {
+          receipts,
+          counts,
+          cloudUrl: `https://chatgpt.com/codex/cloud/security/findings?repo=${encodeURIComponent(destination.url)}&source=imported&provider=${source.provider}`,
+        };
+        const temporary = `${pendingPath}.${randomUUID()}.tmp`;
+        const file = await open(temporary, "wx", 0o600);
+        try {
+          await file.writeFile(JSON.stringify(result));
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+        await rename(temporary, join(state, `${key}.result.json`));
+        await rm(pendingPath, { force: true });
+        return result;
+      });
     },
   };
 }
