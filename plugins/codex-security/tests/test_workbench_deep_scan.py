@@ -3967,6 +3967,7 @@ def test_saturated_run_without_manifest_can_be_marked_failed_or_interrupted(
     scan = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert scan["progress"]["status"] == "failed"
     assert scan["failureMessage"] == terminal["error"]
+    assert scan["logCompletedAt"] == terminal["completedAt"]
 
 
 def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path) -> None:

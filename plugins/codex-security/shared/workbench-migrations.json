@@ -393,5 +393,10 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
     ]
+  },
+  {
+    "version": 48,
+    "name": "persist scan log completion boundaries",
+    "statements": ["ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"]
   }
 ]

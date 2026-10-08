@@ -1923,10 +1923,11 @@ def fail_deep_scan_locked(
         parent_update = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
+                log_completed_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (message, timestamp, timestamp, scan_id),
+            (message, timestamp, timestamp, timestamp, scan_id),
         )
         if parent_update.rowcount != 1:
             raise SystemExit("Deep Scan failure could not be persisted to its parent scan.")

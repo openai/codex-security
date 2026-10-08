@@ -88,6 +88,7 @@ EXPECTED_MIGRATIONS = [
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
     (47, "snapshot deep scan discovery context"),
+    (48, "persist scan log completion boundaries"),
 ]
 
 
@@ -961,6 +962,33 @@ def test_scan_model_migration_preserves_existing_scans() -> None:
     assert scan["model"] is None
     assert scan["reasoning_effort"] is None
     assert scan["completion_warnings_json"] == "[]"
+
+
+def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
+    connection, apply_migrations = create_historical_database(48)
+    connection.execute(
+        "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
+    )
+    for status in ("running", "complete", "failed"):
+        connection.execute(
+            "INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, "
+            "scan_dir, status, phase, started_at, completed_at, created_at, updated_at) "
+            "VALUES (?, 'workspace', '/synthetic/repository', 'revision', '.', 'standard', "
+            "?, ?, 'reporting', 'started', ?, 'created', 'later-edit')",
+            (
+                status,
+                f"/synthetic/{status}",
+                status,
+                None if status == "running" else "artifact-time",
+            ),
+        )
+    connection.commit()
+    before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+
+    apply_migrations(connection)
+
+    after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+    assert after == [{**row, "log_completed_at": None} for row in before]
 
 
 def test_deep_discovery_error_migration_backfills_each_existing_threshold() -> None:

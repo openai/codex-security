@@ -258,6 +258,85 @@ describe("saved scan logs", () => {
     },
   );
 
+  test.each(["2026-08-11T12:03:00.000Z", null, undefined])(
+    "uses the saved log boundary for resumed turns and workers: %p",
+    async (logCompletedAt) => {
+      const home = await temporaryHome();
+      const scanDirectory = join(home, "scans", "resumed");
+      const resumed = [
+        {
+          timestamp: "2026-08-11T12:02:00.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "resume-turn" },
+        },
+        commandEvent("resumed scan work", "resume-call"),
+      ];
+      const followup = [
+        {
+          timestamp: "2026-08-11T12:04:00.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "followup-turn" },
+        },
+        commandEvent("post-scan followup", "post-call"),
+      ];
+      await writeSession(
+        home,
+        "parent",
+        [...resumed, ...followup],
+        undefined,
+        "2026-08-11T12:00:00.000Z",
+        scanDirectory,
+      );
+      for (const [threadId, startedAt, directory] of [
+        [
+          "resumed-worker",
+          "2026-08-11T12:02:00.000Z",
+          join(scanDirectory, "artifacts"),
+        ],
+        [
+          "followup-worker",
+          "2026-08-11T12:04:00.000Z",
+          join(scanDirectory, "artifacts"),
+        ],
+        [
+          "unrelated-worker",
+          "2026-08-11T12:02:00.000Z",
+          join(home, "other-scan", "artifacts"),
+        ],
+      ] as const) {
+        await writeSession(home, threadId, [], undefined, startedAt, directory);
+      }
+
+      const result = await readSavedScanLogs(
+        {
+          scanId: "resumed-scan",
+          mode: "deep",
+          scanDir: scanDirectory,
+          continuationThreadId: "parent",
+          executionThreadIds: ["parent"],
+          progress: {
+            status: "complete",
+            updatedAt: "2026-08-11T12:01:00.000Z",
+          },
+          updatedAt: "2026-08-11T12:05:00.000Z",
+          ...(logCompletedAt === undefined ? {} : { logCompletedAt }),
+        },
+        home,
+      );
+
+      const expected =
+        logCompletedAt == null ? [...resumed, ...followup] : resumed;
+      expect(
+        result.events.filter(({ threadId }) => threadId === "parent").slice(1),
+      ).toEqual(expected.map((event) => ({ threadId: "parent", event })));
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+        logCompletedAt == null
+          ? ["followup-worker", "parent", "resumed-worker"]
+          : ["parent", "resumed-worker"],
+      );
+    },
+  );
+
   test("feedback returns an empty log set when no scan threads are recorded", async () => {
     const home = await temporaryHome();
     await writeSession(home, "unrelated", []);

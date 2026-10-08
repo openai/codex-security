@@ -33,6 +33,7 @@ export type ScanLogSource = JsonObject & {
   executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
+  logCompletedAt?: string | null;
   progress?: { status?: string; updatedAt?: string };
 };
 
@@ -61,7 +62,7 @@ export function readSavedScanLogs(
         : scan.progress?.status === "complete" ||
             scan.progress?.status === "failed" ||
             scan.progress?.status === "canceled"
-          ? (scan.progress.updatedAt ?? "")
+          ? (scan.logCompletedAt ?? null)
           : "",
   });
 }
@@ -175,7 +176,7 @@ export async function readScanLogs(options: ScanLogOptions) {
     sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
-  // Artifact completion can precede the scan turn's final response. Keep that
+  // Recorded completion can precede the scan turn's final response. Keep that
   // turn's remaining events, then stop before a post-completion turn starts.
   const completionBoundary = sessionStartedAt(options.completedAt);
   for (const session of sessions) {
