@@ -48,7 +48,7 @@ async function runEntrypoint(
 async function runVersionVerifier(
   response: string,
   failure = false,
-  digest?: string,
+  expectedDigest?: string,
 ): Promise<SpawnSyncReturns<string> & { workflowOutput: string }> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-container-version-")),
@@ -83,7 +83,7 @@ async function runVersionVerifier(
         versionVerifier,
         endpoint,
         "0.1.4",
-        ...(digest === undefined ? [] : [digest]),
+        ...(expectedDigest === undefined ? [] : [expectedDigest]),
       ],
       {
         encoding: "utf8",
@@ -264,44 +264,70 @@ describe("immutable customer container releases", () => {
     async () => {
       const digest = `sha256:${"a".repeat(64)}`;
       for (const newer of [false, true]) {
-        const versions = [
-          { name: digest, metadata: { container: { tags: ["0.1.4"] } } },
-          ...(newer
-            ? [
-                {
-                  name: `sha256:${"b".repeat(64)}`,
-                  metadata: { container: { tags: ["0.2.0", "latest"] } },
+        for (const latest of ["same", "different", "missing"]) {
+          const versions = [
+            {
+              name: digest,
+              metadata: {
+                container: {
+                  tags: ["0.1.4", ...(latest === "same" ? ["latest"] : [])],
                 },
-              ]
-            : []),
-        ];
-        const result = await runVersionVerifier(
-          `[]\n${JSON.stringify(versions)}`,
-          false,
-          digest,
-        );
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.workflowOutput).toBe(`publish_latest=${!newer}\n`);
+              },
+            },
+            {
+              name: `sha256:${"b".repeat(64)}`,
+              metadata: {
+                container: {
+                  tags: [
+                    ...(newer ? ["0.2.0"] : []),
+                    ...(latest === "different" ? ["latest"] : []),
+                  ],
+                },
+              },
+            },
+          ];
+          const result = await runVersionVerifier(
+            `[]\n${JSON.stringify(versions)}`,
+            false,
+            digest,
+          );
+          const allowed = newer || latest === "same";
+          expect(result.status, JSON.stringify({ newer, latest })).toBe(
+            allowed ? 0 : 1,
+          );
+          expect(result.workflowOutput).toBe(
+            allowed ? `publish_latest=${!newer}\n` : "",
+          );
+          if (allowed) expect(result.stderr).toBe("");
+        }
       }
     },
   );
 
   testPosix(
-    "rejects a retry with a different or missing published digest",
+    "requires every existing version tag to match a valid verified digest",
     async () => {
       const digest = `sha256:${"a".repeat(64)}`;
-      for (const name of [`sha256:${"b".repeat(64)}`, undefined]) {
+      for (const [name, verified] of [
+        [`sha256:${"b".repeat(64)}`, digest],
+        [undefined, digest],
+        ["invalid", "invalid"],
+      ] as const) {
         const result = await runVersionVerifier(
           JSON.stringify([
+            {
+              name: verified,
+              metadata: { container: { tags: ["0.1.4", "latest"] } },
+            },
             { name, metadata: { container: { tags: ["0.1.4"] } } },
+            { metadata: { container: { tags: ["0.2.0"] } } },
           ]),
           false,
-          digest,
+          verified,
         );
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(
-          "stable version tags cannot be overwritten",
+          "Container version 0.1.4 already exists",
         );
         expect(result.workflowOutput).toBe("");
       }
@@ -351,22 +377,3 @@ describe("immutable customer container releases", () => {
     expect(result.workflowOutput).toBe("");
   });
 });
-
-testPosix(
-  "retries promotion only for the same verified manifest digest",
-  async () => {
-    const digest = `sha256:${"a".repeat(64)}`;
-    const response = JSON.stringify([
-      { name: digest, metadata: { container: { tags: ["0.1.4", "latest"] } } },
-    ]);
-    expect((await runVersionVerifier(response, false, digest)).status).toBe(0);
-    expect(
-      (await runVersionVerifier(response, false, `sha256:${"b".repeat(64)}`))
-        .status,
-    ).toBe(1);
-    expect((await runVersionVerifier(response, false, "invalid")).status).toBe(
-      1,
-    );
-    expect((await runVersionVerifier(response, true, digest)).status).toBe(1);
-  },
-);

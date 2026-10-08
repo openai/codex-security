@@ -26,12 +26,17 @@ if ! version_status="$(
                 error("Container package versions must contain at least one JSON array.")
             else
                 [.[][] | select(any(.metadata.container.tags[]?; . == $version))] as $existing |
+                [.[][] | select(any(.metadata.container.tags[]?; . == "latest"))] as $latest |
+                any(.[][]; any(.metadata.container.tags[]?;
+                    stable_version > ($version | stable_version))) as $backfill |
                 if ($existing | length) > 0 and (
                     ($digest | test("^sha256:[a-fA-F0-9]{64}$") | not) or
-                    any($existing[]; .name != $digest)
+                    any($existing[]; .name != $digest) or
+                    ($backfill | not) and (
+                        ($latest | length) == 0 or any($latest[]; .name != $digest)
+                    )
                 ) then "published"
-                elif any(.[]; any(.[]; any(.metadata.container.tags[]?;
-                    stable_version > ($version | stable_version)))) then "backfill"
+                elif $backfill then "backfill"
                 else "latest"
                 end
             end
@@ -53,7 +58,7 @@ case "$version_status" in
         exit 0
         ;;
     published)
-        printf '%s\n' "::error::Container version $version already exists; stable version tags cannot be overwritten." >&2
+        printf '%s\n' "::error::Container version $version already exists; retries require a matching verified digest and, unless a newer stable version exists, a matching latest tag." >&2
         exit 1
         ;;
     *)
