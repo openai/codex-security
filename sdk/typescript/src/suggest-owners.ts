@@ -144,6 +144,7 @@ export async function suggestOwnersInternal(
         },
         {
           surface,
+          command: "suggest-owners",
           threadSource: CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
         },
       );

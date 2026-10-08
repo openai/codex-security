@@ -199,6 +199,7 @@ const allowedFiles = new Set([
     "publish",
     "result",
     "record",
+    "request-metadata",
     "runtime",
     "scan-activity",
     "scan-comparison",
