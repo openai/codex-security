@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import { parseJson, stringifyJson } from "../helpers/json";
 import { requireSqliteText } from "./database";
 import { transaction } from "./transaction";
@@ -53,6 +54,9 @@ export function storeFindings(
       const repository = database.prepare(
         "INSERT OR IGNORE INTO finding_repositories (repository_id, finding_id) VALUES (?, ?)",
       );
+      const stored = database.prepare(
+        "SELECT details_json FROM findings WHERE id = ?",
+      );
       for (const entry of entries) {
         const finding = entry.finding;
         requireSqliteText([
@@ -64,13 +68,20 @@ export function storeFindings(
           entry.embedding.model,
         ]);
         requireFiniteNumbers([finding, entry.embedding.vector]);
+        let details = stringifyJson(finding, 0);
+        const previous = stored.get(finding.findingId)?.details_json;
+        if (
+          typeof previous === "string" &&
+          isDeepStrictEqual(parseJson(previous), parseJson(details))
+        )
+          details = previous;
         const { changes } = upsert.run(
           finding.findingId,
           finding.fingerprints.primary,
           finding.ruleId,
           finding.identity.anchor,
           finding.identity.instance ?? null,
-          stringifyJson(finding, 0),
+          details,
           timestamp,
           timestamp,
         );

@@ -155,6 +155,12 @@ export type {
   DeduplicateScanResult,
 } from "./deduplication/scan.js";
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
+export type { FindingEmbeddingBinding } from "./deduplication/local.js";
+export type {
+  DeduplicationDiagnostic,
+  DeduplicationDiagnosticObserver,
+} from "./deduplication/diagnostics.js";
+export type { FindingEmbedder } from "./server/embeddings.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,

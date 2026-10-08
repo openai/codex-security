@@ -6994,7 +6994,7 @@ process.exit(2);
     const onAuthentication =
       mock<(authentication: ScanAuthentication) => void>();
     let pythonEnvironment: Record<string, string | undefined> | undefined;
-    let pythonProtectedRoot: string | undefined;
+    let pythonProtectedRoot: string | readonly string[] | undefined;
     const client = TestClient.withDependencies({
       environment: {
         openai_api_key: "stale-key",

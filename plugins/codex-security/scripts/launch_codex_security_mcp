@@ -15,7 +15,11 @@ launch_node() {
   if [ "${1:-}" = "--helper" ]; then
     shift
     # Preserve POSIX argv and HOME bytes without temporary files or consuming stdin.
-    exec 4<&0
+    helper_stdin=-
+    if (exec 4<&0) 2>&-; then
+      exec 4<&0
+      helper_stdin=4
+    fi
     wait_helper() {
       if wait "$!" 2>&-; then exit 0; else exit $?; fi
     }
@@ -30,7 +34,7 @@ launch_node() {
     trap 'forward_signal INT 130' INT
     trap 'forward_signal TERM 143' TERM
     printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n' |
-      "$node_command" "$server_path" --helper 3<&0 0<&4 4<&- &
+      "$node_command" "$server_path" --helper 3<&0 0<&"$helper_stdin" 4<&- &
     exec 4<&-
     wait_helper
   fi
