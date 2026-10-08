@@ -484,10 +484,10 @@ export class DeepScanWorkerRunner {
           threadId: result.threadId ?? activeThreadId,
         };
       } catch (error) {
+        if (confirmedOwnershipChange(error, run.scanId)) throw error;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
-        if (confirmedOwnershipChange(error, run.scanId)) throw error;
         const normalized = asError(error);
         const retryable = !(normalized instanceof DeepScanNonRetryableError);
         const policyRefusal =

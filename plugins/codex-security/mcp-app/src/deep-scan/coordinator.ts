@@ -769,6 +769,26 @@ export class DeepScanCoordinator {
       return undefined;
     };
 
+    const settleFailure = async (error: unknown): Promise<never> => {
+      this.abortController.abort(errorMessage(error));
+      const reducerFailure = await reconcileReducerSettlement();
+      const discoveries = await Promise.allSettled([...active.values()]);
+      // SDK iterator cleanup can let a later generic rejection settle first.
+      // Inspect every active worker's result before discarding confirmed ownership.
+      const failures = [
+        error,
+        reducerFailure,
+        ...discoveries.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        ),
+      ];
+      throw (
+        failures.find((failure) =>
+          confirmedOwnershipChange(failure, this.state.scanId),
+        ) ?? error
+      );
+    };
+
     await this.options.store.updateProgress({
       scanId: this.state.scanId,
       phase: "discovery",
@@ -845,10 +865,7 @@ export class DeepScanCoordinator {
 
       const settlement = await nextSettlement();
       if (settlement.status === "rejected") {
-        this.abortController.abort(errorMessage(settlement.error));
-        await reconcileReducerSettlement();
-        await this.settleSchedulerWork();
-        throw settlement.error;
+        return await settleFailure(settlement.error);
       }
       const outcome = settlement.outcome;
       if (outcome.type === "discovery") {
@@ -877,15 +894,9 @@ export class DeepScanCoordinator {
               outcome.error.message,
               outcome.error,
             );
-            this.abortController.abort(thresholdError.message);
-            await reconcileReducerSettlement();
-            await this.settleSchedulerWork();
-            throw thresholdError;
+            return await settleFailure(thresholdError);
           }
-          this.abortController.abort(outcome.error.message);
-          await reconcileReducerSettlement();
-          await this.settleSchedulerWork();
-          throw outcome.error;
+          return await settleFailure(outcome.error);
         }
         if (outcome.status === "canceled") {
           if (
@@ -923,9 +934,7 @@ export class DeepScanCoordinator {
           outcome.error.message,
           outcome.error,
         );
-        this.abortController.abort(thresholdError.message);
-        await this.settleSchedulerWork();
-        throw thresholdError;
+        return await settleFailure(thresholdError);
       }
       reducerFailures = 0;
       if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
