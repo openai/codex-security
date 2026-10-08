@@ -530,6 +530,7 @@ describe("npm package tar listings", () => {
       const pathOrder = ordinary
         ? representation.slice("ordinary-".length)
         : representation;
+      const wrongLongName = pathOrder === "pax-then-wrong-long-name";
       const orderedPath = representation.includes("then");
       const overwrite = representation.startsWith("overwrite");
       let stored =
@@ -627,7 +628,9 @@ describe("npm package tar listings", () => {
         status: extracted.status,
         stderr: extracted.stderr.toString(),
       }).toEqual({ status: 0, stderr: "" });
-      expect(readFileSync(join(nativeRoot, path)).equals(logo)).toBe(true);
+      // These incompatible packages do not promise a portable native asset path.
+      if (!wrongLongName)
+        expect(readFileSync(join(nativeRoot, path)).equals(logo)).toBe(true);
       const contractPath = join(root, "contract.json");
       writeFileSync(
         contractPath,
@@ -647,14 +650,25 @@ describe("npm package tar listings", () => {
         status: installed.status,
         stderr: installed.status === 0 ? "" : installed.stderr,
       }).toEqual({ status: 0, stderr: "" });
-      const installedLogo = join(
+      const installedPackage = join(
         consumer,
         "node_modules",
         "@openai",
         "codex-security",
+      );
+      const installedLogo = join(
+        installedPackage,
         "_bundled_plugin",
         "logo.png",
       );
+      if (wrongLongName) {
+        expect(existsSync(installedLogo)).toBe(false);
+        expect(
+          readFileSync(
+            join(installedPackage, wrongPath.slice("package/".length)),
+          ).equals(logo),
+        ).toBe(true);
+      }
       const compatible = [
         "pax-full",
         "pax-path",
