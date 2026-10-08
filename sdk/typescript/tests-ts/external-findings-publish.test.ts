@@ -359,6 +359,7 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
       ...finding,
       id: "container-package",
       artifactType: { osPackageManager: "DPKG", codeLibraryLanguage: null },
+      codeLibraryLanguage: "JAVA",
       vulnerableAsset: {
         id: "container-image",
         type: "CONTAINER_IMAGE",
@@ -369,6 +370,7 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
       ...finding,
       id: "vm-library",
       artifactType: { osPackageManager: null, codeLibraryLanguage: "PYTHON" },
+      codeLibraryLanguage: "JAVA",
       vulnerableAsset: {
         id: "virtual-machine",
         type: "VIRTUAL_MACHINE",
@@ -391,11 +393,18 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
       packageManager: "reported-manager",
       imageDigest: `sha256:${"b".repeat(64)}`,
       artifactType: { osPackageManager: "DPKG" },
+      codeLibraryLanguage: "JAVA",
       vulnerableAsset: {
         id: "explicit-container",
         type: "CONTAINER_IMAGE",
         imageId: `sha256:${"c".repeat(64)}`,
       },
+    },
+    {
+      ...finding,
+      id: "legacy-library",
+      codeLibraryLanguage: "JAVASCRIPT",
+      vulnerableAsset: { id: "legacy-image" },
     },
   ];
   const f = await fixture({
@@ -422,6 +431,7 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
     { ecosystem: "PYTHON", digests: [] },
     { ecosystem: null, digests: [`sha256:${"d".repeat(64)}`] },
     { ecosystem: "reported-manager", digests: [`sha256:${"b".repeat(64)}`] },
+    { ecosystem: "JAVASCRIPT", digests: [] },
   ]);
   expect(parsed.findings.map(({ evidence }) => evidence.source_data)).toEqual(
     records,
@@ -1057,6 +1067,61 @@ test("canceling a waiting publisher preserves the active request", async () => {
     release.resolve();
     observer.restore();
     await Promise.allSettled([active, waiting]);
+  }
+});
+
+test("longer publications remain cancelable and resume their saved request", async () => {
+  const f = await fixture();
+  let elapsed = 0;
+  const deadlines: { at: number; controller: AbortController }[] = [];
+  const timeout = spyOn(AbortSignal, "timeout").mockImplementation((delay) => {
+    const controller = new AbortController();
+    deadlines.push({ at: elapsed + delay, controller });
+    return controller.signal;
+  });
+  const controller = new AbortController();
+  let cancel = false;
+  const deps = {
+    ...f.deps,
+    signal: controller.signal,
+    fetch: async (url: string, init: RequestInit) => {
+      if (init.method === "POST") {
+        // Advance request deadlines without waiting for the server's processing budget.
+        elapsed += 45_000;
+        for (const deadline of deadlines)
+          if (deadline.at <= elapsed)
+            deadline.controller.abort(
+              new DOMException("Timed out", "TimeoutError"),
+            );
+        if (cancel) controller.abort(new Error("Publication canceled"));
+      }
+      return f.deps.fetch(url, init);
+    },
+  };
+  try {
+    expect(
+      (
+        await (
+          await prepareExternalPublication(f.file, options, deps)
+        ).publish()
+      ).counts.created,
+    ).toBe(1);
+    await writeFile(
+      f.file,
+      JSON.stringify([normalized("vendor-1", "critical")]),
+    );
+    cancel = true;
+    const prepared = await prepareExternalPublication(f.file, options, deps);
+    await expect(prepared.publish()).rejects.toThrow("Publication canceled");
+    expect(f.posts).toHaveLength(1);
+    const retry = await prepareExternalPublication(f.file, options, f.deps);
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests[0]!.request_id).toBe(
+      prepared.preview.requests[0]!.request_id,
+    );
+    expect((await retry.publish()).counts.updated).toBe(1);
+  } finally {
+    timeout.mockRestore();
   }
 });
 

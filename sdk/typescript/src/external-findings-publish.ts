@@ -184,6 +184,7 @@ export async function prepareExternalPublication(
     body?: FindingImportRequest,
   ): Promise<unknown> {
     dependencies.signal?.throwIfAborted();
+    const requestTimeout = AbortSignal.timeout(body ? 60_000 : 30_000);
     const response = await (dependencies.fetch ?? globalThis.fetch)(
       `${BASE_URL}${endpoint}`,
       {
@@ -197,8 +198,8 @@ export async function prepareExternalPublication(
         ...(body ? { body: JSON.stringify(body) } : {}),
         redirect: "error",
         signal: dependencies.signal
-          ? AbortSignal.any([dependencies.signal, AbortSignal.timeout(30_000)])
-          : AbortSignal.timeout(30_000),
+          ? AbortSignal.any([dependencies.signal, requestTimeout])
+          : requestTimeout,
       },
     );
     if (!response.ok) {

@@ -85,7 +85,8 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
         ecosystem:
           text(record["packageManager"]) ??
           text(artifactType?.["osPackageManager"]) ??
-          text(artifactType?.["codeLibraryLanguage"]),
+          text(artifactType?.["codeLibraryLanguage"]) ??
+          text(record["codeLibraryLanguage"]),
         installed_version: version,
         manifest_path: null,
         fixed_versions: text(record["fixedVersion"])
