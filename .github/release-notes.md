@@ -131,6 +131,7 @@
 - reject special filesystem path targets before scanning ([#1524](https://github.com/openai/codex-security/pull/1524))
 - honor cancellation during PDF knowledge-base extraction ([#1529](https://github.com/openai/codex-security/pull/1529))
 - ignore status markers inside Markdown fences ([#1525](https://github.com/openai/codex-security/pull/1525))
+- explain pull request labels in agent instructions ([#1521](https://github.com/openai/codex-security/pull/1521))
 
 <!-- release-section: highlights:end -->
 
