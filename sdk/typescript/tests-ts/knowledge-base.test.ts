@@ -249,11 +249,15 @@ describe("scan knowledge bases", () => {
     await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
     await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
 
-    const knowledgeBase = await prepareKnowledgeBase([root, scope, scope]);
+    const knowledgeBase = await prepareKnowledgeBase([scope, root, scope]);
     temporaryDirectories.track(knowledgeBase.path);
 
-    expect(knowledgeBase.sources).toEqual([root, scope]);
-    expect((await readdir(knowledgeBase.path)).length).toBe(3);
+    expect(knowledgeBase.sources).toEqual([scope, root]);
+    expect((await readdir(knowledgeBase.path)).sort()).toEqual([
+      "0-scope.md.txt",
+      "1-deployment.MARKDOWN.txt",
+      "2-notes.txt.txt",
+    ]);
     const documents = await extractedDocuments(knowledgeBase.path);
     expect(documents).toContain("Ignore local debug endpoints.");
     expect(documents).toContain("Public API gateway.");
@@ -400,22 +404,24 @@ describe("scan knowledge bases", () => {
 
     const controller = new AbortController();
     const reason = new Error("Knowledge-base preparation canceled.");
-    let checks = 0;
-    const signalSpy = spyOn(controller.signal, "throwIfAborted");
-    signalSpy.mockImplementation(() => {
-      if (++checks === 4) controller.abort(reason);
-      if (controller.signal.aborted) throw controller.signal.reason;
-    });
-    const temporarySpy = spyOn(os, "tmpdir").mockImplementation(() => staging);
+    const originalWriteFile = filesystem.writeFile;
+    let staged = false;
+    const writeSpy = spyOn(filesystem, "writeFile").mockImplementation(
+      async (...args) => {
+        await Reflect.apply(originalWriteFile, filesystem, args);
+        staged = true;
+        controller.abort(reason);
+      },
+    );
 
     try {
       await expect(
-        prepareKnowledgeBase([first, second], controller.signal),
+        prepareKnowledgeBase([first, second], controller.signal, staging),
       ).rejects.toBe(reason);
+      expect(staged).toBe(true);
       expect(await readdir(staging)).toEqual([]);
     } finally {
-      signalSpy.mockRestore();
-      temporarySpy.mockRestore();
+      writeSpy.mockRestore();
     }
   });
 

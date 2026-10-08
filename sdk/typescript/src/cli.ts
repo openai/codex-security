@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { listenForAbort } from "./cli-signals.js";
-import { isNonEmptyString } from "./value.js";
+import { isNonEmptyString, parseJson } from "./value.js";
 
 import {
   execFile as execFileCallback,
@@ -29,7 +29,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -59,14 +59,14 @@ import {
   type ArtifactExportArguments,
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
-  createSecurityInternal,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
+  scanCodexHome,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -87,6 +87,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
+import type { DeepScanProgress } from "./deep-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -186,6 +187,7 @@ import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
+  withCredentialHomeLock,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
@@ -196,6 +198,7 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
+  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
 } from "./runtime.js";
@@ -685,7 +688,6 @@ class PublicationProgressPresenter {
       try {
         dashboard.stop();
       } catch {}
-      this.#dashboard = null;
     }
   }
 
@@ -1160,9 +1162,6 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
-  prepareAuthenticationHome?: (
-    environment: NodeJS.ProcessEnv,
-  ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
@@ -1228,9 +1227,8 @@ interface CliDependencies {
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
-    createSecurityInternal(config, { surface: "cli" }),
+    new CodexSecurity(config, undefined, { surface: "cli" }),
   environment: process.env,
-  prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
   hasStoredChatGPTSignIn: async (signal) => {
@@ -1359,7 +1357,9 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const overrides = structuredClone(output.codexOverrides ?? {});
+      const overrides = parseToml(
+        stringifyToml(output.codexOverrides ?? {}),
+      ) as JsonObject;
       const config = deepMerge(ambientConfig, overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
       // Native Codex ignores configured tables for these built-in providers.
@@ -1375,7 +1375,7 @@ export async function runCodexSkillCommand(
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]
           : undefined;
-      const commandAuth = providerConfiguration?.["auth"] !== undefined;
+      const commandAuth = providerConfiguration?.["auth"] != null;
       const explicitChatgpt =
         output.auth === "chatgpt" && !isExternalModelProvider(provider);
       const providerBearer =
@@ -1676,14 +1676,10 @@ export async function runCodexSkillCommand(
               }),
             ]);
       invocationStatus = new Promise<number>((resolve, reject) => {
-        let completed = false;
         const complete = (
           code: number | null,
           signal: NodeJS.Signals | null,
         ): void => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
           resolve(
             requestedSignal === "SIGINT" || signal === "SIGINT"
               ? 130
@@ -1693,12 +1689,7 @@ export async function runCodexSkillCommand(
           );
         };
         forceStatusCompletion = () => complete(null, null);
-        invocation.once("error", (error) => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
-          reject(error);
-        });
+        invocation.once("error", reject);
         invocation.once(output === undefined ? "exit" : "close", complete);
       });
       let [status, events] = await Promise.all([invocationStatus, captured]);
@@ -2070,17 +2061,43 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const repository = resolveCliPath(
+      const requestedRepository = resolveCliPath(
         dependencies.currentDirectory(),
         args.repository ?? ".",
+      );
+      const repository = await realpath(requestedRepository).catch(
+        () => requestedRepository,
       );
       return presentHistory(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
-            const target = (value["repositories"] as JsonObject[]).find(
+            const repositories = value["repositories"] as JsonObject[];
+            let target = repositories.find(
+              (entry) => entry["targetPath"] === requestedRepository,
+            );
+            const canonicalTarget = repositories.find(
               (entry) => entry["targetPath"] === repository,
             );
+            if (
+              target === undefined &&
+              canonicalTarget !== undefined &&
+              (await sameFile(
+                canonicalTarget["targetPath"] as string,
+                requestedRepository,
+              ))
+            ) {
+              target = canonicalTarget;
+            }
+            if (target === undefined) {
+              for (const entry of repositories) {
+                const storedPath = entry["targetPath"] as string;
+                if (await sameFile(storedPath, requestedRepository)) {
+                  target = entry;
+                  break;
+                }
+              }
+            }
             const findings =
               target === undefined
                 ? []
@@ -3167,7 +3184,7 @@ export async function main(
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
-        )(resolve(dependencies.currentDirectory(), args.scanDir), {
+        )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
           ...publicationDestination(options, dependencies.environment),
           signal: controller.signal,
         });
@@ -3396,7 +3413,7 @@ export async function main(
                 createSecurity:
                   dependencies.createPolicySecurity ??
                   ((config) =>
-                    createSecurityInternal(config, { surface: "cli" })),
+                    new CodexSecurity(config, undefined, { surface: "cli" })),
                 chooseAuthentication: (config, auth, signal) =>
                   chooseInteractiveAuthentication(
                     {
@@ -4597,6 +4614,7 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,
@@ -5410,22 +5428,18 @@ export async function main(
         { args: { action: "status" }, description: "Check authentication." },
       ],
       async run({ args, options }) {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
-        if (args.action === "status" && existsSync(credentialHome)) {
-          const ambientHome =
-            environmentValue(dependencies.environment, "CODEX_HOME") ??
-            join(homedir(), ".codex");
-          await initialCredentialsAvailable(
-            dependencies.environment,
-            ambientHome,
-            credentialHome,
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
+        const authentication = scanAuthentication(dependencies.environment);
+        if (args.action === "status" && authentication.method !== "api_key") {
+          const ambientHome = scanCodexHome(dependencies.environment);
+          await withCredentialHomeLock(credentialHome, () =>
+            initialCredentialsAvailable(
+              dependencies.environment,
+              ambientHome,
+              credentialHome,
+            ),
           );
         }
         const authenticationEnvironment = {
@@ -5443,15 +5457,10 @@ export async function main(
           undefined,
           authenticationEnvironment,
         );
-        if (
-          args.action === undefined &&
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
+        if (args.action === undefined && exitCode === 0) {
           await setCodexSecurityCredentialLogout(credentialHome, false);
         }
         if (args.action === "status") {
-          const authentication = scanAuthentication(dependencies.environment);
           if (
             authentication.method === "api_key" &&
             (exitCode === 0 || exitCode === 1)
@@ -5465,7 +5474,6 @@ export async function main(
             );
           }
         } else if (exitCode === 0 && !options.withApiKey) {
-          const authentication = scanAuthentication(dependencies.environment);
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
               dependencies.environment,
@@ -5497,29 +5505,23 @@ export async function main(
       destructive: true,
       mcp: false,
       async run() {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
         };
-        exitCode = await dependencies.runCodex(
-          ["logout"],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
-          await setCodexSecurityCredentialLogout(credentialHome, true);
-        }
+        await withCredentialHomeLock(credentialHome, async () => {
+          exitCode = await dependencies.runCodex(
+            ["logout"],
+            undefined,
+            authenticationEnvironment,
+          );
+          if (exitCode === 0) {
+            await setCodexSecurityCredentialLogout(credentialHome, true);
+          }
+        });
       },
     })
     .command("serve", {
@@ -5695,11 +5697,7 @@ export async function main(
             ? await resolveDeepScanConfig(
                 resolved.options,
                 join(
-                  expandHome(
-                    environmentValue(dependencies.environment, "CODEX_HOME") ??
-                      join(homedir(), ".codex"),
-                    dependencies.environment,
-                  ),
+                  scanCodexHome(dependencies.environment),
                   "codex-security",
                   "config.toml",
                 ),
@@ -7703,12 +7701,7 @@ export async function readSkillCommandOutput(
 
   for await (const line of createInterface({ input: Readable.from(stream) })) {
     if (line.trim().length === 0) continue;
-    let event: unknown;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    const event = parseJson(() => line);
     if (typeof event !== "object" || event === null) {
       continue;
     }
@@ -7972,12 +7965,8 @@ function incurErrorMessage(output: string): string {
     .find((line) => line.startsWith("message: "))
     ?.slice("message: ".length);
   if (message === undefined) return output.trim();
-  try {
-    const parsed: unknown = JSON.parse(message);
-    return typeof parsed === "string" ? parsed : message;
-  } catch {
-    return message;
-  }
+  const parsed = parseJson(() => message);
+  return typeof parsed === "string" ? parsed : message;
 }
 
 async function runExport(
@@ -8125,6 +8114,8 @@ async function executeScan(
   let lastProgressUpdate = "";
   let workerCapacity: { planned: number; started: number } | null = null;
   let fileProgress: ScanProgress | null = null;
+  let deepProgress: DeepScanProgress | null = null;
+  let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
@@ -8342,7 +8333,11 @@ async function executeScan(
           `Workers: ${workerCapacity.started}/${workerCapacity.planned}`,
         );
       }
-      if (fileProgress !== null && fileProgress.filesTotal > 0) {
+      if (deepProgress !== null) {
+        details.push(
+          `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
+        );
+      } else if (fileProgress !== null && fileProgress.filesTotal > 0) {
         details.push(
           `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
         );
@@ -8570,6 +8565,30 @@ async function executeScan(
         progress.stage(
           `Scan phase: ${phase}${update.filesTotal === 0 ? "" : ` (${update.filesCompleted.toLocaleString("en-US")}/${update.filesTotal.toLocaleString("en-US")} files)`}.`,
         );
+        progress.startTimer(runningMessage());
+      },
+      onDeepProgress: (update) => {
+        if (
+          deepProgress === null &&
+          update.completed === 0 &&
+          update.active === 0 &&
+          !update.consolidating
+        )
+          return;
+        deepProgress = update;
+        deepConsolidating =
+          update.consolidating === true ||
+          (deepConsolidating && update.active === 0);
+        phase = deepConsolidating ? "consolidating results" : "discovery";
+        const message = `Scan phase: ${phase} | Reviews: ${update.completed} completed, ${update.active} active, cap ${update.maximum}`;
+        if (dashboard !== null) {
+          dashboard.setStage(phase);
+          dashboard.note(message);
+          return;
+        }
+        if (progress === null) return;
+        progress.stopTimer();
+        progress.stage(message);
         progress.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
@@ -9561,7 +9580,6 @@ export class Progress {
   #timerLineActive = false;
   #cursorHidden = false;
   #observingStreamErrors = false;
-  #streamErrorsActive = false;
   #streamErrorGeneration = 0;
   readonly #onStreamError = (): void => {};
 
@@ -9629,14 +9647,12 @@ export class Progress {
       }
     } finally {
       if (this.#observingStreamErrors) {
-        this.#streamErrorsActive = false;
         const generation = this.#streamErrorGeneration;
         try {
           this.#stream.write("", () => {
             queueMicrotask(() => {
               if (
                 generation === this.#streamErrorGeneration &&
-                !this.#streamErrorsActive &&
                 this.#observingStreamErrors
               ) {
                 this.#stream.off?.("error", this.#onStreamError);
@@ -9672,7 +9688,6 @@ export class Progress {
   }
 
   #observeStreamErrors(): void {
-    this.#streamErrorsActive = true;
     this.#streamErrorGeneration += 1;
     if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
       this.#stream.on("error", this.#onStreamError);

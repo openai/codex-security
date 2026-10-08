@@ -394,8 +394,7 @@ def lookup_multi_agent_v2_enabled(
 
     table_override = False
     for source, feature_config in v2_configs:
-        # Higher tables inherit enabled only through uninterrupted lower tables.
-        if table_override and not isinstance(feature_config, dict):
+        if table_override and not isinstance(feature_config, (dict, bool)):
             break
         if isinstance(feature_config, bool):
             return True, feature_config, source

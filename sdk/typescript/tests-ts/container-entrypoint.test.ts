@@ -48,6 +48,7 @@ async function runEntrypoint(
 async function runVersionVerifier(
   response: string,
   failure = false,
+  digest?: string,
 ): Promise<SpawnSyncReturns<string>> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-container-version-")),
@@ -74,17 +75,26 @@ async function runVersionVerifier(
     );
 
     const endpoint = "orgs/openai/packages/container/codex-security";
-    return spawnSync("sh", [versionVerifier, endpoint, "0.1.4"], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        EXPECTED_ENDPOINT: endpoint,
-        GH_FIXTURE_FAILURE: failure ? "1" : "0",
-        GH_FIXTURE_RESPONSE: response,
-        PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
+    return spawnSync(
+      "sh",
+      [
+        versionVerifier,
+        endpoint,
+        "0.1.4",
+        ...(digest === undefined ? [] : [digest]),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          EXPECTED_ENDPOINT: endpoint,
+          GH_FIXTURE_FAILURE: failure ? "1" : "0",
+          GH_FIXTURE_RESPONSE: response,
+          PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        timeout: 10_000,
       },
-      timeout: 10_000,
-    });
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -122,6 +132,14 @@ describe("customer container entrypoint", () => {
   testPosix("accepts CSVs after global and bulk-scan options", async () => {
     for (const arguments_ of [
       ["bulk-scan", "--workers", "2", "/input/repositories.csv"],
+      ["bulk-scan", "--config", "settings.json", "/input/repositories.csv"],
+      ["bulk-scan", "-c", "settings.json", "/input/repositories.csv"],
+      [
+        "bulk-scan",
+        "--validation-prompt-file",
+        "prompt.md",
+        "/input/repositories.csv",
+      ],
       ["bulk-scan", "--max-cost", "12.50", "/input/repositories.csv"],
       ["bulk-scan", "bulk-scan", "--output-dir", "/output"],
       [
@@ -172,6 +190,9 @@ describe("customer container entrypoint", () => {
       for (const arguments_ of [
         ["bulk-scan"],
         ["bulk-scan", "--workers", "8"],
+        ["bulk-scan", "--config", "settings.json"],
+        ["bulk-scan", "-c", "settings.json"],
+        ["bulk-scan", "--validation-prompt-file", "prompt.md"],
         ["bulk-scan", "--max-cost", "12.50"],
         ["bulk-scan", "--scan-prompt-file", "prompt.md"],
         ["bulk-scan", "--post-scan-prompt-file", "post-prompt.md"],
@@ -250,3 +271,41 @@ describe("immutable customer container releases", () => {
     expect(result.stderr).toContain("refusing to publish");
   });
 });
+
+testPosix(
+  "retries promotion only for the same verified manifest digest",
+  async () => {
+    const digest = `sha256:${"a".repeat(64)}`;
+    const response = JSON.stringify([
+      { name: digest, metadata: { container: { tags: ["0.1.4", "latest"] } } },
+    ]);
+    expect((await runVersionVerifier(response, false, digest)).status).toBe(0);
+    expect(
+      (await runVersionVerifier(response, false, `sha256:${"b".repeat(64)}`))
+        .status,
+    ).toBe(1);
+    expect((await runVersionVerifier(response, false, "invalid")).status).toBe(
+      1,
+    );
+    expect((await runVersionVerifier(response, true, digest)).status).toBe(1);
+    const older = JSON.stringify([
+      { name: digest, metadata: { container: { tags: ["0.1.4"] } } },
+      {
+        name: `sha256:${"b".repeat(64)}`,
+        metadata: { container: { tags: ["0.1.5", "latest"] } },
+      },
+    ]);
+    expect((await runVersionVerifier(older, false, digest)).status).toBe(1);
+    expect(
+      (
+        await runVersionVerifier(
+          JSON.stringify([
+            { name: digest, metadata: { container: { tags: ["0.1.4"] } } },
+          ]),
+          false,
+          digest,
+        )
+      ).status,
+    ).toBe(1);
+  },
+);
