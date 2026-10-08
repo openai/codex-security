@@ -259,7 +259,7 @@ describe("saved scan logs", () => {
   );
 
   test.each(["2026-08-11T12:03:00.000Z", null, undefined])(
-    "uses the saved log boundary for resumed turns and workers: %p",
+    "uses the saved log boundary while preserving recorded resumed workers: %p",
     async (logCompletedAt) => {
       const home = await temporaryHome();
       const scanDirectory = join(home, "scans", "resumed");
@@ -289,6 +289,11 @@ describe("saved scan logs", () => {
       );
       for (const [threadId, startedAt, directory] of [
         [
+          "recorded-worker",
+          "2026-08-11T12:02:00.000Z",
+          join(scanDirectory, "artifacts"),
+        ],
+        [
           "resumed-worker",
           "2026-08-11T12:02:00.000Z",
           join(scanDirectory, "artifacts"),
@@ -313,7 +318,7 @@ describe("saved scan logs", () => {
           mode: "deep",
           scanDir: scanDirectory,
           continuationThreadId: "parent",
-          executionThreadIds: ["parent"],
+          executionThreadIds: ["parent", "recorded-worker"],
           progress: {
             status: "complete",
             updatedAt: "2026-08-11T12:01:00.000Z",
@@ -331,8 +336,8 @@ describe("saved scan logs", () => {
       ).toEqual(expected.map((event) => ({ threadId: "parent", event })));
       expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual(
         logCompletedAt == null
-          ? ["followup-worker", "parent", "resumed-worker"]
-          : ["parent", "resumed-worker"],
+          ? ["parent", "recorded-worker"]
+          : ["parent", "recorded-worker", "resumed-worker"],
       );
     },
   );
@@ -712,6 +717,22 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(archivedLogs)).toContain("review archived scan");
     expect(JSON.stringify(archivedLogs)).not.toContain("PRIVATE REPLACEMENT");
 
+    for (const logCompletedAt of [null, undefined]) {
+      const legacyLogs = await readSavedScanLogs(
+        {
+          scanId: "archived-scan",
+          mode: "deep",
+          scanDir: archived,
+          continuationThreadId: "archived-parent",
+          executionThreadIds: ["archived-parent"],
+          progress: { status: "complete", updatedAt: completedAt },
+          ...(logCompletedAt === undefined ? {} : { logCompletedAt }),
+        },
+        home,
+      );
+      expect(legacyLogs).toEqual(archivedLogs);
+    }
+
     const unrelatedRoot = await readScanLogs({
       ...options,
       scanDirectory: join(home, "scans", "unrelated.previous-fixture"),
@@ -815,7 +836,7 @@ describe("saved scan logs", () => {
         scanId: "scan-555",
         threadId: "parent",
         codexHome: home,
-        completedAt,
+        logCompletedAt: completedAt,
       });
 
       const expected = excludeFollowup

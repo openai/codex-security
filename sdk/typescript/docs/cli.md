@@ -1081,8 +1081,9 @@ data even though scan recipes do not store credentials.
 
 Saved scan logs retain the finishing turn, including its final response, and
 exclude later turns once the scan records a completion boundary. Older scans
-without that boundary retain their full session history. This also applies to
-logs attached with `feedback --include-logs`.
+retain the full history of their attributed sessions and keep their existing
+worker-selection boundaries. This also applies to logs attached with
+`feedback --include-logs`.
 
 Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
 Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
