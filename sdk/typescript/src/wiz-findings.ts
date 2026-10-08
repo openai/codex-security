@@ -45,12 +45,17 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
   const version = text(record["version"]);
   const severity = text(record["vendorSeverity"]) ?? text(record["severity"]);
   const asset = object(record["vulnerableAsset"]);
+  const artifact = object(record["artifactType"]);
   if (!name || !packageName || !text(asset?.["id"])) {
     throw new Error(
       "Expected a Wiz package vulnerability finding with name, detailedName, and vulnerableAsset.id. Other finding classes need a separate mapping.",
     );
   }
-  const digest = text(asset?.["imageDigest"]) ?? text(record["imageDigest"]);
+  const digest =
+    text(asset?.["imageId"]) ??
+    text(asset?.["ImageExternalId"]) ??
+    text(asset?.["imageDigest"]) ??
+    text(record["imageDigest"]);
   const updated = text(record["updatedAt"]);
   const updatedSeconds = updated ? Date.parse(updated) / 1000 : null;
   if (
@@ -73,7 +78,10 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
       ? [
           {
             name: packageName,
-            ecosystem: text(record["packageManager"]),
+            ecosystem:
+              text(artifact?.["osPackageManager"]) ??
+              text(artifact?.["codeLibraryLanguage"]) ??
+              text(record["packageManager"]),
             installed_version: version,
             manifest_path: null,
             fixed_versions: text(record["fixedVersion"])

@@ -436,6 +436,9 @@ export async function prepareExternalPublication(
               receipts[batchIndex] ??
                 (await request("/finding_imports", batch)),
             );
+            const batchItems = new Map(
+              batch.items.map((item) => [item.client_id, item]),
+            );
             if (
               receipt.id !== batch.request_id ||
               canonicalJson(receipt.repository) !==
@@ -443,10 +446,9 @@ export async function prepareExternalPublication(
               canonicalJson(receipt.source) !== canonicalJson(batch.source) ||
               receipt.item_count !== batch.items.length ||
               receipt.results.length !== batch.items.length ||
-              receipt.results.some(
-                (item, index) =>
-                  item.client_id !== batch.items[index]!.client_id,
-              )
+              new Set(receipt.results.map((item) => item.client_id)).size !==
+                batch.items.length ||
+              receipt.results.some((item) => !batchItems.has(item.client_id))
             )
               throw new CodexSecurityError(
                 "Cloud returned a receipt for a different publication.",
@@ -493,8 +495,12 @@ export async function prepareExternalPublication(
           // Verify readable source records without mistaking a newer concurrent
           // observation for failure of the original, immutable import receipt.
           for (const [batchIndex, receipt] of receipts.entries()) {
-            for (const [index, item] of receipt.results.entries()) {
+            const batchItems = new Map(
+              requests[batchIndex]!.items.map((item) => [item.client_id, item]),
+            );
+            for (const item of receipt.results) {
               if (item.outcome === "error") continue;
+              const expected = batchItems.get(item.client_id)!;
               const report = validateSourceReport(
                 await request(
                   `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
@@ -506,11 +512,8 @@ export async function prepareExternalPublication(
                 (report.version === item.version &&
                   (report.observation_id !== item.observation_id ||
                     canonicalJson(report.evidence) !==
-                      canonicalJson(
-                        requests[batchIndex]!.items[index]!.evidence,
-                      ))) ||
-                report.source_finding_id !==
-                  requests[batchIndex]!.items[index]!.source_finding_id ||
+                      canonicalJson(expected.evidence))) ||
+                report.source_finding_id !== expected.source_finding_id ||
                 report.repo_id !== destination.id ||
                 report.repo_connector_id !== destination.repo_connector_id ||
                 canonicalJson(report.source) !== canonicalJson(source)
