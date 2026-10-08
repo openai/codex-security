@@ -87,6 +87,7 @@ EXPECTED_MIGRATIONS = [
     (44, "version local finding embedding inputs"),
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
+    (47, "snapshot deep scan discovery context"),
 ]
 
 

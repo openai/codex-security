@@ -90,6 +90,7 @@ import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
 import { importScan } from "../src/import-scan.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { VERSION } from "../src/version.js";
 import { createProviderProfile } from "../src/provider-profile.js";
 import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
@@ -542,7 +543,13 @@ describe("CodexSecurity finding validation", () => {
           model_reasoning_effort: "high",
           features: { plugins: false },
           analytics: { enabled: false },
-          responses_api_metadata: { codex_security_surface: "sdk" },
+          responses_api_metadata: {
+            codex_security_surface: "sdk",
+            codex_security_command: "validate",
+            codex_security_package_version: VERSION,
+            codex_security_plugin_version:
+              preparedRuntime("unused").plugin.version,
+          },
         },
       });
       expect(captured.codex?.env?.["OPENAI_API_KEY"]).toBeUndefined();
@@ -1830,10 +1837,14 @@ describe("CodexSecurity orchestration", () => {
       [
         {
           profile: "cloud",
+          analytics: { enabled: true },
+          responses_api_metadata: { custom_attribution: "root" },
           model_context_window: 64_000,
           model_auto_compact_token_limit: 48_000,
           profiles: {
             cloud: {
+              analytics: { enabled: false },
+              responses_api_metadata: { custom_attribution: "selected" },
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_context_window: 96_000,
@@ -1936,6 +1947,17 @@ describe("CodexSecurity orchestration", () => {
                   const workerConfig = parseToml(
                     await readFile(deepConfigPath, "utf8"),
                   )["worker_runtime"] as JsonObject;
+                  const selected = resolveCodexProfile(overrides);
+                  expect(workerConfig["analytics"]).toEqual(
+                    selected["analytics"],
+                  );
+                  expect(workerConfig["responses_api_metadata"]).toMatchObject({
+                    ...(selected["responses_api_metadata"] as
+                      JsonObject | undefined),
+                    codex_security_surface: "sdk",
+                    codex_security_command: "scan",
+                    codex_security_package_version: VERSION,
+                  });
                   const windows = (resolveCodexProfile(overrides)["windows"] ??
                     DEFAULT_CODEX_CONFIG["windows"]) as { sandbox: string };
                   expect(workerConfig["windows"] as JsonObject).toEqual(
@@ -3666,6 +3688,100 @@ describe("CodexSecurity orchestration", () => {
         expect(commands).toContain("complete-scan");
       }
       await client.close();
+    },
+  );
+
+  test.each(["EACCES", "EPERM", "EMFILE"])(
+    "retries session logs and limits repeated %s diagnostics appropriately",
+    async (code) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const sessions = join(codexHome, "sessions");
+      await mkdir(sessions);
+      const logs = [
+        join(sessions, "a-synthetic.jsonl"),
+        join(sessions, "b-synthetic.jsonl"),
+      ];
+      await Promise.all(logs.map((path) => writeFile(path, "")));
+      const denied = new Set([logs[0]!]);
+      const attempts = new Map<string, number>();
+      let firstRepeated!: () => void;
+      let secondRepeated!: () => void;
+      const first = new Promise<void>((resolve) => {
+        firstRepeated = resolve;
+      });
+      const second = new Promise<void>((resolve) => {
+        secondRepeated = resolve;
+      });
+      const open = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation(
+        async (...args: Parameters<typeof fsPromises.open>) => {
+          const path = String(args[0]);
+          if (denied.has(path)) {
+            const count = (attempts.get(path) ?? 0) + 1;
+            attempts.set(path, count);
+            if (count === 3)
+              (path === logs[0] ? firstRepeated : secondRepeated)();
+            throw Object.assign(
+              new Error(`Synthetic ${code} for ${basename(path)}`),
+              { code, syscall: "open", path },
+            );
+          }
+          return await open(...args);
+        },
+      );
+      const warnings: string[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "thread-1" };
+                await first;
+                denied.delete(logs[0]!);
+                denied.add(logs[1]!);
+                await second;
+                denied.delete(logs[1]!);
+                for await (const event of completedEvents()) {
+                  if (event.type !== "thread.started") yield event;
+                }
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setTimeout(() => {}, 10_000);
+      const operation = client.run(repository, {
+        onActivity: () => {},
+        onWarning: (warning) => warnings.push(warning),
+      });
+      try {
+        expect(await operation).toMatchObject({
+          threadId: "thread-1",
+        });
+        await Promise.resolve();
+        for (const log of logs) {
+          expect(attempts.get(log)).toBeGreaterThanOrEqual(3);
+          const messages = warnings.filter((message) =>
+            message.includes(basename(log)),
+          );
+          if (code === "EMFILE")
+            expect(messages.length).toBeGreaterThanOrEqual(3);
+          else expect(messages).toHaveLength(1);
+        }
+      } finally {
+        clearTimeout(keepAlive);
+        denied.clear();
+        firstRepeated();
+        secondRepeated();
+        await operation.catch(() => {});
+        await client.close();
+        opening.mockRestore();
+      }
     },
   );
 
