@@ -120,7 +120,6 @@ function preflightStatus(
   item: Readonly<Record<string, unknown>>,
 ): ScanWorkerStatus | null {
   if (
-    item["status"] === "failed" ||
     typeof item["command"] !== "string" ||
     !PREFLIGHT_COMMAND.test(item["command"]) ||
     typeof item["aggregated_output"] !== "string"
@@ -136,22 +135,19 @@ function preflightStatus(
   ) {
     return null;
   }
+  const expectedExitCode =
+    payload["status"] === "blocked"
+      ? 1
+      : payload["status"] === "incomplete"
+        ? 2
+        : 0;
   const exitCode = item["exit_code"];
-  if (typeof exitCode === "number") {
-    const expectedExitCode =
-      payload["status"] === "blocked"
-        ? 1
-        : payload["status"] === "incomplete"
-          ? 2
-          : payload["status"] === "ready"
-            ? 0
-            : null;
-    if (
-      (expectedExitCode !== null && exitCode !== expectedExitCode) ||
-      (expectedExitCode === null && exitCode !== 0)
-    ) {
-      return null;
-    }
+  // Codex also marks the helper's intentional nonzero exits as failed.
+  if (
+    (typeof exitCode === "number" && exitCode !== expectedExitCode) ||
+    (item["status"] === "failed" && expectedExitCode === 0)
+  ) {
+    return null;
   }
   const results = payload["results"];
   const delegated = results.filter(
