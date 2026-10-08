@@ -1548,6 +1548,70 @@ describe("multiscan", () => {
     ]);
   });
 
+  test.each(["completed", "failed"] as const)(
+    "records a %s scan outcome when checkout cleanup fails",
+    async (outcome) => {
+      const { paths } = await repositoryFixture(
+        `cleanup-${outcome}`,
+        "stubborn",
+      );
+      const checkout = join(paths.output, "checkouts", "stubborn");
+      const originalRm = filesystem.rm;
+      let scanned = false;
+      let rejectedCleanup = false;
+      const removeSpy = spyOn(filesystem, "rm").mockImplementation(
+        async (...args: Parameters<typeof originalRm>) => {
+          if (scanned && !rejectedCleanup && String(args[0]) === checkout) {
+            rejectedCleanup = true;
+            throw Object.assign(
+              new Error(`EACCES: permission denied, rm '${checkout}'`),
+              { code: "EACCES" },
+            );
+          }
+          return await Reflect.apply(originalRm, filesystem, args);
+        },
+      );
+      const run = mock<SecurityClient["run"]>(
+        async (_repository, scanOptions = {}) => {
+          if (outcome === "failed") {
+            scanned = true;
+            throw new Error("ORIGINAL_SCAN_FAILURE");
+          }
+          const result = await completedScan(scanOptions.outputDir!);
+          scanned = true;
+          return result;
+        },
+      );
+      const configured = options(paths, client(run), { maxAttempts: 1 });
+
+      try {
+        const summary = await runMultiscan(configured);
+        expect(summary).toMatchObject(
+          outcome === "completed"
+            ? { completed: 1, failed: 0 }
+            : { completed: 0, failed: 1 },
+        );
+        const receipts = await results(summary.resultsPath);
+        expect(receipts).toHaveLength(1);
+        expect(receipts[0]).toMatchObject({ status: outcome });
+        const error = String(receipts[0]?.["error"]);
+        expect(error).toContain("Multiscan checkout cleanup failed");
+        if (outcome === "failed") {
+          expect(error).toContain("ORIGINAL_SCAN_FAILURE");
+        } else {
+          expect((await lstat(checkout)).isDirectory()).toBe(true);
+          expect(await runMultiscan(configured)).toMatchObject({ skipped: 1 });
+          expect(run).toHaveBeenCalledTimes(1);
+          await expect(lstat(checkout)).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        }
+      } finally {
+        removeSpy.mockRestore();
+      }
+    },
+  );
+
   test("limits simultaneous checkouts to the requested worker count", async () => {
     const paths = await fixture();
     const knowledgeBasePaths = [
