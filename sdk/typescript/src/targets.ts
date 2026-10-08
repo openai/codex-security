@@ -1,3 +1,4 @@
+import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
@@ -12,8 +13,11 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import { InvalidTargetError } from "./errors.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { InvalidTargetError, abortReason } from "./errors.js";
+import {
+  resolveTrustedExecutable,
+  type TrustedExecutable,
+} from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
 import type { ScanMode } from "./scan-modes.js";
@@ -65,13 +69,10 @@ export class DiffTarget {
         `Unsupported diff target kind: ${String(this.kind)}`,
       );
     }
-    if (typeof this.base !== "string" || this.base.length === 0) {
+    if (!isNonEmptyString(this.base)) {
       throw new InvalidTargetError("The diff base ref must be non-empty.");
     }
-    if (
-      this.kind === "refs" &&
-      (typeof this.head !== "string" || this.head.length === 0)
-    ) {
+    if (this.kind === "refs" && !isNonEmptyString(this.head)) {
       throw new InvalidTargetError(
         "Git diff refs must include a non-empty head ref.",
       );
@@ -235,10 +236,7 @@ export async function isGitMetadataDirectory(
 ): Promise<boolean> {
   const metadata = async (name: string, followLinks = false) =>
     await (followLinks ? stat : lstat)(join(repository, name)).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      },
+      nullIfMissingPath,
     );
   const head = await metadata("HEAD");
   if (head === null) {
@@ -399,10 +397,7 @@ export async function gitObjectDirectories(
     visited.add(directory);
     const contents = await readFile(join(directory, "info", "alternates"), {
       signal,
-    }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    }).catch(nullIfMissingPath);
     if (contents === null) continue;
     for (const path of gitAlternatePaths(contents)) {
       throwIfAborted(signal);
@@ -531,29 +526,20 @@ export async function normalizeTarget(
     }
     await requireGitRepository(root, signal);
     const base = await resolveGitRef(root, target.base, signal);
-    if (target.kind === "refs") {
-      const head = target.head;
-      if (typeof head !== "string" || head.length === 0) {
-        throw new InvalidTargetError(
-          "Git diff refs must include a non-empty head ref.",
-        );
-      }
-      return {
-        kind: "refs",
-        paths: [],
-        base,
-        head: await resolveGitRef(root, head, signal),
-        baseRef: target.base,
-        headRef: head,
-      };
+    const kind = target.kind === "refs" ? "refs" : "working_tree";
+    const head = kind === "refs" ? target.head : "HEAD";
+    if (!isNonEmptyString(head)) {
+      throw new InvalidTargetError(
+        "Git diff refs must include a non-empty head ref.",
+      );
     }
     return {
-      kind: "working_tree",
+      kind,
       paths: [],
       base,
-      head: await resolveGitRef(root, "HEAD", signal),
+      head: await resolveGitRef(root, head, signal),
       baseRef: target.base,
-      headRef: "HEAD",
+      headRef: head,
     };
   }
 
@@ -724,6 +710,40 @@ async function resolveGitRef(
   }
 }
 
+/** Read-only identity for matching saved history with an already selected host Git. */
+export async function gitHistoryIdentity(
+  repository: string,
+  git: TrustedExecutable,
+  signal?: AbortSignal,
+): Promise<{ commonDirectory: string | null; origin: string | null }> {
+  const read = async (args: readonly string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFile(
+        git.executable,
+        ["-c", "core.fsmonitor=false", "-C", repository, ...args],
+        {
+          encoding: "utf8",
+          signal,
+          env: isolatedGitEnvironment(true, git.environment),
+          maxBuffer: Infinity,
+        },
+      );
+      return (
+        stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "") ||
+        null
+      );
+    } catch {
+      throwIfAborted(signal);
+      return null;
+    }
+  };
+  const [commonDirectory, origin] = await Promise.all([
+    read(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    read(["remote", "get-url", "origin"]),
+  ]);
+  return { commonDirectory, origin };
+}
+
 async function gitOutput(
   repository: string,
   args: readonly string[],
@@ -758,10 +778,49 @@ export async function gitMarkerRoot(
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  const canonical = await abortable(() => realpath(repository), signal);
-  let current = (await lstat(canonical)).isDirectory()
-    ? canonical
-    : dirname(canonical);
+  let candidate = resolve(repository);
+  let current: string;
+  while (true) {
+    try {
+      const canonical = await abortable(() => realpath(candidate), signal);
+      current = (await lstat(canonical)).isDirectory()
+        ? canonical
+        : dirname(canonical);
+      break;
+    } catch (error) {
+      // Stale or inaccessible descendants still belong to their accessible checkout ancestors.
+      throwIfAborted(signal);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        search !== "outermost" ||
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
+      )
+        throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) throw error;
+      candidate = parent;
+    }
+  }
+  return await walkGitMarkers(current, signal, search);
+}
+
+/** Protect both the stored path's checkout and its resolved destination. */
+export async function gitProtectionRoots(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots = await Promise.all([
+    gitMarkerRoot(repository, signal, "outermost"),
+    walkGitMarkers(resolve(repository), signal, "outermost"),
+  ]);
+  return [...new Set(roots.filter((root): root is string => root !== null))];
+}
+
+async function walkGitMarkers(
+  current: string,
+  signal: AbortSignal | undefined,
+  search: "nearest" | "outermost",
+): Promise<string | null> {
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);
@@ -770,7 +829,14 @@ export async function gitMarkerRoot(
       if (search === "nearest") return current;
       root = current;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      throwIfAborted(signal);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        code !== "ENOENT" &&
+        code !== "ENOTDIR" &&
+        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
+      )
+        throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;
@@ -780,8 +846,9 @@ export async function gitMarkerRoot(
 
 function isolatedGitEnvironment(
   preserveGitConfiguration: boolean,
+  source: Readonly<Record<string, string | undefined>> = process.env,
 ): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
+  const environment = { ...source };
   for (const name of Object.keys(environment)) {
     const normalized = name.toUpperCase();
     if (
@@ -805,30 +872,20 @@ export async function abortable<T>(
   return await new Promise<T>((resolvePromise, reject) => {
     const onAbort = (): void => reject(abortReason(signal));
     signal.addEventListener("abort", onAbort, { once: true });
+    const finish =
+      <U>(settle: (value: U) => void) =>
+      (value: U): void => {
+        signal.removeEventListener("abort", onAbort);
+        settle(value);
+      };
     void Promise.resolve()
       .then(operation)
-      .then(
-        (value) => {
-          signal.removeEventListener("abort", onAbort);
-          resolvePromise(value);
-        },
-        (error: unknown) => {
-          signal.removeEventListener("abort", onAbort);
-          reject(error);
-        },
-      );
+      .then(finish(resolvePromise), finish(reject));
   });
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw abortReason(signal);
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }
 
 function expandHome(value: string): string {
@@ -839,4 +896,16 @@ function expandHome(value: string): string {
     return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
   }
   return value;
+}
+
+/** @internal */
+export function nullIfMissingFile(error: NodeJS.ErrnoException): null {
+  if (error.code === "ENOENT") return null;
+  throw error;
+}
+
+/** @internal */
+export function nullIfMissingPath(error: NodeJS.ErrnoException): null {
+  if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+  throw error;
 }

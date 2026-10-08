@@ -10,23 +10,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, parse } from "node:path";
+import { dirname, join, parse } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-
-async function removeTemporaryDirectory(path: string): Promise<void> {
-  // Bun 1.3.14 ignores fs.rm's retry options.
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await rm(path, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10)
-        throw error;
-      await Bun.sleep(100 * (attempt + 1));
-    }
-  }
-}
+import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 
 test.skipIf(process.platform !== "win32")(
   "launches the PATH Node executable independently of command extensions and the caller directory",
@@ -127,6 +114,283 @@ test.skipIf(process.platform !== "win32")(
     }
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "preserves helper argument bytes, stdin, and exit status",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-helper-pipe-")),
+    );
+    try {
+      const scripts = join(root, "plugin with spaces", "scripts");
+      const mcp = join(root, "plugin with spaces", "mcp");
+      await mkdir(scripts, { recursive: true });
+      await mkdir(mcp);
+      const launcher = join(scripts, "launch_codex_security_mcp");
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+        launcher,
+      );
+      await chmod(launcher, 0o700);
+      await writeFile(
+        join(mcp, "helpers.mjs"),
+        `import { readFileSync } from "node:fs";
+const payload = Buffer.from(readFileSync(3, "ascii").trim(), "hex");
+console.log(JSON.stringify({
+  args: process.argv.slice(2),
+  payload: payload.toString("hex"),
+  stdin: readFileSync(0).toString("hex"),
+}));
+process.exitCode = 23;
+`,
+      );
+      const argument = 'space "quote" back\\slash\nline\t雪';
+      const largeArgument = "x".repeat(70_000);
+      const input = Buffer.from("original stdin\n\0tail");
+      const result = spawnSync(
+        "/bin/sh",
+        [
+          "-c",
+          'exec "$1" --helper probe "$2" "" "raw-$(printf \'\\377\')" "$3"',
+          "helper-test",
+          launcher,
+          argument,
+          largeArgument,
+        ],
+        {
+          input,
+          encoding: "utf8",
+          env: { ...process.env, CODEX_MCP_NODE_PATH: node },
+          maxBuffer: Infinity,
+        },
+      );
+      expect(result.status, result.stderr || result.error?.message).toBe(23);
+      expect(result.stderr).toBe("");
+      const expectedPayload = Buffer.concat([
+        Buffer.from(
+          [
+            process.env["HOME"] === undefined ? "" : "x",
+            process.env["HOME"] ?? "",
+            "probe",
+            argument,
+            "",
+            "raw-",
+          ].join("\0"),
+        ),
+        Buffer.from([0xff, 0]),
+        Buffer.from(largeArgument + "\0"),
+      ]);
+      expect(JSON.parse(result.stdout)).toEqual({
+        args: ["--helper"],
+        payload: expectedPayload.toString("hex"),
+        stdin: input.toString("hex"),
+      });
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "launches argument-only helpers with closed stdin",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-helper-closed-stdin-")),
+    );
+    try {
+      const scripts = join(root, "plugin with spaces", "scripts");
+      const mcp = join(root, "plugin with spaces", "mcp");
+      await mkdir(scripts, { recursive: true });
+      await mkdir(mcp);
+      const launcher = join(scripts, "launch_codex_security_mcp");
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+        launcher,
+      );
+      await chmod(launcher, 0o700);
+      await writeFile(
+        join(mcp, "helpers.mjs"),
+        `import { readFileSync } from "node:fs";
+const payload = Buffer.from(readFileSync(3, "ascii").trim(), "hex");
+console.log(JSON.stringify({ payload: payload.toString("hex") }));
+process.exitCode = 23;
+`,
+      );
+      const result = spawnSync(
+        "/bin/sh",
+        [
+          "-c",
+          'exec 0<&-; exec "$1" --helper probe "argument with spaces"',
+          "helper-test",
+          launcher,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_MCP_NODE_PATH: node },
+        },
+      );
+      expect(result.status, result.stderr || result.error?.message).toBe(23);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toEqual({
+        payload: Buffer.from(
+          [
+            process.env["HOME"] === undefined ? "" : "x",
+            process.env["HOME"] ?? "",
+            "probe",
+            "argument with spaces",
+            "",
+          ].join("\0"),
+        ).toString("hex"),
+      });
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
+for (const mode of ["managed", "PATH"] as const) {
+  test.skipIf(process.platform !== "darwin")(
+    `resolves security policy with ${mode} Node and filesystem writes denied`,
+    async () => {
+      const node = Bun.which("node");
+      if (node === null)
+        throw new Error("Node is required for the launcher test.");
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-read-only-helper-")),
+      );
+      try {
+        const repository = join(root, "repository with spaces");
+        await mkdir(join(repository, "service"), { recursive: true });
+        await writeFile(join(repository, "SECURITY.md"), "root policy\n");
+        await writeFile(
+          join(repository, "service", "SECURITY.md"),
+          "scoped policy\n",
+        );
+        const result = spawnSync(
+          "/usr/bin/sandbox-exec",
+          [
+            "-p",
+            "(version 1) (allow default) (deny file-write*)",
+            join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+            "--helper",
+            "resolve-security-md",
+            "--repo",
+            repository,
+            "--scope",
+            "service",
+            "--out",
+            "-",
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_MCP_NODE_PATH: mode === "managed" ? node : "",
+              CODEX_BROWSER_USE_NODE_PATH: "",
+              CODEX_ELECTRON_RESOURCES_PATH: "",
+              CODEX_CLI_PATH: "",
+              XDG_CACHE_HOME: join(root, "unused cache"),
+              PATH: dirname(node),
+            },
+          },
+        );
+        expect(result.status, result.stderr || result.error?.message).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout).toContain("root policy\n");
+        expect(result.stdout).toContain("scoped policy\n");
+      } finally {
+        await removeTemporaryDirectory(root);
+      }
+    },
+  );
+}
+
+for (const [signal, exitCode] of [
+  ["SIGTERM", 23],
+  ["SIGINT", 130],
+  ["SIGHUP", 129],
+] as const) {
+  test.skipIf(process.platform === "win32")(
+    `forwards ${signal} and waits for the helper`,
+    async () => {
+      const node = Bun.which("node");
+      if (node === null)
+        throw new Error("Node is required for the launcher test.");
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-helper-signal-")),
+      );
+      try {
+        const scripts = join(root, "scripts");
+        const mcp = join(root, "mcp");
+        await mkdir(scripts);
+        await mkdir(mcp);
+        const launcherPath = join(scripts, "launch_codex_security_mcp");
+        await copyFile(
+          join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+          launcherPath,
+        );
+        await chmod(launcherPath, 0o700);
+        await writeFile(
+          join(mcp, "helpers.mjs"),
+          `import { readFileSync } from "node:fs";
+readFileSync(3);
+process.on("SIGTERM", () => process.exit(23));
+console.log(JSON.stringify({ pid: process.pid }));
+setInterval(() => {}, 1000);
+`,
+        );
+        const launcher = Bun.spawn([launcherPath, "--helper", "probe"], {
+          env: { ...process.env, CODEX_MCP_NODE_PATH: node },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        let helperPid: number | undefined;
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const reader = launcher.stdout.getReader();
+          const ready = await reader.read();
+          reader.releaseLock();
+          expect(ready.done).toBe(false);
+          helperPid = JSON.parse(new TextDecoder().decode(ready.value)).pid;
+          launcher.kill(signal);
+          const result = await Promise.race([
+            launcher.exited,
+            new Promise<never>((_, reject) => {
+              deadline = setTimeout(
+                () => reject(new Error("The helper did not terminate.")),
+                5000,
+              );
+            }),
+          ]);
+          expect(result).toBe(exitCode);
+          expect(() => process.kill(helperPid!, 0)).toThrow("ESRCH");
+          expect(await new Response(launcher.stderr).text()).toBe("");
+        } finally {
+          if (deadline !== undefined) clearTimeout(deadline);
+          if (launcher.exitCode === null) launcher.kill("SIGKILL");
+          if (helperPid !== undefined) {
+            try {
+              process.kill(helperPid, "SIGKILL");
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ESRCH")
+                throw error;
+            }
+          }
+          await launcher.exited;
+        }
+      } finally {
+        await removeTemporaryDirectory(root);
+      }
+    },
+  );
+}
 
 test.each(["server", "helper"] as const)(
   "starts the packaged %s with managed Node and an empty PATH",

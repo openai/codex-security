@@ -1,15 +1,6 @@
+import { modelResponseText } from "./support/model-response-text.js";
 import { execFile as execFileCallback } from "node:child_process";
-import {
-  cp,
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { promisify } from "node:util";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
@@ -21,16 +12,12 @@ import {
   type OwnerFinding,
   type SuggestOwnersOptions,
 } from "../src/suggest-owners.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const execFile = promisify(execFileCallback);
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectory, cleanup } =
+  createApiTestFixtures("owner-repository-");
+afterEach(cleanup);
 
 const finding: OwnerFinding = {
   findingId: "finding-one",
@@ -40,10 +27,7 @@ const finding: OwnerFinding = {
 };
 
 async function repository() {
-  const path = await realpath(
-    await mkdtemp(join(tmpdir(), "owner-repository-")),
-  );
-  directories.push(path);
+  const path = await temporaryDirectory();
   const git = async (...args: string[]) =>
     (await execFile("git", ["-C", path, ...args])).stdout.trim();
   await git("init", "-q");
@@ -88,10 +72,7 @@ function fakeCodex(decide: (context: OwnerContext) => unknown = chooseAlex) {
           ) as OwnerContext;
           calls.push({ context, thread, turn });
           const result = decide(context);
-          return {
-            finalResponse:
-              typeof result === "string" ? result : JSON.stringify(result),
-          };
+          return { finalResponse: modelResponseText(result) };
         },
       };
     },
@@ -117,10 +98,7 @@ test.each(["borrowed-gitfile", "forged-commondir"])(
   "rejects %s before sending another checkout's evidence to Codex",
   async (kind) => {
     const other = await repository();
-    const selected = await realpath(
-      await mkdtemp(join(tmpdir(), "owner-unbound-")),
-    );
-    directories.push(selected);
+    const selected = await temporaryDirectory("owner-unbound-");
     const metadata = await other.git("rev-parse", "--absolute-git-dir");
     if (kind === "borrowed-gitfile") {
       await writeFile(join(selected, ".git"), `gitdir: ${metadata}\n`);
@@ -148,10 +126,7 @@ test.each(["refs", "refs/heads", "HEAD", "packed-refs"])(
   "rejects borrowed %s before sending another checkout's evidence to Codex",
   async (reference) => {
     const other = await repository();
-    const selected = await realpath(
-      await mkdtemp(join(tmpdir(), "owner-borrowed-ref-")),
-    );
-    directories.push(selected);
+    const selected = await temporaryDirectory("owner-borrowed-ref-");
     const branch = await other.git("symbolic-ref", "--short", "HEAD");
     await execFile("git", [
       "init",
@@ -195,10 +170,7 @@ test.each([
   "alternate-pack-link",
 ])("rejects %s before collecting another checkout's objects", async (kind) => {
   const other = await repository();
-  const selected = await realpath(
-    await mkdtemp(join(tmpdir(), "owner-borrowed-objects-")),
-  );
-  directories.push(selected);
+  const selected = await temporaryDirectory("owner-borrowed-objects-");
   await execFile("git", ["init", "--quiet", selected]);
   const objects = join(selected, ".git", "objects");
   const borrowed = join(
@@ -248,8 +220,7 @@ test.each([
   "in-tree-alternate",
 ])("supports a bound %s", async (kind) => {
   const repo = await repository();
-  const root = await realpath(await mkdtemp(join(tmpdir(), "owner-bound-")));
-  directories.push(root);
+  const root = await temporaryDirectory("owner-bound-");
   let selected = repo.path;
   if (kind === "linked-worktree") {
     selected = join(root, "checkout");
@@ -296,12 +267,12 @@ test("combines source, affected-line authorship, and history through the restric
     codex,
     signal,
     model: "synthetic-model",
-    reasoningEffort: "high",
+    reasoningEffort: "future-effort",
   });
   expect(report).toMatchObject({
     revision: repo.revision,
     model: "synthetic-model",
-    reasoningEffort: "high",
+    reasoningEffort: "future-effort",
     results: [
       {
         findingId: finding.findingId,
@@ -325,7 +296,7 @@ test("combines source, affected-line authorship, and history through the restric
   expect(calls[0]!.thread).toMatchObject({
     threadSource: "security_suggest_owners",
     model: "synthetic-model",
-    modelReasoningEffort: "high",
+    modelReasoningEffort: "future-effort",
     sandboxMode: "read-only",
     approvalPolicy: "never",
     networkAccessEnabled: false,

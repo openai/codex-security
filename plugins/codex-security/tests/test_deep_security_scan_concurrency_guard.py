@@ -1,50 +1,14 @@
 from __future__ import annotations
 
-import json
-import os
 import sqlite3
-import subprocess
-import sys
-import uuid
 from pathlib import Path
 
-PLUGIN_DIR = Path(__file__).resolve().parent.parent
-WORKBENCH_SCRIPT = PLUGIN_DIR / "scripts" / "workbench_db.py"
-
-
-def run_workbench(state_dir: Path, *args: str) -> dict[str, object]:
-    completed = subprocess.run(
-        [sys.executable, str(WORKBENCH_SCRIPT), *args],
-        check=True,
-        capture_output=True,
-        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
-        text=True,
-    )
-    return json.loads(completed.stdout)
-
-
-def create_saved_workspace(state_dir: Path, target: Path, mode: str) -> dict[str, object]:
-    workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
-    return run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        mode,
-    )
+from workbench_test_support import (
+    create_saved_git_workspace,
+    fail_scan,
+    get_scan,
+    start_scan_command,
+)
 
 
 def test_scan_context_reports_only_other_running_deep_scans(tmp_path: Path) -> None:
@@ -56,20 +20,15 @@ def test_scan_context_reports_only_other_running_deep_scans(tmp_path: Path) -> N
         target.mkdir()
 
     workspaces = {
-        name: create_saved_workspace(
+        name: create_saved_git_workspace(
             state_dir,
             target,
-            "standard" if name == "standard" else "deep",
+            mode="standard" if name == "standard" else "deep",
         )
         for name, target in targets.items()
     }
     scans = {
-        name: run_workbench(
-            state_dir,
-            "start-scan",
-            "--workspace-id",
-            str(workspace["id"]),
-        )
+        name: start_scan_command(state_dir, str(workspace["id"]))
         for name, workspace in workspaces.items()
     }
 
@@ -80,14 +39,7 @@ def test_scan_context_reports_only_other_running_deep_scans(tmp_path: Path) -> N
             "UPDATE scans SET handoff_status = 'delivered' WHERE id IN (?, ?)",
             (failed_scan_id, other_scan_id),
         )
-    run_workbench(
-        state_dir,
-        "fail-scan",
-        "--scan-id",
-        failed_scan_id,
-        "--message",
-        "Stopped for the fixture.",
-    )
+    fail_scan(state_dir, failed_scan_id, "Stopped for the fixture.")
     complete_scan_id = str(scans["complete"]["results"]["scanId"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
@@ -100,7 +52,7 @@ def test_scan_context_reports_only_other_running_deep_scans(tmp_path: Path) -> N
         )
 
     current_scan_id = str(scans["current"]["results"]["scanId"])
-    context = run_workbench(state_dir, "get-scan", "--scan-id", current_scan_id)
+    context = get_scan(state_dir, current_scan_id)
 
     assert context["otherRunningDeepScans"] == [
         {
@@ -112,13 +64,6 @@ def test_scan_context_reports_only_other_running_deep_scans(tmp_path: Path) -> N
         }
     ]
 
-    run_workbench(
-        state_dir,
-        "fail-scan",
-        "--scan-id",
-        other_scan_id,
-        "--message",
-        "Stopped for the fixture.",
-    )
-    context = run_workbench(state_dir, "get-scan", "--scan-id", current_scan_id)
+    fail_scan(state_dir, other_scan_id, "Stopped for the fixture.")
+    context = get_scan(state_dir, current_scan_id)
     assert context["otherRunningDeepScans"] == []

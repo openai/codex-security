@@ -9,11 +9,11 @@ import {
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import {
-  bundledPluginRoot,
   canonicalizeModelSafePath,
   codexSecurityStateDirectory,
+  workbenchEnvironment,
   requireOutputOutsideRepository,
-  resolvePluginPython,
+  resolveWorkbenchRuntime,
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "./runtime.js";
@@ -53,6 +53,7 @@ export class SeverityStore {
       save: async (finding, assessment, result) => {
         await this.run(["severity-classification"], {
           action: "save",
+          scanId,
           finding,
           assessment: {
             ...assessment,
@@ -103,32 +104,25 @@ export class SeverityStore {
   }
 
   private async run(args: string[], input?: object) {
-    const options = await (this.options ??= this.resolveOptions());
     return runWorkbench(
-      options,
+      await (this.options ??= this.resolveOptions()),
       args,
       input === undefined ? undefined : JSON.stringify(input),
     );
   }
 
   private async resolveOptions(): Promise<WorkbenchCommandOptions> {
-    const environment = {
-      ...this.environment,
-      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(this.environment),
-    };
+    const environment = workbenchEnvironment(this.environment);
     requireOutputOutsideRepository(
       this.scanDirectory,
       await canonicalizeModelSafePath(environment.CODEX_SECURITY_STATE_DIR),
       "runtime",
     );
-    const [python, pluginRoot] = await Promise.all([
-      resolvePluginPython({
-        environment,
-        protectedRoot: this.scanDirectory,
-        signal: this.signal,
-      }),
-      bundledPluginRoot(),
-    ]);
+    const [python, pluginRoot] = await resolveWorkbenchRuntime({
+      environment,
+      protectedRoot: this.scanDirectory,
+      signal: this.signal,
+    });
     return {
       python,
       pluginRoot,
