@@ -28,96 +28,28 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.scan_dir = Path(self.temp_dir.name).resolve()
-        self.manifest = {
-            "documentType": "codex-security.scan-manifest",
-            "schemaVersion": "1.0",
-            "scan": {
-                "id": "scan_001",
-                "producer": {
-                    "name": "codex-security-plugin",
-                    "version": "0.1.0",
-                },
-                "status": "completed",
-                "startedAt": "2026-05-31T18:00:00Z",
-                "completedAt": "2026-05-31T18:09:00Z",
-                "target": {
-                    "kind": "git_worktree",
-                    "targetId": "target_sha256_example",
-                    "displayName": "example/repo",
-                    "remote": "https://github.com/example/repo",
-                    "revision": "deadbeef",
-                    "snapshotDigest": "codex-security-snapshot/v1:sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                },
-                "scope": {
-                    "includePaths": ["src/"],
-                    "excludePaths": [],
-                },
-                "coverageRef": "coverage.json",
-                "findingsRef": "findings.json",
-            },
-        }
-        self.finding = {
-            "ruleId": "path-traversal.archive-extraction",
-            "identity": {
-                "anchor": "archive-entry-write-without-containment",
-            },
-            "title": "Unsafe archive extraction can escape the output directory",
-            "summary": "An attacker-controlled path reaches a filesystem write without containment validation.",
-            "severity": {
-                "level": "high",
-                "score": 8.1,
-                "scoringSystem": "CVSS:3.1",
-            },
-            "confidence": {
-                "level": "high",
-                "rationale": "Direct source trace reaches the filesystem write without a containment check.",
-            },
-            "taxonomy": {
-                "category": "path-traversal",
-                "cwe": ["CWE-22"],
-            },
-            "locations": [
-                {
-                    "path": "src/extract.py",
-                    "startLine": 41,
-                    "endLine": 44,
-                    "role": "sink",
-                }
-            ],
-            "remediation": "Normalize destinations and reject entries that escape the extraction root.",
-            "validation": None,
-            "attackPath": None,
-            "provenance": {
-                "source": "local_plugin",
-            },
-            "extensions": {},
-        }
-        self.findings = {
-            "documentType": "codex-security.findings",
-            "schemaVersion": "1.0",
-            "scanId": "scan_001",
-            "findings": [copy.deepcopy(self.finding)],
-        }
-        self.coverage = {
-            "documentType": "codex-security.coverage",
-            "schemaVersion": "1.0",
-            "scanId": "scan_001",
-            "mode": "repository",
-            "completeness": "complete",
-            "inventoryStrategy": "repository",
-            "includePaths": ["src/"],
-            "excludePaths": [],
-            "surfaces": [
-                {
-                    "id": "surface_archive_extraction",
-                    "label": "Archive extraction",
-                    "disposition": "reported",
-                    "receiptRefs": [],
-                }
-            ],
-            "explicitExclusions": [],
-            "deferred": [],
-        }
+        self.manifest = json.loads((EXAMPLE_DIR / "scan-manifest.json").read_text(encoding="utf-8"))
+        scan = self.manifest["scan"]
+        scan["id"] = "scan_001"
+        scan.pop("sealedAt")
+        scan.pop("artifacts")
+        scan["scope"]["includePaths"] = ["src/"]
+        scan["target"]["snapshotDigest"] = "codex-security-snapshot/v1:sha256:" + "0" * 64
+        self.findings = json.loads((EXAMPLE_DIR / "findings.json").read_text(encoding="utf-8"))
+        self.finding = self.findings["findings"][0]
+        for field in (
+            "findingId",
+            "occurrenceId",
+            "fingerprints",
+            "remediationTests",
+            "preventiveControls",
+        ):
+            self.finding.pop(field)
+        self.findings["scanId"] = "scan_001"
+        self.findings["findings"] = [copy.deepcopy(self.finding)]
+        self.coverage = json.loads((EXAMPLE_DIR / "coverage.json").read_text(encoding="utf-8"))
+        self.coverage["scanId"] = "scan_001"
+        self.coverage["includePaths"] = ["src/"]
 
     def write_sealed_scan(self) -> None:
         self.write_scan()
