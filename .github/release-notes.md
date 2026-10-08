@@ -125,6 +125,7 @@
 - match user context before reusing discovery ([#1048](https://github.com/openai/codex-security/pull/1048))
 - report incomplete results as errors and deduplicate log warnings ([#977](https://github.com/openai/codex-security/pull/977))
 - preserve request attribution across CLI, SDK, and Deep Scan ([#1424](https://github.com/openai/codex-security/pull/1424))
+- manage the findings service lifecycle ([#700](https://github.com/openai/codex-security/pull/700))
 
 <!-- release-section: highlights:end -->
 
