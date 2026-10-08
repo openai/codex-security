@@ -1656,3 +1656,38 @@ test.each([false, true])(
     }
   },
 );
+
+test("numeric evidence size excludes an oversized item and preserves a valid mixed-format sibling", async () => {
+  const oversized = {
+    ...normalized("oversized-numbers"),
+    evidence: {
+      ...normalized().evidence,
+      source_data: { metrics: Array(48_000).fill(1e-7) },
+    },
+  };
+  const accepted = {
+    ...normalized("accepted-numbers"),
+    evidence: {
+      ...normalized().evidence,
+      source_data: {
+        metrics: [...Array(10_000).fill(1e-7), ...Array(30_000).fill(1e-6)],
+      },
+    },
+  };
+  expect(Buffer.byteLength(JSON.stringify(accepted.evidence))).toBeGreaterThan(
+    256 * 1024,
+  );
+  const f = await fixture([oversized, accepted]);
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  expect(
+    prepared.preview.findings.map((finding) => finding.source_finding_id),
+  ).toEqual(["accepted-numbers"]);
+  expect(prepared.preview.excluded).toHaveLength(1);
+  expect(prepared.preview.excluded[0]!.reason).toContain("256 KiB");
+  expect((await prepared.publish()).counts.created).toBe(1);
+  expect(f.posts).toHaveLength(1);
+  expect(JSON.parse(f.posts[0]!).items[0].evidence.source_data).toEqual(
+    accepted.evidence.source_data,
+  );
+  expect(f.reports.has("oversized-numbers")).toBe(false);
+});

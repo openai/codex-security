@@ -121,6 +121,7 @@ export function validateExternalEvidence(
         "Evidence URLs must be HTTP(S) links without credentials.",
       );
   }
+  let numericByteAdjustment = 0;
   const pending: [unknown, number][] = [[result, 0]];
   while (pending.length > 0) {
     const [value, depth] = pending.pop()!;
@@ -129,11 +130,23 @@ export function validateExternalEvidence(
     if (value !== null && typeof value === "object") {
       for (const child of Object.values(value))
         pending.push([child, depth + 1]);
-    } else if (typeof value === "number" && !Number.isFinite(value)) {
-      throw new Error("Evidence must contain finite JSON numbers.");
+    } else if (typeof value === "number") {
+      if (!Number.isFinite(value))
+        throw new Error("Evidence must contain finite JSON numbers.");
+      const wire = JSON.stringify(value);
+      // Cloud pads short exponents and formats small fractions scientifically.
+      const cloud = (
+        wire.includes(".") && Math.abs(value) < 1e-4
+          ? value.toExponential()
+          : wire
+      ).replace(/e-(\d)$/u, "e-0$1");
+      numericByteAdjustment += cloud.length - wire.length;
     }
   }
-  if (Buffer.byteLength(JSON.stringify(result)) > 256 * 1024)
+  if (
+    Buffer.byteLength(JSON.stringify(result)) + numericByteAdjustment >
+    256 * 1024
+  )
     throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
   return result;
 }
