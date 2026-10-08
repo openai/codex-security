@@ -1361,6 +1361,9 @@ describe("scan and patch workflow", () => {
             ) {
               expect(output.command).toBe("patch");
               expect(output.appServer?.sandbox).toBe("read-only");
+              expect(args).toContain(
+                'responses_api_metadata.codex_security_command="assess-patch-risk"',
+              );
               expect(output.appServer?.prompt).toContain(
                 "<!-- codex-security:patch-risk-summary:start -->",
               );
