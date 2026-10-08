@@ -1414,6 +1414,143 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each([
+    ["auto", "root"],
+    ["api-key", "root"],
+    ["auto", "profile"],
+    ["api-key", "profile"],
+  ] as const)(
+    "uses a native provider's selected env_key with %s authentication from %s",
+    async (auth, selection) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const createCodex = mock(completedCodex(root));
+      const onAuthentication = mock<(selected: ScanAuthentication) => void>();
+      const provider = {
+        model: "synthetic-deployment",
+        model_provider: "synthetic.gateway",
+        model_providers: {
+          "synthetic.gateway": {
+            name: "Synthetic gateway",
+            base_url: "https://provider.example.test/openai/v1",
+            wire_api: "responses",
+            env_key: "SYNTHETIC_PROVIDER_KEY",
+          },
+        },
+      };
+      const environment = {
+        SYNTHETIC_PROVIDER_KEY: " synthetic-selected-key ",
+        ...(selection === "profile"
+          ? { OPENAI_API_KEY: "synthetic-unrelated-openai-key" }
+          : {}),
+      };
+      const client = new TestClient(
+        {
+          codexOverrides:
+            selection === "root"
+              ? provider
+              : {
+                  model_provider: "openai",
+                  profile: "selected",
+                  profiles: { selected: provider },
+                },
+        },
+        {
+          environment,
+          prepareRuntime: unauthenticatedRuntime(codexHome, () => environment),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          resolveCodexCommand: () =>
+            fail("custom provider must not sign in to OpenAI"),
+          createCodex,
+        },
+      );
+      const authentication: ScanAuthentication = {
+        method: "api_key",
+        source: "SYNTHETIC_PROVIDER_KEY",
+        verified: false,
+      };
+      expect(
+        (await client.preflight(repository, { auth })).authentication,
+      ).toEqual(authentication);
+      await expect(
+        client.run(repository, { auth, onAuthentication }),
+      ).resolves.toMatchObject({ threadId: "thread-1" });
+      expect(onAuthentication.mock.lastCall?.[0]).toEqual(authentication);
+      expect(createCodex.mock.lastCall?.[0]?.apiKey).toBeUndefined();
+      expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
+        SYNTHETIC_PROVIDER_KEY: environment.SYNTHETIC_PROVIDER_KEY,
+      });
+      expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
+        "OPENAI_API_KEY",
+      );
+      expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
+        "CODEX_API_KEY",
+      );
+      await client.close();
+    },
+  );
+
+  test("ignores native built-in provider tables during credential selection", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const createCodex = mock(completedCodex(root));
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: "openai",
+          model_providers: { openai: { env_key: "SYNTHETIC_UNUSED_KEY" } },
+        },
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-openai-key",
+          SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
+        },
+        prepareRuntime: unauthenticatedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex,
+      },
+    );
+    expect(
+      (await client.preflight(repository, { auth: "api-key" })).authentication,
+    ).toEqual({ method: "api_key", source: "OPENAI_API_KEY", verified: false });
+    await client.run(repository, { auth: "api-key" });
+    expect(createCodex.mock.lastCall?.[0]?.apiKey).toBe("synthetic-openai-key");
+    await client.close();
+  });
+
+  test.each([undefined, "   "])(
+    "requires the selected native provider key instead of an unrelated key (%s)",
+    async (key) => {
+      const { repository } = await runtimeDirectories();
+      const { client, prepareRuntime } = localClient(
+        {
+          codexOverrides: {
+            model_provider: "synthetic.gateway",
+            model_providers: {
+              "synthetic.gateway": { env_key: "SYNTHETIC_PROVIDER_KEY" },
+            },
+          },
+        },
+        {
+          OPENAI_API_KEY: "synthetic-unrelated-openai-key",
+          SYNTHETIC_PROVIDER_KEY: key,
+        },
+      );
+      for (const operation of ["preflight", "run"] as const) {
+        await expect(
+          client[operation](repository, { auth: "api-key" }),
+        ).rejects.toThrow(
+          "API-key authentication requires SYNTHETIC_PROVIDER_KEY.",
+        );
+      }
+      expect(prepareRuntime).not.toHaveBeenCalled();
+      await client.close();
+    },
+  );
+
   test.each(EXTERNAL_PROVIDER_CASES)(
     "requires the %s API key instead of accepting another provider's credentials",
     async (name, provider, apiKey, model, providerConfig) => {

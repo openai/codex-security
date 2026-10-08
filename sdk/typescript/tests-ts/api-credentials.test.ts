@@ -601,83 +601,100 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("reuses the managed runtime when scan authentication changes", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const ambientHome = join(root, "ambient-codex-home");
-    const stateDirectory = join(root, "state");
-    const dedicatedHome = join(stateDirectory, "codex-home");
-    const scanDir = join(root, "scan");
-    const ambientAuthentication = '{"auth_mode":"chatgpt"}\n';
-    await mkdir(repository);
-    await mkdir(ambientHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    await writeFile(join(ambientHome, "auth.json"), ambientAuthentication);
-    const runs: Array<{ home: string; apiKey?: string }> = [];
-    const client = new TestClient(
-      {
-        pluginPath: PLUGIN_ROOT,
-        codexOverrides: {
-          model_provider: "synthetic.account",
-          model_providers: {
-            "synthetic.account": {
-              name: "Synthetic account provider",
-              wire_api: "responses",
-              requires_openai_auth: true,
-              auth: null,
+  test.each([undefined, "SYNTHETIC_PROVIDER_KEY"])(
+    "reuses the managed runtime when scan authentication changes (provider key: %s)",
+    async (providerEnvKey) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const ambientHome = join(root, "ambient-codex-home");
+      const stateDirectory = join(root, "state");
+      const dedicatedHome = join(stateDirectory, "codex-home");
+      const scanDir = join(root, "scan");
+      const ambientAuthentication = '{"auth_mode":"chatgpt"}\n';
+      await mkdir(repository);
+      await mkdir(ambientHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(join(ambientHome, "auth.json"), ambientAuthentication);
+      const runs: Array<{ home: string; apiKey?: string }> = [];
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides: {
+            model_provider: "synthetic.account",
+            model_providers: {
+              "synthetic.account": {
+                name: "Synthetic account provider",
+                wire_api: "responses",
+                requires_openai_auth: true,
+                auth: null,
+                ...(providerEnvKey === undefined
+                  ? {}
+                  : { env_key: providerEnvKey }),
+              },
             },
           },
         },
-      },
-      {
-        environment: {
-          HOME: root,
-          USERPROFILE: root,
-          CODEX_HOME: "~/ambient-codex-home",
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-          OPENAI_API_KEY: "synthetic-transient-key",
+        {
+          environment: {
+            HOME: root,
+            USERPROFILE: root,
+            CODEX_HOME: "~/ambient-codex-home",
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+            OPENAI_API_KEY: "synthetic-transient-key",
+            ...(providerEnvKey === undefined
+              ? {}
+              : { [providerEnvKey]: "synthetic-provider-key" }),
+          },
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options: CodexOptions) => {
+            runs.push({
+              home: options.env?.["CODEX_HOME"] ?? "",
+              ...(options.apiKey === undefined
+                ? {}
+                : { apiKey: options.apiKey }),
+            });
+            throw new Error("authentication-selected scan reached");
+          },
         },
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => {
-          runs.push({
-            home: options.env?.["CODEX_HOME"] ?? "",
-            ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
-          });
-          throw new Error("authentication-selected scan reached");
-        },
-      },
-    );
+      );
 
-    try {
-      await expect(client.run(repository, { auth: "api-key" })).rejects.toThrow(
-        "authentication-selected scan reached",
-      );
-      expect(runs[0]?.home).toBe(dedicatedHome);
-      expect(runs[0]?.apiKey).toBe("synthetic-transient-key");
-      expect(existsSync(join(dedicatedHome, "auth.json"))).toBe(false);
+      try {
+        await expect(
+          client.run(repository, {
+            auth: providerEnvKey === undefined ? "api-key" : "auto",
+          }),
+        ).rejects.toThrow("authentication-selected scan reached");
+        expect(runs[0]?.home).toBe(dedicatedHome);
+        expect(runs[0]?.apiKey).toBe(
+          providerEnvKey === undefined ? "synthetic-transient-key" : undefined,
+        );
+        expect(existsSync(join(dedicatedHome, "auth.json"))).toBe(false);
 
-      await expect(client.run(repository, { auth: "chatgpt" })).rejects.toThrow(
-        "authentication-selected scan reached",
-      );
-      expect(runs[1]).toEqual({ home: dedicatedHome });
-      expect(await readFile(join(dedicatedHome, "auth.json"), "utf8")).toBe(
-        ambientAuthentication,
-      );
-      await expect(client.run(repository, { auth: "api-key" })).rejects.toThrow(
-        "authentication-selected scan reached",
-      );
-      expect(runs[2]?.home).toBe(dedicatedHome);
-      expect(runs[2]?.apiKey).toBe("synthetic-transient-key");
-      expect(await readFile(join(dedicatedHome, "auth.json"), "utf8")).toBe(
-        ambientAuthentication,
-      );
-    } finally {
-      await client.close();
-    }
-    expect(existsSync(dedicatedHome)).toBe(true);
-  });
+        await expect(
+          client.run(repository, { auth: "chatgpt" }),
+        ).rejects.toThrow("authentication-selected scan reached");
+        expect(runs[1]).toEqual({ home: dedicatedHome });
+        expect(await readFile(join(dedicatedHome, "auth.json"), "utf8")).toBe(
+          ambientAuthentication,
+        );
+        await expect(
+          client.run(repository, { auth: "api-key" }),
+        ).rejects.toThrow("authentication-selected scan reached");
+        expect(runs[2]?.home).toBe(dedicatedHome);
+        expect(runs[2]?.apiKey).toBe(
+          providerEnvKey === undefined ? "synthetic-transient-key" : undefined,
+        );
+        expect(await readFile(join(dedicatedHome, "auth.json"), "utf8")).toBe(
+          ambientAuthentication,
+        );
+      } finally {
+        await client.close();
+      }
+      expect(existsSync(dedicatedHome)).toBe(true);
+    },
+  );
 
   test("does not reimport ambient credentials after an explicit logout", async () => {
     const root = await temporaryDirectory();

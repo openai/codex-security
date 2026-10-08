@@ -43,6 +43,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  inlineToml,
   scanModelConfiguration,
 } from "../src/config.js";
 import {
@@ -2452,6 +2453,66 @@ describe("CLI", () => {
           model_providers: { [provider]: providerConfig },
         });
       }
+    },
+  );
+
+  test.each(["root", "profile"])(
+    "scan preflight uses the %s native provider environment key",
+    async (selection) => {
+      const provider = {
+        model_providers: { gateway: { env_key: "SYNTHETIC_PROVIDER_KEY" } },
+        ...(selection === "profile"
+          ? {
+              profile: "selected",
+              profiles: { selected: { model_provider: "gateway" } },
+            }
+          : { model_provider: "gateway" }),
+      };
+      for (const auth of ["auto", "api-key"]) {
+        const initialized = mock();
+        expect(
+          await runCapturedCli(
+            main,
+            [
+              "scan",
+              ".",
+              "--auth",
+              auth,
+              ...Object.entries(provider).flatMap(([key, value]) => [
+                "--codex",
+                `${key}=${inlineToml(value)}`,
+              ]),
+            ],
+            dependencies({
+              environment: { SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key" },
+              onConfig: initialized,
+            }),
+          ),
+        ).toBe(0);
+        expect(initialized).toHaveBeenCalledTimes(1);
+      }
+      const initialized = mock();
+      const output = captureCli(main, "stderr");
+      expect(
+        await output.run(
+          [
+            "scan",
+            ".",
+            "--auth",
+            "api-key",
+            ...Object.entries(provider).flatMap(([key, value]) => [
+              "--codex",
+              `${key}=${inlineToml(value)}`,
+            ]),
+          ],
+          dependencies({
+            environment: { OPENAI_API_KEY: "synthetic-unrelated" },
+            onConfig: initialized,
+          }),
+        ),
+      ).toBe(2);
+      expect(output.text()).toContain("SYNTHETIC_PROVIDER_KEY");
+      expect(initialized).not.toHaveBeenCalled();
     },
   );
 

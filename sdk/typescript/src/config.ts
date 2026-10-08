@@ -108,6 +108,41 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
 }
 
+/** @internal Built-in providers ignore custom provider tables in native Codex. */
+export function scanProviderEnvironmentKey(
+  config: JsonObject,
+): string | undefined {
+  const provider = scanProviderConfiguration(config);
+  return typeof provider?.["env_key"] === "string"
+    ? provider["env_key"]
+    : undefined;
+}
+
+/** @internal Environment values explicitly referenced by the selected provider. */
+export function scanProviderHeaderEnvironmentNames(
+  config: JsonObject,
+): string[] {
+  const headers = scanProviderConfiguration(config)?.["env_http_headers"];
+  return isObject(headers)
+    ? Object.values(headers).filter(
+        (name): name is string => typeof name === "string",
+      )
+    : [];
+}
+
+function scanProviderConfiguration(config: JsonObject): JsonObject | undefined {
+  const selected = scanModelProvider(config);
+  if (
+    typeof selected !== "string" ||
+    ["openai", "ollama", "lmstudio"].includes(selected)
+  ) {
+    return undefined;
+  }
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  return isObject(provider) ? provider : undefined;
+}
+
 /** @internal Native Codex validates the auth table, including invalid selections. */
 export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
   const selected = scanModelProvider(config);

@@ -133,6 +133,17 @@ comparisons, and deduplication preserve that selection. Relative helper paths an
 `auth.cwd` resolve from `CODEX_HOME` (default `~/.codex`). Comparisons and reviews
 also honor the selected command provider in that home's `config.toml`.
 
+A custom provider selected with `--codex` settings uses its configured
+`model_providers.<id>.env_key` for `--auth auto` and `--auth api-key`, including
+provider settings in a selected profile. Set that environment variable; an
+unrelated OpenAI key does not satisfy `--auth api-key` for the custom provider.
+Scans with an `env_key` provider skip the interactive ChatGPT chooser; use
+`auto` or `api-key` with that provider's native credentials.
+Use the provider's native Codex settings for its endpoint and request options.
+Cost estimates still use the configured model name and standard OpenAI pricing;
+a deployment alias matching a priced model is not a provider-specific price or
+budget guarantee. Unrecognized model names do not support `--max-cost`.
+
 For other providers, set their key and select a model the provider supports:
 
 ```bash

@@ -1468,6 +1468,47 @@ test.each([
   },
 );
 
+test.each(["root", "profile"])(
+  "component preflight uses the %s native provider environment key",
+  async (selection) => {
+    const paths = await fixture();
+    const plan = mock(async () => ({ components }));
+    const config = {
+      codexOverrides: {
+        model_providers: { gateway: { env_key: "SYNTHETIC_PROVIDER_KEY" } },
+        ...(selection === "profile"
+          ? {
+              profile: "selected",
+              profiles: { selected: { model_provider: "gateway" } },
+            }
+          : { model_provider: "gateway" }),
+      },
+    };
+    const options = {
+      components: undefined,
+      auto: true,
+      planOnly: true,
+      config,
+      scanOptions: { auth: "api-key" as const },
+      planComponents: plan,
+    };
+    const result = await scan(paths, {
+      ...options,
+      environment: { SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key" },
+    });
+    expect(result.total).toBe(components.length);
+    expect(plan).toHaveBeenCalledTimes(1);
+    plan.mockClear();
+    await expect(
+      scan(paths, {
+        ...options,
+        environment: { OPENAI_API_KEY: "synthetic-unrelated" },
+      }),
+    ).rejects.toThrow("SYNTHETIC_PROVIDER_KEY");
+    expect(plan).not.toHaveBeenCalled();
+  },
+);
+
 test("CLI requires an explicitly selected API key before automatic planning", async () => {
   const paths = await fixture();
   const planComponentsMock = mock(resolving({ components }));

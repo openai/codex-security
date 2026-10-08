@@ -298,8 +298,6 @@ test.each([
               environment: {
                 CODEX_HOME: sourceHome,
                 CODEX_SECURITY_STATE_DIR: state,
-                OPENAI_API_KEY: "synthetic-account-key",
-                OPENROUTER_API_KEY: "synthetic-sdk-account-key",
                 ...providerEnvironment,
                 SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
               },
@@ -422,7 +420,7 @@ test.each([
         );
       }
       // A's snapshot exists before B updates the shared credential home.
-      runs.push(clients[0]!.run(repository, { mode: "deep" }));
+      runs.push(clients[0]!.run(repository, { mode: "deep", auth: "api-key" }));
       await Promise.race([ready[0]!.promise, runs[0]]);
       runs.push(
         clients[1]!
@@ -955,13 +953,15 @@ for await (const line of createInterface({ input: process.stdin })) {
 }
 
 test.each([
-  "SYNTHETIC_CUSTOM_API_KEY",
-  "CODEX_API_KEY",
-  "OPENROUTER_API_KEY",
-  "FIREWORKS_API_KEY",
+  ["SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER"],
+  ["CODEX_API_KEY", "SYNTHETIC_CUSTOM_HEADER"],
+  ["OPENROUTER_API_KEY", "SYNTHETIC_CUSTOM_HEADER"],
+  ["FIREWORKS_API_KEY", "SYNTHETIC_CUSTOM_HEADER"],
+  ["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY"],
+  ["SYNTHETIC_CUSTOM_API_KEY", "OPENAI_API_KEY"],
 ])(
-  "native plugin workers recover the selected %s and other provider variables",
-  async (providerKey) => {
+  "native plugin workers recover selected %s and header %s",
+  async (providerKey, configuredHeaderKey) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -978,9 +978,10 @@ test.each([
       ? providerKey.split("_")[0]!.toLowerCase()
       : "synthetic.gateway";
     const headerKey =
-      process.platform === "win32"
+      process.platform === "win32" &&
+      configuredHeaderKey === "SYNTHETIC_CUSTOM_HEADER"
         ? "synthetic_custom_header"
-        : "SYNTHETIC_CUSTOM_HEADER";
+        : configuredHeaderKey;
     const providerEnvironment = {
       [providerKey]: external
         ? " synthetic-custom-key\n"
@@ -993,6 +994,13 @@ test.each([
         pluginPath: plugin,
         codexOverrides: {
           model_provider: providerId,
+          ...(configuredHeaderKey === "CODEX_API_KEY"
+            ? {
+                model_provider: "unselected.gateway",
+                profile: "selected",
+                profiles: { selected: { model_provider: providerId } },
+              }
+            : {}),
           model_providers: {
             [providerId]: {
               name: "Synthetic gateway",
@@ -1009,6 +1017,12 @@ test.each([
               wire_api: "responses",
               env_key: "SYNTHETIC_REQUIRED_KEY",
             },
+            "unselected.gateway": {
+              name: "Unused gateway",
+              wire_api: "responses",
+              base_url: "https://unused.example.test/v1",
+              env_http_headers: { "X-Unselected": "OPENAI_API_KEY" },
+            },
           },
         },
       },
@@ -1017,6 +1031,7 @@ test.each([
           CODEX_HOME: sourceHome,
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "synthetic-account-key",
+          CODEX_API_KEY: "synthetic-unrelated-codex-key",
           ...providerEnvironment,
           ...(process.platform === "win32"
             ? { SYNTHETIC_CUSTOM_HEADER: " synthetic-child-header " }
@@ -1030,9 +1045,20 @@ test.each([
           startThread: () => ({
             id: null,
             async runStreamed() {
-              expect(options.apiKey).toBe(
-                external ? undefined : "synthetic-account-key",
+              expect(options.apiKey).toBeUndefined();
+              expect(options.env?.[providerKey]).toBe(
+                external
+                  ? providerEnvironment[providerKey]!.trim()
+                  : providerEnvironment[providerKey],
               );
+              expect(options.env?.[headerKey]).toBe(
+                providerEnvironment[headerKey],
+              );
+              for (const name of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+                if (name !== providerKey && name !== headerKey) {
+                  expect(options.env?.[name]).toBeUndefined();
+                }
+              }
               const status = await nativeRequest(
                 {
                   ...options.env!,
@@ -1061,14 +1087,12 @@ test.each([
                 },
                 recovered: {
                   ...providerEnvironment,
-                  ...(process.platform === "win32"
+                  ...(process.platform === "win32" &&
+                  configuredHeaderKey === "SYNTHETIC_CUSTOM_HEADER"
                     ? { [headerKey]: " synthetic-child-header " }
                     : {}),
                   ...(external
                     ? { [providerKey]: "synthetic-custom-key" }
-                    : {}),
-                  ...(providerKey === "CODEX_API_KEY"
-                    ? { CODEX_API_KEY: "synthetic-account-key" }
                     : {}),
                 },
               });
