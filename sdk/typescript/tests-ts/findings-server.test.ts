@@ -1468,7 +1468,6 @@ test("rejects invalid UTF-8 before embedding or storing findings", async () => {
   }
 });
 
-
 test("dashboard can sort and search a stored title with an unpaired surrogate", async () => {
   const { store } = await fixture();
   const base = await start(store);
