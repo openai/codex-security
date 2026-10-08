@@ -1252,7 +1252,17 @@ async function readCheckpointHead(
     context,
     ["checkpoint-head.json"],
     label,
-  );
+  ).catch((error) => {
+    if (
+      skipInvalid &&
+      error instanceof Error &&
+      (error.message === `${label}: the requested artifact is unavailable.` ||
+        error.message === `${label}: the requested artifact cannot be read.`)
+    )
+      return undefined;
+    throw error;
+  });
+  if (saved === undefined) return;
   let head: JsonObject;
   try {
     head = parseJsonObject(saved.contents, label);

@@ -1626,3 +1626,120 @@ for (const interrupted of [false, true]) {
     });
   }
 }
+
+for (const headState of ["readable", "unreadable", "missing", "unsafe"]) {
+  test(`accepted retry retains readable coverage with current head ${headState}`, async (t) => {
+    const f = await fixture();
+    try {
+      const worker = {
+        root: f.output,
+        repoRoot: f.root,
+        scanId,
+        layout: "worker",
+      };
+      const archive = path.join(f.workerRoot, "attempts", "attempt-01");
+      for (const attempt of [1, 2]) {
+        await recordCodexSecurityWorkerScanDraft(
+          worker,
+          workerDraft([], {
+            complete: false,
+            coverage: {
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [
+                {
+                  id: `task-${attempt}`,
+                  reason: `Synthetic proof ${attempt}.`,
+                },
+              ],
+            },
+          }),
+        );
+        if (attempt === 1) await archiveDirectory(f.output, archive);
+      }
+      const head = path.join(f.output, "checkpoint-head.json");
+      const headBefore = await readFile(head);
+      assert.ok((await fs.lstat(head)).isFile());
+      const current = workerDraft([], { complete: true });
+      await writeFile(f.resultPath, JSON.stringify(current));
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      const resultBefore = await readFile(f.resultPath);
+      const archiveBefore = await readFile(path.join(archive, "result.json"));
+      const checkpoints = await readdir(path.join(f.output, "checkpoints"));
+      const checkpointBytes = await Promise.all(
+        checkpoints.map((name) =>
+          readFile(path.join(f.output, "checkpoints", name)),
+        ),
+      );
+      if (headState === "missing" || headState === "unsafe") {
+        await rm(head);
+        if (headState === "unsafe") await mkdir(head);
+      }
+      if (headState === "unreadable") {
+        const open = fs.open;
+        t.mock.method(fs, "open", async (...args: Parameters<typeof open>) => {
+          if (args[0] === head && args[1] === "r") {
+            throw Object.assign(
+              new Error("Synthetic current-head read failure."),
+              { code: "EIO" },
+            );
+          }
+          return open(...args);
+        });
+      }
+      if (headState === "unsafe") {
+        await assert.rejects(
+          readDeepReductionSources(f.context),
+          /current checkpoint head is not a safe file/,
+        );
+        assert.ok((await fs.lstat(head)).isDirectory());
+      } else {
+        const coverage = (await readDeepReductionSources(f.context))
+          .discoveries[0].coverage;
+        assert.deepEqual(
+          new Set(
+            coverage.deferred.map(
+              (row: { provenance: { sourceId: string } }) =>
+                row.provenance.sourceId,
+            ),
+          ),
+          new Set(["task-1", "task-2"]),
+        );
+        if (headState !== "missing")
+          assert.deepEqual(await readFile(head), headBefore);
+      }
+      assert.deepEqual(await readFile(f.resultPath), resultBefore);
+      assert.deepEqual(
+        await readFile(path.join(archive, "result.json")),
+        archiveBefore,
+      );
+      assert.deepEqual(
+        await readdir(path.join(f.output, "checkpoints")),
+        checkpoints,
+      );
+      assert.deepEqual(
+        await Promise.all(
+          checkpoints.map((name) =>
+            readFile(path.join(f.output, "checkpoints", name)),
+          ),
+        ),
+        checkpointBytes,
+      );
+      if (headState === "unreadable") {
+        await assert.rejects(
+          recordCodexSecurityWorkerScanDraft(worker, current),
+          /cannot be read/,
+        );
+        assert.deepEqual(await readFile(f.resultPath), resultBefore);
+      }
+    } finally {
+      t.mock.restoreAll();
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
