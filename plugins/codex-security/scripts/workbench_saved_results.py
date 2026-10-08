@@ -42,7 +42,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
-from workbench.json_numbers import json_number_key, normalize_json_integer
+from workbench.json_numbers import dumps_json, json_number_key, normalize_json_integer
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -127,6 +127,12 @@ def _encoded(value: Any) -> bytes:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_encoded(value)).hexdigest()
+
+
+def _encoded_exact(value: Any) -> bytes:
+    return dumps_json(
+        value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode()
 
 
 def _children(scan_dir: Path, relative: str) -> list[str]:
@@ -273,7 +279,7 @@ def _read_saved_result(
     kind: str | None = None,
     expected_digest: str | None = None,
 ) -> tuple[dict[str, Any], str, int]:
-    draft, _, metadata = _read_scan_local_json_with_metadata(
+    draft, raw, metadata = _read_scan_local_json_with_metadata(
         scan_dir, relative, "Saved scan checkpoint"
     )
     directory = _checkpoint_head_directory(relative)
@@ -298,8 +304,10 @@ def _read_saved_result(
     legacy_digest = _digest(draft)
     if _is_source_order_snapshot(relative):
         return draft, legacy_digest, metadata.st_mtime_ns
+    if expected_digest is not None and expected_digest == hashlib.sha256(raw).hexdigest():
+        return draft, expected_digest, metadata.st_mtime_ns
     if expected_digest == legacy_digest:
-        # Legacy freezes and canonical parent copies authenticate this rounded view.
+        # Legacy canonical-only freezes authenticate this rounded view.
         return json.loads(_encoded(draft)), legacy_digest, metadata.st_mtime_ns
     # Bind both the existing JSON representation and its exact numeric meaning.
     digest = _digest([legacy_digest, _semantic_digest(draft)])
@@ -582,7 +590,7 @@ def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
     return _saved_results_changed(db, connection, scan)
 
 
-def _finding_key(finding: dict[str, Any]) -> str:
+def _finding_key(finding: dict[str, Any], *, persisted: bool = False) -> str:
     # Wording and evidence may improve between checkpoints; distinct source locations
     # must not collide merely because two workers chose the same semantic identity.
     provenance = finding.get("provenance")
@@ -599,24 +607,29 @@ def _finding_key(finding: dict[str, Any]) -> str:
     locations = finding.get("locations", [])
     if not isinstance(locations, list):
         locations = []
-    return _semantic_digest(
-        [
-            finding.get("ruleId"),
-            identity,
-            sorted(
+    components = [
+        finding.get("ruleId"),
+        identity,
+        sorted(
+            (
                 (
-                    (
-                        location.get("path"),
-                        normalize_json_integer(location.get("startLine")),
-                        normalize_json_integer(location.get("endLine", location.get("startLine"))),
-                    )
-                    for location in locations
-                    if isinstance(location, dict)
-                ),
-                key=_encoded,
+                    location.get("path"),
+                    normalize_json_integer(location.get("startLine")),
+                    normalize_json_integer(location.get("endLine", location.get("startLine"))),
+                )
+                for location in locations
+                if isinstance(location, dict)
             ),
-        ]
-    )
+            key=_encoded,
+        ),
+    ]
+    key = _semantic_digest(components)
+    if persisted:
+        encoded = _encoded(components)
+        # Keep legacy IDs when their encoded view retains the exact identity.
+        if _semantic_digest(json.loads(encoded)) == key:
+            return hashlib.sha256(encoded).hexdigest()
+    return key
 
 
 def _worker_candidate_key(
@@ -640,19 +653,24 @@ def _worker_candidate_key(
 
 def _semantic_digest(value: Any) -> str:
     """Compare exact JSON values while retaining their JSON type distinctions."""
-
-    def normalize(item: Any) -> Any:
+    result: list[Any] = [None]
+    pending = [(result, 0, value)]
+    while pending:
+        parent, key, item = pending.pop()
         if isinstance(item, dict):
-            return {key: normalize(child) for key, child in item.items()}
-        if isinstance(item, (list, tuple)):
+            normalized: Any = {}
+            pending.extend((normalized, child_key, child) for child_key, child in item.items())
+        elif isinstance(item, (list, tuple)):
             # Reserve number markers without adding another container level.
-            return ["array", *(normalize(child) for child in item)]
-        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            normalized = ["array", *([None] * len(item))]
+            pending.extend((normalized, index + 1, child) for index, child in enumerate(item))
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
             sign, coefficient, exponent = json_number_key(item)
-            return ["number", sign, coefficient, hex(exponent)]
-        return item
-
-    return _digest(normalize(value))
+            normalized = ["number", sign, coefficient, hex(exponent)]
+        else:
+            normalized = item
+        parent[key] = normalized
+    return _digest(result[0])
 
 
 def _finding_content_key(finding: dict[str, Any]) -> str:
@@ -1021,7 +1039,7 @@ def merge_saved_results(
                         parent = _merge_tied_parent_observations(parent, previous_parent)
                         parent_is_canonical = False
                         tied_observations = True
-                payload = _encoded(parent)
+                payload = _encoded_exact(parent)
                 parent_digest = hashlib.sha256(payload).hexdigest()
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 checkpoint_path = scan_dir / parent_checkpoint
@@ -1928,6 +1946,16 @@ def merge_saved_results(
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
+                        if _finding_key(retained) == _finding_key(finding):
+                            # Equivalent number spellings must retain the identity binding
+                            # used to derive published IDs and their saved triage decisions.
+                            finding["identity"] = copy.deepcopy(retained["identity"])
+                            if "preservedIdentity" in retained["provenance"]:
+                                provenance["preservedIdentity"] = copy.deepcopy(
+                                    retained["provenance"]["preservedIdentity"]
+                                )
+                            else:
+                                provenance.pop("preservedIdentity", None)
                         retained = finding
                         findings[finding_positions[key]] = retained
                     else:
@@ -2068,8 +2096,10 @@ def merge_saved_results(
         key = _encoded([finding.get("ruleId"), identity]).decode()
         variant = _finding_key(finding)
         if key in identities and identities[key] != variant:
+            # Sibling suffixes are persisted identities; retain their original digest.
+            suffix = _finding_key(finding, persisted=True)
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
-            identity["instance"] = f"{identity.get('instance', 'saved')}-{variant[:16]}"
+            identity["instance"] = f"{identity.get('instance', 'saved')}-{suffix[:16]}"
         identities[key] = variant
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
@@ -2511,7 +2541,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 checkpoint_contents,
             )
         checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
-        checkpoint_contents = _encoded(checkpoint)
+        checkpoint_contents = _encoded_exact(checkpoint)
         checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
@@ -2527,7 +2557,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             write_scan_local_bytes(
                 scan_dir,
                 filename,
-                (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
+                (dumps_json(document, allow_nan=False, indent=2) + "\n").encode(),
             )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
         # Accepted Standard drafts are evidence of review or report assembly,
