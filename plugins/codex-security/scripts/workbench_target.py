@@ -316,6 +316,7 @@ def candidate_source_lines(
             target, base, head, "local-patch" if local else "revisions"
         )
     }
+    location_set = set(locations)
     result: dict[str, dict[str, Any]] = {}
     counts: dict[str, int] = {}
     for raw in dict.fromkeys([*paths, *locations]):
@@ -342,7 +343,7 @@ def candidate_source_lines(
                 result[raw] = {"error": "not_file" if metadata else "missing"}
                 continue
         source: dict[str, Any] = {"path": name}
-        if raw in locations:
+        if raw in location_set:
             if name not in counts:
                 blob = git_command(target, "cat-file", "blob", f"{revision}:{name}", text=False)
                 blob.check_returncode()
