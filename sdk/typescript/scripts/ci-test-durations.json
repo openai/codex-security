@@ -4,7 +4,8 @@
     "https://github.com/openai/codex-security/actions/runs/33227512538",
     "https://github.com/openai/codex-security/actions/runs/33233690024",
     "https://github.com/openai/codex-security/actions/runs/37420072376",
-    "https://github.com/openai/codex-security/actions/runs/37472306800"
+    "https://github.com/openai/codex-security/actions/runs/37472306800",
+    "https://github.com/openai/codex-security/actions/runs/37782856773"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 1.552,
@@ -184,6 +185,7 @@
     "api-policy.test.ts": 101.385,
     "api-post-scan.test.ts": 22.571,
     "api-preflight-config.test.ts": 1.602,
+    "api-provider-isolation.test.ts": 320.294,
     "api.test.ts": 137.276,
     "artifact-export.test.ts": 2.514,
     "attack-path-tool-name.test.ts": 0.283,
@@ -275,6 +277,7 @@
     "linear-comment-pagination.test.ts": 0.002,
     "linear-pagination.test.ts": 0.003,
     "linear.test.ts": 0.003,
+    "local-dedupe.test.ts": 120.007,
     "mcp-launcher.test.ts": 3.656,
     "mock-scan.test.ts": 28.689,
     "multiscan.test.ts": 71.201,
