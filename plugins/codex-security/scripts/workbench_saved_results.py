@@ -991,6 +991,7 @@ def merge_saved_results(
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
+    published_coverage: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -2122,16 +2123,37 @@ def merge_saved_results(
             identity["instance"] = f"{identity.get('instance', 'saved')}-{suffix[:16]}"
         identities[key] = variant
     for field in ("surfaces", "explicitExclusions", "deferred"):
-        used: set[str] = set()
         items = coverage.setdefault(field, [])
-        for item in items if isinstance(items, list) else []:
-            if not isinstance(item, dict):
-                continue
+        rows = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        for item in rows:
             if id(item) in canonical_rows:
-                if isinstance(item.get("id"), str):
-                    used.add(item["id"])
                 continue
             item.setdefault("id", _saved_coverage_id(item))
+            if not isinstance(item["id"], str):
+                continue
+            for published in (published_coverage or {}).get(field, []):
+                identity = published.get("id")
+                if not isinstance(identity, str):
+                    continue
+                candidate = {**published, "id": item["id"]}
+                if _schema_values_equal(item, candidate) and identity in {
+                    item["id"],
+                    f"{item['id']}-{_digest(candidate)[:16]}",
+                    f"{item['id']}-{_semantic_digest(candidate)[:16]}",
+                }:
+                    item["id"] = identity
+                    canonical_rows.add(id(item))
+                    break
+        # Frozen recovery rebuilds raw checkpoints in hash order. Reserve the
+        # verified published bindings before a new observation can claim an old ID.
+        used = {
+            item["id"]
+            for item in rows
+            if id(item) in canonical_rows and isinstance(item.get("id"), str)
+        }
+        for item in rows:
+            if id(item) in canonical_rows:
+                continue
             if not isinstance(item["id"], str):
                 # Preserve malformed rows for per-record recovery, including frozen replay.
                 continue
@@ -2298,6 +2320,7 @@ def preserve_scan_results_locked(
     existing_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
     existing_scan = db.read_json_object(existing_path).get("scan", {}) if existing_path else {}
     existing = None
+    published_coverage = None
     if scan["seal_manifest_digest"] is not None or (
         isinstance(existing_scan, dict)
         and (
@@ -2305,7 +2328,7 @@ def preserve_scan_results_locked(
         )
     ):
         db.require_recorded_manifest_digest(scan, scan_dir)
-        existing, existing_findings, _ = finalize_scan(
+        existing, existing_findings, published_coverage = finalize_scan(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
             projection_warnings=warnings,
@@ -2352,6 +2375,7 @@ def preserve_scan_results_locked(
         frozen_source_digests=frozen_source_digests,
         frozen_model_source=model_source[0] if model_source else None,
         selected_model_source=model_source,
+        published_coverage=published_coverage,
         allow_frozen_legacy_parent=(
             include_parent_with_recovery
             or (
