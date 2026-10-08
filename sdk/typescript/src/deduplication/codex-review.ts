@@ -24,6 +24,8 @@ import {
 } from "../runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
 import { VERSION } from "../version.js";
+import type { CodexSecuritySurface } from "../api.js";
+import { codexSecurityRequestMetadata } from "../request-metadata.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
@@ -164,6 +166,7 @@ export class CodexReviewRunner {
       random?: () => number;
     } = {},
     private readonly onDiagnostic?: DeduplicationDiagnosticObserver,
+    private readonly surface: CodexSecuritySurface = "sdk",
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
@@ -380,7 +383,11 @@ export class CodexReviewRunner {
                 update_plan: { enabled: false },
                 experimental_request_user_input: { enabled: false },
               },
-              responses_api_metadata: { codex_security_surface: "sdk" },
+              responses_api_metadata: {
+                ...(executionConfig["responses_api_metadata"] as
+                  Record<string, string> | undefined),
+                ...codexSecurityRequestMetadata(this.surface, "dedupe"),
+              },
               features: {
                 code_mode: {
                   direct_only_tool_namespaces: ["review_validator"],
