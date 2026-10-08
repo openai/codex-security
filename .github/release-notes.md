@@ -137,6 +137,10 @@
 - load scan contract documents in one sequence ([#1481](https://github.com/openai/codex-security/pull/1481))
 - reuse native equality for contract lists ([#1457](https://github.com/openai/codex-security/pull/1457))
 - simplify artifact export metadata transport ([#1462](https://github.com/openai/codex-security/pull/1462))
+- simplify scan result construction ([#1445](https://github.com/openai/codex-security/pull/1445))
+- reuse artifact JSON schema definitions ([#1443](https://github.com/openai/codex-security/pull/1443))
+- reject standalone collections inside the target ([#1430](https://github.com/openai/codex-security/pull/1430))
+- preserve structured findings API errors ([#1081](https://github.com/openai/codex-security/pull/1081))
 
 <!-- release-section: highlights:end -->
 
