@@ -655,41 +655,50 @@ describe("saved scan logs", () => {
     );
   });
 
-  test("excludes same-thread events emitted after scan completion", async () => {
-    const home = await temporaryHome();
-    const scanDirectory = join(home, "scans", "results");
-    await writeSession(
-      home,
-      "parent",
-      [
-        commandEvent(
-          "SCAN REVIEW BEFORE COMPLETION",
-          "scan-call",
-          "2026-08-11T12:01:00.000Z",
-        ),
-        commandEvent(
-          "POST SCAN FOLLOWUP AFTER COMPLETION",
-          "post-call",
-          "2026-08-11T12:03:00.000Z",
-        ),
-      ],
-      undefined,
-      "2026-08-11T12:00:00.000Z",
-      scanDirectory,
-    );
+  test.each(["2026-08-11T12:02:00.000Z", undefined, null, "invalid"])(
+    "bounds same-thread events by a valid completion time: %p",
+    async (completedAt) => {
+      const home = await temporaryHome();
+      const before = commandEvent(
+        "scan work",
+        "scan-call",
+        "2026-08-11T12:01:59.999Z",
+      );
+      const at = commandEvent(
+        "at completion",
+        "boundary-call",
+        "2026-08-11T12:02:00.000Z",
+      );
+      const after = commandEvent(
+        "post-scan followup",
+        "post-call",
+        "2026-08-11T12:02:00.001Z",
+      );
+      const undated = commandEvent("undated", "undated-call");
+      const invalid = commandEvent(
+        "invalid timestamp",
+        "invalid-call",
+        "invalid",
+      );
+      const events = [before, at, after, undated, invalid];
+      await writeSession(home, "parent", events);
 
-    const result = await readScanLogs({
-      scanId: "scan-555",
-      threadId: "parent",
-      codexHome: home,
-      scanDirectory,
-      completedAt: "2026-08-11T12:02:00.000Z",
-    });
+      const result = await readScanLogs({
+        scanId: "scan-555",
+        threadId: "parent",
+        codexHome: home,
+        completedAt,
+      });
 
-    const serialized = JSON.stringify(result);
-    expect(serialized).toContain("SCAN REVIEW BEFORE COMPLETION");
-    expect(serialized).not.toContain("POST SCAN FOLLOWUP AFTER COMPLETION");
-  });
+      const expected =
+        completedAt === "2026-08-11T12:02:00.000Z"
+          ? [before, undated, invalid]
+          : events;
+      expect(result.events.slice(1)).toEqual(
+        expected.map((event) => ({ threadId: "parent", event })),
+      );
+    },
+  );
 
   test.each([false, true])(
     "does not parse event bodies from unrelated saved sessions (copied: %p)",

@@ -178,10 +178,7 @@ export async function readScanLogs(options: ScanLogOptions) {
   // A post-scan prompt runs on the same thread after completion, so bound the
   // events of an included session by the same completion time used to select
   // the sessions themselves.
-  const completionBoundary =
-    typeof options.completedAt === "string"
-      ? Date.parse(options.completedAt)
-      : Number.NaN;
+  const completionBoundary = sessionStartedAt(options.completedAt);
   for (const session of sessions) {
     let replaying = false;
     for await (const event of sessionEvents(session.path)) {
@@ -200,8 +197,9 @@ export async function readScanLogs(options: ScanLogOptions) {
         }
         replaying = false;
       }
-      if (Number.isFinite(completionBoundary) && eventAtOrAfter(event, completionBoundary)) {
-        continue;
+      if (completionBoundary !== null) {
+        const timestamp = sessionStartedAt(event["timestamp"]);
+        if (timestamp !== null && timestamp >= completionBoundary) continue;
       }
       events.push({ threadId: session.threadId, event });
     }
@@ -217,16 +215,6 @@ export async function readScanLogs(options: ScanLogOptions) {
     })),
     events,
   };
-}
-
-function eventAtOrAfter(
-  event: Readonly<Record<string, unknown>>,
-  boundary: number,
-): boolean {
-  const timestamp = event["timestamp"];
-  if (typeof timestamp !== "string") return false;
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) && parsed >= boundary;
 }
 
 function belongsToScan(
