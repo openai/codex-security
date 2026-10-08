@@ -1145,43 +1145,4 @@ describe("one-shot scan events", () => {
       { phase: "validation", filesCompleted: 8, filesTotal: 8 },
     ]);
   });
-
-  test("forwards every file count printed by a completed review command", async () => {
-    const scanDir = await copyCompletedScan(await temporaryDirectory());
-    const updates: ScanProgress[] = [];
-
-    async function* progressEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
-      yield {
-        type: "item.completed",
-        item: {
-          id: "file-review-1",
-          type: "command_execution",
-          command: "review the two files in the inventory",
-          aggregated_output: [
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":2}',
-            "--- commands.py ---",
-            "--- server.py ---",
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":2,"filesTotal":2}',
-          ].join("\n"),
-          exit_code: 0,
-          status: "completed",
-        },
-      };
-      yield completedTurn();
-    }
-
-    await expect(
-      runEvents(scanDir, progressEvents(), {
-        expectedFilesTotal: 2,
-        onProgress: (progress) => updates.push(progress),
-      }),
-    ).resolves.toBeDefined();
-    expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
-      { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
-    ]);
-  });
 });

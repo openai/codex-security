@@ -276,7 +276,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
+        schema_version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -308,6 +308,11 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
     assert sum(result["coordinatorDisposition"] == "adopted" for result in results) == 1
     assert sum(result["coordinatorDisposition"] == "observing" for result in results) == 3
     assert {result["deepScan"]["coordinatorGeneration"] for result in results} == {3}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+            == schema_version
+        )
 
 
 def test_legacy_generation_with_active_worker_observes_grace_then_adopts(tmp_path: Path) -> None:
@@ -1966,6 +1971,12 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
     assert continued["startDisposition"] == "joined"
     assert continued["deepScan"]["scanId"] == scan_id
     assert continued["deepScan"]["manifestPath"] == str(manifest)
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["independentReviews"] == {
+        "active": 0,
+        "completed": 0,
+        "maximum": 40,
+        "consolidating": True,
+    }
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
@@ -2975,6 +2986,12 @@ def test_failure_capped_completion_preserves_partial_results_and_exact_omissions
     assert finished["terminalReason"] == "capped"
     assert finished["config"]["maxDiscoveryRuns"] == 10
     assert finished["dispatchedCount"] == 4
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["independentReviews"] == {
+        "active": 0,
+        "completed": 3,
+        "maximum": 10,
+        "consolidating": True,
+    }
     assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
     assert (

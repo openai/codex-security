@@ -10,12 +10,11 @@ import subprocess
 import sys
 import tempfile
 import threading
-import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest import mock
+from unittest import main, mock, skipIf, skipUnless
 
 import pytest
 from workbench_test_support import ScanFixtureTestCase, load_script, windows_file_backend
@@ -130,7 +129,46 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
         self.assertEqual(findings, original)
         return compatible["findings"][0]
 
-    def run_finalizer(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def test_cli_resolves_noncanonical_scan_directory_arguments(self) -> None:
+        self.write_scan()
+        for spelling in (
+            self.scan_dir.name,
+            str(self.scan_dir / ".." / self.scan_dir.name),
+        ):
+            with self.subTest(spelling=spelling):
+                result = self.run_finalizer("--scan-dir", spelling, cwd=self.scan_dir.parent)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    @skipIf(os.name == "nt", "POSIX directory alias fixture")
+    def test_cli_resolves_scan_directory_symlink(self) -> None:
+        self.write_scan()
+        with tempfile.TemporaryDirectory() as directory:
+            alias = Path(directory) / "alias"
+            alias.symlink_to(self.scan_dir, target_is_directory=True)
+            result = self.run_finalizer("--scan-dir", str(alias))
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    @skipIf(os.name == "nt", "POSIX source filenames")
+    def test_sarif_hashes_source_names_that_are_not_portable_artifact_names(self) -> None:
+        source_root = self.scan_dir / "source"
+        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md"):
+            with self.subTest(name=name):
+                source = source_root / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("synthetic_source()\n")
+                self.findings["findings"][0]["locations"] = [{"path": name, "startLine": 1}]
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir, source_root=source_root)
+                sarif = json.loads((self.scan_dir / "exports/results.sarif").read_text())
+                self.assertIn(
+                    "primaryLocationLineHash", sarif["runs"][0]["results"][0]["partialFingerprints"]
+                )
+                with self.assertRaises(FINALIZER.ContractError):
+                    FINALIZER.open_scan_local_file_descriptor(source_root, name, "artifact")
+
+    def run_finalizer(
+        self, *args: str, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
@@ -142,6 +180,7 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
             capture_output=True,
             text=True,
             check=False,
+            cwd=cwd,
         )
 
     def write_scan(self) -> None:
@@ -1157,7 +1196,7 @@ The extraction root is not enforced.
         self.assertIn("cannot overwrite a scan artifact", result.stderr)
         self.assertEqual(findings.read_bytes(), before)
 
-    @unittest.skipIf(os.name == "nt", "backslash is a path separator on Windows")
+    @skipIf(os.name == "nt", "backslash is a path separator on Windows")
     def test_sarif_only_entrypoint_accepts_posix_backslash_output_name(self) -> None:
         self.write_sealed_scan()
         output = self.scan_dir.parent / "results\\v1.sarif"
@@ -2896,7 +2935,7 @@ The extraction root is not enforced.
             result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
-    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
+    @skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
     def test_sarif_line_hash_skips_fifo_source_without_blocking(self) -> None:
         source_root = self.scan_dir / "source"
         source_root.mkdir()
@@ -3006,4 +3045,4 @@ The extraction root is not enforced.
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()

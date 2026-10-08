@@ -160,7 +160,6 @@ function preflightStatus(
   if (capacity.length > 1) return null;
   const capacityResult = capacity[0];
   const configuredSlots =
-    capacity.length === 1 &&
     capacityResult !== undefined &&
     isSafeNonNegativeInteger(capacityResult["actual"])
       ? capacityResult["actual"]

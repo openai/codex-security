@@ -1,3 +1,4 @@
+import { parseJson } from "./value.js";
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
@@ -13,6 +14,7 @@ import {
 } from "./scan-activity.js";
 import {
   isScanArtifactDirectory,
+  sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
@@ -481,12 +483,7 @@ function readSessionEvent(
   repository?: string,
 ): void {
   if (line.length === 0) return;
-  let event: unknown;
-  try {
-    event = JSON.parse(line) as unknown;
-  } catch {
-    return;
-  }
+  const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
   if (event["type"] === "session_meta") {
@@ -512,20 +509,12 @@ function readSessionEvent(
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
       if (usage !== null) session.inheritedUsage = usage;
     }
-    if (payload["type"] === "task_started") {
-      // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.
-      const threadOrder = uuid7Order(session.threadId);
-      const turnOrder = uuid7Order(payload["turn_id"]);
-      const owned =
-        threadOrder === null
-          ? typeof payload["started_at"] === "number" &&
-            session.startedAt !== null &&
-            payload["started_at"] >= Math.floor(session.startedAt / 1_000)
-          : turnOrder !== null && turnOrder >= threadOrder;
-      if (owned) {
-        session.replaying = false;
-        session.events?.push(event);
-      }
+    if (
+      payload["type"] === "task_started" &&
+      sessionOwnsTurn(session, payload)
+    ) {
+      session.replaying = false;
+      session.events?.push(event);
     }
     return;
   }
@@ -663,18 +652,6 @@ function readSessionEvent(
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) session.usage = ownUsage;
-}
-
-function uuid7Order(value: unknown): bigint | null {
-  if (
-    typeof value !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-      value,
-    )
-  ) {
-    return null;
-  }
-  return BigInt(`0x${value.replaceAll("-", "")}`);
 }
 
 function readSessionReasoning(

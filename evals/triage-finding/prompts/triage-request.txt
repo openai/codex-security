@@ -1,3 +1,5 @@
+Read and follow skills/triage-finding/SKILL.md from this checkout for the following request.
+
 {{invocation_preamble}}
 
 Repository path to inspect:

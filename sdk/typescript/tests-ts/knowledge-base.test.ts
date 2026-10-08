@@ -249,11 +249,15 @@ describe("scan knowledge bases", () => {
     await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
     await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
 
-    const knowledgeBase = await prepareKnowledgeBase([root, scope, scope]);
+    const knowledgeBase = await prepareKnowledgeBase([scope, root, scope]);
     temporaryDirectories.track(knowledgeBase.path);
 
-    expect(knowledgeBase.sources).toEqual([root, scope]);
-    expect((await readdir(knowledgeBase.path)).length).toBe(3);
+    expect(knowledgeBase.sources).toEqual([scope, root]);
+    expect((await readdir(knowledgeBase.path)).sort()).toEqual([
+      "0-scope.md.txt",
+      "1-deployment.MARKDOWN.txt",
+      "2-notes.txt.txt",
+    ]);
     const documents = await extractedDocuments(knowledgeBase.path);
     expect(documents).toContain("Ignore local debug endpoints.");
     expect(documents).toContain("Public API gateway.");
@@ -400,22 +404,24 @@ describe("scan knowledge bases", () => {
 
     const controller = new AbortController();
     const reason = new Error("Knowledge-base preparation canceled.");
-    let checks = 0;
-    const signalSpy = spyOn(controller.signal, "throwIfAborted");
-    signalSpy.mockImplementation(() => {
-      if (++checks === 4) controller.abort(reason);
-      if (controller.signal.aborted) throw controller.signal.reason;
-    });
-    const temporarySpy = spyOn(os, "tmpdir").mockImplementation(() => staging);
+    const originalWriteFile = filesystem.writeFile;
+    let staged = false;
+    const writeSpy = spyOn(filesystem, "writeFile").mockImplementation(
+      async (...args) => {
+        await Reflect.apply(originalWriteFile, filesystem, args);
+        staged = true;
+        controller.abort(reason);
+      },
+    );
 
     try {
       await expect(
-        prepareKnowledgeBase([first, second], controller.signal),
+        prepareKnowledgeBase([first, second], controller.signal, staging),
       ).rejects.toBe(reason);
+      expect(staged).toBe(true);
       expect(await readdir(staging)).toEqual([]);
     } finally {
-      signalSpy.mockRestore();
-      temporarySpy.mockRestore();
+      writeSpy.mockRestore();
     }
   });
 
@@ -464,6 +470,49 @@ describe("scan knowledge bases", () => {
 
     expect(documents).toContain("Payment service boundary");
     expect(documents).toContain("SSRF & IDOR\n");
+  });
+
+  test.each([
+    ["&#x110000;", "&#x110000;"],
+    ["&#1114112;", "&#1114112;"],
+    ["&#99999999999999;", "&#99999999999999;"],
+    ["&#xD800;", "&#xD800;"],
+    ["&#xDFFF;", "&#xDFFF;"],
+    ["&#55296;", "&#55296;"],
+    ["&#xD7FF;", "\uD7FF"],
+    ["&#xE000;", "\uE000"],
+    ["&#65;", "A"],
+    ["&#128512;", "\u{1F600}"],
+    ["&#x10FFFF;", "\u{10FFFF}"],
+    ["&#0;", "\0"],
+    ["&#x1;", "\x01"],
+  ])(
+    "decodes DOCX Unicode scalar references and preserves unusable ones: %s",
+    async (reference, expected) => {
+      const root = await temporaryDirectory();
+      await writeFile(join(root, "reference.docx"), docx(`Text ${reference}.`));
+      const knowledgeBase = await prepareKnowledgeBase([root]);
+      temporaryDirectories.track(knowledgeBase.path);
+      const documents = await extractedDocuments(knowledgeBase.path);
+      expect(documents).toEqual([`Text ${expected}.\n`]);
+    },
+  );
+
+  test("keeps one unusable reference from failing the other knowledge-base documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "notes.md"), "Authentication boundary notes");
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("Boundary &#x110000; case."),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+    const documents = await extractedDocuments(knowledgeBase.path);
+
+    expect(documents).toHaveLength(2);
+    expect(documents).toContain("Authentication boundary notes");
+    expect(documents).toContain("Boundary &#x110000; case.\n");
   });
 
   test("cleans up documents and rediscovers directory contents on later runs", async () => {

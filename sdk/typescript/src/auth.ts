@@ -43,10 +43,10 @@ export function withoutOpenAiApiKeys<Value>(
 
 /** @internal */
 export function configuredCodexHome(environment: ProcessEnvironment): string {
+  const configured = environmentEntry(environment, "CODEX_HOME");
   return resolve(
     expandHome(
-      environmentEntry(environment, "CODEX_HOME")?.trim() ||
-        join(homedir(), ".codex"),
+      configured?.trim() ? configured : join(homedir(), ".codex"),
       environment,
     ),
   );
@@ -325,8 +325,10 @@ function preferredAuthUrl(value: string): string | null {
   )) {
     const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
     try {
-      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
       if (
+        parsed.protocol === "https:" &&
         hostname !== "localhost" &&
         !hostname.endsWith(".localhost") &&
         !(isIP(hostname) === 4 && hostname.startsWith("127.")) &&
