@@ -6732,6 +6732,7 @@ describe("CodexSecurity orchestration", () => {
     const bundledTools = join(dirname(dirname(executable)), "codex-path");
     const inheritedTools = join(root, "operator-tools");
     await mkdir(bundledTools, { recursive: true });
+    await mkdir(dirname(executable));
     await mkdir(inheritedTools);
     const originalPlatform = Object.getOwnPropertyDescriptor(
       process,
