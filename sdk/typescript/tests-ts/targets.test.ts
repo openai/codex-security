@@ -111,6 +111,12 @@ describe("scan target normalization", () => {
 
   test("normalizes repository and path targets", async () => {
     const repo = await repository();
+    const alias = join(repo, "source-link");
+    await symlink(
+      join(repo, "src"),
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     expect(await normalizeTarget(repo, "repository")).toEqual({
       kind: "repository",
       paths: [],
@@ -121,6 +127,7 @@ describe("scan target normalization", () => {
         join(repo, "src", "app.ts"),
         join(repo, "src"),
         "src/app.ts",
+        alias,
       ]),
     ).toEqual({
       kind: "paths",
@@ -163,13 +170,28 @@ describe("scan target normalization", () => {
     },
   );
 
-  test("rejects empty and escaping paths", async () => {
+  test("rejects empty, missing, and escaping paths", async () => {
     const repo = await repository();
     await expect(normalizeTarget(repo, [""])).rejects.toThrow("empty path");
+    await expect(normalizeTarget(repo, ["missing.ts"])).rejects.toThrow(
+      "Path target does not exist: missing.ts",
+    );
     await expect(normalizeTarget(repo, [join(repo, "..")])).rejects.toThrow(
       "outside the repository",
     );
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects special filesystem targets the scan scope resolver cannot read",
+    async () => {
+      const repo = await repository();
+      const fifo = join(repo, "src", "pending.fifo");
+      execFileSync("mkfifo", [fifo]);
+      await expect(normalizeTarget(repo, [fifo])).rejects.toThrow(
+        "not a regular file or directory",
+      );
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "rejects NTFS alternate streams before runtime initialization",
