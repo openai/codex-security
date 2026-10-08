@@ -252,7 +252,12 @@ export class DeepScanCoordinator {
   ): Promise<DeepScanRunState> {
     const existing = this.cancellationPersistence;
     if (existing) {
-      await existing.promise;
+      try {
+        await existing.promise;
+      } catch (error) {
+        if (existing.failure) await this.settled();
+        throw error;
+      }
       return await this.settled();
     }
     if (
@@ -313,15 +318,19 @@ export class DeepScanCoordinator {
         }
       }
     } catch (error) {
-      if (!persistence.failure) this.cancellationPersistence = undefined;
       reject(error);
-      throw error;
+      if (!persistence.failure) {
+        this.cancellationPersistence = undefined;
+        throw error;
+      }
     } finally {
       // Cleanup still inspects durable state and preserves results when the
       // process lost a committed response, then reports the persistence failure.
       persistence.resolve();
     }
-    return await this.settled();
+    const settled = await this.settled();
+    if (persistence.failure) throw persistence.failure.error;
+    return settled;
   }
 
   failExternallyPersisted(reason: string | undefined): void {
