@@ -193,6 +193,7 @@ export async function classifySeverityInternal(
         options,
         {
           surface,
+          command: "classify-severity",
           threadSource: CODEX_SECURITY_THREAD_SOURCES.severityClassification,
         },
       );
