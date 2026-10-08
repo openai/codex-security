@@ -57,8 +57,7 @@ for (const formatting of [
     const original = entry("shared-finding");
     original.finding.extensions = {
       score: 0,
-      opaqueId:
-        formatting === "large-exponent" ? 9007199254740992n : 9007199254740993n,
+      opaqueId: 9007199254740993n,
     };
     storeFindings(database, [original], "created");
     const body =
@@ -72,8 +71,10 @@ for (const formatting of [
         formatting === "signed-zero" ? '"score": -0.0' : '"score": 0',
       )
       .replace(
-        '"opaqueId": 9007199254740992',
-        '"opaqueId": 9.007199254740992e15',
+        '"opaqueId": 9007199254740993',
+        formatting === "large-exponent"
+          ? '"opaqueId": 9.0071992547409930e+15'
+          : '"opaqueId": 9007199254740993',
       );
     database
       .prepare("UPDATE findings SET details_json = ? WHERE id = ?")
@@ -131,16 +132,39 @@ for (const formatting of [
   });
 }
 
-for (const [name, before, after] of [
+for (const [name, before, after, storedNumber] of [
   ["boolean", true, 1],
   ["array order", [1, 2], [2, 1]],
   ["large integer", 9007199254740992n, 9007199254740993n],
+  [
+    "rounded exponent",
+    9007199254740992n,
+    9007199254740992n,
+    "9.007199254740993e15",
+  ],
+  [
+    "rounded decimal",
+    9007199254740992n,
+    9007199254740992n,
+    "9007199254740992.1",
+  ],
+  ["underflow", 0, 0, "1e-1000"],
 ] as const) {
   test(`changed ${name} invalidates the local finding cache`, (t) => {
     const database = open(t);
     const original = entry("shared-finding");
     original.finding.extensions = { value: before };
     storeFindings(database, [original], "created");
+    if (storedNumber !== undefined)
+      database
+        .prepare("UPDATE findings SET details_json = ? WHERE id = ?")
+        .run(
+          stringifyJson(original.finding).replace(
+            `"value": ${before}`,
+            `"value": ${storedNumber}`,
+          ),
+          original.finding.findingId,
+        );
     database
       .prepare(
         "INSERT INTO local_finding_embeddings VALUES (?, 'local-model', '[1,0]', 'local-cache-key')",

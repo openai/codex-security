@@ -95,13 +95,14 @@ export function findPotentialDuplicates(
     // Stable sorting keeps insertion-time / finding-ID order for ties.
     ranked.sort((a, b) => b.similarity - a.similarity);
     const selected = [findingId, ...ranked.slice(0, 50).map(({ id }) => id)];
-    const documents = database
+    const serializedDocuments = database
       .prepare(
         `SELECT findings.details_json FROM json_each(?) AS selected
          JOIN findings ON findings.id = selected.value ORDER BY selected.key`,
       )
       .all(JSON.stringify(selected))
-      .map((row) => parseJson(row.details_json as string));
+      .map((row) => row.details_json as string);
+    const documents = serializedDocuments.map(parseJson);
     const [finding, ...potentialDuplicates] = documents;
     if (expectedCacheKeys === undefined)
       return { finding, potentialDuplicates };
@@ -110,7 +111,7 @@ export function findPotentialDuplicates(
     );
     const sourceSnapshots = new Map<string, unknown>();
     const findingDocuments = new Map(
-      selected.map((id, index) => [id, documents[index]]),
+      selected.map((id, index) => [id, serializedDocuments[index]!]),
     );
     for (const row of database
       .prepare(
@@ -138,10 +139,7 @@ export function findPotentialDuplicates(
       if (
         typeof row.source_json === "string" &&
         typeof row.occurrence_json === "string" &&
-        equalFindingJson(
-          parseJson(row.occurrence_json),
-          findingDocuments.get(id),
-        )
+        equalFindingJson(row.occurrence_json, findingDocuments.get(id)!)
       )
         sourceSnapshots.set(id, JSON.parse(row.source_json));
     }

@@ -69,10 +69,7 @@ export function storeFindings(
         requireFiniteNumbers([finding, entry.embedding.vector]);
         let details = stringifyJson(finding, 0);
         const previous = stored.get(finding.findingId)?.details_json;
-        if (
-          typeof previous === "string" &&
-          equalFindingJson(parseJson(previous), parseJson(details))
-        )
+        if (typeof previous === "string" && equalFindingJson(previous, details))
           details = previous;
         const { changes } = upsert.run(
           finding.findingId,

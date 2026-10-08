@@ -2029,7 +2029,7 @@ def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: st
     assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
 
 
-@pytest.mark.parametrize("blank", ["", " \t\n"])
+@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000])
 def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
     state_dir = tmp_path / "state"
     workspace_id = str(uuid.uuid4())
@@ -2041,6 +2041,31 @@ def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: st
     saved = save_workspace(state_dir, workspace_id, str(target), blank, "standard")
     assert saved["targetPath"] == str(target)
     assert saved["scope"] == "."
+
+
+@pytest.mark.parametrize("field", ["scope", "target-path"])
+@pytest.mark.parametrize("leading", [False, True])
+def test_workspace_checks_retained_literal_path_length(tmp_path: Path, field: str, leading: bool):
+    state_dir = tmp_path / "state"
+    value = " " * 5000 + "src" if leading else "src" + " " * 5000
+    result = run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        str(uuid.uuid4()),
+        f"--{field}={value}",
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert result["stderr"] == "Text value must be no longer than 4096 characters.\n"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
+
+
+def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
+    scope = " " * 4093 + "src"
+    created = create_workspace(tmp_path / "state", str(uuid.uuid4()), "--scope", scope)
+    assert created["scope"] == scope
 
 
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
