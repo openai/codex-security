@@ -265,7 +265,7 @@ export class ScanDashboard {
         input.on("data", this.#onInput);
         this.#stream.write(ENABLE_ALTERNATE_SCROLL);
       }
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch (error) {
       try {
         this.stop();
@@ -537,12 +537,8 @@ export class ScanDashboard {
   #refresh(): void {
     if (this.#timer === null) return;
     try {
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch {}
-  }
-
-  #render(): void {
-    this.#stream.write(this.#frame());
   }
 
   #frame(): string {
@@ -568,7 +564,9 @@ export class ScanDashboard {
     const files =
       this.#files === null
         ? "waiting for inventory"
-        : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
+        : this.#files.filesCompleted > 0
+          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
+          : `${formatCount(this.#files.filesTotal)} in scope`;
     const history = this.#activityLines(width);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);

@@ -6,12 +6,18 @@ import {
   readdir,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
+import {
+  gitMarkerRoot,
+  isGitMetadataDirectory,
+  nullIfMissingFile,
+} from "./targets.js";
 
 const DOCUMENT_EXTENSIONS = new Set([
   ".md",
@@ -24,14 +30,21 @@ const DOCUMENT_EXTENSIONS = new Set([
 export interface PreparedKnowledgeBase {
   path: string;
   sources: string[];
+  protectedRoots: string[];
   cleanup(): Promise<void>;
 }
 
-export async function prepareKnowledgeBase(
+export interface KnowledgeBaseSnapshot {
+  readonly sources: readonly string[];
+  readonly protectedRoots?: readonly string[];
+  readonly documents: Readonly<Record<string, string>>;
+}
+
+/** @internal Extract once so campaign identity and workers use identical inputs. */
+export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
-  directory?: string,
-): Promise<PreparedKnowledgeBase> {
+): Promise<KnowledgeBaseSnapshot> {
   const sources = new Set<string>();
   const documents = new Set<string>();
 
@@ -52,7 +65,7 @@ export async function prepareKnowledgeBase(
 
     const source = await realpath(path);
     const selected = metadata.isDirectory()
-      ? await discover(source, signal)
+      ? (await discover(source, signal)).sort()
       : [source];
     if (selected.length === 0) {
       throw new Error(
@@ -65,53 +78,99 @@ export async function prepareKnowledgeBase(
     sources.add(source);
   }
 
+  const extracted: Record<string, string> = {};
+  let index = 0;
+  for (const document of documents) {
+    signal?.throwIfAborted();
+    const metadata = await lstat(document);
+    if (process.platform !== "win32" && (metadata.mode & 0o444) === 0) {
+      throw new Error(`Knowledge base document is not readable: ${document}`);
+    }
+    const bytes = await readFile(document, {
+      flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      signal,
+    });
+    const extension = extname(document).toLowerCase();
+    const text =
+      extension === ".pdf"
+        ? await extractPdf(document, bytes)
+        : extension === ".docx"
+          ? extractDocx(document, bytes)
+          : decodeText(document, bytes);
+    if ((extension === ".pdf" || extension === ".docx") && !text.trim()) {
+      throw new Error(
+        `Knowledge base document contains no extractable text: ${document}`,
+      );
+    }
+    const name = `${index}-${basename(document)}.txt`;
+    // The prefix and suffix can exceed the filesystem's 255-byte name limit.
+    const filename = Buffer.byteLength(name) > 255 ? `${index}.txt` : name;
+    extracted[filename] = text;
+    index++;
+  }
+  return {
+    sources: [...sources],
+    protectedRoots: await Promise.all(
+      [...sources].map(
+        async (source) =>
+          (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+      ),
+    ),
+    documents: extracted,
+  };
+}
+
+export async function prepareKnowledgeBase(
+  input: readonly string[] | KnowledgeBaseSnapshot,
+  signal?: AbortSignal,
+  directory?: string,
+): Promise<PreparedKnowledgeBase> {
+  const snapshot =
+    "documents" in input
+      ? input
+      : await readKnowledgeBaseSnapshot(input, signal);
+  const protectedRoots =
+    snapshot.protectedRoots === undefined
+      ? await Promise.all(
+          snapshot.sources.map(
+            async (source) =>
+              (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+          ),
+        )
+      : [...snapshot.protectedRoots];
   const path = await mkdtemp(
     join(directory ?? tmpdir(), "codex-security-knowledge-"),
   );
   try {
-    let index = 0;
-    for (const document of documents) {
+    for (const [filename, text] of Object.entries(snapshot.documents)) {
       signal?.throwIfAborted();
-      const metadata = await lstat(document);
-      if (process.platform !== "win32" && (metadata.mode & 0o444) === 0) {
-        throw new Error(`Knowledge base document is not readable: ${document}`);
-      }
-      const bytes = await readFile(document, {
-        flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-        signal,
-      });
-      const extension = extname(document).toLowerCase();
-      const text =
-        extension === ".pdf"
-          ? await extractPdf(document, bytes)
-          : extension === ".docx"
-            ? extractDocx(document, bytes)
-            : decodeText(document, bytes);
-      if ((extension === ".pdf" || extension === ".docx") && !text.trim()) {
-        throw new Error(
-          `Knowledge base document contains no extractable text: ${document}`,
-        );
-      }
-      const name = `${index}-${basename(document)}.txt`;
-      // The prefix and suffix can exceed the filesystem's 255-byte name limit.
-      const filename = Buffer.byteLength(name) > 255 ? `${index}.txt` : name;
       await writeFile(join(path, filename), text, {
         encoding: "utf8",
         mode: 0o600,
         signal,
       });
-      index++;
     }
   } catch (error) {
     await rm(path, { recursive: true, force: true });
     throw error;
   }
-
   return {
     path,
-    sources: [...sources],
+    sources: [...snapshot.sources],
+    protectedRoots,
     cleanup: () => rm(path, { recursive: true, force: true }),
   };
+}
+
+/** @internal Read the same extracted document text used by scans. */
+export async function readKnowledgeBaseDocuments(
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const { documents } = await readKnowledgeBaseSnapshot(paths, signal);
+  return Object.keys(documents)
+    .sort()
+    .map((name) => documents[name]!);
 }
 
 async function discover(
@@ -124,8 +183,26 @@ async function discover(
   signal?.throwIfAborted();
   for (const entry of entries) {
     signal?.throwIfAborted();
-    if (entry.name.toLowerCase() === ".git") continue;
+    if (
+      (process.platform === "win32" ? entry.name.toLowerCase() : entry.name) ===
+      ".git"
+    )
+      continue;
     const path = join(directory, entry.name);
+    if (entry.name.toLowerCase() === ".git") {
+      const marker = await stat(join(directory, ".git"), {
+        bigint: true,
+      }).catch(nullIfMissingFile);
+      if (marker !== null) {
+        const candidate = await lstat(path, { bigint: true });
+        if (candidate.dev === marker.dev && candidate.ino === marker.ino) {
+          continue;
+        }
+      }
+      if (entry.isDirectory() && (await isGitMetadataDirectory(path, signal))) {
+        continue;
+      }
+    }
     if (entry.isDirectory()) {
       for (const document of await discover(path, signal)) {
         documents.push(document);
@@ -237,9 +314,17 @@ function decodeXml(value: string): string {
     (entity, name: string) => {
       if (!name.startsWith("#")) return entities[name.toLowerCase()] ?? entity;
       const hexadecimal = name[1]?.toLowerCase() === "x";
-      return String.fromCodePoint(
-        Number.parseInt(name.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10),
+      const codePoint = Number.parseInt(
+        name.slice(hexadecimal ? 2 : 1),
+        hexadecimal ? 16 : 10,
       );
+      if (
+        codePoint > 0x10ffff ||
+        (codePoint >= 0xd800 && codePoint <= 0xdfff)
+      ) {
+        return entity;
+      }
+      return String.fromCodePoint(codePoint);
     },
   );
 }
