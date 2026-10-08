@@ -8,7 +8,7 @@ overrides:
   '@openai/codex': 0.162.0-alpha.20
   '@openai/codex-sdk': 0.162.0-alpha.20
   '@openai/codex-security@0.1.31>smol-toml': 1.9.0
-  '@opencode-ai/sdk': 1.18.33
+  '@opencode-ai/sdk': 1.18.34
   ibm-cloud-sdk-core@5.6.0>axios: 1.20.0
   get-uri@8.0.1>basic-ftp: 6.2.1
   simple-git@3.36.0>@simple-git/args-pathspec: 1.0.4
@@ -23,8 +23,8 @@ importers:
         specifier: 0.162.0-alpha.20
         version: 0.162.0-alpha.20
       '@opencode-ai/sdk':
-        specifier: 1.18.33
-        version: 1.18.33
+        specifier: 1.18.34
+        version: 1.18.34
       promptfoo:
         specifier: 0.123.1
         version: 0.123.1(@aws-sdk/credential-provider-node@3.972.83)(@aws-sdk/credential-providers@3.1136.0)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.63.0)(socks@2.8.10)
@@ -1399,8 +1399,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opencode-ai/sdk@1.18.33':
-    resolution: {integrity: sha512-Nyurky9+AA2tvZ6my8UtO5pxPoXxrNypqjeEqMshBGiR542glOy+KE1Y+3lwWU+Z6HC/hSmrdXNbX81+qiuTzg==}
+  '@opencode-ai/sdk@1.18.34':
+    resolution: {integrity: sha512-R9QWUpcngtdQ6FCixz7NC6n1WsSho6CEuRUzYHz/CzZcp3miSklDzXkm0oDwXVCnuEu+ANoeM0f6RDp51kOMzQ==}
 
   '@opentelemetry/api-logs@0.222.0':
     resolution: {integrity: sha512-9mb1If+IF6u0ZVXkHQ6ogEae5HwA6ajIVUgpSDQyRASxft6BSXHvBvPooRle3yFN/fKnCdSOnuu0OC3PLcF6+g==}
@@ -5948,7 +5948,7 @@ snapshots:
   '@openai/codex@0.162.0-alpha.20-win32-x64':
     optional: true
 
-  '@opencode-ai/sdk@1.18.33':
+  '@opencode-ai/sdk@1.18.34':
     dependencies:
       cross-spawn: 7.0.6
 
@@ -8416,7 +8416,7 @@ snapshots:
       '@openai/agents': 0.11.8(@aws-sdk/credential-provider-node@3.972.83)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.5)
       '@openai/codex-sdk': 0.162.0-alpha.20
       '@openai/codex-security': 0.1.31(@types/node@25.9.1)(graphql@17.0.2)
-      '@opencode-ai/sdk': 1.18.33
+      '@opencode-ai/sdk': 1.18.34
       '@playwright/browser-chromium': 1.63.0
       '@rollup/rollup-linux-x64-gnu': 4.63.1
       '@slack/web-api': 8.1.1
