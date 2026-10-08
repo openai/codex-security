@@ -344,10 +344,12 @@ describe("worker progress events", () => {
   test("ignores progress and dispatch markers inside nested or tilde fences", () => {
     const progress = {
       phase: "discovery" as const,
-      filesCompleted: 8,
+      filesCompleted: 3,
       filesTotal: 8,
     };
     const progressMarker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(progress)}`;
+    const liveProgress = { ...progress, filesCompleted: 4 };
+    const liveMarker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(liveProgress)}`;
     const dispatchMarker = `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify({
       phase: "file_review",
       planned: 6,
@@ -364,11 +366,11 @@ describe("worker progress events", () => {
             progressMarker,
             "```",
             "````",
-            progressMarker,
+            liveMarker,
           ].join("\n"),
         ),
       ),
-    ).toEqual([progress]);
+    ).toEqual([liveProgress]);
     // A tilde fence is not closed by a backtick fence.
     expect(
       scanProgressUpdatesFromEvent(
@@ -380,11 +382,11 @@ describe("worker progress events", () => {
             "```",
             progressMarker,
             "~~~",
-            progressMarker,
+            liveMarker,
           ].join("\n"),
         ),
       ),
-    ).toEqual([progress]);
+    ).toEqual([liveProgress]);
     // Dispatch markers inside a fenced block are not live worker status.
     expect(
       workerStatusFromEvent(
