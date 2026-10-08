@@ -63,7 +63,8 @@ export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
     );
   }
 }
-export type ProtectedScanPathKind = "output" | "temporary" | "runtime";
+export type ProtectedScanPathKind =
+  "output" | "state" | "temporary" | "runtime";
 
 export class OutputInsideProtectedRootError extends OutputDirectoryError {
   public constructor(

@@ -5277,6 +5277,35 @@ describe("CLI", () => {
     }
   });
 
+  test("explains when the state directory is inside the protected scan root", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const failing = dependencies();
+    failing.createSecurity = () =>
+      fakeSecurity(async () => {
+        throw new OutputInsideProtectedRootError(
+          "/tmp/home/.codex/state/plugins/codex-security",
+          "/tmp/home",
+          "state",
+        );
+      });
+
+    expect(
+      await runCli(
+        ["scan", ".", "--output-dir", "/tmp/home-codex-security-scan"],
+        failing,
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(
+      "Codex Security state directory must be outside the scanned directory and any enclosing Git worktree.",
+    );
+    expect(stderr.text()).toContain(
+      "Set CODEX_SECURITY_STATE_DIR to a private directory outside the protected root.",
+    );
+    expect(stderr.text()).not.toContain("--output-dir");
+  });
+
   test("preserves partial-output guidance for a late protected-root failure", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
