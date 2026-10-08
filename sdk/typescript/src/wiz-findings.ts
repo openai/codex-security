@@ -28,10 +28,18 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function sourceFindingId(value: unknown): string {
+  const id = text(value);
+  if (!id || id.includes("\0") || Buffer.byteLength(id) > 512)
+    throw new Error(
+      "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters.",
+    );
+  return id;
+}
+
 /** Keep a Wiz vulnerability occurrence intact; advisory names are not identities. */
 function wizFinding(record: Record<string, unknown>): VendorFinding {
-  const id = text(record["id"]);
-  if (!id) throw new Error("Wiz vulnerability finding is missing its id.");
+  const id = sourceFindingId(record["id"]);
   const name = text(record["name"]);
   const packageName = text(record["detailedName"]);
   const version = text(record["version"]);
@@ -165,11 +173,8 @@ export async function readVendorFindings(
             "Normalized input permits only source_finding_id and evidence.",
           );
         }
-        const id = text(record["source_finding_id"]);
-        if (!id || Buffer.byteLength(id) > 512)
-          throw new Error("Source finding id must contain 1–512 UTF-8 bytes.");
         finding = {
-          source_finding_id: id,
+          source_finding_id: sourceFindingId(record["source_finding_id"]),
           evidence: validateExternalEvidence(record["evidence"]),
         };
       } else {
