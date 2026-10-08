@@ -360,6 +360,7 @@
         "next": {
           "anyOf": [
             {
+              "maxLength": 4096,
               "type": "string"
             },
             {
@@ -785,6 +786,7 @@
         "next": {
           "anyOf": [
             {
+              "maxLength": 4096,
               "type": "string"
             },
             {
