@@ -29,7 +29,6 @@ import {
   abortError,
   errorMessage,
   boundedDeepScanErrorMessage,
-  isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
   CodexWorkerExecutor,
@@ -338,12 +337,7 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) {
         return;
       }
-      if (
-        await this.stopAfterOwnershipChange(
-          this.options.threadId,
-          isStaleCoordinatorGenerationError(error),
-        )
-      ) {
+      if (await this.stopAfterOwnershipChange(this.options.threadId)) {
         return;
       }
       const message = errorMessage(error);
@@ -549,7 +543,7 @@ export class DeepScanCoordinator {
     }
     this.scheduleHeartbeat();
     if (this.terminal || this.ownershipCheck) return;
-    const ownershipCheck = this.stopAfterOwnershipChange(threadId, false);
+    const ownershipCheck = this.stopAfterOwnershipChange(threadId);
     this.ownershipCheck = ownershipCheck;
     try {
       await ownershipCheck;
@@ -561,31 +555,26 @@ export class DeepScanCoordinator {
 
   private async stopAfterOwnershipChange(
     threadId: string | undefined,
-    leaseLossConfirmed: boolean,
   ): Promise<boolean> {
     if (this.externallyFailed || this.terminal || !threadId)
       return this.externallyFailed;
     let current: DeepScanRunState;
     try {
       current = await this.options.store.get(this.state.scanId, threadId);
-      // A successful state read determines whether ownership changed.
-      leaseLossConfirmed = false;
     } catch (readError) {
       this.log({
         event: "coordinator_ownership_read_failed",
         scanId: this.state.scanId,
         reason: errorKind(readError),
       });
-      if (!leaseLossConfirmed) return this.externallyFailed;
-      current = this.state;
+      return this.externallyFailed;
     }
     if (this.externallyFailed || this.terminal) return this.externallyFailed;
     const replacementConfirmed =
-      leaseLossConfirmed ||
-      (current.status === "running" &&
-        current.coordinatorGeneration !== undefined &&
-        this.state.coordinatorGeneration !== undefined &&
-        current.coordinatorGeneration > this.state.coordinatorGeneration);
+      current.status === "running" &&
+      current.coordinatorGeneration !== undefined &&
+      this.state.coordinatorGeneration !== undefined &&
+      current.coordinatorGeneration > this.state.coordinatorGeneration;
     if (current.status === "running" && !replacementConfirmed) return false;
 
     this.externallyFailed = true;

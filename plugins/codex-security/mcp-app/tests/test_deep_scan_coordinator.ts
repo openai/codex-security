@@ -2427,48 +2427,60 @@ async function testStaleMutationObservesReplacement() {
 }
 
 async function testReducerDiagnosticDoesNotOverrideOwnership() {
-  for (const reference of [
-    "missing-reference",
-    "Deep Scan coordinator lease belongs to a newer generation.",
-  ]) {
-    const { fixture, store } = await coordinatorFixture({
-      workers: 1,
-      maxDiscoveryRuns: 1,
-      stopAfterConsecutiveErrors: 1,
-    });
-    fixture.run.coordinatorGeneration = store.run.coordinatorGeneration = 2;
-    const worker = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
-    const executor = {
-      async run(request: Parameters<FakeExecutor["run"]>[0]) {
-        const result = await worker.run(request);
-        if (request.kind === "dedup") {
-          const resultPath = path.join(
-            request.artifactContext!.root,
-            "result.json",
-          );
-          const draft = await readJson(resultPath);
-          draft.findings[0].provenance.sourceFindingIds = [reference];
-          await writeJson(resultPath, draft);
-        }
-        return result;
-      },
-    };
-    let observations = 0;
-    const terminal = await runCoordinator(fixture, store, executor, {
-      retryDelaysMs: [],
-      threadId: "fixture-thread",
-      heartbeatIntervalMs: 60_000,
-      observeReplacement: async (run) => {
-        observations += 1;
-        return run;
-      },
-    });
-    assert.equal(observations, 0);
-    assert.equal(terminal?.status, "failed");
-    assert.equal(store.run.status, "failed");
-    assert.equal(terminal?.coordinatorGeneration, 2);
-    assert.ok(store.failureMessages[0].includes(reference));
-  }
+  for (const failRead of [false, true])
+    for (const reference of [
+      "missing-reference",
+      "Deep Scan coordinator lease belongs to a newer generation.",
+    ]) {
+      const { fixture, store } = await coordinatorFixture({
+        workers: 1,
+        maxDiscoveryRuns: 1,
+        stopAfterConsecutiveErrors: 1,
+      });
+      fixture.run.coordinatorGeneration = store.run.coordinatorGeneration = 2;
+      const worker = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+      const executor = {
+        async run(request: Parameters<FakeExecutor["run"]>[0]) {
+          const result = await worker.run(request);
+          if (request.kind === "dedup") {
+            const resultPath = path.join(
+              request.artifactContext!.root,
+              "result.json",
+            );
+            const draft = await readJson(resultPath);
+            draft.findings[0].provenance.sourceFindingIds = [reference];
+            await writeJson(resultPath, draft);
+          }
+          return result;
+        },
+      };
+      if (failRead) {
+        const get = store.get.bind(store);
+        let failed = false;
+        store.get = async (...args) => {
+          if (!failed) {
+            failed = true;
+            throw new Error("Synthetic authoritative ownership read failed");
+          }
+          return get(...args);
+        };
+      }
+      let observations = 0;
+      const terminal = await runCoordinator(fixture, store, executor, {
+        retryDelaysMs: [],
+        threadId: "fixture-thread",
+        heartbeatIntervalMs: 60_000,
+        observeReplacement: async (run) => {
+          observations += 1;
+          return run;
+        },
+      });
+      assert.equal(observations, 0);
+      assert.equal(terminal?.status, "failed");
+      assert.equal(store.run.status, "failed");
+      assert.equal(terminal?.coordinatorGeneration, 2);
+      assert.ok(store.failureMessages[0].includes(reference));
+    }
 }
 
 async function testJoinAndOrphanRules() {
