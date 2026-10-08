@@ -132,6 +132,66 @@ describe("worker progress events", () => {
     });
   });
 
+  test("reconciles preflight command metadata with its reported payload", () => {
+    const output = (status: string) =>
+      JSON.stringify({
+        profile: "security_scan",
+        status,
+        results: [
+          { capability: "delegated_workers", status: "pass" },
+          { capability: "usable_worker_slots_6", status: "pass", actual: 8 },
+        ],
+      });
+    const preflight = (status: string, metadata: Record<string, unknown>) =>
+      workerStatusFromEvent({
+        type: "item.completed",
+        item: {
+          id: "command-1",
+          type: "command_execution",
+          command: "python3 /plugin/scripts/config_preflight.py --profile security_scan",
+          aggregated_output: output(status),
+          ...metadata,
+        },
+      });
+    const available = {
+      kind: "preflight",
+      delegation: "available",
+      configuredSlots: 8,
+    };
+    // Documented status/exit mapping: ready=0, blocked=1, incomplete=2.
+    expect(preflight("ready", { status: "completed", exit_code: 0 })).toEqual(
+      available,
+    );
+    expect(preflight("blocked", { status: "completed", exit_code: 1 })).toEqual(
+      available,
+    );
+    expect(
+      preflight("incomplete", { status: "completed", exit_code: 2 }),
+    ).toEqual(available);
+    // Explicit command failure is never trustworthy capability evidence.
+    expect(preflight("ready", { status: "failed", exit_code: 2 })).toBeNull();
+    // Contradictory status/exit combinations are rejected.
+    expect(preflight("ready", { status: "completed", exit_code: 1 })).toBeNull();
+    expect(preflight("blocked", { status: "completed", exit_code: 0 })).toBeNull();
+    // A legacy payload without a recognized status tolerates exit 0 only.
+    expect(
+      workerStatusFromEvent({
+        type: "item.completed",
+        item: {
+          id: "command-1",
+          type: "command_execution",
+          command: "config_preflight.py",
+          aggregated_output: JSON.stringify({
+            profile: "security_scan",
+            results: [{ capability: "delegated_workers", status: "pass" }],
+          }),
+          status: "completed",
+          exit_code: 2,
+        },
+      }),
+    ).toBeNull();
+  });
+
   test("keeps unavailable and unknown delegation distinct from capacity", () => {
     for (const [status, delegation] of [
       ["fail", "unavailable"],
@@ -337,6 +397,53 @@ describe("worker progress events", () => {
     expect(
       scanProgressUpdatesFromEvent(
         messageEvent(`Inline \`\`\` is not a fence.\n${marker}`),
+      ),
+    ).toEqual([progress]);
+  });
+
+  test("ignores progress and dispatch markers inside nested or tilde fences", () => {
+    const progress = {
+      phase: "discovery" as const,
+      filesCompleted: 8,
+      filesTotal: 8,
+    };
+    const progressMarker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(progress)}`;
+    const dispatchMarker = `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify({
+      phase: "file_review",
+      planned: 6,
+      started: 3,
+    })}`;
+    // A four-backtick fence is not closed by an inner three-backtick line.
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          ["````markdown", "```text", progressMarker, "```", "````"].join("\n"),
+        ),
+      ),
+    ).toEqual([]);
+    // A tilde fence is not closed by a backtick fence.
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          ["~~~text", progressMarker, "```", progressMarker, "~~~"].join("\n"),
+        ),
+      ),
+    ).toEqual([]);
+    // Dispatch markers inside a fenced block are not live worker status.
+    expect(
+      workerStatusFromEvent(
+        messageEvent(["Example:", "```text", dispatchMarker, "```"].join("\n")),
+      ),
+    ).toBeNull();
+    // A real marker after the fence closes is still read.
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          ["```text", progressMarker, "```", progressMarker].join("\n"),
+        ),
       ),
     ).toEqual([progress]);
   });
