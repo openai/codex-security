@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 from test_workbench_standard_deep_results import (
     accepted_standard_worker,
+    committed_standard_reducer,
     deep_scan_fixture,
+    run_workbench_with_fault,
     write_saved_parent,
 )
 from workbench_test_support import (
@@ -1200,3 +1202,207 @@ def test_recovery_preserves_worker_candidate_identity_values(
         } == {1, 2}
     assert {file: file.read_bytes() for file in source_bytes} == source_bytes
     assert (scan_dir / "scan-manifest.json").read_bytes() == sealed_bytes
+
+
+@pytest.fixture
+def numeric_frozen_results(tmp_path: Path):
+    example = Path(__file__).resolve().parents[1] / "examples" / "completed-scan"
+    historical = json.loads((example / "findings.json").read_text())["findings"][0]
+    historical["extensions"] = {"observation": 1.0, "candidateId": "numeric-candidate"}
+    current = copy.deepcopy(historical)
+    current["severity"]["level"] = "low"
+    current["locations"][0]["startLine"] += 1
+    current["provenance"]["previousFindings"] = [historical]
+    scan_id = "frozen-number-recovery"
+    for owner, finding, observed in (("worker", historical, 10), ("reducer", current, 100)):
+        output = tmp_path / owner
+        output.mkdir()
+        path = output / "result.json"
+        path.write_text(json.dumps(saved_draft(scan_id, findings=[finding], complete=True)))
+        os.utime(path, ns=(observed, observed))
+    workers = [
+        {
+            **saved_discovery_worker(tmp_path / "reducer", "reducer"),
+            "kind": "dedup",
+            "status": "succeeded",
+            "completed_at": "2026-01-01T00:00:00Z",
+            "result_manifest_path": str(tmp_path / "reducer" / "result.json"),
+        },
+        saved_discovery_worker(tmp_path / "worker", "worker"),
+    ]
+    binding = {
+        **saved_binding(),
+        "allowedTargetKinds": ["git_worktree"],
+        "target": json.loads((example / "scan-manifest.json").read_text())["scan"]["target"],
+    }
+    return scan_id, binding, workers
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("token", ["1.0", "1e0", "1.0000000000000001", "true"])
+def test_frozen_recovery_binds_the_compared_number_view(
+    tmp_path: Path, numeric_frozen_results, legacy: bool, token: str
+) -> None:
+    scan_id, binding, workers = numeric_frozen_results
+
+    def merge(frozen=None):
+        return saved.merge_saved_results(
+            tmp_path,
+            scan_id,
+            binding,
+            workers,
+            [],
+            stopped=True,
+            reason="interrupted",
+            frozen_source_digests=frozen,
+        )
+
+    initial = merge()
+    assert initial[1]["findings"][0]["severity"]["level"] == "low"
+    frozen = initial[0]["scan"]["preservedSources"]
+    if legacy:
+        # Existing freezes contain the digest of Python's rounded JSON view.
+        frozen = {
+            path: saved._digest(json.loads((tmp_path / path).read_text()))
+            for path in frozen
+            if not path.startswith("source-order/")
+        }
+        saved._freeze_source_times(
+            tmp_path, scan_id, frozen, {"worker/result.json": 10, "reducer/result.json": 100}
+        )
+    assert any(path.startswith("source-order/") for path in frozen)
+    unchanged = merge(frozen)
+    assert unchanged[1]["findings"][0]["severity"]["level"] == "low"
+    assert unchanged[0]["scan"]["preservedSources"] == frozen
+    path = tmp_path / "worker" / "result.json"
+    path.write_text(path.read_text().replace('"observation": 1.0', f'"observation": {token}'))
+    rewritten = path.read_bytes()
+    if token == "true" or (not legacy and token == "1.0000000000000001"):
+        with pytest.raises(
+            saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
+        ):
+            merge(frozen)
+    else:
+        replay = merge(frozen)
+        assert replay[1]["findings"][0]["severity"]["level"] == "low"
+        assert replay[0]["scan"]["preservedSources"] == frozen
+    assert path.read_bytes() == rewritten
+    captured = saved._capture_saved_source(
+        tmp_path, "worker/result.json", scan_id, write=False, expected_digests=frozen
+    )
+    assert (captured["worker/result.json"][0] == frozen["worker/result.json"]) is (
+        token in {"1.0", "1e0"} or (legacy and token == "1.0000000000000001")
+    )
+
+
+@pytest.mark.parametrize("container", ["object", "array"])
+def test_frozen_parent_and_worker_recover_shared_nested_evidence(
+    tmp_path: Path, container: str
+) -> None:
+    example = Path(__file__).resolve().parents[1] / "examples" / "completed-scan"
+    finding = json.loads((example / "findings.json").read_text())["findings"][0]
+    finding.pop("writeup", None)
+    nested: object = 1.5
+    for _ in range(350):
+        nested = {"nested": nested} if container == "object" else [nested]
+    finding["extensions"] = {"deep": nested}
+    scan_id = "nested-frozen-recovery"
+    document = saved_draft(scan_id, findings=[finding], complete=False)
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", document)
+    select(tmp_path, checkpoint, 100)
+    output = tmp_path / "worker"
+    output.mkdir()
+    (output / "result.json").write_text(json.dumps(document))
+    captured = saved._capture_saved_source(tmp_path, "checkpoint-head.json", scan_id)
+    captured.update(saved._capture_saved_source(tmp_path, "worker/result.json", scan_id))
+    frozen = {path: observed[0] for path, observed in captured.items()}
+    saved._freeze_source_times(
+        tmp_path, scan_id, frozen, {path: observed[1] for path, observed in captured.items()}
+    )
+    source_bytes = {path: (tmp_path / path).read_bytes() for path in frozen}
+    binding = {
+        **saved_binding(),
+        "allowedTargetKinds": ["git_worktree"],
+        "target": json.loads((example / "scan-manifest.json").read_text())["scan"]["target"],
+    }
+    recovered = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        [saved_discovery_worker(output)],
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+    )
+    assert len(recovered[1]["findings"]) == 1
+    assert recovered[1]["findings"][0]["extensions"]["deep"] == nested
+    assert all(
+        (tmp_path / path).read_bytes() == original for path, original in source_bytes.items()
+    )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_registered_frozen_numeric_sources_keep_published_meaning(
+    tmp_path: Path, legacy: bool
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, worker_result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    historical = json.loads((contract / "findings.json").read_text())["findings"][0]
+    historical["extensions"] = {"observation": 1.0, "candidateId": "numeric-candidate"}
+    current = copy.deepcopy(historical)
+    current["severity"]["level"] = "low"
+    current["provenance"]["previousFindings"] = [historical]
+    document = json.loads(worker_result.read_text())
+    document["findings"] = [current]
+    worker_result.write_text(json.dumps(document))
+    committed_standard_reducer(state, codex_home, scan_dir, scan_id, worker_id, worker_result)
+    document["findings"] = [historical]
+    worker_result.write_text(json.dumps(document))
+    if legacy:
+        # Reproduce the prior writer's digest while keeping real publication/DB paths.
+        result = run_workbench_with_fault(
+            tmp_path / "legacy_writer.py",
+            state,
+            codex_home,
+            "read_saved = workbench_saved_results._read_saved_result\n"
+            "def legacy_read(directory, relative, scan_id, **options):\n"
+            "    draft, digest, observed = read_saved(directory, relative, scan_id, **options)\n"
+            "    if not workbench_saved_results._is_source_order_snapshot(relative) and workbench_saved_results._checkpoint_head_directory(relative) is None:\n"
+            "        digest = workbench_saved_results._digest(draft)\n"
+            "    return draft, digest, observed\n"
+            "workbench_saved_results._read_saved_result = legacy_read\n",
+            "fail-deep-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Synthetic worker stop.",
+        )
+        assert result.returncode == 0, result.stderr
+    else:
+        fail_deep_scan(state, codex_home, scan_id)
+    original = {
+        name: (scan_dir / name).read_bytes() for name in ("scan-manifest.json", "findings.json")
+    }
+    assert json.loads(original["findings.json"])["findings"][0]["severity"]["level"] == "low"
+    assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
+    environment = {"CODEX_HOME": str(codex_home)}
+    scan_command(state, "recover-scan-results", scan_id, environment=environment)
+    worker_result.write_text(
+        worker_result.read_text().replace('"observation": 1.0', '"observation": 1.0000000000000001')
+    )
+    changed_source = worker_result.read_bytes()
+    assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is (not legacy)
+    if legacy:
+        scan_command(state, "recover-scan-results", scan_id, environment=environment)
+    else:
+        result = scan_command(
+            state, "recover-scan-results", scan_id, environment=environment, check=False
+        )
+        assert result["returncode"] != 0
+        assert "checkpoint changed after the scan stopped" in result["stderr"]
+    assert worker_result.read_bytes() == changed_source
+    assert all((scan_dir / name).read_bytes() == raw for name, raw in original.items())
