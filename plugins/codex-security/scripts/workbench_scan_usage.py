@@ -646,7 +646,11 @@ def _discover_recorded_worker_sessions(
 ) -> list[RolloutSession]:
     recorded: dict[str, list[RolloutSession]] = {}
     children: dict[str, set[str]] = {}
-    for candidate in sorted((codex_home / "sessions").rglob("*.jsonl")):
+    for candidate in sorted(
+        path
+        for directory in ("sessions", "archived_sessions")
+        for path in (codex_home / directory).rglob("*.jsonl")
+    ):
         path = _rollout_path(str(candidate))
         if path is None:
             continue

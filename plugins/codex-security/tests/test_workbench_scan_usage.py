@@ -698,6 +698,7 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         "current-unreadable",
         "current-mismatched",
         "external-sqlite",
+        "external-archived",
         "external-late-parent",
         "external-shared-home",
         "external-missing-copy",
@@ -940,6 +941,7 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             )
         elif worker_home in {
             "external-sqlite",
+            "external-archived",
             "external-owner",
             "external-late-parent",
             "external-shared-home",
@@ -948,7 +950,11 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
         }:
             # Native keeps rollouts in its Codex home even when its SQLite
             # index lives elsewhere and recovery chooses a different index.
-            sessions = selected_home / "sessions" / "2026" / "01" / "01"
+            sessions = (
+                selected_home / "archived_sessions"
+                if worker_home == "external-archived"
+                else selected_home / "sessions" / "2026" / "01" / "01"
+            )
             sessions.mkdir(parents=True, exist_ok=True)
             for thread_id, path in worker_threads.items():
                 recorded = sessions / f"rollout-{thread_id}.jsonl"
