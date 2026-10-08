@@ -1,6 +1,6 @@
 import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
-import { existsSync, realpathSync, type Stats } from "node:fs";
+import { realpathSync, type Stats } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import {
@@ -570,34 +570,22 @@ export async function normalizeTarget(
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
-    if (!existsSync(candidate)) {
-      throw new InvalidTargetError(`Path target does not exist: ${value}`);
-    }
     let metadata: Stats;
-    try {
-      metadata = await abortable(() => stat(candidate), signal);
-    } catch (error) {
-      throwIfAborted(signal);
-      throw new InvalidTargetError(`Path target does not exist: ${value}`, {
-        cause: error,
-      });
-    }
-    // The bundled scan scope resolver only accepts regular files and
-    // directories, so a FIFO, socket, or device node would pass preflight and
-    // then fail during scan setup.
-    if (!metadata.isFile() && !metadata.isDirectory()) {
-      throw new InvalidTargetError(
-        `Path target is not a regular file or directory: ${value}`,
-      );
-    }
     let canonical: string;
     try {
+      metadata = await abortable(() => stat(candidate), signal);
       canonical = await abortable(() => realpath(candidate), signal);
     } catch (error) {
       throwIfAborted(signal);
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
         cause: error,
       });
+    }
+    // Match the bundled scan scope resolver's supported filesystem types.
+    if (!metadata.isFile() && !metadata.isDirectory()) {
+      throw new InvalidTargetError(
+        `Path target is not a regular file or directory: ${value}`,
+      );
     }
     const relativePath = relative(root, canonical);
     if (relativePathIsOutside(relativePath)) {
