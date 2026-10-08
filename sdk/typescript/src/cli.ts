@@ -29,7 +29,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -66,6 +66,7 @@ import {
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
+  scanCodexHome,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -86,11 +87,13 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
+import type { DeepScanProgress } from "./deep-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
+import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runRecordsProtocol } from "./deduplication/records-protocol.js";
 import {
@@ -147,6 +150,7 @@ import {
   AuthenticationRequiredError,
   ConfigurationError,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
@@ -185,6 +189,7 @@ import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
+  withCredentialHomeLock,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
@@ -1159,9 +1164,6 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
-  prepareAuthenticationHome?: (
-    environment: NodeJS.ProcessEnv,
-  ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
@@ -1176,6 +1178,7 @@ interface CliDependencies {
   recordsInput?: Readable;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
+  cloudFetch?: (url: string, options: RequestInit) => Promise<Response>;
   publishScanToCustom?: typeof publishScanToCustom;
   sendFeedback?: typeof sendFeedback;
   confirmPatchReview?: (question: string) => Promise<boolean>;
@@ -1228,7 +1231,6 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
     new CodexSecurity(config, undefined, { surface: "cli" }),
   environment: process.env,
-  prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
   hasStoredChatGPTSignIn: async (signal) => {
@@ -2637,6 +2639,21 @@ export async function main(
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
+      let cloudRequestStarted = false;
+      const cloudFetch = (
+        url: string,
+        options: RequestInit,
+      ): Promise<Response> => {
+        options.signal?.throwIfAborted();
+        cloudRequestStarted = true;
+        return (dependencies.cloudFetch ?? globalThis.fetch)(url, options);
+      };
+      const publicationErrorMessage = (error: unknown): string =>
+        cloudRequestStarted &&
+        controller.signal.aborted &&
+        error === controller.signal.reason
+          ? "Any upload already in flight may have been accepted. Check Cloud before retrying."
+          : errorMessage(error);
       let presentation: PublicationProgressPresenter | undefined;
       let firstSignalAt = 0;
       let observingSignals = false;
@@ -2680,9 +2697,9 @@ export async function main(
             ? "Publication canceled by Ctrl-C."
             : "Publication terminated by SIGTERM.";
         const recovery =
-          error === undefined || error === signal
+          error === undefined || (error === signal && !cloudRequestStarted)
             ? ""
-            : ` ${diagnosticValue(error)}`;
+            : ` ${diagnosticValue(publicationErrorMessage(error))}`;
         errorOutput.write(`codex-security: ${reason}${recovery}\n`);
         exitCode = signal === "SIGINT" ? 130 : 143;
         return true;
@@ -2791,6 +2808,7 @@ export async function main(
             environment: dependencies.environment,
             dryRun: options.dryRun,
             signal: controller.signal,
+            fetch: cloudFetch,
           });
           return { ...result };
         }
@@ -3023,6 +3041,7 @@ export async function main(
                 break;
               }
               cloudBatch.notAttempted.shift();
+              cloudRequestStarted = false;
               try {
                 const result = await (
                   dependencies.publishScanToCloud ?? publishScanToCloud
@@ -3030,11 +3049,12 @@ export async function main(
                   environment: dependencies.environment,
                   dryRun: options.dryRun,
                   signal: controller.signal,
+                  fetch: cloudFetch,
                   ...(scanId === undefined ? {} : { expectedScanId: scanId }),
                 });
                 cloudBatch.results.push({ scanDir: directory, ...result });
               } catch (error) {
-                const message = errorMessage(error);
+                const message = publicationErrorMessage(error);
                 cloudBatch.failed.push({
                   scanDir: directory,
                   ...(scanId === undefined ? {} : { scanId }),
@@ -3055,6 +3075,7 @@ export async function main(
             environment: dependencies.environment,
             dryRun: options.dryRun,
             signal: controller.signal,
+            fetch: cloudFetch,
             ...(selectedScans[0]?.scanId === undefined
               ? {}
               : { expectedScanId: selectedScans[0].scanId }),
@@ -3971,9 +3992,7 @@ export async function main(
           .string()
           .url()
           .optional()
-          .describe(
-            "Findings API base URL; the scan's findings must already be indexed.",
-          ),
+          .describe("Findings API base URL for service-backed deduplication."),
       }),
       output: z
         .object({
@@ -3995,68 +4014,127 @@ export async function main(
         })
         .optional(),
       async run({ options }) {
-        if (options.records)
-          throw new CodexSecurityError("Use dedupe --records alone.");
-        const controller = new AbortController();
-        const removeSignals = listenForAbort(dependencies, controller);
-        try {
-          if (options.findingsUrl === undefined)
-            throw new CodexSecurityError(
-              "Saved-scan deduplication requires --findings-url.",
-            );
-          const scanId =
-            options.scan ??
-            (options.workflowId === undefined
-              ? undefined
-              : (await resolveWorkflowScan(options.workflowId, dependencies))
-                  .scanId);
-          if (scanId === undefined)
-            throw new CodexSecurityError(
-              "Deduplication requires --scan or --workflow-id.",
-            );
-          const result = await (
-            dependencies.deduplicateScan ?? deduplicateScanInternal
-          )(
-            scanId,
-            {
-              findingsUrl: options.findingsUrl,
-              concurrency: options.concurrency,
-              ...(options.workflowId === undefined
-                ? {}
-                : { workflowId: options.workflowId }),
-              allRepositories: options.allRepositories,
-              signal: controller.signal,
-            },
-            {
-              environment: dependencies.environment,
-              currentDirectory: dependencies.currentDirectory,
-              runWorkbench: dependencies.runWorkbench,
-            },
-          );
-          for (const refusal of result.refusals ?? []) {
-            try {
-              errorOutput.write(
-                `codex-security: ${refusal.stage} refused by ${refusal.model} for ${refusal.findingIds.join(", ")}: ${refusal.reason} No decision was made; affected pairs were kept separate.\n`,
+        return await withTerminalErrorsHandled(errorOutput, async () => {
+          if (options.records)
+            throw new CodexSecurityError("Use dedupe --records alone.");
+          const controller = new AbortController();
+          const removeSignals = listenForAbort(dependencies, controller);
+          try {
+            const defaultWorkbench =
+              dependencies.runWorkbench === DEFAULT_DEPENDENCIES.runWorkbench;
+            const workflowWorkbench =
+              defaultWorkbench &&
+              options.scan === undefined &&
+              options.workflowId !== undefined
+                ? await savedScanWorkbench(
+                    { workflowId: options.workflowId },
+                    {
+                      environment: dependencies.environment,
+                      pluginRoot: await bundledPluginRoot(),
+                      currentDirectory: dependencies.currentDirectory(),
+                      signal: controller.signal,
+                    },
+                  )
+                : undefined;
+            const scanId =
+              options.scan ??
+              (options.workflowId === undefined
+                ? undefined
+                : (
+                    await resolveWorkflowScan(options.workflowId, {
+                      ...dependencies,
+                      runWorkbench:
+                        workflowWorkbench ?? dependencies.runWorkbench,
+                    })
+                  ).scanId);
+            if (scanId === undefined)
+              throw new CodexSecurityError(
+                "Deduplication requires --scan or --workflow-id.",
               );
-            } catch {
-              // Optional diagnostics must not discard the completed result.
+            const result = await (
+              dependencies.deduplicateScan ?? deduplicateScanInternal
+            )(
+              scanId,
+              {
+                findingsUrl: options.findingsUrl,
+                concurrency: options.concurrency,
+                ...(options.workflowId === undefined
+                  ? {}
+                  : { workflowId: options.workflowId }),
+                allRepositories: options.allRepositories,
+                signal: controller.signal,
+                onDiagnostic: (diagnostic) => {
+                  const level =
+                    dependencies.environment[
+                      "CODEX_SECURITY_LOG_LEVEL"
+                    ]?.trim() || dependencies.environment["LOG_LEVEL"]?.trim();
+                  const debug = level?.toLowerCase() === "debug";
+                  const visible =
+                    diagnostic.event === "review.warning" ||
+                    diagnostic.event === "review.stderr" ||
+                    diagnostic.event === "review.started" ||
+                    diagnostic.event === "review.completed" ||
+                    diagnostic.event === "review.reused" ||
+                    diagnostic.event.startsWith("preparation.");
+                  if (!debug && !visible) return;
+                  try {
+                    const message = debug
+                      ? JSON.stringify(diagnostic)
+                      : [
+                          diagnostic.event,
+                          diagnostic.stage,
+                          diagnostic.model,
+                          diagnostic.effort,
+                          diagnostic.message,
+                          diagnostic.details === undefined
+                            ? undefined
+                            : JSON.stringify(diagnostic.details),
+                        ]
+                          .filter((part) => part !== undefined)
+                          .join(" ");
+                    errorOutput.write(
+                      `codex-security: ${debug ? "debug: " : ""}${diagnosticValue(message)}\n`,
+                    );
+                  } catch {
+                    // Optional diagnostics must not discard the review result.
+                  }
+                },
+              },
+              {
+                environment: dependencies.environment,
+                currentDirectory: dependencies.currentDirectory,
+                ...(defaultWorkbench
+                  ? {}
+                  : { runWorkbench: dependencies.runWorkbench }),
+              },
+            );
+            for (const refusal of result.refusals ?? []) {
+              try {
+                errorOutput.write(
+                  `codex-security: ${refusal.stage} refused by ${refusal.model} for ${refusal.findingIds.join(", ")}: ${refusal.reason} No decision was made; affected pairs were kept separate.\n`,
+                );
+              } catch {
+                // Optional diagnostics must not discard the completed result.
+              }
             }
+            return result;
+          } catch (error) {
+            const signal = controller.signal.reason;
+            errorOutput.write(
+              `codex-security: ${
+                signal === "SIGINT" || signal === "SIGTERM"
+                  ? options.findingsUrl === undefined
+                    ? "Deduplication canceled. Completed local preparation is saved for retry."
+                    : "Deduplication canceled. Findings are unchanged."
+                  : diagnosticValue(error)
+              }\n`,
+            );
+            exitCode = interruptedExitCode(controller.signal) ?? 2;
+            return undefined;
+          } finally {
+            removeSignals();
           }
-          return result;
-        } catch (error) {
-          const signal = controller.signal.reason;
-          errorOutput.write(
-            `codex-security: ${
-              signal === "SIGINT" || signal === "SIGTERM"
-                ? "Deduplication canceled. Findings are unchanged."
-                : diagnosticValue(error)
-            }\n`,
-          );
-          exitCode = interruptedExitCode(controller.signal) ?? 2;
-          return undefined;
-        } finally {
-          removeSignals();
-        }
+        });
       },
     })
     .command(imports)
@@ -4595,6 +4673,7 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,
@@ -5408,22 +5487,18 @@ export async function main(
         { args: { action: "status" }, description: "Check authentication." },
       ],
       async run({ args, options }) {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
-        if (args.action === "status" && existsSync(credentialHome)) {
-          const ambientHome =
-            environmentValue(dependencies.environment, "CODEX_HOME") ??
-            join(homedir(), ".codex");
-          await initialCredentialsAvailable(
-            dependencies.environment,
-            ambientHome,
-            credentialHome,
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
+        const authentication = scanAuthentication(dependencies.environment);
+        if (args.action === "status" && authentication.method !== "api_key") {
+          const ambientHome = scanCodexHome(dependencies.environment);
+          await withCredentialHomeLock(credentialHome, () =>
+            initialCredentialsAvailable(
+              dependencies.environment,
+              ambientHome,
+              credentialHome,
+            ),
           );
         }
         const authenticationEnvironment = {
@@ -5441,15 +5516,10 @@ export async function main(
           undefined,
           authenticationEnvironment,
         );
-        if (
-          args.action === undefined &&
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
+        if (args.action === undefined && exitCode === 0) {
           await setCodexSecurityCredentialLogout(credentialHome, false);
         }
         if (args.action === "status") {
-          const authentication = scanAuthentication(dependencies.environment);
           if (
             authentication.method === "api_key" &&
             (exitCode === 0 || exitCode === 1)
@@ -5463,7 +5533,6 @@ export async function main(
             );
           }
         } else if (exitCode === 0 && !options.withApiKey) {
-          const authentication = scanAuthentication(dependencies.environment);
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
               dependencies.environment,
@@ -5495,29 +5564,23 @@ export async function main(
       destructive: true,
       mcp: false,
       async run() {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
         };
-        exitCode = await dependencies.runCodex(
-          ["logout"],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
-          await setCodexSecurityCredentialLogout(credentialHome, true);
-        }
+        await withCredentialHomeLock(credentialHome, async () => {
+          exitCode = await dependencies.runCodex(
+            ["logout"],
+            undefined,
+            authenticationEnvironment,
+          );
+          if (exitCode === 0) {
+            await setCodexSecurityCredentialLogout(credentialHome, true);
+          }
+        });
       },
     })
     .command("serve", {
@@ -5693,11 +5756,7 @@ export async function main(
             ? await resolveDeepScanConfig(
                 resolved.options,
                 join(
-                  expandHome(
-                    environmentValue(dependencies.environment, "CODEX_HOME") ??
-                      join(homedir(), ".codex"),
-                    dependencies.environment,
-                  ),
+                  scanCodexHome(dependencies.environment),
                   "codex-security",
                   "config.toml",
                 ),
@@ -8114,6 +8173,8 @@ async function executeScan(
   let lastProgressUpdate = "";
   let workerCapacity: { planned: number; started: number } | null = null;
   let fileProgress: ScanProgress | null = null;
+  let deepProgress: DeepScanProgress | null = null;
+  let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
@@ -8331,7 +8392,11 @@ async function executeScan(
           `Workers: ${workerCapacity.started}/${workerCapacity.planned}`,
         );
       }
-      if (fileProgress !== null && fileProgress.filesTotal > 0) {
+      if (deepProgress !== null) {
+        details.push(
+          `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
+        );
+      } else if (fileProgress !== null && fileProgress.filesTotal > 0) {
         details.push(
           `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
         );
@@ -8559,6 +8624,30 @@ async function executeScan(
         progress.stage(
           `Scan phase: ${phase}${update.filesTotal === 0 ? "" : ` (${update.filesCompleted.toLocaleString("en-US")}/${update.filesTotal.toLocaleString("en-US")} files)`}.`,
         );
+        progress.startTimer(runningMessage());
+      },
+      onDeepProgress: (update) => {
+        if (
+          deepProgress === null &&
+          update.completed === 0 &&
+          update.active === 0 &&
+          !update.consolidating
+        )
+          return;
+        deepProgress = update;
+        deepConsolidating =
+          update.consolidating === true ||
+          (deepConsolidating && update.active === 0);
+        phase = deepConsolidating ? "consolidating results" : "discovery";
+        const message = `Scan phase: ${phase} | Reviews: ${update.completed} completed, ${update.active} active, cap ${update.maximum}`;
+        if (dashboard !== null) {
+          dashboard.setStage(phase);
+          dashboard.note(message);
+          return;
+        }
+        if (progress === null) return;
+        progress.stopTimer();
+        progress.stage(message);
         progress.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
@@ -8947,6 +9036,7 @@ function isLocalScanFailure(error: unknown): boolean {
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
     error instanceof ConfigurationError ||
+    error instanceof LocalPluginBootstrapError ||
     error instanceof PluginPythonUnavailableError
   ) {
     return true;

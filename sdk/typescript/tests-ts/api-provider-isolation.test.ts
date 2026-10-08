@@ -198,11 +198,7 @@ test.each([
     await mkdir(repository);
     await mkdir(sourceHome, { mode: 0o700 });
     await mkdir(sharedHome, { recursive: true, mode: 0o700 });
-    // Initialize native state before the mocked primary scans start concurrently.
-    await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
-
     const workerRuntimeSettings = await loadWorkerSettings(root);
-    let nativeProbe = Promise.resolve();
 
     const ready = [
       Promise.withResolvers<void>(),
@@ -379,22 +375,32 @@ test.each([
                       featureOverrides,
                     );
                     expect(settings.config["web_search"]).toBe(webSearch);
-                    // Native SQLite probes share a home; keep the scans concurrent.
-                    const probe = nativeProbe.then(() =>
-                      effectiveProvider(
-                        environment,
-                        repository,
-                        profileConfigOverrides(settings.config),
-                        settings.nativeProfile,
+                    expect(settings.config["model_provider"]).toBe(
+                      "openrouter",
+                    );
+                    expect(settings.nativeProfile).toBeDefined();
+                    expect(settings.nativeProfile).toBe(options.nativeProfile);
+                    expect(
+                      (workerSnapshot["worker_runtime"] as JsonObject)[
+                        "native_profile"
+                      ],
+                    ).toBe(settings.nativeProfile);
+                    // Read A's private profile after B updates the shared home.
+                    // Native profile loading is covered by the inheritance tests.
+                    const nativeConfig = parseToml(
+                      await readFile(
+                        join(
+                          sharedHome,
+                          `${settings.nativeProfile}.config.toml`,
+                        ),
+                        "utf8",
                       ),
                     );
-                    nativeProbe = probe.then(
-                      () => undefined,
-                      () => undefined,
-                    );
-                    const actual = await probe;
+                    const actual = (
+                      nativeConfig["model_providers"] as JsonObject
+                    )["openrouter"] as JsonObject;
                     expect(actual).toMatchObject(provider);
-                    expect(actual.http_headers ?? {}).toEqual(
+                    expect(actual["http_headers"] ?? {}).toEqual(
                       provider.http_headers ?? {},
                     );
                     expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
@@ -572,6 +578,7 @@ const legacyScanCases: Array<
       capability?: true | number;
       inherited?: string;
       managed?: string;
+      isolatedConfig?: boolean;
       rejects?: boolean;
       reads?: boolean;
     },
@@ -588,6 +595,93 @@ const legacyScanCases: Array<
   ["standard", "standard", {}, {}],
   ["deep", "deep", {}, {}],
   ["standard with explicit provider", "standard", legacyProviders[0]![1], {}],
+  [
+    "deep with a root endpoint and no private snapshot",
+    "deep",
+    { openai_base_url: "https://endpoint.example.test/v1" },
+    { isolatedConfig: false, rejects: true },
+  ],
+  [
+    "deep with an OpenAI endpoint and readable snapshot",
+    "deep",
+    {
+      model_provider: "openai",
+      openai_base_url: "https://endpoint.example.test/v1",
+    },
+    { capability: true, rejects: true },
+  ],
+  [
+    "deep with a profile endpoint and selector snapshot 2",
+    "deep",
+    {
+      profile: "selected",
+      profiles: {
+        selected: { openai_base_url: "https://endpoint.example.test/v1" },
+      },
+    },
+    { capability: 2, rejects: true },
+  ],
+  [
+    "deep with a profile endpoint override and selector snapshot 3",
+    "deep",
+    {
+      openai_base_url: "https://unused.example.test/v1",
+      profile: "selected",
+      profiles: {
+        selected: {
+          model_provider: "openai",
+          openai_base_url: "https://endpoint.example.test/v1",
+        },
+      },
+    },
+    { capability: 3, rejects: true },
+  ],
+  [
+    "deep with an endpoint fallback and no private snapshot path",
+    "deep",
+    {
+      openai_base_url: "https://endpoint.example.test/v1",
+      profile: "selected",
+      profiles: { selected: { model_provider: "openai" } },
+    },
+    { capability: 4, isolatedConfig: false, rejects: true },
+  ],
+  [
+    "standard with an endpoint and no private snapshot",
+    "standard",
+    { openai_base_url: "https://endpoint.example.test/v1" },
+    { isolatedConfig: false },
+  ],
+  [
+    "deep with an unused profile endpoint",
+    "deep",
+    {
+      profiles: {
+        unused: { openai_base_url: "https://unused.example.test/v1" },
+      },
+    },
+    { isolatedConfig: false },
+  ],
+  [
+    "deep with a root endpoint and runtime snapshot 4",
+    "deep",
+    { openai_base_url: "https://endpoint.example.test/v1" },
+    { capability: 4 },
+  ],
+  [
+    "deep with a profile endpoint and runtime snapshot 4",
+    "deep",
+    {
+      profile: "selected",
+      profiles: {
+        selected: {
+          model_provider: "openai",
+          openai_base_url: "https://endpoint.example.test/v1",
+        },
+      },
+    },
+    { capability: 4 },
+  ],
   [
     "deep with explicit OpenAI",
     "deep",
@@ -664,6 +758,15 @@ test.each(legacyScanCases)(
     if (native.capability === undefined) delete manifest.codexSecurity;
     else manifest.codexSecurity = { workerProviderSnapshot: native.capability };
     await writeFile(manifestPath, JSON.stringify(manifest));
+    if (native.isolatedConfig === false) {
+      const mcpPath = join(plugin, ".mcp.json");
+      const configuration = JSON.parse(await readFile(mcpPath, "utf8"));
+      const server = configuration.mcpServers["codex-security"];
+      server.env_vars = server.env_vars.filter(
+        (name: string) => name !== "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      );
+      await writeFile(mcpPath, JSON.stringify(configuration));
+    }
     const callsPath = join(root, "config-reads.jsonl");
     const fakeNative = join(root, "native-config.mjs");
     await writeFile(
@@ -727,6 +830,21 @@ test.each(legacyScanCases)(
                 expect(
                   resolveCodexProfile(config as JsonObject)["model_provider"],
                 ).toBe(resolveCodexProfile(overrides)["model_provider"]);
+                const endpoint =
+                  resolveCodexProfile(overrides)["openai_base_url"];
+                expect(endpoint).toBe(options.config?.["openai_base_url"]);
+                expect(config).not.toHaveProperty("openai_base_url");
+                if (mode === "deep" && endpoint !== undefined) {
+                  const worker = parseToml(
+                    await readFile(
+                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                  );
+                  expect(
+                    (worker["worker_runtime"] as JsonObject)["openai_base_url"],
+                  ).toBe(endpoint);
+                }
                 if (native.capability === 2 || native.capability === 3) {
                   const worker = parseToml(
                     await readFile(

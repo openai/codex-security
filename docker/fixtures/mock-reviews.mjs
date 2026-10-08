@@ -49,9 +49,15 @@ const server = createServer(async (request, response) => {
       const { findings } = JSON.parse(
         prompt.slice(prompt.lastIndexOf("\n\n") + 2),
       );
-      const stage = prompt.startsWith("Review the complete assigned")
-        ? "screen"
-        : "pair";
+      const tools = body.input
+        .filter((entry) => entry.type === "additional_tools")
+        .flatMap((entry) => entry.tools);
+      const validator = tools.find((tool) => tool.name === "review_validator");
+      assert.equal(validator?.type, "namespace");
+      assert.equal(validator.tools[0].name, "submit_decisions");
+      assert.equal(validator.tools[0].type, "function");
+      const schema = validator.tools[0].parameters;
+      const stage = schema.required?.includes("decisions") ? "screen" : "pair";
       if (stage === "pair") assert.equal(findings.length, 2);
       assert.equal(
         body.model,
@@ -61,13 +67,6 @@ const server = createServer(async (request, response) => {
         body.reasoning.effort,
         stage === "screen" ? "xhigh" : "high",
       );
-      const tools = body.input
-        .filter((entry) => entry.type === "additional_tools")
-        .flatMap((entry) => entry.tools);
-      const validator = tools.find((tool) => tool.name === "review_validator");
-      assert.equal(validator?.type, "namespace");
-      assert.equal(validator.tools[0].name, "submit_decisions");
-      assert.equal(validator.tools[0].type, "function");
       const functions = tools.find((tool) => tool.name === "functions").tools;
       const execute = functions.find((tool) => tool.name === "exec");
       assert.match(execute.description, /### `exec_command`/);
@@ -87,7 +86,11 @@ const server = createServer(async (request, response) => {
               ),
             }
           : same
-            ? sameDecision(findings)
+            ? schema.oneOf.some((variant) =>
+                variant.required.includes("mergedFinding"),
+              )
+              ? sameDecision(findings)
+              : { ...sameRecommendation }
             : {
                 decision: "DISTINCT",
                 rationale: "Synthetic review of the original reports.",

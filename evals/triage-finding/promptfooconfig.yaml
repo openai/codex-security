@@ -8,11 +8,26 @@ providers:
   - id: openai:codex-sdk:gpt-5.5
     label: "Codex SDK triage-finding"
     config:
-      working_dir: ../..
-      sandbox_mode: read-only
+      working_dir: "{{triage_runtime_root}}"
+      skip_git_repo_check: true
       approval_policy: never
-      network_access_enabled: false
+      additional_directories:
+        - "{{triage_fixture_root}}"
+        - "{{triage_node_root}}"
+      cli_config:
+        default_permissions: triage_runtime_only
+        permissions:
+          triage_runtime_only:
+            filesystem:
+              ":minimal": read
+              ":workspace_roots": read
+            network:
+              enabled: false
+        features:
+          memories: false
+          plugins: false
       cli_env:
+        CODEX_MCP_NODE_PATH: "{{triage_node_path}}"
         HTTP_PROXY: "{{env.HTTP_PROXY}}"
         HTTPS_PROXY: "{{env.HTTPS_PROXY}}"
         ALL_PROXY: "{{env.ALL_PROXY}}"
@@ -22,6 +37,8 @@ evaluateOptions:
   maxConcurrency: 1
 
 defaultTest:
+  options:
+    transformVars: file://./scripts/runtime-vars.mts
   vars:
     invocation_preamble: "Use $codex-security:triage-finding to triage the supplied existing security findings."
     eval_instructions: |-

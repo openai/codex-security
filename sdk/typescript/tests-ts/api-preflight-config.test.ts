@@ -615,6 +615,8 @@ describe("CodexSecurity preflight configuration", () => {
     const sanitized = scanPreflightCodexConfig({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "high",
+      openai_base_url:
+        "https://synthetic-user:synthetic-password@gateway.example.test/v1?token=synthetic-root-token",
       features: {
         plugins: true,
         goals: true,
@@ -626,6 +628,8 @@ describe("CodexSecurity preflight configuration", () => {
       profiles: {
         review: {
           model: "profile-model",
+          openai_base_url:
+            "https://synthetic-user:synthetic-password@profile.example.test/v1?token=synthetic-profile-token",
           features: { goals: true, secret: "PROFILE_SECRET" },
           agents: { max_threads: 4, token: "PROFILE_AGENT_TOKEN" },
           shell_environment_policy: { set: { SECRET: "PROFILE_ENV_SECRET" } },

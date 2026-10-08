@@ -82,8 +82,15 @@ with `requires_openai_auth = true`.
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
-If the home has no credentials, it imports an existing file-based Codex login.
-Logout disables imports until the next login.
+Without an overriding environment API key, scans and status checks import
+existing file-based Codex credentials when this home is empty. Import errors make
+`login status` exit with code 2 and SDK `account()` reject its promise. Logout
+disables imports until you log in again. Status imports and logout share the
+credential-home lock so a concurrent status check cannot restore credentials
+after logout completes.
+
+Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
+`HOME` or `USERPROFILE` environment setting.
 
 If credentials cannot refresh, run `login status`. Retry if the sign-in recently
 changed; otherwise run `logout`, then `login`.
@@ -499,7 +506,21 @@ without substituting another model or effort.
 The flags also work with bulk/component scans, policy, validation, patching,
 verification, owner suggestions, severity classification, and scan matching.
 Matching and severity classification default to Codex's configured model and
-`medium` effort. `dedupe` has separate screening and review models.
+`medium` effort. `dedupe` has separate default screening and review models;
+the host's Codex model and effort settings override those defaults for both
+stages.
+
+`codex-security dedupe --scan SCAN_ID --json` prepares embeddings and deduplicates
+directly in local SQLite. An optional `--findings-url URL` selects an existing
+findings service instead. Local mode needs an embedding API key for missing or
+stale vectors and a model provider for fresh reviews; it does not publish to
+Cloud. See [deduplication](findings-service.md#deduplicate-a-scan) for scope,
+credentials, and workflow resume behavior.
+
+For `dedupe --scan latest`, matching across worktrees or clones requires a Git
+executable outside all saved scan targets. If a historical target includes the
+available Git installation, use `codex-security dedupe --scan SCAN_ID` with an
+explicit saved scan ID. Exact-path `latest` lookup still works without Git.
 
 Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
 `--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are
@@ -550,7 +571,7 @@ For filesystem and approval behavior, see the
 | `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.          |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                   |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                           |
-| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Findings service embeddings endpoint.                              |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.             |
 | `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                         |
 | `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                |
 | `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                              |
@@ -561,7 +582,8 @@ Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
 command shims such as `codex.cmd` fall back to the bundled executable.
 
-Python lookup: `--python` (scan, bulk scan, export) or SDK `pythonPath`, then
+Python lookup: `--python` on commands that expose interpreter selection or SDK
+`pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
 works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
 
@@ -658,7 +680,11 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
-Changed project configuration requires a new output directory.
+Changes to project configuration, extracted knowledge-base text, staged document
+filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` selections
+require a new output directory. Version 1 manifests also require a new directory
+because their original knowledge inputs and direct overrides cannot be verified.
+Worker and retry counts can change when resuming.
 
 ### Recovering failed or interrupted bulk scans
 
@@ -1009,6 +1035,12 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Keep it private,
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
+
+Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
+Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
+compressed sessions are unavailable to `scans logs`, feedback attachments, and
+`scans resume`. Upgrade Node.js to read or resume these sessions. Plain `.jsonl`
+logs work on all supported runtimes.
 
 ### Resuming an interrupted Deep Scan
 
