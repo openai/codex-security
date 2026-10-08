@@ -1118,6 +1118,10 @@ def merge_saved_results(
             worker_id,
         )
 
+    def coverage_source_directory(relative: str) -> Path:
+        directory = Path(relative).parent
+        return directory.parent if directory.name == "checkpoints" else directory
+
     # Frozen observations retain checkpoint selection even if a worker moves its head.
     headed_workers = {
         worker_attempts[_checkpoint_head_directory(head).as_posix()][0]
@@ -1127,9 +1131,7 @@ def merge_saved_results(
     for relative, _, worker_id in sources:
         if worker_id not in headed_workers:
             continue
-        directory = Path(relative).parent
-        if directory.name == "checkpoints":
-            directory = directory.parent
+        directory = coverage_source_directory(relative)
         _, attempt = worker_attempts.get(directory.as_posix(), (worker_id, 0))
         source_order[relative] = (attempt, source_order[relative][1])
     selected_observations: dict[str, tuple[int, int]] = {}
@@ -1166,9 +1168,7 @@ def merge_saved_results(
         refs = item.get("receiptRefs", [])
         if not isinstance(refs, list):
             return refs
-        directory = Path(relative).parent
-        if directory.name == "checkpoints":
-            directory = directory.parent
+        directory = coverage_source_directory(relative)
         output = Path(worker["artifact_dir"]).relative_to(scan_dir)
         worker_root = output.parent if output.name == "output" else output
         archive_prefix = (worker_root / "attempts").as_posix() + "/"
@@ -1286,9 +1286,7 @@ def merge_saved_results(
         return None
 
     def coverage_source_attempt(relative: str, worker: Any) -> int:
-        directory = Path(relative).parent
-        if directory.name == "checkpoints":
-            directory = directory.parent
+        directory = coverage_source_directory(relative)
         return worker_attempts.get(directory.as_posix(), (worker["id"], worker["attempt"]))[1]
 
     def relative_surface_receipts(
@@ -1300,9 +1298,7 @@ def merge_saved_results(
         refs = coverage_receipts(item, worker, relative)
         if not isinstance(refs, list):
             return refs
-        directory = Path(target).parent
-        if directory.name == "checkpoints":
-            directory = directory.parent
+        directory = coverage_source_directory(target)
         prefix = directory.as_posix() + "/"
         return [ref.removeprefix(prefix) if isinstance(ref, str) else ref for ref in refs]
 
@@ -1355,9 +1351,7 @@ def merge_saved_results(
                 prior = dict(record)
                 if field == "surfaces":
                     refs = relative_surface_receipts(item, worker["id"], relative, relative)
-                    directory = Path(path).parent
-                    if directory.name == "checkpoints":
-                        directory = directory.parent
+                    directory = coverage_source_directory(path)
                     value["receiptRefs"] = (
                         [
                             ref.removeprefix(directory.as_posix() + "/")
