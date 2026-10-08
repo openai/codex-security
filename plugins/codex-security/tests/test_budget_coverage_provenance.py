@@ -15,12 +15,16 @@ from test_workbench_db import BUDGET_COST
 
 @pytest.mark.parametrize("explicit_ids", [True, False], ids=["named-surfaces", "omitted-ids"])
 @pytest.mark.parametrize("replay", ["fresh", "legacy", "duplicated"])
+@pytest.mark.parametrize(
+    "receipt_origin", ["worker-relative", "archived-scan-relative", "current-scan-relative"]
+)
 def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
     workbench_api,
     workbench_db,
     publication_scan,
     explicit_ids,
     replay,
+    receipt_origin,
     tmp_path,
     monkeypatch,
 ):
@@ -69,6 +73,23 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
         receipt.parent.mkdir(exist_ok=True)
         receipts[receipt] = f"Independent review receipt {index}.\n".encode()
         receipt.write_bytes(receipts[receipt])
+    if receipt_origin == "archived-scan-relative":
+        archived = output.parent / "attempts" / "attempt-01"
+        archived.parent.mkdir()
+        output.rename(archived)
+        output.mkdir()
+        receipts = {archived / path.relative_to(output): value for path, value in receipts.items()}
+        for surface in surfaces:
+            surface["receiptRefs"] = [
+                (archived / ref).relative_to(scan.scan_dir).as_posix()
+                for ref in surface["receiptRefs"]
+            ]
+    elif receipt_origin == "current-scan-relative":
+        for surface in surfaces:
+            surface["receiptRefs"] = [
+                (output / ref).relative_to(scan.scan_dir).as_posix()
+                for ref in surface["receiptRefs"]
+            ]
     deferred = {
         "reason": "Both independent validation tasks remain unfinished.",
         "provenance": source_provenance,
@@ -227,7 +248,10 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
             **({"sourceId": original["id"]} if explicit_ids else {}),
         }
         assert retained["receiptRefs"] == [
-            (output / ref).relative_to(scan.scan_dir).as_posix() for ref in original["receiptRefs"]
+            (output / ref).relative_to(scan.scan_dir).as_posix()
+            if receipt_origin == "worker-relative"
+            else ref
+            for ref in original["receiptRefs"]
         ]
     for path, receipt_contents in receipts.items():
         assert path.read_bytes() == receipt_contents

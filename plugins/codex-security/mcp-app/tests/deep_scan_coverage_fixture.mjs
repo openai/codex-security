@@ -18,7 +18,7 @@ const bundled = await build({
       'export { validateDiscoveryArtifacts } from "./src/deep-scan/artifact-validation.ts";',
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
-      'export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";',
+      'export { recordCodexSecurityScanDraftViaWorkbench, recordCodexSecurityWorkerScanDraft, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";',
       'export { recordCodexSecurityDeepReduction, getCodexSecurityDeepReducerInputs } from "./src/artifact-deep-reducer.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
@@ -41,6 +41,7 @@ export async function publishCoverageFixture(
     splitSeededReducers = false,
     selectedRecovery = false,
     sourceProvenance,
+    discoveryReceiptRetry,
   } = {},
 ) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
@@ -52,6 +53,7 @@ export async function publishCoverageFixture(
     WorkbenchDeepScanStore,
     createScanArtifactContext,
     recordCodexSecurityScanDraftViaWorkbench,
+    recordCodexSecurityWorkerScanDraft,
     recordCodexSecurityDeepReduction,
     getCodexSecurityDeepReducerInputs,
     saveScanDraftCheckpoint,
@@ -404,6 +406,8 @@ export async function publishCoverageFixture(
     }
   }
   let discoveryCalls = 0;
+  let receiptRetryStarted = false;
+  const retryReceipts = new Map();
   const executor = {
     async run(request) {
       assert.equal(
@@ -417,14 +421,84 @@ export async function publishCoverageFixture(
         discoveryCalls++;
         const index =
           Number(
-            path.basename(path.dirname(request.promptPath)).split("-").at(-1),
+            path
+              .basename(path.dirname(request.artifactContext.root))
+              .split("-")
+              .at(-1),
           ) - 1;
-        if (index === 0 && !request.resumeThreadId)
+        if (discoveryReceiptRetry && !receiptRetryStarted) {
+          receiptRetryStarted = true;
+          const artifactDir = request.artifactContext.root;
+          await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
+          await writeFile(
+            path.join(artifactDir, "artifacts", "old-review.md"),
+            "Archived review evidence.\n",
+          );
+          await recordCodexSecurityWorkerScanDraft(
+            {
+              ...request.artifactContext,
+              repoRoot: targetPath,
+              scanId: run.scanId,
+            },
+            {
+              scanId: run.scanId,
+              complete: false,
+              findings: [],
+              coverage: {
+                completeness: "partial",
+                surfaces: [
+                  {
+                    id: "archived-surface",
+                    label: "Archived boundary",
+                    disposition: "no_issue_found",
+                    receiptRefs: ["artifacts/old-review.md"],
+                  },
+                ],
+                explicitExclusions: [],
+                deferred: [],
+              },
+            },
+          );
+          // A returned partial draft fails validation and triggers the real archive/retry path.
+          return { threadId: thread, finalResponse: "Checkpoint recorded." };
+        }
+        if (!discoveryReceiptRetry && index === 0 && !request.resumeThreadId)
           return {
             threadId: thread,
             finalResponse: "Continue the unfinished audit.",
           };
         await writeDiscovery(request.artifactContext.root, index);
+        if (discoveryReceiptRetry) {
+          const artifactDir = request.artifactContext.root;
+          const archived = path.join(
+            path.dirname(artifactDir),
+            "attempts",
+            "attempt-01",
+            "artifacts",
+            "old-review.md",
+          );
+          retryReceipts.set(archived, "Archived review evidence.\n");
+          if (discoveryReceiptRetry === "collision") {
+            const current = path.join(
+              artifactDir,
+              "artifacts",
+              "old-review.md",
+            );
+            await writeFile(current, "New retry evidence.\n");
+            retryReceipts.set(current, "New retry evidence.\n");
+          }
+          const resultPath = path.join(artifactDir, "result.json");
+          const result = JSON.parse(await readFile(resultPath, "utf8"));
+          await recordCodexSecurityWorkerScanDraft(
+            {
+              ...request.artifactContext,
+              repoRoot: targetPath,
+              scanId: run.scanId,
+            },
+            result,
+          );
+          rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+        }
       } else {
         if (immutableInputs) {
           const current = await store.get(run.scanId, threadId);
@@ -580,6 +654,8 @@ export async function publishCoverageFixture(
   }
   await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
   for (const [file, bytes] of rawSources)
+    assert.equal(await readFile(file, "utf8"), bytes);
+  for (const [file, bytes] of retryReceipts)
     assert.equal(await readFile(file, "utf8"), bytes);
   return { scanDir: run.scanDir, threadId, terminal };
 }

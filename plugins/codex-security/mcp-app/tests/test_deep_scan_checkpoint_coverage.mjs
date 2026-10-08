@@ -47,3 +47,37 @@ for (const continueAfterResume of [false, true]) {
     }
   });
 }
+
+for (const retry of ["missing", "collision"]) {
+  test(`archived discovery receipt preserves its origin after retry (${retry})`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "deep-retry-coverage-"));
+    try {
+      const fixture = path.join(root, "fixture");
+      await mkdir(fixture, { mode: 0o700 });
+      const { scanDir } = await publishCoverageFixture(fixture, "complete", {
+        discoveryReceiptRetry: retry,
+      });
+      const coverage = JSON.parse(
+        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
+      );
+      const archived = coverage.surfaces.find(
+        (surface) => surface.label === "Archived boundary",
+      );
+      assert.ok(archived, "accepted archived coverage reaches publication");
+      assert.equal(archived.receiptRefs.length, 1);
+      assert.equal(
+        await readFile(path.join(scanDir, archived.receiptRefs[0]), "utf8"),
+        "Archived review evidence.\n",
+      );
+      const current = coverage.surfaces.find(
+        (surface) => surface.label === "Archive route",
+      );
+      assert.equal(
+        await readFile(path.join(scanDir, current.receiptRefs[0]), "utf8"),
+        "Synthetic review evidence.\n",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

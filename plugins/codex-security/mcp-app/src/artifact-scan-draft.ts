@@ -2,7 +2,7 @@ import type { JsonObject } from "./types.js";
 import { isRecord as isObject, isNonEmptyString } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
@@ -1449,9 +1449,22 @@ async function readArchivedWorkerCheckpoints(
         Number(right.result) - Number(left.result) ||
         right.name.localeCompare(left.name),
     );
-    archived.push(
-      ...drafts.map((draft) => ({ ...draft, attempt: attempt.name })),
-    );
+    const workerPrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/`;
+    const activePrefix = `${workerPrefix}output/`;
+    const archivePrefix = `${workerPrefix}attempts/`;
+    for (const draft of drafts) {
+      // Receipts move with the archived attempt; immutable checkpoint bytes stay unchanged.
+      for (const surface of draft.input.coverage.surfaces as JsonObject[]) {
+        surface.receiptRefs = (
+          (surface.receiptRefs as string[] | undefined) ?? []
+        ).map((value) => {
+          const ref = posix.normalize(value);
+          if (ref.startsWith(archivePrefix)) return ref;
+          return `${archivePrefix}${attempt.name}/${ref.startsWith(activePrefix) ? ref.slice(activePrefix.length) : ref}`;
+        });
+      }
+      archived.push({ ...draft, attempt: attempt.name });
+    }
   }
   return archived;
 }

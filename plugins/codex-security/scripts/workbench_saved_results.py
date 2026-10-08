@@ -2484,6 +2484,7 @@ def retain_unmerged_budget_coverage(
     provenance = {"workerId": worker["id"], "attempt": worker["attempt"]}
     prefix = f"{worker['id']}-attempt-{worker['attempt']}"
     artifact_prefix = Path(worker["artifact_dir"]).relative_to(scan_dir).as_posix()
+    archive_prefix = f"{Path(artifact_prefix).parent.as_posix()}/attempts/"
     surfaces = {
         item.get("id"): f"{prefix}-surface-{index + 1}"
         for index, item in enumerate(source.get("surfaces", []))
@@ -2536,7 +2537,10 @@ def retain_unmerged_budget_coverage(
             if field == "surfaces":
                 item["id"] = f"{prefix}-surface-{index + 1}"
                 item["receiptRefs"] = [
-                    f"{artifact_prefix}/{ref}" for ref in item.get("receiptRefs", [])
+                    ref
+                    if ref.startswith((archive_prefix, f"{artifact_prefix}/"))
+                    else f"{artifact_prefix}/{ref}"
+                    for ref in item.get("receiptRefs", [])
                 ]
             if field == "deferred" and "candidateId" in item:
                 item["candidateId"] = f"{prefix}-candidate-{index + 1}"
