@@ -24,21 +24,17 @@ const locationShape = {
   path: z.string().min(1).optional(),
 };
 
-export const saveArtifactInputSchema = z
-  .object({
-    ...locationShape,
-    content: z.string().optional(),
-    sourcePath: z.string().min(1).optional(),
-  })
-  .strict();
+export const saveArtifactInputSchema = z.strictObject({
+  ...locationShape,
+  content: z.string().optional(),
+  sourcePath: z.string().min(1).optional(),
+});
 
-export const readArtifactInputSchema = z
-  .object({
-    ...locationShape,
-    path: z.string().min(1),
-    encoding: z.enum(["utf8", "base64"]).default("utf8"),
-  })
-  .strict();
+export const readArtifactInputSchema = z.strictObject({
+  ...locationShape,
+  path: z.string().min(1),
+  encoding: z.enum(["utf8", "base64"]).default("utf8"),
+});
 
 export type ArtifactLocation = z.infer<typeof saveArtifactInputSchema>;
 
