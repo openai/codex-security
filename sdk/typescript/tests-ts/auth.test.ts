@@ -170,6 +170,35 @@ describe("Codex authentication process boundary", () => {
     },
   );
 
+  test.each([
+    ["HTTP-only output", "", null],
+    [
+      "HTTP followed by HTTPS",
+      "Open https://auth.example.test/device\n",
+      "https://auth.example.test/device",
+    ],
+  ] as const)(
+    "ignores external plaintext HTTP authentication URLs: %s",
+    async (_description, httpsOutput, verificationUrl) => {
+      const root = await temporaryDirectory("codex-security-auth-http-");
+      const script = join(root, "login.mjs");
+      await writeFile(
+        script,
+        `process.stderr.write(${JSON.stringify(`Open http://auth.example.test/device\n${httpsOutput}User code: ABCD-EFGH\n`)}, () => process.exit(0));\n`,
+      );
+      const handle = new CodexLoginHandle(
+        nodeCommand(),
+        [script],
+        process.env,
+        () => {},
+      );
+
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+      expect(handle.verificationUrl).toBe(verificationUrl);
+      expect(handle.userCode).toBe("ABCD-EFGH");
+    },
+  );
+
   test("retains large interactive output and login instructions", async () => {
     const root = await temporaryDirectory("codex-security-auth-output-");
     const script = join(root, "login.mjs");

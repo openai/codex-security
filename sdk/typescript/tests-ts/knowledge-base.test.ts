@@ -522,6 +522,49 @@ describe("scan knowledge bases", () => {
     expect(await readFile(parent, "utf8")).toBe("synthetic occupied path");
   });
 
+  test.each([
+    ["&#x110000;", "&#x110000;"],
+    ["&#1114112;", "&#1114112;"],
+    ["&#99999999999999;", "&#99999999999999;"],
+    ["&#xD800;", "&#xD800;"],
+    ["&#xDFFF;", "&#xDFFF;"],
+    ["&#55296;", "&#55296;"],
+    ["&#xD7FF;", "\uD7FF"],
+    ["&#xE000;", "\uE000"],
+    ["&#65;", "A"],
+    ["&#128512;", "\u{1F600}"],
+    ["&#x10FFFF;", "\u{10FFFF}"],
+    ["&#0;", "\0"],
+    ["&#x1;", "\x01"],
+  ])(
+    "decodes DOCX Unicode scalar references and preserves unusable ones: %s",
+    async (reference, expected) => {
+      const root = await temporaryDirectory();
+      await writeFile(join(root, "reference.docx"), docx(`Text ${reference}.`));
+      const knowledgeBase = await prepareKnowledgeBase([root]);
+      temporaryDirectories.track(knowledgeBase.path);
+      const documents = await extractedDocuments(knowledgeBase.path);
+      expect(documents).toEqual([`Text ${expected}.\n`]);
+    },
+  );
+
+  test("keeps one unusable reference from failing the other knowledge-base documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "notes.md"), "Authentication boundary notes");
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("Boundary &#x110000; case."),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+    const documents = await extractedDocuments(knowledgeBase.path);
+
+    expect(documents).toHaveLength(2);
+    expect(documents).toContain("Authentication boundary notes");
+    expect(documents).toContain("Boundary &#x110000; case.\n");
+  });
+
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "scope.md");

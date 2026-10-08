@@ -2150,6 +2150,9 @@ async function testBedrockCredentialsReachWorker() {
     });
     for (const kind of ["discovery", "dedup"] as const) {
       for (const resumeThreadId of [undefined, "fixture-bedrock-resume"]) {
+        awsEnvironment.AWS_BEARER_TOKEN_BEDROCK = `synthetic-${kind}-${resumeThreadId ?? "fresh"}`;
+        awsEnvironment.AWS_REGION = resumeThreadId ? "us-west-2" : "us-east-2";
+        Object.assign(process.env, awsEnvironment);
         const result = await executor.run(
           workerRequest(promptPath, workingDirectory, { kind, resumeThreadId }),
         );

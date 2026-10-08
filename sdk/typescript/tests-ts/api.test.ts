@@ -655,6 +655,112 @@ describe("CodexSecurity finding validation", () => {
 });
 
 describe("CodexSecurity orchestration", () => {
+  test.each([false, true])(
+    "workbench usage uses the managed home with an explicit database override: %p",
+    async (overrideDatabase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const ambientHome = join(root, "ambient-home");
+      await mkdir(ambientHome);
+      const environment = {
+        CODEX_HOME: ambientHome,
+        OPENAI_API_KEY: "synthetic-usage-key",
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        CODEX_SQLITE_HOME: "",
+        CODEX_STATE_DB: overrideDatabase
+          ? join(codexHome, "state_5.sqlite")
+          : "",
+      };
+      const expectedHome = join(
+        environment.CODEX_SECURITY_STATE_DIR,
+        "codex-home",
+      );
+      const expectedDatabase = overrideDatabase
+        ? environment.CODEX_STATE_DB
+        : join(expectedHome, "state_5.sqlite");
+      let measured: JsonObject | undefined;
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides: { model: "synthetic-unpriced-model" },
+        },
+        {
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          environment,
+          runWorkbench: async (options, args, input) => {
+            if (args[0] === "register-cli-scan") {
+              expect(options.environment?.["CODEX_HOME"]).toBe(expectedHome);
+              expect(options.environment?.["CODEX_HOME"]).not.toBe(ambientHome);
+              if (overrideDatabase) {
+                expect(options.environment?.["CODEX_STATE_DB"]).toBe(
+                  environment.CODEX_STATE_DB,
+                );
+              }
+              const script = [
+                "import json, sqlite3, sys",
+                "from pathlib import Path",
+                "sys.path.insert(0, sys.argv[1])",
+                "from workbench_scan_usage import collect_scan_usage",
+                "home = Path(sys.argv[2])",
+                "rollout = home / 'synthetic-rollout.jsonl'",
+                "events = [",
+                "  {'type': 'session_meta', 'payload': {'id': 'thread-1', 'timestamp': '2026-07-26T12:00:00Z', 'source': 'exec'}},",
+                "  {'type': 'event_msg', 'timestamp': '2026-07-26T12:00:01Z', 'payload': {'type': 'task_started', 'turn_id': '019f9e4d-b3ba-7000-8000-000000000001', 'started_at': 1785067201}},",
+                "  {'type': 'event_msg', 'timestamp': '2026-07-26T12:00:02Z', 'payload': {'type': 'token_count', 'info': {'total_token_usage': {'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110}}}},",
+                "]",
+                "rollout.write_text(''.join(json.dumps(event) + chr(10) for event in events))",
+                "with sqlite3.connect(sys.argv[3]) as db:",
+                "  db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)')",
+                "  db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)')",
+                "  db.execute('INSERT INTO threads VALUES (?, ?)', ('thread-1', str(rollout)))",
+                "workbench = sqlite3.connect(':memory:')",
+                "workbench.row_factory = sqlite3.Row",
+                "workbench.execute('CREATE TABLE workspaces (id TEXT, thread_id TEXT)')",
+                "workbench.execute(\"INSERT INTO workspaces VALUES ('synthetic-workspace', 'thread-1')\")",
+                "scan = workbench.execute(\"SELECT 'synthetic-scan' AS id, 'synthetic-workspace' AS workspace_id, 'standard' AS mode, '2026-07-26T12:00:00Z' AS started_at, '2026-07-26T12:05:00Z' AS completed_at\").fetchone()",
+                "print(json.dumps(collect_scan_usage(workbench, scan, thread_id='thread-1')))",
+              ].join("\n");
+              measured = JSON.parse(
+                execFileSync(
+                  pythonExecutable()!,
+                  [
+                    "-I",
+                    "-B",
+                    "-c",
+                    script,
+                    join(PLUGIN_ROOT, "scripts"),
+                    expectedHome,
+                    expectedDatabase,
+                  ],
+                  {
+                    env: { ...process.env, ...options.environment },
+                    encoding: "utf8",
+                  },
+                ),
+              );
+              throw new Error("workbench usage captured");
+            }
+            return mockWorkbench(args, input);
+          },
+        },
+      );
+      try {
+        await expect(client.run(repository)).rejects.toThrow(
+          "workbench usage captured",
+        );
+        expect(measured).toMatchObject({
+          coverage: "complete",
+          inputTokens: 100,
+          outputTokens: 10,
+          totalTokens: 110,
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("isolates per-run safety identifiers across clients and clears them on reuse", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1626,6 +1732,83 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test("refreshes Bedrock credentials and caller overrides when reusing a client", async () => {
+    const { root, repository, scanDir } = await scanDirectories();
+    const environment: Record<string, string> = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-openai-key-must-not-be-used",
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-east-2",
+      GIT_SSH_COMMAND: "synthetic-ssh --first",
+    };
+    const observed: CodexOptions[] = [];
+    const onAuthentication = mock<(selected: ScanAuthentication) => void>();
+    const client = new TestClient(
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: {
+          model_provider: "amazon-bedrock",
+          model: "openai.gpt-5.6-luna",
+        },
+      },
+      {
+        environment,
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) => {
+          observed.push(options);
+          throw new Error("Bedrock environment captured");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { onAuthentication }),
+      ).rejects.toThrow("Bedrock environment captured");
+      expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
+        method: "aws_credentials",
+        source: "AWS_BEARER_TOKEN_BEDROCK",
+      });
+      delete environment["AWS_BEARER_TOKEN_BEDROCK"];
+      environment["AWS_ACCESS_KEY_ID"] = "synthetic-refreshed-access-key";
+      environment["AWS_SECRET_ACCESS_KEY"] = "synthetic-refreshed-secret-key";
+      environment["AWS_REGION"] = "us-west-2";
+      await expect(
+        client.run(repository, { onAuthentication }),
+      ).rejects.toThrow("Bedrock environment captured");
+      expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
+        method: "aws_credentials",
+        source: "AWS_ACCESS_KEY_ID",
+      });
+      expect(observed[1]?.env).toMatchObject({
+        AWS_ACCESS_KEY_ID: "synthetic-refreshed-access-key",
+        AWS_SECRET_ACCESS_KEY: "synthetic-refreshed-secret-key",
+        AWS_REGION: "us-west-2",
+        GIT_SSH_COMMAND: "synthetic-ssh --first",
+      });
+      expect(observed[1]?.env).not.toHaveProperty("AWS_BEARER_TOKEN_BEDROCK");
+      expect(observed[1]?.env).not.toHaveProperty("OPENAI_API_KEY");
+      environment["GIT_SSH_COMMAND"] = "synthetic-ssh --caller";
+      await expect(client.run(repository)).rejects.toThrow(
+        "Bedrock environment captured",
+      );
+      expect(observed[2]?.env?.["GIT_SSH_COMMAND"]).toBe(
+        "synthetic-ssh --caller",
+      );
+      expect(observed[2]?.env?.["CODEX_HOME"]).toBe(
+        observed[0]?.env?.["CODEX_HOME"],
+      );
+      expect(observed[0]?.env).toMatchObject({
+        AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+        AWS_REGION: "us-east-2",
+        GIT_SSH_COMMAND: "synthetic-ssh --first",
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   test("isolates resolved Deep settings across concurrent Bedrock scans", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1714,8 +1897,8 @@ describe("CodexSecurity orchestration", () => {
           {
             environment: {
               CODEX_SECURITY_STATE_DIR: stateDirectory,
-              AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-key",
-              AWS_REGION: "us-east-2",
+              AWS_BEARER_TOKEN_BEDROCK: `synthetic-bedrock-key-${index}`,
+              AWS_REGION: index % 2 === 0 ? "us-east-2" : "us-west-2",
             },
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scanDir,
@@ -1794,7 +1977,10 @@ describe("CodexSecurity orchestration", () => {
                   });
                   expect(config["service_tier"]).toBe(expectedTier);
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
-                    "synthetic-bedrock-key",
+                    `synthetic-bedrock-key-${index}`,
+                  );
+                  expect(mcpEnvironment["AWS_REGION"]).toBe(
+                    index % 2 === 0 ? "us-east-2" : "us-west-2",
                   );
                   const shared = parseToml(
                     await readFile(
