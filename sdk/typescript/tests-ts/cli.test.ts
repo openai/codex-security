@@ -599,17 +599,19 @@ describe("CLI", () => {
       expect(normalize(migrated.hook)).toBe(hook);
       expect(migrated.failOnSeverity).toBe("medium");
       expect(await readFile(hook, "utf8")).toBe(trustedHook);
-      await writeFile(
-        hook,
-        trustedHook.replace("unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n", ""),
-      );
-      expect(
-        await migratedHook.run(
-          ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
-          deps,
-        ),
-      ).toBe(0);
-      expect(await readFile(hook, "utf8")).toBe(trustedHook);
+      for (const unset of [
+        "",
+        "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n",
+      ]) {
+        await writeFile(hook, trustedHook.replace(/^unset .*\n/m, unset));
+        expect(
+          await migratedHook.run(
+            ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
+            deps,
+          ),
+        ).toBe(0);
+        expect(await readFile(hook, "utf8")).toBe(trustedHook);
+      }
 
       const existingHook = captureCli(main, "stderr");
       expect(await existingHook.run(["install-hook", "."], deps)).toBe(2);
@@ -772,7 +774,21 @@ describe("CLI", () => {
           "-qm",
           "fixture",
         ];
-        const clean = await runCommand("git", args, { timeout: 10000 });
+        const gitDirectory = join(repository, ".git");
+        const environment = {
+          ...process.env,
+          GIT_DIR: gitDirectory,
+          GIT_WORK_TREE: repository,
+          GIT_INDEX_FILE: join(gitDirectory, "index"),
+          GIT_OBJECT_DIRECTORY: join(gitDirectory, "objects"),
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: join(gitDirectory, "objects"),
+          GIT_COMMON_DIR: gitDirectory,
+          GIT_REPLACE_REF_BASE: "refs/replace/",
+        };
+        const clean = await runCommand("git", args, {
+          env: environment,
+          timeout: 10000,
+        });
         expect(clean.status, clean.stderr).toBe(0);
         expect(JSON.parse(await readFile(record, "utf8"))).toEqual([
           "scan",
@@ -782,7 +798,7 @@ describe("CLI", () => {
           "high",
         ]);
         const rejected = await runCommand("git", args, {
-          env: { ...process.env, FIXTURE_POLICY_FAILURE: "1" },
+          env: { ...environment, FIXTURE_POLICY_FAILURE: "1" },
           timeout: 10_000,
         });
         expect(rejected.status).not.toBe(0);

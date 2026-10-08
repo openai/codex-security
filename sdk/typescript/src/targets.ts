@@ -24,7 +24,7 @@ import type { ScanMode } from "./scan-modes.js";
 export type { ScanMode } from "./scan-modes.js";
 
 const execFile = promisify(execFileCallback);
-const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
+export const UNSUPPORTED_GIT_ENVIRONMENT: ReadonlySet<string> = new Set([
   "GIT_DIR",
   "GIT_WORK_TREE",
   "GIT_INDEX_FILE",

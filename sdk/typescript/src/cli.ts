@@ -249,6 +249,7 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -3807,13 +3808,15 @@ export async function main(
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
           const invocation = `exec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
-          const contents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n${invocation}`;
+          const contents = `#!/bin/sh\nset -eu\nunset ${[...UNSUPPORTED_GIT_ENVIRONMENT].join(" ")}\n${invocation}`;
+          const previousScopedContents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n${invocation}`;
           const previousContents = `#!/bin/sh\nset -eu\n${invocation}`;
           const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
           const existing = await readFile(hook, "utf8").catch(() => null);
           if (
             existing !== null &&
             existing !== contents &&
+            existing !== previousScopedContents &&
             existing !== previousContents &&
             existing !== legacyContents
           ) {
