@@ -2412,60 +2412,62 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_unsafe_code_evidence_paths(self) -> None:
-        self.findings["findings"][0]["codeEvidence"] = [
-            {
-                "id": "unsafe-source",
-                "label": "Unsafe source",
-                "path": "../../outside.ts",
-                "startLine": 1,
-                "code": "unsafe_source()",
-                "explanation": "Synthetic traversal evidence.",
-            }
-        ]
-        self.write_scan()
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
+        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+            with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Synthetic source evidence.",
+                    }
+                ]
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError,
+                    r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_unsafe_deferred_paths(self) -> None:
         self.coverage["completeness"] = "partial"
-        self.coverage["deferred"] = [
-            {
-                "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
-                "paths": ["../../outside.ts"],
-            }
-        ]
-        self.write_scan()
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
+        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+            with self.subTest(path=path):
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError,
+                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
 
     def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
         self.findings["findings"][0]["codeEvidence"] = [
             {
-                "id": "safe-source",
-                "label": "Safe source",
+                "id": "source",
+                "label": "Source",
                 "path": "src/extract.py",
                 "startLine": 41,
-                "code": "safe_source()",
+                "code": "source()",
                 "explanation": "Repository-relative evidence.",
             }
         ]
         self.coverage["completeness"] = "partial"
-        self.coverage["deferred"] = [
-            {
-                "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
-                "paths": ["src/extract.py"],
-            }
-        ]
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+            with self.subTest(path=path):
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.write_scan()
+                _, findings, coverage = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(
+                    findings["findings"][0]["codeEvidence"][0]["path"], "src/extract.py"
+                )
+                self.assertEqual(coverage["deferred"][0]["paths"], [path])
 
     def test_rejects_non_rfc3339_timestamps(self) -> None:
         for timestamp in ("2026-W22-7T18:09:00+00:00", "2026-05-31T18:09:00+0000"):

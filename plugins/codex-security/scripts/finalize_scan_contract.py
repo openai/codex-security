@@ -1706,18 +1706,13 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
     for index, deferred in enumerate(coverage.get("deferred", [])):
-        if not isinstance(deferred, dict):
+        if not isinstance(deferred, dict) or "paths" not in deferred:
             continue
         context = f"coverage.deferred[{index}]"
-        paths = deferred.get("paths")
-        if paths is None:
-            continue
-        if not isinstance(paths, list):
-            raise ContractError(f"{context}.paths: expected an array")
-        for path_index, path in enumerate(paths):
+        for path_index, path in enumerate(_require_list(deferred, "paths", context)):
             if not isinstance(path, str):
                 raise ContractError(f"{context}.paths[{path_index}]: expected a string")
-            _require_safe_relative_path(path, f"{context}.paths[{path_index}]")
+            _require_safe_relative_path(path, f"{context}.paths[{path_index}]", allow_dot=True)
     _validate_resolved_deferred(coverage)
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
