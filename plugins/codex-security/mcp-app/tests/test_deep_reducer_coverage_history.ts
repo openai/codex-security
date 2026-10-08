@@ -186,9 +186,9 @@ for (const direct of [false, true]) {
         await mkdir(f.output, { recursive: true });
         const current = workerDraft([], { complete: true });
         if (changed)
-          current.coverage.resolvedDeferred = [
-            { id: "review", reason: "Updated closure." },
-          ];
+          Object.assign(current.coverage, {
+            resolvedDeferred: [{ id: "review", reason: "Updated closure." }],
+          });
         if (direct) await writeFile(f.resultPath, JSON.stringify(current));
         else await recordCodexSecurityWorkerScanDraft(f.workerContext, current);
         const original = await readFile(f.resultPath);
