@@ -1,3 +1,4 @@
+import { codexFactory } from "./support/api-events.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -306,117 +307,108 @@ test.each([
               resolvePluginPython: async () => "/managed/python",
               prepareOutputDir: async () => scan,
               repositoryRevision: async () => "deadbeef",
-              createCodex: (options) => ({
-                startThread: () => ({
-                  id: null,
-                  async runStreamed() {
-                    const environment = options.env!;
-                    snapshots[index] =
-                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-                    const permission = parseToml(
-                      options.configOverrides!.find((value) =>
-                        value.startsWith(
-                          "permissions.codex_security_scan.filesystem=",
-                        ),
-                      )!,
-                    )["permissions"] as Record<string, Record<string, unknown>>;
-                    filesystems[index] = permission["codex_security_scan"]![
-                      "filesystem"
-                    ] as Record<string, unknown>;
-                    ready[index]!.resolve();
-                    await ready[1]!.promise;
-                    expect(snapshots[0]).not.toBe(snapshots[1]);
-                    for (const snapshot of snapshots) {
-                      expect(dirname(dirname(snapshot))).toBe(sharedHome);
-                      for (const filesystem of filesystems) {
-                        // The same denied home protects both concurrent snapshots.
-                        expect(filesystem[sharedHome]).toEqual({ ".": "deny" });
-                      }
-                    }
-                    const preflight = await readFile(
-                      environment["CODEX_SECURITY_CONFIG_PATH"]!,
-                      "utf8",
-                    );
-                    expect(preflight).not.toContain("synthetic-key-");
-                    expect(preflight).not.toContain("synthetic-header-");
-                    const workerSnapshotPath =
-                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-                    const workerSnapshot = parseToml(
-                      await readFile(workerSnapshotPath, "utf8"),
-                    );
-                    expect(workerSnapshot["worker_runtime"]).toMatchObject({
-                      environment: providerEnvironment,
-                      features: featureOverrides,
-                      web_search: webSearch,
-                    });
-                    expect(options.config!["web_search"]).toBe(webSearch);
-                    expect(options.config!["features"]).toMatchObject(
-                      featureOverrides,
-                    );
-                    expect(
-                      (workerSnapshot["worker_runtime"] as JsonObject)[
-                        "environment"
-                      ],
-                    ).toEqual(providerEnvironment);
-                    if (process.platform !== "win32") {
-                      expect(
-                        (await stat(workerSnapshotPath)).mode & 0o777,
-                      ).toBe(0o600);
-                    }
-                    expect(
-                      JSON.stringify({
-                        config: options.config,
-                        overrides: options.configOverrides,
-                      }),
-                    ).not.toContain("synthetic-key-");
-                    const settings = await workerRuntimeSettings(environment);
-                    expect(settings.environment).toEqual(providerEnvironment);
-                    expect(settings.config["features"]).toMatchObject(
-                      featureOverrides,
-                    );
-                    expect(settings.config["web_search"]).toBe(webSearch);
-                    expect(settings.config["model_provider"]).toBe(
-                      "openrouter",
-                    );
-                    expect(settings.nativeProfile).toBeDefined();
-                    expect(settings.nativeProfile).toBe(options.nativeProfile);
-                    expect(
-                      (workerSnapshot["worker_runtime"] as JsonObject)[
-                        "native_profile"
-                      ],
-                    ).toBe(settings.nativeProfile);
-                    // Read A's private profile after B updates the shared home.
-                    // Native profile loading is covered by the inheritance tests.
-                    const nativeConfig = parseToml(
-                      await readFile(
-                        join(
-                          sharedHome,
-                          `${settings.nativeProfile}.config.toml`,
-                        ),
-                        "utf8",
+              createCodex: (options) =>
+                codexFactory(async function runStreamed() {
+                  const environment = options.env!;
+                  snapshots[index] =
+                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                  const permission = parseToml(
+                    options.configOverrides!.find((value) =>
+                      value.startsWith(
+                        "permissions.codex_security_scan.filesystem=",
                       ),
+                    )!,
+                  )["permissions"] as Record<string, Record<string, unknown>>;
+                  filesystems[index] = permission["codex_security_scan"]![
+                    "filesystem"
+                  ] as Record<string, unknown>;
+                  ready[index]!.resolve();
+                  await ready[1]!.promise;
+                  expect(snapshots[0]).not.toBe(snapshots[1]);
+                  for (const snapshot of snapshots) {
+                    expect(dirname(dirname(snapshot))).toBe(sharedHome);
+                    for (const filesystem of filesystems) {
+                      // The same denied home protects both concurrent snapshots.
+                      expect(filesystem[sharedHome]).toEqual({ ".": "deny" });
+                    }
+                  }
+                  const preflight = await readFile(
+                    environment["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "utf8",
+                  );
+                  expect(preflight).not.toContain("synthetic-key-");
+                  expect(preflight).not.toContain("synthetic-header-");
+                  const workerSnapshotPath =
+                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                  const workerSnapshot = parseToml(
+                    await readFile(workerSnapshotPath, "utf8"),
+                  );
+                  expect(workerSnapshot["worker_runtime"]).toMatchObject({
+                    environment: providerEnvironment,
+                    features: featureOverrides,
+                    web_search: webSearch,
+                  });
+                  expect(options.config!["web_search"]).toBe(webSearch);
+                  expect(options.config!["features"]).toMatchObject(
+                    featureOverrides,
+                  );
+                  expect(
+                    (workerSnapshot["worker_runtime"] as JsonObject)[
+                      "environment"
+                    ],
+                  ).toEqual(providerEnvironment);
+                  if (process.platform !== "win32") {
+                    expect((await stat(workerSnapshotPath)).mode & 0o777).toBe(
+                      0o600,
                     );
-                    const actual = (
-                      nativeConfig["model_providers"] as JsonObject
-                    )["openrouter"] as JsonObject;
-                    expect(actual).toMatchObject(provider);
-                    expect(actual["http_headers"] ?? {}).toEqual(
-                      provider.http_headers ?? {},
-                    );
-                    expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
-                      providerEnvironment.SYNTHETIC_CUSTOM_API_KEY,
-                    );
-                    const saved = await readFile(
-                      join(sharedHome, "config.toml"),
+                  }
+                  expect(
+                    JSON.stringify({
+                      config: options.config,
+                      overrides: options.configOverrides,
+                    }),
+                  ).not.toContain("synthetic-key-");
+                  const settings = await workerRuntimeSettings(environment);
+                  expect(settings.environment).toEqual(providerEnvironment);
+                  expect(settings.config["features"]).toMatchObject(
+                    featureOverrides,
+                  );
+                  expect(settings.config["web_search"]).toBe(webSearch);
+                  expect(settings.config["model_provider"]).toBe("openrouter");
+                  expect(settings.nativeProfile).toBeDefined();
+                  expect(settings.nativeProfile).toBe(options.nativeProfile);
+                  expect(
+                    (workerSnapshot["worker_runtime"] as JsonObject)[
+                      "native_profile"
+                    ],
+                  ).toBe(settings.nativeProfile);
+                  // Read A's private profile after B updates the shared home.
+                  // Native profile loading is covered by the inheritance tests.
+                  const nativeConfig = parseToml(
+                    await readFile(
+                      join(sharedHome, `${settings.nativeProfile}.config.toml`),
                       "utf8",
-                    );
-                    expect(saved).not.toContain("model_providers");
-                    expect(saved).not.toContain("synthetic-key-");
-                    expect(saved).not.toContain("synthetic-header-");
-                    throw new Error("synthetic provider configuration checked");
-                  },
-                }),
-              }),
+                    ),
+                  );
+                  const actual = (
+                    nativeConfig["model_providers"] as JsonObject
+                  )["openrouter"] as JsonObject;
+                  expect(actual).toMatchObject(provider);
+                  expect(actual["http_headers"] ?? {}).toEqual(
+                    provider.http_headers ?? {},
+                  );
+                  expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
+                    providerEnvironment.SYNTHETIC_CUSTOM_API_KEY,
+                  );
+                  const saved = await readFile(
+                    join(sharedHome, "config.toml"),
+                    "utf8",
+                  );
+                  expect(saved).not.toContain("model_providers");
+                  expect(saved).not.toContain("synthetic-key-");
+                  expect(saved).not.toContain("synthetic-header-");
+                  throw new Error("synthetic provider configuration checked");
+                })(),
             },
           ),
         );
@@ -817,58 +809,52 @@ test.each(legacyScanCases)(
         repositoryRevision: async () => "deadbeef",
         createCodex: (options) => {
           launched = true;
-          return {
-            startThread: () => ({
-              id: null,
-              async runStreamed() {
-                const config = parseToml(
-                  await readFile(
-                    options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                    "utf8",
-                  ),
-                );
-                expect(
-                  resolveCodexProfile(config as JsonObject)["model_provider"],
-                ).toBe(resolveCodexProfile(overrides)["model_provider"]);
-                const endpoint =
-                  resolveCodexProfile(overrides)["openai_base_url"];
-                expect(endpoint).toBe(options.config?.["openai_base_url"]);
-                expect(config).not.toHaveProperty("openai_base_url");
-                if (mode === "deep" && endpoint !== undefined) {
-                  const worker = parseToml(
-                    await readFile(
-                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                      "utf8",
-                    ),
-                  );
-                  expect(
-                    (worker["worker_runtime"] as JsonObject)["openai_base_url"],
-                  ).toBe(endpoint);
-                }
-                if (native.capability === 2 || native.capability === 3) {
-                  const worker = parseToml(
-                    await readFile(
-                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                      "utf8",
-                    ),
-                  );
-                  expect(
-                    (worker["worker_runtime"] as JsonObject)["model_provider"],
-                  ).toBe("openai");
-                }
-                expect(
-                  existsSync(
-                    join(
-                      options.env!["CODEX_HOME"]!,
-                      ".codex-security-preflight",
-                      ".codex-security-scan.lock",
-                    ),
-                  ),
-                ).toBe(false);
-                throw new Error("synthetic compatible scan started");
-              },
-            }),
-          };
+          return codexFactory(async function runStreamed() {
+            const config = parseToml(
+              await readFile(
+                options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                "utf8",
+              ),
+            );
+            expect(
+              resolveCodexProfile(config as JsonObject)["model_provider"],
+            ).toBe(resolveCodexProfile(overrides)["model_provider"]);
+            const endpoint = resolveCodexProfile(overrides)["openai_base_url"];
+            expect(endpoint).toBe(options.config?.["openai_base_url"]);
+            expect(config).not.toHaveProperty("openai_base_url");
+            if (mode === "deep" && endpoint !== undefined) {
+              const worker = parseToml(
+                await readFile(
+                  options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                  "utf8",
+                ),
+              );
+              expect(
+                (worker["worker_runtime"] as JsonObject)["openai_base_url"],
+              ).toBe(endpoint);
+            }
+            if (native.capability === 2 || native.capability === 3) {
+              const worker = parseToml(
+                await readFile(
+                  options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                  "utf8",
+                ),
+              );
+              expect(
+                (worker["worker_runtime"] as JsonObject)["model_provider"],
+              ).toBe("openai");
+            }
+            expect(
+              existsSync(
+                join(
+                  options.env!["CODEX_HOME"]!,
+                  ".codex-security-preflight",
+                  ".codex-security-scan.lock",
+                ),
+              ),
+            ).toBe(false);
+            throw new Error("synthetic compatible scan started");
+          })();
         },
       },
     );
@@ -1026,74 +1012,68 @@ test.each([
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              expect(options.apiKey).toBe(
-                external ? undefined : "synthetic-account-key",
-              );
-              const status = await nativeRequest(
-                {
-                  ...options.env!,
-                  ...(options.apiKey === undefined
-                    ? {}
-                    : { CODEX_API_KEY: options.apiKey }),
-                },
-                repository,
-                [],
-                // Tool enumeration starts the real MCP child without a model turn.
-                "mcpServerStatus/list",
-                { serverName: "codex-security", detail: "toolsAndAuthOnly" },
-              );
-              expect(status.data).toHaveLength(1);
-              expect(status.data[0].name).toBe("codex-security");
-              expect(status.data[0].toolsError).toBeNull();
-              expect(status.data[0].tools).toHaveProperty(
-                "synthetic_environment",
-              );
-              expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
-                inherited: {
-                  SYNTHETIC_CUSTOM_API_KEY: null,
-                  SYNTHETIC_CUSTOM_HEADER: null,
-                  SYNTHETIC_REQUIRED_KEY: null,
-                  SYNTHETIC_UNUSED_KEY: null,
-                },
-                recovered: {
-                  ...providerEnvironment,
-                  ...(process.platform === "win32"
-                    ? { [headerKey]: " synthetic-child-header " }
-                    : {}),
-                  ...(external
-                    ? { [providerKey]: "synthetic-custom-key" }
-                    : {}),
-                  ...(providerKey === "CODEX_API_KEY"
-                    ? { CODEX_API_KEY: "synthetic-account-key" }
-                    : {}),
-                },
-              });
-              for (const text of [
-                await readFile(
-                  options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                  "utf8",
-                ),
-                await readFile(
-                  join(options.env!["CODEX_HOME"]!, "config.toml"),
-                  "utf8",
-                ),
-                JSON.stringify({
-                  config: options.config,
-                  overrides: options.configOverrides,
-                }),
-              ]) {
-                for (const marker of Object.values(providerEnvironment)) {
-                  expect(text).not.toContain(marker);
-                }
+        createCodex: (options) =>
+          codexFactory(async function runStreamed() {
+            expect(options.apiKey).toBe(
+              external ? undefined : "synthetic-account-key",
+            );
+            const status = await nativeRequest(
+              {
+                ...options.env!,
+                ...(options.apiKey === undefined
+                  ? {}
+                  : { CODEX_API_KEY: options.apiKey }),
+              },
+              repository,
+              [],
+              // Tool enumeration starts the real MCP child without a model turn.
+              "mcpServerStatus/list",
+              { serverName: "codex-security", detail: "toolsAndAuthOnly" },
+            );
+            expect(status.data).toHaveLength(1);
+            expect(status.data[0].name).toBe("codex-security");
+            expect(status.data[0].toolsError).toBeNull();
+            expect(status.data[0].tools).toHaveProperty(
+              "synthetic_environment",
+            );
+            expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
+              inherited: {
+                SYNTHETIC_CUSTOM_API_KEY: null,
+                SYNTHETIC_CUSTOM_HEADER: null,
+                SYNTHETIC_REQUIRED_KEY: null,
+                SYNTHETIC_UNUSED_KEY: null,
+              },
+              recovered: {
+                ...providerEnvironment,
+                ...(process.platform === "win32"
+                  ? { [headerKey]: " synthetic-child-header " }
+                  : {}),
+                ...(external ? { [providerKey]: "synthetic-custom-key" } : {}),
+                ...(providerKey === "CODEX_API_KEY"
+                  ? { CODEX_API_KEY: "synthetic-account-key" }
+                  : {}),
+              },
+            });
+            for (const text of [
+              await readFile(
+                options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                "utf8",
+              ),
+              await readFile(
+                join(options.env!["CODEX_HOME"]!, "config.toml"),
+                "utf8",
+              ),
+              JSON.stringify({
+                config: options.config,
+                overrides: options.configOverrides,
+              }),
+            ]) {
+              for (const marker of Object.values(providerEnvironment)) {
+                expect(text).not.toContain(marker);
               }
-              throw new Error("synthetic native plugin environment checked");
-            },
-          }),
-        }),
+            }
+            throw new Error("synthetic native plugin environment checked");
+          })(),
       },
     );
     try {
