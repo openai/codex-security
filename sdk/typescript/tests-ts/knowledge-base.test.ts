@@ -12,7 +12,7 @@ import {
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { ConfigurationError } from "../src/errors.js";
 import {
@@ -529,6 +529,7 @@ describe("scan knowledge bases", () => {
     const controller = new AbortController();
     const reason = new Error("Synthetic cancellation.");
     let pagesRead = 0;
+    const destroy = mock(async () => {});
     const parser = spyOn(pdfjs, "getDocument").mockImplementation(
       () =>
         ({
@@ -536,11 +537,15 @@ describe("scan knowledge bases", () => {
             numPages: 3,
             getPage: async () => {
               pagesRead += 1;
-              controller.abort(reason);
-              return { getTextContent: async () => ({ items: [{ str: "page" }] }) };
+              return {
+                getTextContent: async () => {
+                  controller.abort(reason);
+                  return { items: [{ str: "page" }] };
+                },
+              };
             },
           }),
-          destroy: async () => {},
+          destroy,
         }) as never,
     );
 
@@ -548,6 +553,7 @@ describe("scan knowledge bases", () => {
       const prepared = prepareKnowledgeBase([source], controller.signal);
       await expect(prepared).rejects.toBe(reason);
       expect(pagesRead).toBe(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
     } finally {
       parser.mockRestore();
     }
