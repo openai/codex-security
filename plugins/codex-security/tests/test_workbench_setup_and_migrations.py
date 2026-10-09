@@ -115,7 +115,7 @@ def test_state_directory_failure_preserves_original_exception(workbench_api, tmp
 
 @pytest.mark.parametrize("during_open", [True, False])
 def test_state_open_failure_metadata_is_limited_to_sqlite_connect(
-    workbench_api, tmp_path, during_open
+    workbench_api, tmp_path, during_open, capsys
 ):
     error = sqlite3.OperationalError("unable to open database file")
     connect = workbench_api["connect"]
@@ -139,7 +139,12 @@ def test_state_open_failure_metadata_is_limited_to_sqlite_connect(
         ):
             connect()
         assert failure.value is error
+        assert str(error) == "unable to open database file"
         assert getattr(error, "_codex_security_state_unavailable", False) is during_open
+        detail = capsys.readouterr().err
+        assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+        assert "SQLite journal files" in detail
+        assert "CODEX_SECURITY_STATE_DIR" in detail
     finally:
         connection.close()
 

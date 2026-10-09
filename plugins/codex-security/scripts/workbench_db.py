@@ -220,6 +220,11 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 def connect(*, deferred: bool = False) -> sqlite3.Connection:
     path = database_path()
+    guidance = (
+        f"Workbench database: {path}. Ensure the state directory and SQLite journal files "
+        "are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside "
+        "the scanned repository."
+    )
     try:
         create_private_directory(path.parent)
     except OSError as exc:
@@ -232,6 +237,7 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
         except sqlite3.OperationalError as exc:
             if str(exc) == "unable to open database file":
                 exc._codex_security_state_unavailable = True
+            print(guidance, file=sys.stderr)
             raise
         try:
             connection.row_factory = sqlite3.Row
@@ -245,6 +251,7 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
         except sqlite3.OperationalError as exc:
             connection.close()
             if attempt == SQLITE_RETRY_ATTEMPTS - 1 or not sqlite_busy(exc):
+                print(guidance, file=sys.stderr)
                 raise
             time.sleep(0.05 * (2**attempt))
     raise AssertionError("SQLite retry loop exhausted unexpectedly.")
