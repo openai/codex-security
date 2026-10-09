@@ -250,6 +250,7 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  gitMarkerRoot,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -3704,20 +3705,31 @@ export async function main(
         .optional(),
       async run({ args, options }) {
         try {
-          const hook = execFileSync(
+          const repository = await realpath(
+            resolveCliPath(
+              dependencies.currentDirectory(),
+              args.repository ?? ".",
+            ),
+          );
+          const git = await resolveTrustedExecutable(
             "git",
+            dependencies.environment,
+            (await gitMarkerRoot(repository, undefined, "outermost")) ??
+              repository,
+          );
+          if (git === null)
+            throw new Error("Git is not available on a trusted PATH.");
+          const hook = execFileSync(
+            git.executable,
             [
               "-C",
-              resolveCliPath(
-                dependencies.currentDirectory(),
-                args.repository ?? ".",
-              ),
+              repository,
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
               "hooks/pre-commit",
             ],
-            { encoding: "utf8" },
+            { encoding: "utf8", env: git.environment },
           ).trim();
           const command = [
             realpathSync(process.execPath),

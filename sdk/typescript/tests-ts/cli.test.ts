@@ -557,6 +557,77 @@ describe("CLI", () => {
     expect(onRun).not.toHaveBeenCalled();
   });
 
+  test.skipIf(process.platform === "win32")(
+    "installs hooks with trusted Git and the caller's configuration",
+    async () => {
+      const root = await realpath(
+        await temporaryDirectory("trusted-hook-git-"),
+      );
+      try {
+        const repository = join(root, "repository");
+        const selected = join(repository, "component");
+        const repositoryTools = join(repository, "tools");
+        const trustedTools = join(root, "trusted-tools");
+        const rejectedMarker = join(root, "repository-git-ran");
+        const trustedMarker = join(root, "trusted-git-ran");
+        const hooks = join(root, "configured hooks");
+        const git = Bun.which("git")!;
+        const initialized = await runCommand(git, ["init", "-q", repository], {
+          timeout: 10_000,
+        });
+        expect(initialized.status, initialized.stderr).toBe(0);
+        await Promise.all([
+          mkdir(selected),
+          mkdir(repositoryTools),
+          mkdir(trustedTools),
+        ]);
+        const quote = (path: string) => `'${path.replaceAll("'", `'"'"'`)}'`;
+        await writeFile(
+          join(repositoryTools, "git"),
+          `#!/bin/sh\nprintf called > ${quote(rejectedMarker)}\nexit 73\n`,
+          { mode: 0o700 },
+        );
+        await writeFile(
+          join(trustedTools, "git"),
+          `#!/bin/sh\nprintf called > ${quote(trustedMarker)}\nexec ${quote(git)} "$@"\n`,
+          { mode: 0o700 },
+        );
+        const output = captureCli(main, "stdout");
+        expect(
+          await output.run(
+            ["install-hook", ".", "--json"],
+            dependencies({
+              currentDirectory: selected,
+              environment: {
+                ...process.env,
+                PATH: [
+                  repositoryTools,
+                  trustedTools,
+                  process.env["PATH"] ?? "",
+                ].join(delimiter),
+                GIT_CONFIG_COUNT: "1",
+                GIT_CONFIG_KEY_0: "core.hooksPath",
+                GIT_CONFIG_VALUE_0: hooks,
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(normalize(JSON.parse(output.text()).hook)).toBe(
+          join(hooks, "pre-commit"),
+        );
+        expect(await readFile(trustedMarker, "utf8")).toBe("called");
+        await expect(stat(rejectedMarker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        expect(await readFile(join(hooks, "pre-commit"), "utf8")).toContain(
+          "--working-tree",
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
     const root = await realpath(
       await temporaryDirectory("codex-security-cli-pre-commit-"),
@@ -573,6 +644,7 @@ describe("CLI", () => {
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
         currentDirectory: root,
+        environment: { ...process.env },
         onRun: () => (started = true),
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
