@@ -246,6 +246,8 @@ const failureReasons: Record<string, string> = {
   "invalid-review-error":
     "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
+  "exit-diagnostic":
+    "Permission profile synthetic_profile was rejected: café 🔒\n",
 };
 const retriedFailures = new Set([
   "text-only",
@@ -255,6 +257,7 @@ const retriedFailures = new Set([
   "invalid-json",
   "invalid-submission",
   "exit",
+  "exit-diagnostic",
 ]);
 const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
