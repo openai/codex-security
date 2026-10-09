@@ -223,6 +223,7 @@ export class DeepScanWorkerRunner {
         async () => await this.options.store.updateWorker(acceptance),
       );
     } catch (error) {
+      if (confirmedOwnershipChange(error, run.scanId)) throw error;
       if (!this.options.signal.aborted) throw error;
       return { type: "discovery", status: "canceled", workerId };
     }

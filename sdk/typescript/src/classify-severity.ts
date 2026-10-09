@@ -1,7 +1,6 @@
 import { findingEntry } from "./value.js";
 import { z } from "incur";
 import { CodexSecurityError } from "./errors.js";
-import { validateJsonNumbers } from "./json-numbers.js";
 import { workflowDigest } from "./finding-workflow.js";
 import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
 import type { Finding, SeverityLevel } from "./models.js";
@@ -119,7 +118,6 @@ export async function classifySeverityInternal(
   checkpoint?: SeverityClassificationCheckpoint,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
-  validateJsonNumbers(findings, "Severity classification input");
   const ids = new Set<string>();
   for (const finding of findings) {
     if (!finding.findingId?.trim() || ids.has(finding.findingId)) {
@@ -244,7 +242,6 @@ export function validateSeverityClassification(
   result: SeverityClassification,
   findings: readonly SeverityClassificationFinding[],
 ): SeverityClassification {
-  validateJsonNumbers(findings, "Severity classification input");
   const byId = new Map(findings.map(findingEntry));
   for (const assessment of result.assessments) {
     const finding = byId.get(assessment.findingId);

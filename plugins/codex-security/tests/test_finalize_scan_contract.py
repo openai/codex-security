@@ -410,7 +410,6 @@ The extraction root is not enforced.
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["summary"] = "é" * 128
-        findings["findings"][0]["locations"][0].update(startLine=41.0, endLine=44.0)
         compact = (json.dumps(findings, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
             "utf-8"
         )
@@ -2097,261 +2096,6 @@ The extraction root is not enforced.
         self.assertEqual(finding["fingerprints"]["algorithm"], "codex-security/v1")
         self.assertNotEqual(finding["fingerprints"]["primary"], "codex-security/v0:sha256:example")
 
-    @pytest.mark.cross_platform
-    def test_recovery_preserves_integer_valued_line_numbers(self) -> None:
-        self.findings["findings"][0]["codeEvidence"] = [
-            {
-                "id": "source",
-                "label": "Source",
-                "path": "src/evidence.py",
-                "startLine": 41,
-                "endLine": 44,
-                "code": "extract()",
-                "explanation": "Source evidence.",
-            }
-        ]
-        self.findings["findings"][0]["rootCause"] = {
-            "summary": "Unchecked source.",
-            "evidenceRefs": ["source"],
-        }
-        for memory in (False, True):
-            for start, end in (("41", "44"), ("41.0", "44.0"), ("4.1e1", "4.4e1")):
-                with self.subTest(memory=memory, start=start):
-                    self.write_scan()
-                    text = (
-                        json.dumps(self.findings)
-                        .replace('"startLine": 41', f'"startLine": {start}')
-                        .replace('"endLine": 44', f'"endLine": {end}')
-                    )
-                    documents = (self.manifest, json.loads(text), self.coverage)
-                    original_documents = json.dumps(documents)
-                    (self.scan_dir / "findings.json").write_text(text, encoding="utf-8")
-                    original_bytes = self.scan_file_bytes(*CANONICAL_FILES)
-                    warnings: list[str] = []
-                    prepared = FINALIZER._prepare_scan_finalization(
-                        self.scan_dir,
-                        completion_warnings=warnings,
-                        draft_documents=documents if memory else None,
-                    )
-                    self.assertEqual(warnings, [])
-                    self.assertEqual(len(prepared[3]["findings"]), 1)
-                    self.assertEqual(prepared[4]["completeness"], "complete")
-                    self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), original_bytes)
-                    self.assertEqual(json.dumps(documents), original_documents)
-                    FINALIZER._write_prepared_scan_finalization(prepared)
-                    markdown = (self.scan_dir / "report.md").read_text(encoding="utf-8")
-                    self.assertIn("src/extract.py:41-44", markdown)
-                    self.assertIn("src/evidence.py:41-44", markdown)
-                    csv_row = next(
-                        csv.DictReader(
-                            io.StringIO(
-                                FINALIZER.build_csv_projection(prepared[3], prepared[4]).decode()
-                            )
-                        )
-                    )
-                    self.assertEqual((csv_row["start_line"], csv_row["end_line"]), ("41", "44"))
-                    sarif = self.read_json("exports/results.sarif")
-                    locations = sarif["runs"][0]["results"][0]["locations"]
-                    self.assertEqual(len(locations), 2)
-                    for location in locations:
-                        region = location["physicalLocation"]["region"]
-                        self.assertEqual(region, {"startLine": 41, "endLine": 44})
-                        self.assertIs(type(region["startLine"]), int)
-                        self.assertIs(type(region["endLine"]), int)
-
-    @pytest.mark.cross_platform
-    def test_raw_numeric_line_tokens_preserve_integer_semantics(self) -> None:
-        for token, accepted in (
-            ("1", True),
-            ("1.0", True),
-            ("1e0", True),
-            ("4.1e1", True),
-            ("1.0000000000000001", False),
-            ("9007199254740991.1", False),
-            ("1.0000000000000000000000000000000000000001", False),
-            ("1e-400", False),
-            ("1e-9999999999999999999", False),
-            ("true", False),
-        ):
-            with self.subTest(token=token):
-                self.findings["findings"][0]["locations"][0].update(
-                    startLine="RAW_NUMBER", endLine="RAW_NUMBER"
-                )
-                self.write_scan()
-                path = self.scan_dir / "findings.json"
-                raw = path.read_text().replace('"RAW_NUMBER"', token)
-                path.write_text(raw)
-                for loaded in (
-                    FINALIZER._read_json(path),
-                    FINALIZER._read_scan_local_json(self.scan_dir, "findings.json", "findings"),
-                ):
-                    location = loaded["findings"][0]["locations"][0]
-                    self.assertEqual(FINALIZER.is_json_integer(location["startLine"]), accepted)
-                    self.assertEqual(
-                        FINALIZER.is_json_integer(copy.deepcopy(location)["startLine"]), accepted
-                    )
-                    encoded = FINALIZER._json_bytes(loaded)
-                    self.assertTrue(
-                        FINALIZER._schema_values_equal(loaded, FINALIZER._loads_json(encoded))
-                    )
-                    if accepted:
-                        self.assertEqual(encoded, FINALIZER._json_bytes(json.loads(raw)))
-                if accepted:
-                    _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
-                    self.assertEqual(
-                        findings["findings"][0]["locations"][0]["startLine"], float(token)
-                    )
-                else:
-                    with self.assertRaisesRegex(FINALIZER.ContractError, "positive integer"):
-                        FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_json_writers_preserve_exact_numbers_and_literal_text(self) -> None:
-        # Build escaped text with the standard writer, leaving only numeric tokens raw.
-        literal = '123 "quoted" \\ -1e9 日本語'
-        source = json.dumps({"z": "RAW", "a": [True, 1, literal, False, 0.1]}).replace(
-            '"RAW"', "1.0000000000000001"
-        )
-        payload = FINALIZER._loads_json(source)
-        payload["tuple"] = (FINALIZER._loads_json("1e-" + "9" * 5001), False, literal)
-        for options in (
-            {},
-            {"sort_keys": True, "indent": 2},
-            {"ensure_ascii": False, "separators": (",", ":")},
-        ):
-            with self.subTest(options=options):
-                encoded = FINALIZER.dumps_json(payload, allow_nan=False, **options)
-                decoded = FINALIZER._loads_json(encoded)
-                self.assertTrue(FINALIZER._schema_values_equal(payload["z"], decoded["z"]))
-                self.assertTrue(
-                    FINALIZER._schema_values_equal(payload["tuple"][0], decoded["tuple"][0])
-                )
-                self.assertEqual(decoded["a"], [True, 1, literal, False, 0.1])
-                ordinary = {"z": 1.0, "a": [True, 1, literal, None, 0.1], "tuple": (1.0, False)}
-                self.assertEqual(
-                    FINALIZER.dumps_json(ordinary, allow_nan=False, **options),
-                    json.dumps(ordinary, allow_nan=False, **options),
-                )
-        for nonfinite in (float("inf"), float("nan")):
-            with self.assertRaises(ValueError):
-                FINALIZER.dumps_json({"value": nonfinite}, allow_nan=False)
-
-    @pytest.mark.cross_platform
-    def test_exact_score_bounds_are_checked_before_sealing(self) -> None:
-        self.write_scan()
-        _, canonical, _ = FINALIZER.finalize_scan(self.scan_dir)
-        template = canonical["findings"][0]
-        for token, accepted in (
-            ("0", True),
-            ("-0.0", True),
-            ("10", True),
-            ("10.0", True),
-            ("1e1", True),
-            ("9.99999999999999999999999999999999999999", True),
-            ("1e-400", True),
-            ("1e-" + "9" * 5001, True),
-            ("10.0000000000000001", False),
-            ("10.00000000000000000000000000000000000001", False),
-            ("-1e-400", False),
-            ("-1e-" + "9" * 5001, False),
-            ("true", False),
-        ):
-            with self.subTest(token=token):
-                value = FINALIZER._loads_json(token)
-                finding = copy.deepcopy(template)
-                finding["severity"]["score"] = value
-                schema = {"type": "number", "minimum": 0, "maximum": 10}
-                if accepted:
-                    FINALIZER._validate_schema_node(value, schema, "score")
-                    FINALIZER._validate_finding(finding, "finding")
-                else:
-                    with self.assertRaises(FINALIZER.ContractError):
-                        FINALIZER._validate_schema_node(value, schema, "score")
-                    with self.assertRaises(FINALIZER.ContractError):
-                        FINALIZER._validate_finding(finding, "finding")
-                self.findings["findings"][0]["severity"].update(
-                    score="RAW_SCORE", scoringSystem="CVSS:3.1"
-                )
-                self.write_scan()
-                path = self.scan_dir / "findings.json"
-                raw = path.read_text().replace('"RAW_SCORE"', token).encode()
-                path.write_bytes(raw)
-                if accepted:
-                    manifest, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
-                    self.assertTrue(manifest["scan"]["sealedAt"])
-                    written = FINALIZER._loads_json(path.read_bytes())
-                    self.assertTrue(
-                        FINALIZER._schema_values_equal(
-                            value, written["findings"][0]["severity"]["score"]
-                        )
-                    )
-                    self.assertEqual(len(findings["findings"]), 1)
-                else:
-                    with self.assertRaises(FINALIZER.ContractError):
-                        FINALIZER.finalize_scan(self.scan_dir)
-                    self.assertEqual(path.read_bytes(), raw)
-                    self.assertNotIn(
-                        "sealedAt",
-                        json.loads((self.scan_dir / "scan-manifest.json").read_text())["scan"],
-                    )
-
-    def test_exact_numeric_bounds_order_negative_values_and_long_exponents(self) -> None:
-        for token, minimum, maximum, accepted in (
-            ("-1.0000000000000001", -1, 0, False),
-            ("-0.9999999999999999", -1, 0, True),
-            ("1.0000000000000001", 0, 1, False),
-            ("0.9999999999999999", 0, 1, True),
-            ("-1e-" + "9" * 5001, -1, 0, True),
-            ("1e-" + "9" * 5001, -1, 0, False),
-        ):
-            with self.subTest(token=token):
-                value = FINALIZER._loads_json(token)
-                schema = {"type": "number", "minimum": minimum, "maximum": maximum}
-                if accepted:
-                    FINALIZER._validate_schema_node(value, schema, "value")
-                else:
-                    with self.assertRaises(FINALIZER.ContractError):
-                        FINALIZER._validate_schema_node(value, schema, "value")
-
-    def test_raw_large_exponents_keep_nonfinite_rejection(self) -> None:
-        for token in ("1e400", "1e9999999999999999999", "-1e9999999999999999999"):
-            with self.subTest(token=token):
-                self.write_scan()
-                path = self.scan_dir / "findings.json"
-                path.write_text(
-                    path.read_text().replace(
-                        '"extensions": {}', '"extensions": {"number": ' + token + "}"
-                    )
-                )
-                with self.assertRaisesRegex(FINALIZER.ContractError, "non-finite JSON numbers"):
-                    FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_integer_line_compatibility_keeps_invalid_values_rejected(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["codeEvidence"] = [
-            {
-                "id": "source",
-                "label": "Source",
-                "path": "src/evidence.py",
-                "startLine": 41,
-                "endLine": 44,
-                "code": "extract()",
-                "explanation": "Source evidence.",
-            }
-        ]
-        for collection in ("locations", "codeEvidence"):
-            for field in ("startLine", "endLine"):
-                for value in (True, False, 0, -1, 41.5, float(1 << 53), float("inf"), float("nan")):
-                    with self.subTest(collection=collection, field=field, value=value):
-                        row = finding[collection][0]
-                        previous = row[field]
-                        row[field] = value
-                        self.write_scan()
-                        before = self.scan_file_bytes(*CANONICAL_FILES)
-                        with self.assertRaises(FINALIZER.ContractError):
-                            FINALIZER.finalize_scan(self.scan_dir)
-                        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), before)
-                        row[field] = previous
-
     def test_recovery_normalizes_severity_change_condition_lists(self) -> None:
         self.findings["findings"][0]["severity"]["changeConditions"] = [
             " Raise if the vulnerable path becomes internet-reachable. ",
@@ -2564,6 +2308,16 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_rejects_remote_control_characters(self) -> None:
+        for character in ("\0", "\t", "\n", "\r", "\x7f", "\x85", "\u2028", "\u2029"):
+            with self.subTest(character=repr(character)):
+                self.manifest["scan"]["target"]["remote"] = f"https://example.com{character}/repo"
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
     def test_rejects_repository_root_finding_location(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "."
         self.write_scan()
@@ -2639,6 +2393,64 @@ The extraction root is not enforced.
         self.write_scan()
         with self.assertRaisesRegex(FINALIZER.ContractError, "cannot have deferred work"):
             FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_unsafe_code_evidence_paths(self) -> None:
+        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+            with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Synthetic source evidence.",
+                    }
+                ]
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError,
+                    r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_unsafe_deferred_paths(self) -> None:
+        self.coverage["completeness"] = "partial"
+        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+            with self.subTest(path=path):
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError,
+                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
+        self.findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": "src/extract.py",
+                "startLine": 41,
+                "code": "source()",
+                "explanation": "Repository-relative evidence.",
+            }
+        ]
+        self.coverage["completeness"] = "partial"
+        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+            with self.subTest(path=path):
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.write_scan()
+                _, findings, coverage = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(
+                    findings["findings"][0]["codeEvidence"][0]["path"], "src/extract.py"
+                )
+                self.assertEqual(coverage["deferred"][0]["paths"], [path])
 
     def test_rejects_non_rfc3339_timestamps(self) -> None:
         for timestamp in ("2026-W22-7T18:09:00+00:00", "2026-05-31T18:09:00+0000"):

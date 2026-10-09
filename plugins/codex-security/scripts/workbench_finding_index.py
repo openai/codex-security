@@ -5,14 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from decimal import Decimal
 from typing import Any
 
-from workbench.json_numbers import JsonFloat, dumps_json, json_number_key
-
-# Tag number tokens without imposing Python's integer-string conversion limit.
+# Tag numbers so 10 and 10.0 compare equally without treating true as 1.
 _finding_json = json.JSONDecoder(
-    parse_int=lambda value: (json_number_key(JsonFloat(value)),),
-    parse_float=lambda value: (json_number_key(JsonFloat(value)),),
+    parse_int=lambda value: (Decimal(value),),
+    parse_float=lambda value: (Decimal(value),),
 )
 
 
@@ -25,7 +24,7 @@ def upsert_finding(
     current = connection.execute(
         "SELECT details_json FROM findings WHERE id = ?", (finding["findingId"],)
     ).fetchone()
-    details = dumps_json(finding, allow_nan=False, sort_keys=True)
+    details = json.dumps(finding, allow_nan=False, sort_keys=True)
     # Preserve unchanged text without conflating JSON booleans and numbers.
     if (
         current is not None
@@ -103,7 +102,7 @@ def index_findings(
                 severity["level"],
                 confidence["level"],
                 finding["remediation"],
-                dumps_json(finding, allow_nan=False, sort_keys=True),
+                json.dumps(finding, allow_nan=False, sort_keys=True),
                 timestamp,
             ),
         )
