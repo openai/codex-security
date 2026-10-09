@@ -1320,7 +1320,10 @@ are off by default. Each selected stage can request one author revision by
 default; `--max-review-revisions N` instead sets a shared revision budget and
 restarts the selected reviews after a later stage requests changes. Set it to
 `0` to require approval without author revisions. A blocked, malformed, or
-unapproved review prevents patch publication.
+unapproved review prevents patch publication. Reviews compare the complete candidate
+with the state before patching, so existing user edits remain distinguishable. Review explanations
+are printed on failure. Custom validation instructions run in author stages;
+`--external-sandbox`, when selected for patching, also applies to review tasks.
 
 ```bash
 codex-security scan . --patch --review-minimality --review-style

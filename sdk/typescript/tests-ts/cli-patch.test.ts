@@ -5,7 +5,14 @@ import { parse as parseToml } from "smol-toml";
 import { describe, expect, test, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -2359,7 +2366,9 @@ describe("scan and patch workflow", () => {
           onCodex: (args, output) => {
             const { prompt, sandbox } = output!.appServer!;
             if (sandbox === "read-only") {
-              expect(output!.appServer!.externalSandbox).toBeUndefined();
+              expect(output!.appServer!.externalSandbox).toBe(
+                arguments_.includes("--external-sandbox") ? true : undefined,
+              );
               expect(prompt).toContain(JSON.stringify(["src/finding-1.ts"]));
               const stage = ["minimality", "local-coding-style"].find((value) =>
                 prompt.includes(`only the ${value} review`),
@@ -2434,17 +2443,31 @@ describe("scan and patch workflow", () => {
     const result = resultWithFindings(["high"]);
     const scopes: string[][] = [];
     let reviews = 0;
+    let revised = false;
     const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--review-minimality", "--review-style"],
+      [
+        "patch",
+        "--scan",
+        "scan-1",
+        "--review-minimality",
+        "--review-style",
+        "--json",
+      ],
       {
         result,
         onWorkbench: () => savedScan(result),
+        onRepositoryCommand: (_command, args) =>
+          args.includes("--name-only")
+            ? revised
+              ? "src/finding-1.ts\0src/existing-helper.ts\0"
+              : "src/finding-1.ts\0"
+            : "",
         onCodex: (args, output) => {
           const { prompt, sandbox } = output!.appServer!;
           if (sandbox === "read-only") {
             const lines = prompt.split("\n");
             const scope = lines.findIndex((line) =>
-              line.startsWith("Review only the finding-related"),
+              line.startsWith("Candidate changes since the pre-author"),
             );
             scopes.push(JSON.parse(lines[scope + 1]!));
             reviews += 1;
@@ -2458,6 +2481,7 @@ describe("scan and patch workflow", () => {
           } else if (reviews === 0) {
             completePatches(args, output);
           } else {
+            revised = true;
             output!.stdout.write(
               JSON.stringify({
                 patches: [
@@ -2479,8 +2503,12 @@ describe("scan and patch workflow", () => {
     expect(outcome.exitCode).toBe(0);
     expect(scopes).toEqual([
       ["src/finding-1.ts"],
-      ["src/existing-helper.ts"],
-      ["src/existing-helper.ts"],
+      ["src/finding-1.ts", "src/existing-helper.ts"],
+      ["src/finding-1.ts", "src/existing-helper.ts"],
+    ]);
+    expect(JSON.parse(outcome.stdout).patches[0].files).toEqual([
+      "src/finding-1.ts",
+      "src/existing-helper.ts",
     ]);
   });
 
@@ -2501,7 +2529,7 @@ describe("scan and patch workflow", () => {
         onWorkbench: () => savedScan(result),
         onRepositoryCommand: (command, args) => {
           commands.push([command, ...args]);
-          return "";
+          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
         },
         onCodex: (args, output) => {
           if (output!.appServer!.sandbox === "read-only") {
@@ -2529,7 +2557,250 @@ describe("scan and patch workflow", () => {
       ),
     ).toBe(false);
     expect(outcome.stderr).toContain('"status":"blocked"');
+    expect(outcome.stderr).toContain(
+      "The patch is outside the production threat model.",
+    );
   });
+
+  test.each([
+    { emptyFirstReport: false, renameFix: false },
+    { emptyFirstReport: true, renameFix: false },
+    { emptyFirstReport: false, renameFix: true },
+  ])(
+    "publishes cumulative reviewed files (empty report: $emptyFirstReport, rename: $renameFix)",
+    async ({ emptyFirstReport, renameFix }) => {
+      const root = await temporaryDirectory("codex-security-reviewed-patch-");
+      const repository = join(root, "repository");
+      const remote = join(root, "remote.git");
+      await mkdir(join(repository, "src"), { recursive: true });
+      const git = repositoryGit(repository);
+      const result = resultWithFindings(["high"]);
+      let authors = 0;
+      let reviews = 0;
+      const scopes: string[][] = [];
+      const unchanged = "unchanged context\n".repeat(12);
+      const expectedFiles = [
+        "src/finding-1.ts",
+        ...(renameFix ? ["src/renamed.ts"] : []),
+        "test.ts",
+      ];
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        await writeFile(
+          join(repository, "src/finding-1.ts"),
+          `${unchanged}unsafe\n`,
+        );
+        git("add", "--", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        git("push", "--set-upstream", "origin", "main");
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "--scan",
+            "scan",
+            "--review-minimality",
+            "--create-pr",
+            "--json",
+          ],
+          {
+            currentDirectory: repository,
+            result,
+            onWorkbench: () => savedScan(result, "scan", repository),
+            onRepositoryCommand: (command, args, directory, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, directory, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.com/example/repository/pull/1",
+            onCodex: async (_args, output) => {
+              const { prompt, sandbox } = output!.appServer!;
+              if (sandbox === "read-only") {
+                const lines = prompt.split("\n");
+                const index = lines.findIndex((line) =>
+                  line.startsWith("Candidate changes since the pre-author"),
+                );
+                scopes.push(JSON.parse(lines[index + 1]!));
+                reviews += 1;
+                output!.stdout.write(
+                  JSON.stringify(
+                    reviews === 1
+                      ? {
+                          status: "revise",
+                          findings: ["Add the focused regression test."],
+                        }
+                      : { status: "approved", findings: [] },
+                  ),
+                );
+              } else {
+                authors += 1;
+                const file = authors === 1 ? "src/finding-1.ts" : "test.ts";
+                await writeFile(
+                  join(repository, file),
+                  authors === 1 ? `${unchanged}safe\n` : "regression\n",
+                );
+                if (authors === 2 && renameFix)
+                  await rename(
+                    join(repository, "src/finding-1.ts"),
+                    join(repository, "src/renamed.ts"),
+                  );
+                output!.stdout.write(
+                  JSON.stringify({
+                    patches: [
+                      {
+                        occurrenceId: "occ_1",
+                        status: "verified",
+                        files: authors === 1 && emptyFirstReport ? [] : [file],
+                        verification:
+                          "The exploit fails and the regression passes.",
+                      },
+                    ],
+                  }),
+                );
+              }
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(authors).toBe(2);
+        expect(reviews).toBe(2);
+        expect(scopes).toEqual([["src/finding-1.ts"], expectedFiles]);
+        expect(JSON.parse(outcome.stdout).patches[0].files).toEqual(
+          expectedFiles,
+        );
+        expect(
+          git("show", "--format=", "--name-only", "--no-renames", "HEAD").split(
+            "\n",
+          ),
+        ).toEqual(expectedFiles);
+        expect(git("status", "--porcelain")).toBe("");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(["git", "directory"])(
+    "preserves the pre-author %s baseline for review and revision",
+    async (kind) => {
+      const root = await temporaryDirectory("codex-security-review-baseline-");
+      const repository = join(root, "repository");
+      const validation = join(root, "validation.md");
+      await mkdir(repository);
+      const git = repositoryGit(repository);
+      const before = "unsafe\npre-existing user edit\n";
+      const validationInstructions =
+        "Create a validation output directory, run the regression, and remove the output directory.";
+      let authors = 0;
+      let reviews = 0;
+      let copiedBaseline: string | undefined;
+      let baselineTree: string | undefined;
+      try {
+        await writeFile(join(repository, "app.ts"), "unsafe\n");
+        if (kind === "git") {
+          git("init", "--initial-branch=main");
+          git("config", "user.name", "Synthetic User");
+          git("config", "user.email", "synthetic@example.test");
+          git("config", "commit.gpgsign", "false");
+          git("add", "--", ".");
+          git("commit", "-m", "Initial synthetic checkout");
+        }
+        await writeFile(join(repository, "app.ts"), before);
+        await writeFile(validation, validationInstructions);
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "Synthetic issue",
+            "--review-minimality",
+            "--validation-prompt-file",
+            validation,
+            "--external-sandbox",
+          ],
+          {
+            currentDirectory: repository,
+            onRepositoryCommand: (command, args, directory, options) => {
+              if (kind === "directory")
+                throw new Error("fatal: not a git repository");
+              return runGitRepositoryCommand(command, args, directory, options);
+            },
+            onCodex: async (_args, output) => {
+              const { prompt, sandbox, externalSandbox } = output!.appServer!;
+              expect(externalSandbox).toBe(true);
+              if (sandbox === "read-only" || authors > 0) {
+                const lines = prompt.split("\n");
+                const index = lines.indexOf(
+                  "Pre-author baseline and current candidate snapshot (JSON):",
+                );
+                const baseline = JSON.parse(lines[index + 1]!);
+                if (kind === "git") {
+                  baselineTree ??= baseline.tree;
+                  expect(baseline.tree).toBe(baselineTree);
+                  expect(git("show", `${baseline.tree}:app.ts`)).toBe(
+                    before.trim(),
+                  );
+                  const diff = git("diff", baseline.tree, baseline.head);
+                  expect(diff).toContain("-unsafe");
+                  expect(diff).toContain("+safe");
+                  expect(diff).not.toContain("+pre-existing user edit");
+                } else {
+                  copiedBaseline ??= baseline.directory;
+                  expect(baseline.directory).toBe(copiedBaseline);
+                  expect(
+                    await readFile(join(baseline.directory, "app.ts"), "utf8"),
+                  ).toBe(before);
+                }
+              }
+              if (sandbox === "read-only") {
+                expect(prompt).not.toContain(validationInstructions);
+                expect(prompt).not.toContain(
+                  "Custom patch validation instructions",
+                );
+                reviews += 1;
+                output!.stdout.write(
+                  JSON.stringify(
+                    reviews === 1
+                      ? {
+                          status: "revise",
+                          findings: [
+                            "Keep the focused explanation beside the fix.",
+                          ],
+                        }
+                      : { status: "approved", findings: [] },
+                  ),
+                );
+              } else {
+                expect(prompt).toContain(validationInstructions);
+                authors += 1;
+                await writeFile(
+                  join(repository, "app.ts"),
+                  `safe\npre-existing user edit\n${authors === 2 ? "focused explanation\n" : ""}`,
+                );
+                output!.stdout.write("Verified patch.");
+              }
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(authors).toBe(2);
+        expect(reviews).toBe(2);
+        expect(await readFile(join(repository, "app.ts"), "utf8")).toContain(
+          "pre-existing user edit",
+        );
+        if (copiedBaseline !== undefined)
+          await expect(
+            readFile(join(copiedBaseline, "app.ts")),
+          ).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("rejects optional patch reviews without an explicit patch request", async () => {
     for (const flag of ["--review-minimality", "--review-style"]) {

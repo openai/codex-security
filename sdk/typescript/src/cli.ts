@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import {
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -1112,6 +1113,10 @@ const findingVerificationSchema = z.object({
 
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
+type PatchReviewBaseline =
+  | { tree: string; head?: string }
+  | { directory: string; symbolicLinks: Record<string, string> };
+
 interface SkillRunOptions extends PatchReviewOptions {
   externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
@@ -1130,6 +1135,8 @@ interface SkillRunOptions extends PatchReviewOptions {
   reviewFindings?: readonly string[];
   reviewHistory?: readonly PatchReviewDecision[];
   reviewPaths?: readonly string[];
+  reviewBaseline?: PatchReviewBaseline;
+  patchBase?: string | Map<string, string>;
   patchArtifact?: {
     path: string;
     repository: string;
@@ -5405,6 +5412,7 @@ export async function main(
             dependencies,
             {
               environment,
+              patchBase,
               reviewMinimality: options.reviewMinimality,
               reviewStyle: options.reviewStyle,
               maxReviewRevisions: options.maxReviewRevisions,
@@ -7082,6 +7090,7 @@ async function changedPatchFiles(
   repository: string,
   base: string | Map<string, string>,
   dependencies: CliDependencies,
+  capturedHead?: string,
 ): Promise<string[]> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
@@ -7089,10 +7098,20 @@ async function changedPatchFiles(
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
   }
-  const head = await snapshotPatchTree(repository, dependencies);
+  const head =
+    capturedHead ?? (await snapshotPatchTree(repository, dependencies));
   const output = await dependencies.runRepositoryCommand(
     "git",
-    ["--literal-pathspecs", "diff", "--name-only", "-z", base, head],
+    [
+      "--literal-pathspecs",
+      "diff",
+      "--name-only",
+      // A reviewed patch must publish both the deletion and addition of a rename.
+      ...(capturedHead === undefined ? [] : ["--no-renames"]),
+      "-z",
+      base,
+      head,
+    ],
     repository,
     { trim: false },
   );
@@ -7385,6 +7404,7 @@ async function runFindingPatches(
         dependencies,
         {
           ...options,
+          patchBase: base,
           directory: selected.repository,
           findings: [finding],
           findingInstructions: instruction?.trim()
@@ -7477,7 +7497,7 @@ type SkillStageRunner = (
 ) => Promise<number>;
 
 type PatchReviewSubject =
-  | { status: "ready"; paths?: string[] }
+  | { status: "ready"; response: string }
   | { status: "empty" }
   | { status: "invalid" };
 
@@ -7490,6 +7510,10 @@ interface PatchReviewWorkflowContext {
   options: SkillRunOptions;
   stderr: Writable;
   history: PatchReviewDecision[];
+  directory: string;
+  base: string | Map<string, string>;
+  baseline: PatchReviewBaseline;
+  dependencies: CliDependencies;
   paths?: string[];
 }
 
@@ -7508,27 +7532,52 @@ async function captureSkillStage(
   return { exitCode, response };
 }
 
-function parsePatchReviewSubject(
+async function parsePatchReviewSubject(
   response: string,
-  scopedToFindings: boolean,
-): PatchReviewSubject {
-  if (!scopedToFindings) return { status: "ready" };
-  try {
-    const reported = JSON.parse(response) as { patches?: unknown[] };
-    if (!Array.isArray(reported.patches)) return { status: "invalid" };
-
-    const paths: string[] = [];
-    for (const patch of reported.patches) {
-      const parsed = findingPatchSchema.safeParse(patch);
-      if (!parsed.success) return { status: "invalid" };
-      if (parsed.data.status === "verified") paths.push(...parsed.data.files);
+  context: PatchReviewWorkflowContext,
+): Promise<PatchReviewSubject> {
+  let reported: { patches: unknown[] } | undefined;
+  const patches: FindingPatch[] = [];
+  if (context.options.findings !== undefined) {
+    try {
+      reported = JSON.parse(response) as { patches: unknown[] };
+      if (!Array.isArray(reported.patches)) return { status: "invalid" };
+      for (const patch of reported.patches) {
+        const parsed = findingPatchSchema.safeParse(patch);
+        if (!parsed.success) return { status: "invalid" };
+        patches.push(parsed.data);
+      }
+    } catch {
+      return { status: "invalid" };
     }
-    return paths.length === 0
-      ? { status: "empty" }
-      : { status: "ready", paths };
-  } catch {
-    return { status: "invalid" };
+    if (!patches.some(({ status }) => status === "verified"))
+      return { status: "empty" };
   }
+
+  const head =
+    typeof context.base === "string"
+      ? await snapshotPatchTree(context.directory, context.dependencies)
+      : undefined;
+  context.paths = await changedPatchFiles(
+    context.directory,
+    context.base,
+    context.dependencies,
+    head,
+  );
+  if (typeof context.base === "string")
+    context.baseline = { tree: context.base, head };
+  if (reported !== undefined) {
+    if (context.paths.length === 0) return { status: "invalid" };
+    response = JSON.stringify({
+      ...reported,
+      patches: patches.map((patch) =>
+        patch.status === "verified"
+          ? { ...patch, files: context.paths }
+          : patch,
+      ),
+    });
+  }
+  return { status: "ready", response };
 }
 
 function parsePatchReviewVerdict(
@@ -7566,6 +7615,7 @@ async function runIndependentPatchReview(
   const review = await captureSkillStage(context.run, {
     ...context.options,
     reviewPaths: context.paths,
+    reviewBaseline: context.baseline,
     reviewStage: stage,
     reviewHistory: context.history,
   });
@@ -7597,6 +7647,8 @@ async function runIndependentPatchReview(
       findings: verdict.findings.length,
     })}\n`,
   );
+  for (const finding of verdict.findings)
+    context.stderr.write(`${safePatchReport(finding)}\n`);
   return { status: "reviewed", verdict };
 }
 
@@ -7631,10 +7683,7 @@ async function runPatchReviewWorkflow(
   let patch = await captureSkillStage(context.run);
   if (patch.exitCode !== PATCH_REVIEW_EXIT_CODE.success) return patch.exitCode;
 
-  let subject = parsePatchReviewSubject(
-    patch.response,
-    context.options.findings !== undefined,
-  );
+  let subject = await parsePatchReviewSubject(patch.response, context);
   if (subject.status === "invalid") {
     context.stderr.write(
       "The generated patch did not return a valid review subject.\n",
@@ -7645,7 +7694,7 @@ async function runPatchReviewWorkflow(
     stdout.write(patch.response);
     return PATCH_REVIEW_EXIT_CODE.success;
   }
-  context.paths = subject.paths;
+  patch.response = subject.response;
 
   let reconciled = false;
   let totalRevisions = 0;
@@ -7686,21 +7735,20 @@ async function runPatchReviewWorkflow(
         ...context.options,
         reviewFindings: verdict.findings,
         reviewHistory: context.history,
+        reviewPaths: context.paths,
+        reviewBaseline: context.baseline,
       });
       if (patch.exitCode !== PATCH_REVIEW_EXIT_CODE.success) {
         return patch.exitCode;
       }
-      subject = parsePatchReviewSubject(
-        patch.response,
-        context.options.findings !== undefined,
-      );
+      subject = await parsePatchReviewSubject(patch.response, context);
       if (subject.status !== "ready") {
         context.stderr.write(
           "The revised patch did not return a valid review subject.\n",
         );
         return PATCH_REVIEW_EXIT_CODE.failure;
       }
-      context.paths = subject.paths;
+      patch.response = subject.response;
       if (context.options.maxReviewRevisions !== undefined && stageIndex > 0) {
         stageIndex = -1;
         break;
@@ -7753,12 +7801,47 @@ async function runSkill(
     );
   if (stages.length === 0) return run(stdout);
 
-  return runPatchReviewWorkflow(stages, stdout, {
-    run,
-    options,
-    stderr,
-    history: [],
-  });
+  const directory = options.directory ?? dependencies.currentDirectory();
+  const base =
+    options.patchBase ?? (await snapshotPatchState(directory, dependencies));
+  let snapshotDirectory: string | undefined;
+  try {
+    let baseline: PatchReviewBaseline;
+    if (typeof base === "string") {
+      baseline = { tree: base };
+    } else {
+      snapshotDirectory = await mkdtemp(
+        join(tmpdir(), "codex-security-patch-review-"),
+      );
+      const symbolicLinks = new Map<string, string>();
+      for (const [file, fingerprint] of base) {
+        if (fingerprint.startsWith("link:")) {
+          symbolicLinks.set(file, fingerprint.slice("link:".length));
+          continue;
+        }
+        const destination = join(snapshotDirectory, file);
+        await mkdir(dirname(destination), { recursive: true });
+        await copyFile(join(directory, file), destination);
+      }
+      baseline = {
+        directory: snapshotDirectory,
+        symbolicLinks: Object.fromEntries(symbolicLinks),
+      };
+    }
+    return await runPatchReviewWorkflow(stages, stdout, {
+      run,
+      options,
+      stderr,
+      history: [],
+      directory,
+      base,
+      baseline,
+      dependencies,
+    });
+  } finally {
+    if (snapshotDirectory !== undefined)
+      await rm(snapshotDirectory, { recursive: true, force: true });
+  }
 }
 
 async function runSkillStage(
@@ -7970,10 +8053,17 @@ async function runSkillStage(
     ...(options.reviewPaths === undefined
       ? []
       : [
-          "Review only the finding-related candidate changes in these reported patch files; do not attribute unrelated pre-existing working-tree changes to this patch (JSON array):",
+          "Candidate changes since the pre-author baseline are in these files; preserve unrelated pre-existing working-tree changes (JSON array):",
           JSON.stringify(options.reviewPaths),
         ]),
-    ...(options.validationPrompt === undefined
+    ...(options.reviewBaseline === undefined
+      ? []
+      : [
+          "Pre-author baseline and current candidate snapshot (JSON):",
+          JSON.stringify(options.reviewBaseline),
+          "For Git snapshots, compare the tree and head with git diff to see only candidate changes, including additions and deletions. For a directory baseline, original regular-file contents are under directory and original symlink targets are in symbolicLinks; compare them with the current candidate files. This baseline includes pre-existing user changes: preserve them.",
+        ]),
+    ...(options.validationPrompt === undefined || review
       ? []
       : [
           "Use the following user-provided instructions for dynamic validation of the patch in this same task. Perform the requested environment setup, builds, tests, and runtime checks; use them to verify that the original issue no longer reproduces and legitimate behavior still works. Complete any requested cleanup. Report the commands, results, and evidence in the patch verification. Do not report fixed or verified if a required check fails or cannot run; report the failure or blocker instead.",
@@ -8084,9 +8174,7 @@ async function runSkillStage(
               directory,
               prompt,
               threadSource,
-              ...(options.externalSandbox && !readOnly
-                ? { externalSandbox: true }
-                : {}),
+              ...(options.externalSandbox ? { externalSandbox: true } : {}),
               ...(readOnly ? { sandbox: "read-only" as const } : {}),
               ...(options.onEvent === undefined
                 ? {}
