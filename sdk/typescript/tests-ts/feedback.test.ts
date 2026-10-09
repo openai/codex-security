@@ -252,7 +252,8 @@ test("without log opt-in, does not read or attach saved sessions", async () => {
 for (const [scenario, message, stderr] of [
   ["error", "Upload failed"],
   ["exit", "Codex exited before feedback was uploaded", ""],
-  ["exit-diagnostic", diagnostic],
+  ["exit-diagnostic", `  ${diagnostic}\n  `, `  ${diagnostic}\n  `],
+  ["exit-diagnostic", " \n\t", " \n\t"],
   ["missing-id", "Codex did not return a feedback ID"],
   ["malformed", "JSON"],
 ]) {
@@ -269,7 +270,7 @@ for (const [scenario, message, stderr] of [
   });
 }
 
-for (const stderr of [diagnostic, ""]) {
+for (const stderr of [diagnostic, `  ${diagnostic}\n  `, " \n\t", ""]) {
   test(`stdin failure preserves ${stderr ? "stderr through cleanup" : "the transport error without stderr"}`, async () => {
     const context = await setup();
     const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
@@ -300,7 +301,7 @@ for (const stderr of [diagnostic, ""]) {
     if (stderr) {
       await expect(operation).rejects.toMatchObject({
         name: "CodexSecurityError",
-        message: diagnostic,
+        message: stderr,
         cause: error,
       });
     } else {

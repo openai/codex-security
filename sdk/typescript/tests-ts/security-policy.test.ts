@@ -1108,7 +1108,8 @@ describe("security policy preview", () => {
           "--input-type=module",
           "--eval",
           `
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 const { securityPolicyDiff } = await import(process.argv[1]);
 const draft = JSON.parse(readFileSync(0, "utf8"));
 const failures = [];
@@ -1116,18 +1117,54 @@ for (const [interpreter, size] of [[process.execPath, 100], [process.execPath, 9
   try { await securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(size) }, interpreter); failures.push(null); }
   catch (error) { failures.push({ code: error.code, message: error.message }); }
 }
+if (process.argv[2]) {
+  const wrapper = process.argv[2];
+  for (const code of [0, 7]) {
+    const release = wrapper + code;
+    const diagnostic = '  synthetic café 日本語 😀 error\\n  ';
+    const holder = "const fs = require('fs'); process.send('ready'); const timer = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(timer); fs.writeFileSync(process.argv[1] + '.done', 'done'); process.exit(0); } }, 10); setTimeout(() => process.exit(2), 10000).unref();";
+    const launcher = [
+      '#!' + process.execPath,
+      "require('fs').closeSync(0);",
+      "const child = require('child_process').spawn(process.execPath, ['-e', " + JSON.stringify(holder) + ", " + JSON.stringify(release) + "], { stdio: ['ignore', 1, 2, 'ipc'] });",
+      "child.once('message', () => process.stderr.write(" + JSON.stringify(diagnostic) + ", () => process.exit(" + code + ")));",
+    ].join('\\n');
+    writeFileSync(wrapper, launcher, { mode: 0o700 });
+    const task = securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(900000) }, wrapper).then(
+      () => ({ code: null }), error => ({ code: error.code, message: error.message }));
+    let outcome;
+    try {
+      outcome = await Promise.race([task, delay(2000).then(() => null)]);
+    } finally {
+      writeFileSync(release, 'release');
+      await task;
+      while (!existsSync(release + '.done')) await delay(10);
+    }
+    failures.push({ ...outcome, settledBeforeRelease: outcome !== null, preservedDiagnostic: code === 0 || outcome?.message.endsWith(diagnostic) });
+  }
+}
 console.log(JSON.stringify(failures));`,
           pathToFileURL(module).href,
           process.platform === "win32" ? "" : ignoreInput,
         ],
-        { encoding: "utf8", input: JSON.stringify(draft) },
+        { encoding: "utf8", input: JSON.stringify(draft), timeout: 20_000 },
       ),
     );
     for (const failure of result.slice(0, 2)) {
       expect(failure.code).toBe(9);
       expect(failure.message).toContain("bad option: -I");
     }
-    if (process.platform !== "win32") expect(result[2].code).toBe("EPIPE");
+    if (process.platform !== "win32") {
+      expect(result[2].code).toBe("EPIPE");
+      expect(result.slice(3)).toMatchObject([
+        {
+          code: "EPIPE",
+          settledBeforeRelease: true,
+          preservedDiagnostic: true,
+        },
+        { code: 7, settledBeforeRelease: true, preservedDiagnostic: true },
+      ]);
+    }
     expect(await readdir(f.repository)).toEqual([]);
   });
 

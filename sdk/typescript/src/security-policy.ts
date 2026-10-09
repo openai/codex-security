@@ -1028,8 +1028,19 @@ export async function securityPolicyDiff(
         else reject(failure);
       },
     );
+    const releaseFailedInput = () => {
+      if (
+        inputError === undefined ||
+        (child.exitCode === null && child.signalCode === null)
+      )
+        return;
+      child.stdout!.destroy();
+      child.stderr!.destroy();
+    };
+    child.once("exit", releaseFailedInput);
     child.stdin!.on("error", (error: Error) => {
       inputError = error;
+      releaseFailedInput();
     });
     child.stdin!.end(
       JSON.stringify([
