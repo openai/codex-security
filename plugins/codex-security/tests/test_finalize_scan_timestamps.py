@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -56,6 +55,8 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
             "2024-02-29T18:09:00.1234Z",
             "2024-02-29T18:09:00.12345-02:00",
             "2024-02-29T18:09:00.123456+02:00",
+            "2024-02-29T18:09:00.1234567+02:00",
+            "2024-02-29T18:09:00.123456789Z",
             "2024-02-29t18:09:00.123z",
         ):
             with self.subTest(timestamp=timestamp):
@@ -74,9 +75,17 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
     def test_exports_sealed_scan_with_fractional_timestamps_without_rewriting(self) -> None:
         self.write_scan()
         manifest, _, _ = FINALIZER.finalize_scan(self.scan_dir)
-        fractions = ("1", "12", "123", "1234", "12345", "123456")
-        if sys.version_info >= (3, 11):
-            fractions += ("123456789",)
+        fractions = (
+            "1",
+            "12",
+            "123",
+            "1234",
+            "12345",
+            "123456",
+            "1234567",
+            "123456789",
+            "123456789" * 8,
+        )
         for fraction in fractions:
             with self.subTest(fraction=fraction):
                 timestamp = f"2026-10-08t01:00:00.{fraction}z"
