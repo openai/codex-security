@@ -13,7 +13,6 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_projection import merged_root_cause
-from workbench.json_numbers import is_json_integer
 from workbench_constants import (
     FINDING_ATTACK_PATH_PREVIEW_BYTES,
     FINDING_CODE_EVIDENCE_LIMIT,
@@ -320,13 +319,15 @@ def merged_bounded_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any
         ):
             evidence.pop("role")
         start_line = evidence.get("startLine")
-        if "startLine" in evidence and (not is_json_integer(start_line) or start_line < 1):
+        if "startLine" in evidence and (
+            not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1
+        ):
             evidence.pop("startLine")
         end_line = evidence.get("endLine")
         if (
             "endLine" in evidence
             and end_line is not None
-            and (not is_json_integer(end_line) or end_line < 1)
+            and (not isinstance(end_line, int) or isinstance(end_line, bool) or end_line < 1)
         ):
             evidence.pop("endLine")
         evidence["code"] = bounded_json_text(

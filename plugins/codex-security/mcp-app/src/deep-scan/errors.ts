@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { DeepScanRunState } from "./types.js";
 
 const MAX_PERSISTED_ERROR_LENGTH = 2_400;
 
@@ -22,6 +23,31 @@ export class DeepScanNonRetryableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "DeepScanNonRetryableError";
+  }
+}
+
+/** A store read confirmed that this coordinator no longer owns the scan. */
+export class DeepScanOwnershipChangedError extends Error {
+  constructor(
+    readonly run: DeepScanRunState,
+    cause: unknown,
+  ) {
+    super(errorMessage(cause), { cause });
+    this.name = "DeepScanOwnershipChangedError";
+  }
+}
+
+/** Only a store-confirmed state for this scan establishes ownership loss. */
+export function confirmedOwnershipChange(
+  error: unknown,
+  scanId: string,
+): DeepScanOwnershipChangedError | undefined {
+  for (let cause = error; cause instanceof Error; cause = cause.cause) {
+    if (
+      cause instanceof DeepScanOwnershipChangedError &&
+      cause.run.scanId === scanId
+    )
+      return cause;
   }
 }
 
