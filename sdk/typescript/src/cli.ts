@@ -9023,6 +9023,7 @@ const LOCAL_SYSCALL_CODES = new Set([
 ]);
 
 function isLocalScanFailure(error: unknown): boolean {
+  if (error instanceof IncompleteScanError) error = error.cause;
   if (
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
