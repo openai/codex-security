@@ -174,6 +174,8 @@
 - consolidate Deep Scan preflight compatibility coverage ([#1482](https://github.com/openai/codex-security/pull/1482))
 - use workbench for parent draft publication ([#1487](https://github.com/openai/codex-security/pull/1487))
 - simplify workbench history and usage readers ([#1495](https://github.com/openai/codex-security/pull/1495))
+- consolidate GitHub release publication ([#1474](https://github.com/openai/codex-security/pull/1474))
+- simplify scan configuration processing ([#1459](https://github.com/openai/codex-security/pull/1459))
 
 <!-- release-section: highlights:end -->
 
