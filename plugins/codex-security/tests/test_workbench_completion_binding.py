@@ -411,6 +411,38 @@ def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: P
         ).fetchone() == ("complete", manifest["scan"]["completedAt"])
 
 
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-10-08T03:00:00.123456+02:00",
+        "2026-10-08t01:00:00.123456789z",
+        "2026-10-08T01:00:00.1-00:00",
+        "2026-10-07T17:30:00.123456789012345678901234567890-07:30",
+    ],
+)
+def test_sealed_completion_preserves_original_timestamp_text(
+    tmp_path: Path, timestamp: str
+) -> None:
+    state_dir, target = tmp_path / "state", tmp_path / "target"
+    target.mkdir()
+    scan_dir = tmp_path / "scan"
+    scan_id = register_cli_scan(state_dir, target, scan_dir)["scanId"]
+    write_completed_contract(scan_dir, scan_id, target)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["completedAt"] = timestamp
+    manifest_path.write_text(json.dumps(manifest))
+    _seal_draft(scan_dir, target)
+    sealed_manifest_bytes = manifest_path.read_bytes()
+    scan_command(state_dir, "complete-scan", scan_id)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT created_at, updated_at FROM findings").fetchall() == [
+            (timestamp, timestamp)
+        ]
+    assert manifest_path.read_bytes() == sealed_manifest_bytes
+    assert json.loads(sealed_manifest_bytes)["scan"]["completedAt"] == timestamp
+
+
 def test_incompatible_sealed_deep_scan_remains_recoverable(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
     scan_command(state_dir, "prepare-scan-completion", scan_id)

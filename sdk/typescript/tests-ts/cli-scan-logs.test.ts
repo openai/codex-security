@@ -16,10 +16,11 @@ import { capture, dependencies } from "./cli-fixtures.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
-async function fixture() {
+async function fixture(desktop = false, archived = false, continuation = true) {
   const state = await realpath(await mkdtemp(join(tmpdir(), "saved-logs-")));
-  const home = join(state, "codex-home");
-  await mkdir(join(home, "sessions"), { recursive: true });
+  const home = join(state, desktop ? "desktop-home" : "codex-home");
+  const sessions = join(home, archived ? "archived_sessions" : "sessions");
+  await mkdir(sessions, { recursive: true });
   const events = [
     { type: "session_meta", payload: { id: "thread-1" } },
     {
@@ -30,15 +31,22 @@ async function fixture() {
       },
     },
   ];
-  await writeJsonLines(join(home, "sessions", "rollout.jsonl"), events);
-  const scan = { scanId: "scan-1", continuationThreadId: "thread-1" };
-  const logs = await readSavedScanLogs(scan, home);
+  await writeJsonLines(join(sessions, "rollout.jsonl"), events);
+  const scan = {
+    scanId: "scan-1",
+    ...(continuation ? { continuationThreadId: "thread-1" } : {}),
+    threadIds: ["thread-1"],
+  };
+  const logs = await readSavedScanLogs(scan, home, { allowMissingRoot: true });
   const deps = dependencies({
-    environment: { CODEX_SECURITY_STATE_DIR: state },
+    environment: {
+      CODEX_SECURITY_STATE_DIR: state,
+      CODEX_HOME: home,
+    },
     onWorkbench: () => ({ scan }),
   });
   deps.createSecurity = throwing("Reading logs must not start Codex");
-  return { state, logs, deps };
+  return { state, home, sessions, logs, deps };
 }
 
 async function referenceOutput(args: string[], logs: unknown) {
@@ -79,6 +87,45 @@ describe("saved logs JSON output", () => {
     else process.env["XDG_DATA_HOME"] = previousDataHome;
     await rm(dataHome, { recursive: true, force: true });
   });
+
+  test.each([
+    [false, true],
+    [true, true],
+    [false, false],
+    [true, false],
+  ])(
+    "reads Desktop logs archived=%p continuation=%p",
+    async (archived, continuation) => {
+      const f = await fixture(true, archived, continuation);
+      try {
+        await writeJsonLines(join(f.sessions, "unrelated.jsonl"), [
+          {
+            type: "session_meta",
+            payload: {
+              id: "unrelated",
+              source: {
+                subagent: { thread_spawn: { parent_thread_id: "thread-1" } },
+              },
+            },
+          },
+        ]);
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(["scans", "logs", "scan-1", "--json"], f.deps),
+        ).toBe(0);
+        expect(JSON.parse(stdout.text())).toEqual(f.logs);
+        expect(stderr.text()).toBe("");
+        await rm(f.sessions, { recursive: true });
+        const absent = createCliTest(main);
+        expect(await absent.runCli(["scans", "logs", "scan-1"], f.deps)).toBe(
+          2,
+        );
+        expect(absent.stderr.text()).toContain("No saved session logs");
+      } finally {
+        await rm(f.state, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("preserves the stale installed-skills CTA after saved logs", async () => {
     const f = await fixture();
