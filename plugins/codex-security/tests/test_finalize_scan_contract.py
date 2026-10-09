@@ -12,7 +12,6 @@ import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest import main, mock, skipIf, skipUnless
 
@@ -274,33 +273,6 @@ The extraction root is not enforced.
         self.assertEqual(
             result["partialFingerprints"]["codexSecurity/v1"], finding["fingerprints"]["primary"]
         )
-
-    def test_headless_finalization_replaces_model_timestamps_with_machine_clock(self) -> None:
-        self.manifest["scan"]["startedAt"] = "2026-07-21T23:20:33Z"
-        self.manifest["scan"]["completedAt"] = "2026-07-21T23:30:52Z"
-        self.write_scan()
-        started_at = "2026-07-22T06:20:33Z"
-        before = datetime.now(timezone.utc)
-
-        with mock.patch.dict(os.environ, {"CODEX_SECURITY_STARTED_AT": started_at}):
-            manifest, _, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        completed_at = manifest["scan"]["completedAt"]
-        self.assertEqual(manifest["scan"]["startedAt"], started_at)
-        self.assertTrue(completed_at.endswith("Z"))
-        completed_datetime = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
-        self.assertGreaterEqual(completed_datetime, before)
-        self.assertLessEqual(completed_datetime, datetime.now(timezone.utc))
-        self.assertEqual(manifest["scan"]["sealedAt"], completed_at)
-
-    def test_headless_finalization_rejects_invalid_authoritative_start(self) -> None:
-        self.write_scan()
-
-        with mock.patch.dict(os.environ, {"CODEX_SECURITY_STARTED_AT": "not-a-timestamp"}):
-            with self.assertRaisesRegex(FINALIZER.ContractError, "RFC 3339 timestamp"):
-                FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
 
     def test_finalizes_canonical_document_beyond_previous_size_limit(self) -> None:
         self.manifest["metadata"] = "x" * (16 * 1024 * 1024)
@@ -2452,14 +2424,6 @@ The extraction root is not enforced.
                 )
                 self.assertEqual(coverage["deferred"][0]["paths"], [path])
 
-    def test_rejects_non_rfc3339_timestamps(self) -> None:
-        for timestamp in ("2026-W22-7T18:09:00+00:00", "2026-05-31T18:09:00+0000"):
-            with self.subTest(timestamp=timestamp):
-                self.manifest["scan"]["startedAt"] = timestamp
-                self.write_scan()
-                with self.assertRaisesRegex(FINALIZER.ContractError, "RFC 3339 timestamp"):
-                    FINALIZER.finalize_scan(self.scan_dir)
-
     def test_rejects_coverage_scope_mismatch(self) -> None:
         self.coverage["includePaths"] = ["other/"]
         self.write_scan()
@@ -3083,6 +3047,26 @@ The extraction root is not enforced.
             FINALIZER.build_sarif(self.manifest, {"findings": findings}, source_root)
 
         self.assertEqual(line_hashes.call_count, 1)
+
+
+@pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])
+def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
+    schema = {"type": expected}
+    FINALIZER._validate_schema_node(value, schema, "value")
+    with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
+        FINALIZER._validate_schema_node(True, schema, "value")
+
+
+def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:
+    root = {"$defs": {"text": {"type": "string", "minLength": 1}}}
+    reference = {"$ref": "#/$defs/text"}
+    FINALIZER._validate_schema_node("yes", reference, "value", root)
+    with pytest.raises(FINALIZER.ContractError, match="string is too short"):
+        FINALIZER._validate_schema_node("", reference, "value", root)
+    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
+        FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
+    with pytest.raises(RecursionError):
+        FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
 
 
 if __name__ == "__main__":

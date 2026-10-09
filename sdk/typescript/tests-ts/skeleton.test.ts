@@ -435,9 +435,14 @@ describe("TypeScript package skeleton", () => {
       "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
     expect(quality.env).not.toHaveProperty("CODEX_SECURITY_PROPERTY_SEED");
     expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
-    expect(runner.strategy?.matrix["mode"]).toEqual(["baseline", "parallel"]);
+    expect(runner.strategy?.matrix["mode"]).toEqual([
+      "baseline",
+      "isolated",
+      "parallel",
+    ]);
     for (const [mode, args] of [
       ["baseline", ""],
+      ["isolated", "--isolate"],
       ["parallel", "--parallel=2"],
     ] as const) {
       expect(runner.strategy?.matrix["include"]).toContainEqual({

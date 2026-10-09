@@ -35,6 +35,7 @@ import {
   basename,
   dirname,
   extname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -1568,6 +1569,16 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+const WORKBENCH_ARGUMENTS_PROGRAM = String.raw`
+import json, sys
+sys.argv[2:] = json.loads(sys.stdin.buffer.readline())
+`;
+const WORKBENCH_SCRIPT_PROGRAM = String.raw`
+import runpy, sys
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+`;
+
 const ARCHIVE_READY = "codex-security-archive-ready\n";
 const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
 import io, json, runpy, sys
@@ -1635,6 +1646,13 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
+    // OS argv cannot carry NUL, but workbench text fields can.
+    const framedArguments =
+      !native && arguments_.some((argument) => argument.includes("\0"));
+    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
+    if (framedArguments)
+      program =
+        WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
     const result = await runCodexCommand(
       { command },
       native
@@ -1644,9 +1662,9 @@ export async function runWorkbench(
             "-X",
             "utf8",
             "-B",
-            ...(archiveHandshake ? ["-c", ARCHIVE_REGISTRATION_PROGRAM] : []),
+            ...(program === undefined ? [] : ["-c", program]),
             script,
-            ...arguments_,
+            ...(framedArguments ? [] : arguments_),
           ],
       pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
@@ -1662,6 +1680,10 @@ export async function runWorkbench(
         : input,
       signal,
       archiveHandshake,
+      // Match native argv's UTF-8 encoding for the private argument frame.
+      framedArguments
+        ? `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`
+        : undefined,
     );
     if (!result.success) {
       throw new Error(
@@ -1805,22 +1827,9 @@ export async function runWorkbench(
     }
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
-    const databaseFailure =
-      /\b(?:unable to open database file|attempt to write a readonly database|readonly database|disk i\/o error)\b/iu.test(
-        detail,
-      );
     const failure =
       options.failureMessage ?? "Could not run the Codex Security workbench";
-    throw new CodexSecurityError(
-      databaseFailure
-        ? `${failure}: cannot open the workbench database at ${join(
-            options.stateDirectory ??
-              codexSecurityStateDirectory(options.environment),
-            "workbench.sqlite3",
-          )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
-        : `${failure}: ${detail}`,
-      { cause: error },
-    );
+    throw new CodexSecurityError(`${failure}: ${detail}`, { cause: error });
   }
   let result: unknown;
   try {
@@ -2144,7 +2153,11 @@ async function prepareOutputDirectory(
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
         await rename(path, archiveDir);
-        onOutputArchived?.(archiveDir);
+        try {
+          void Promise.resolve(onOutputArchived?.(archiveDir)).catch(
+            () => undefined,
+          );
+        } catch {}
         existing = null;
       }
     }
@@ -2769,12 +2782,21 @@ export function resolveCodexCommand(
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
   const expanded =
-    configured === undefined ? undefined : expandHome(configured, environment);
+    configured === undefined
+      ? undefined
+      : expandExecutableHome(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
   ) {
-    return { command: resolve(expanded) };
+    return {
+      command:
+        process.platform === "win32"
+          ? resolve(expanded)
+          : isAbsolute(expanded)
+            ? expanded
+            : `${process.cwd()}${sep}${expanded}`,
+    };
   }
 
   return { command: resolveBundledCodexExecutable() };
@@ -3196,6 +3218,7 @@ export function pluginExecutionEnvironment(
   return {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
+    CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
 }
@@ -3252,6 +3275,7 @@ export async function runCodexCommand(
   input?: string | Uint8Array,
   signal?: AbortSignal,
   archiveHandshake = false,
+  stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
@@ -3309,6 +3333,7 @@ export async function runCodexCommand(
     if (signal?.aborted) abort();
   }
   try {
+    if (stdinPrefix !== undefined) child.stdin.write(stdinPrefix);
     if (archiveHandshake) child.stdin.write(`${JSON.stringify(input ?? "")}\n`);
     else child.stdin.end(input);
     return await completion;
@@ -3504,7 +3529,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandHome(candidate, environment)
+      ? expandExecutableHome(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3558,6 +3583,17 @@ export function sameFile(left: string, right: string): Promise<boolean> {
       leftMetadata.ino === rightMetadata.ino,
     () => false,
   );
+}
+
+function expandExecutableHome(
+  value: string,
+  environment: ProcessEnvironment,
+): string {
+  const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
+  // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
+  return path.startsWith("~/")
+    ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
+    : expandHome(path, environment);
 }
 
 export function expandHome(

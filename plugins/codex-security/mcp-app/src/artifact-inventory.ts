@@ -29,15 +29,6 @@ export interface ReviewItem {
   path: string;
 }
 
-export interface ReviewItemsResult {
-  items: ReviewItem[];
-  nextCursor?: string;
-}
-
-export interface PreparedReviewItems {
-  reviewItemsTotal: number;
-}
-
 export const prepareReviewItemsInputSchema = loadArtifactZodSchema(
   documents,
   reviewItemsSchema.$id,
@@ -59,7 +50,7 @@ const reviewItemSchema = loadArtifactZodSchema(
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
-): Promise<PreparedReviewItems> {
+) {
   if (context.layout !== "scan") {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
@@ -84,8 +75,7 @@ export async function prepareCodexSecurityReviewItems(
     helper,
     "--repo",
     context.repoRoot,
-    "--scope",
-    context.scope ?? ".",
+    `--scope=${context.scope ?? "."}`,
     "--out",
     destination,
   ];
@@ -145,7 +135,7 @@ export async function prepareCodexSecurityReviewItems(
 export async function listCodexSecurityReviewItems(
   context: ArtifactContext,
   page: ArtifactPage = {},
-): Promise<ReviewItemsResult> {
+) {
   const result = paginateArtifactRows(
     await readReviewItems(context),
     page,
@@ -180,12 +170,12 @@ async function readReviewItems(
   return rows;
 }
 
-function helperError(error: unknown): string | undefined {
-  if (!error || typeof error !== "object" || !("stderr" in error))
-    return undefined;
-  const stderr = error.stderr;
-  if (typeof stderr === "string") return stderr.trim() || undefined;
-  if (Buffer.isBuffer(stderr))
-    return stderr.toString("utf8").trim() || undefined;
-  return undefined;
+function helperError(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = error.stderr;
+    if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
+    if (Buffer.isBuffer(stderr) && stderr.length)
+      return stderr.toString("utf8").trim();
+  }
+  return error instanceof Error ? error.message : String(error);
 }

@@ -2380,8 +2380,7 @@ export class CodexSecurity {
               activeScan.id,
               "--cost-json",
               JSON.stringify(snapshot?.cost ?? failure.cost),
-              "--message",
-              failure.message.slice(0, 2400),
+              `--message=${failure.message.slice(0, 2400)}`,
             ],
           );
           activeScan = null;
@@ -2455,8 +2454,7 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
-            "--message",
-            errorMessage(failure).slice(0, 2400),
+            `--message=${errorMessage(failure).slice(0, 2400)}`,
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
@@ -3398,8 +3396,7 @@ export class CodexSecurity {
           "fail-scan",
           "--scan-id",
           activeScan.id,
-          "--message",
-          errorMessage(error).slice(0, 2400),
+          `--message=${errorMessage(error).slice(0, 2400)}`,
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();
@@ -4277,6 +4274,10 @@ async function collectResult(
       await requireScanFile(scanDir, name, name, signal);
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
+      let cause = error;
+      while (cause instanceof Error && cause.cause !== undefined)
+        cause = cause.cause;
+      if (!isRecord(cause) || cause["code"] !== "ENOENT") throw error;
       missing.push(name);
     }
   }
@@ -4781,9 +4782,11 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     }
     return result;
   };
-  const result = executionConfig(config);
-  // Keep effective execution settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
+  const result = executionConfig(
+    safeProfileName(config["profile"]) ? config : resolved,
+  );
+  // Keep effective execution settings even when preflight filters the profile name.
   for (const key of ["model_reasoning_summary", "service_tier"]) {
     const value = resolved[key];
     if (safeString(value)) result[key] = value;
@@ -4952,6 +4955,7 @@ function selectedWorkerRuntimeConfig(
         "model_context_window",
         "model_instructions_file",
         "model_verbosity",
+        "shell_environment_policy",
         "web_search",
         "windows",
       ]

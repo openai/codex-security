@@ -1,13 +1,14 @@
 import { existsSync } from "node:fs";
 import {
   chmod,
+  copyFile,
   mkdir,
   readFile,
   readdir,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
@@ -285,6 +286,69 @@ test("native profile turns omit optional null fields and retain array errors", a
   await expect(invalid.startThread().run("synthetic prompt")).rejects.toThrow(
     "Codex config overrides must contain finite TOML values",
   );
+});
+
+test("native profile launches retain bundled tools through executable path aliases", async () => {
+  const root = await temporaryDirectory();
+  const bin = join(root, "vendor", "bin");
+  const tools = join(root, "vendor", "codex-path");
+  const executable = process.platform === "win32" ? "codex.exe" : "codex";
+  const tool = process.platform === "win32" ? "rg.exe" : "rg";
+  await mkdir(bin, { recursive: true });
+  await mkdir(tools);
+  const node = Bun.which("node")!;
+  await copyFile(node, join(bin, executable));
+  await copyFile(node, join(tools, tool));
+  const script = join(root, "profile tools.mjs");
+  await writeFile(
+    script,
+    `import { spawnSync } from "node:child_process";
+import { basename } from "node:path";
+if (basename(process.execPath).startsWith("rg")) {
+  console.log("synthetic bundled search");
+  process.exit(0);
+}
+for await (const chunk of process.stdin) {}
+const result = spawnSync("rg", [], { encoding: "utf8" });
+if (result.error || result.status !== 0) throw result.error ?? new Error(result.stderr);
+console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
+console.log(JSON.stringify({ type: "item.completed", item: {
+  type: "agent_message", id: "answer", text: JSON.stringify({
+    path: process.env.PATH, configured: process.env.CODEX_CLI_PATH,
+    search: result.stdout.trim(), resumed: process.argv.includes("resume"),
+  }),
+} }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+process.exit(0);`,
+  );
+  const configured = `${bin}${sep}.${sep}${executable}`;
+  const environment = {
+    ...(process.env["SystemRoot"] === undefined
+      ? {}
+      : { SystemRoot: process.env["SystemRoot"] }),
+    PATH: "",
+    CODEX_HOME: root,
+    CODEX_CLI_PATH: configured,
+    NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+  };
+  const original = { ...environment };
+  const client = await createProfileCodex(
+    { env: environment },
+    "synthetic-profile",
+  );
+  for (const resumed of [false, true]) {
+    const thread = resumed
+      ? client.resumeThread("synthetic-thread")
+      : client.startThread();
+    const result = await thread.run("synthetic prompt");
+    expect(JSON.parse(result.finalResponse)).toEqual({
+      path: tools,
+      configured,
+      search: "synthetic bundled search",
+      resumed,
+    });
+  }
+  expect(environment).toEqual(original);
 });
 
 test("private profiles retain providers for native required and inherited selection", async () => {

@@ -13,6 +13,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -83,6 +84,7 @@ assert.deepEqual(
     "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
     "PYTHON",
     "PYTHONUTF8",
+    "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
@@ -271,15 +273,14 @@ async function assertBundledNodeLauncher() {
   }
 }
 
-async function assertMissingPythonError() {
+async function assertPythonLaunchError(code: "ENOENT" | "EACCES") {
+  const python = path.join(tmpdir(), `codex-security-python-${randomUUID()}`);
+  if (code === "EACCES") await writeFile(python, "", { mode: 0o600 });
   const missingPythonServer = startTestServer({
     cwd: pluginRoot,
     env: {
       CODEX_SECURITY_STATE_DIR: stateDir,
-      PYTHON: path.join(
-        tmpdir(),
-        `codex-security-missing-python-${randomUUID()}`,
-      ),
+      PYTHON: python,
     },
   });
   try {
@@ -296,15 +297,17 @@ async function assertMissingPythonError() {
     const errorText = response.result.content
       .map((item: { text: string }) => item.text)
       .join(" ");
-    assert.match(errorText, /could not start its Python 3 helper/);
-    assert.match(errorText, /bundled Python runtime/);
-    assert.match(errorText, /set the PYTHON environment variable/);
-    assert.doesNotMatch(
-      errorText,
-      /ENOENT|spawn .*codex-security-missing-python/,
-    );
+    assert.ok(errorText.includes(`spawn ${python} ${code}`), errorText);
+    if (code === "ENOENT") {
+      assert.match(errorText, /could not start its Python 3 helper/);
+      assert.match(errorText, /bundled Python runtime/);
+      assert.match(errorText, /set the PYTHON environment variable/);
+    } else {
+      assert.doesNotMatch(errorText, /Reinstall or update/);
+    }
   } finally {
     await missingPythonServer.stop();
+    await rm(python, { force: true });
   }
 }
 
@@ -371,25 +374,159 @@ async function assertUnavailableUserInputFallback() {
   }
 }
 
-async function assertWorkspaceWorksWithoutUiCapability() {
+async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
+  const fixtureRoot = await temporaryDirectory("workbench-text-target-");
+  const targetPath = path.join(
+    fixtureRoot,
+    process.platform === "win32" ? "target" : "target ",
+  );
+  await mkdir(targetPath);
+  const alias = path.join(fixtureRoot, "alias");
+  if (process.platform !== "win32") {
+    await mkdir(path.join(fixtureRoot, "target"));
+    await symlink(targetPath, alias, "dir");
+  }
+  await mkdir(path.join(targetPath, scope));
+  if (scope !== scope.trim() && scope.trim() !== "./")
+    await mkdir(path.join(targetPath, scope.trim()));
+  await writeFile(path.join(targetPath, scope, "source.py"), "pass\n");
+  await writeFile(path.join(targetPath, "outside.py"), "pass\n");
+  const userContext = "--data\nUnicode Ä 日本語\n".repeat(200).trim();
   const nonUiStateDir = path.join(tmpdir(), randomUUID());
   const nonUiServer = startTestServer({
     cwd: pluginRoot,
-    env: { CODEX_SECURITY_STATE_DIR: nonUiStateDir },
+    env: {
+      CODEX_SECURITY_STATE_DIR: nonUiStateDir,
+      CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
+    },
   });
   try {
     assertNoError(await nonUiServer.initialize("codex-security-non-ui-smoke"));
+    const inspected = await nonUiServer.callTool(10, {
+      name: "inspect_codex_security_target",
+      arguments: {
+        targetPath: process.platform === "win32" ? targetPath : alias,
+      },
+    });
+    assertNoError(inspected);
+    const canonicalTarget =
+      inspected.result.structuredContent.target.targetPath;
+    assert.equal(canonicalTarget, await realpath(targetPath));
+    const reinspected = await nonUiServer.callTool(11, {
+      name: "inspect_codex_security_target",
+      arguments: { targetPath: canonicalTarget },
+    });
+    assertNoError(reinspected);
+    assert.equal(
+      reinspected.result.structuredContent.target.targetPath,
+      canonicalTarget,
+    );
     const response = await nonUiServer.callTool(2, {
       name: "open_codex_security_workspace",
-      arguments: { targetPath: target, mode: "standard", scope: "." },
+      arguments: {
+        targetPath: canonicalTarget,
+        mode: "standard",
+        scope: `./${scope}`,
+        targetTitle: "--user-context",
+        targetSummary: "--fixture-summary",
+        userContext,
+      },
       _meta: { "openai/threadId": "fixture-non-ui-thread" },
     });
     assertNoError(response);
     const workspace = response.result.structuredContent.workspace;
     assert.match(workspace.id, /^[0-9a-f-]{36}$/);
-    assert.equal(workspace.targetPath, await realpath(target));
+    assert.equal(workspace.targetPath, await realpath(targetPath));
     assert.equal(workspace.mode, "standard");
-    assert.equal(workspace.scope, ".");
+    assert.equal(workspace.scope, scope);
+    assert.equal(workspace.targetTitle, "--user-context");
+    assert.equal(workspace.targetSummary, "--fixture-summary");
+    assert.equal(workspace.userContext, userContext);
+    const saved = await nonUiServer.callTool(3, {
+      name: "submit_codex_security_setup",
+      arguments: {
+        sessionId: workspace.id,
+        targetPath: workspace.targetPath,
+        scope: workspace.scope,
+        mode: workspace.mode,
+        targetSummary: "",
+      },
+    });
+    assertNoError(saved);
+    assert.equal(saved.result.structuredContent.workspace.scope, scope);
+    assert.equal(saved.result.structuredContent.workspace.targetSummary, null);
+    assertNoError(
+      await nonUiServer.callTool(4, {
+        name: "list_codex_security_scans",
+        arguments: { query: "-sub" },
+      }),
+    );
+    const setup = await nonUiServer.callTool(12, {
+      name: "inspect_codex_security_setup",
+      arguments: {
+        targetPath: workspace.targetPath,
+        scope: workspace.scope,
+        mode: workspace.mode,
+      },
+    });
+    assertNoError(setup);
+    assert.equal(setup.result.structuredContent.setup.scope, scope);
+    const started = await nonUiServer.callTool(13, {
+      name: "start_codex_security_scan",
+      arguments: { sessionId: workspace.id },
+    });
+    assertNoError(started);
+    assert.equal(
+      started.result.structuredContent.workspace.targetPath,
+      canonicalTarget,
+    );
+    assert.equal(started.result.structuredContent.workspace.scope, scope);
+    for (const [index, name] of [
+      "start_codex_security_prompt_only_scan",
+      "start_codex_security_standard_scan",
+    ].entries()) {
+      const launched = await nonUiServer.callTool(14 + index, {
+        name,
+        arguments: {
+          targetPath: canonicalTarget,
+          scope,
+          ...(index === 0 ? { mode: "standard" } : {}),
+        },
+        _meta: { "openai/threadId": `fixture-path-launch-${index}` },
+      });
+      assertNoError(launched);
+      assert.equal(
+        launched.result.structuredContent.scan.targetPath,
+        canonicalTarget,
+      );
+      assert.equal(launched.result.structuredContent.scan.scope, scope);
+      assert.deepEqual(
+        launched.result.structuredContent.scan.contract.scope
+          .requiredIncludePaths,
+        [scope],
+      );
+    }
+    const inventoryPath = path.join(fixtureRoot, "in_scope_files.txt");
+    execFileSync(process.env.PYTHON?.trim() || "python3", [
+      path.join(pluginRoot, "scripts", "generate_in_scope_files.py"),
+      "--repo",
+      canonicalTarget,
+      `--scope=${scope}`,
+      "--out",
+      inventoryPath,
+    ]);
+    assert.equal(await readFile(inventoryPath, "utf8"), `${scope}/source.py\n`);
+    for (const [index, blank] of ["", " \t\n"].entries()) {
+      const invalid = await nonUiServer.callTool(16 + index, {
+        name: "inspect_codex_security_setup",
+        arguments: {
+          targetPath: canonicalTarget,
+          scope: blank,
+          mode: "standard",
+        },
+      });
+      assert.equal(invalid.result.isError, true);
+    }
     assert.equal(workspace.setup.submitted, false);
     assert.ok(
       (await readFile(path.join(nonUiStateDir, "workbench.sqlite3"))).length >
@@ -398,6 +535,7 @@ async function assertWorkspaceWorksWithoutUiCapability() {
   } finally {
     await nonUiServer.stop();
     await rm(nonUiStateDir, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 }
 
@@ -570,7 +708,12 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
   const fixtureRoot = await temporaryDirectory(
     "codex-security-deep-inventory-",
   );
-  const fixtureTarget = path.join(fixtureRoot, "repository");
+  const fixtureTarget = path.join(
+    fixtureRoot,
+    process.platform === "win32" ? "repository" : "repository ",
+  );
+  if (process.platform !== "win32")
+    await mkdir(path.join(fixtureRoot, "repository"));
   const fixtureState = path.join(fixtureRoot, "state");
   const fixtureScanRoot = path.join(fixtureRoot, "scans");
   await mkdir(path.join(fixtureTarget, "app"), { recursive: true });
@@ -592,7 +735,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
 
     deepServer.sendRequest(2, "tools/call", {
       name: "start_codex_security_deep_scan",
-      arguments: { targetPath: fixtureTarget },
+      arguments: { targetPath: fixtureTarget, scope: fixtureTarget },
       _meta: {
         "openai/threadId": "fixture-deep-inventory-thread",
         "codex/sandbox-state-meta": parentSandboxState,
@@ -633,6 +776,8 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
           ),
         );
         assert.equal(deepScan.status, "running");
+        assert.equal(deepScan.targetPath, await realpath(fixtureTarget));
+        assert.equal(deepScan.scope, ".");
         startupErrorWorker = deepScan.workers.find(
           (worker: { status: string; error?: string }) =>
             worker.error?.includes("missing-deep-scan-codex"),
@@ -1294,10 +1439,16 @@ try {
 
   await assertBundledNodeLauncher();
   await assertBundledPythonRuntime();
-  await assertMissingPythonError();
+  await assertPythonLaunchError("ENOENT");
+  if (process.platform !== "win32") await assertPythonLaunchError("EACCES");
   await assertWorkbenchStdinFailureDoesNotCrashServer();
   await assertUnavailableUserInputFallback();
-  await assertWorkspaceWorksWithoutUiCapability();
+  for (const scope of [
+    "-sub",
+    " component",
+    ...(process.platform === "win32" ? [] : ["./ "]),
+  ])
+    await assertWorkspaceWorksWithoutUiCapability(scope);
   await assertHeadlessStandardScanWorksWithoutUiCapability();
   await assertDeepScanPersistsRetryableWorkerStartupError();
   await assertUserInputFailureLogging();
@@ -2286,15 +2437,22 @@ try {
   );
 
   const handoffClaimToken = randomUUID();
-  const claimedHandoff = await testServer.callTool(2002, {
-    name: "claim_codex_security_scan_handoff_delivery",
-    arguments: { claimToken: handoffClaimToken, scanId },
-  });
-  assertNoError(claimedHandoff);
-  assert.equal(
-    claimedHandoff.result.structuredContent.workspace.results.handoffClaimToken,
-    handoffClaimToken,
-  );
+  for (const [index, name] of [
+    "claim_codex_security_scan_handoff_delivery",
+    "release_codex_security_scan_handoff_delivery",
+    "claim_codex_security_scan_handoff_delivery",
+  ].entries()) {
+    const claimedHandoff = await testServer.callTool(200200 + index, {
+      name,
+      arguments: { claimToken: handoffClaimToken, scanId },
+    });
+    assertNoError(claimedHandoff);
+    assert.equal(
+      claimedHandoff.result.structuredContent.workspace.results
+        .handoffClaimToken,
+      index === 1 ? null : handoffClaimToken,
+    );
+  }
   const attachedHandoff = await testServer.callTool(20021, {
     name: "attach_codex_security_scan_continuation_thread",
     arguments: {
@@ -2764,20 +2922,28 @@ try {
     },
   );
 
-  const requestedPatch = await testServer.callTool(61, {
-    name: "request_codex_security_finding_remediation",
-    arguments: {
-      actionToken: generationActionToken,
-      occurrenceId,
-      requestId: remediationRequestId,
-    },
-  });
-  assertNoError(requestedPatch);
-  assert.equal(
-    requestedPatch.result.structuredContent.scan.findings[0].remediationState
-      .state,
-    "requested",
-  );
+  for (const [index, name] of [
+    "request_codex_security_finding_remediation",
+    "release_codex_security_finding_remediation_claim",
+    "claim_codex_security_finding_remediation_resend",
+  ].entries()) {
+    const requestedPatch = await testServer.callTool(6100 + index, {
+      name,
+      arguments: {
+        actionToken: generationActionToken,
+        occurrenceId,
+        requestId: remediationRequestId,
+      },
+    });
+    assertNoError(requestedPatch);
+    const remediation =
+      requestedPatch.result.structuredContent.scan.findings[0].remediationState;
+    assert.equal(remediation.state, "requested");
+    assert.equal(
+      remediation.actionClaimToken,
+      index === 1 ? null : generationActionToken,
+    );
+  }
   const rejectedPendingClose = await testServer.callTool(161, {
     name: "set_codex_security_finding_triage",
     arguments: { occurrenceId, status: "closed", closeReason: "already_fixed" },
@@ -2787,6 +2953,7 @@ try {
     rejectedPendingClose.result.content[0].text,
     /pending remediation operation/,
   );
+  const remediationPatchPath = " remediation.patch";
   const remediationPatch = `diff --git a/src/a.py b/src/a.py
 --- a/src/a.py
 +++ b/src/a.py
@@ -2795,8 +2962,12 @@ try {
 +fixed
 `;
   await writeFile(
-    path.join(initializedScanDir, "remediation.patch"),
+    path.join(initializedScanDir, remediationPatchPath),
     remediationPatch,
+  );
+  await writeFile(
+    path.join(initializedScanDir, remediationPatchPath.trim()),
+    "different patch contents\n",
   );
   const generatedPatch = await testServer.callTool(62, {
     name: "set_codex_security_finding_remediation",
@@ -2806,7 +2977,7 @@ try {
       requestId: remediationRequestId,
       expectedVersion: 1,
       state: "generated",
-      patchPath: "remediation.patch",
+      patchPath: remediationPatchPath,
       patchDigest: `sha256:${hash("sha256", remediationPatch)}`,
       summary: "Contain archive extraction under the output root.",
     },
@@ -2821,6 +2992,11 @@ try {
     generatedPatch.result.structuredContent.scan.findings[0].remediationState
       .patch,
     remediationPatch,
+  );
+  assert.equal(
+    generatedPatch.result.structuredContent.scan.findings[0].remediationState
+      .patchPath,
+    remediationPatchPath,
   );
 
   const applyActionToken = randomUUID();
@@ -2860,7 +3036,11 @@ try {
   );
   execFileSync(
     "git",
-    ["apply", "--no-index", path.join(initializedScanDir, "remediation.patch")],
+    [
+      "apply",
+      "--no-index",
+      path.join(initializedScanDir, remediationPatchPath),
+    ],
     {
       cwd: target,
     },
@@ -2875,6 +3055,9 @@ try {
       occurrenceId,
       requestId: remediationRequestId,
       state: "applied",
+      patchPath:
+        generatedPatch.result.structuredContent.scan.findings[0]
+          .remediationState.patchPath,
     },
   });
   assertNoError(appliedPatch);
@@ -3386,15 +3569,20 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   });
   assertNoError(rotatedProgress);
+  const failureMessage = "--failure\nline";
   const rotatedFailure = await testServer.callTool(2039, {
     name: "fail_codex_security_scan",
     arguments: {
       handoffClaimToken: rotatedFallbackClaimToken,
-      message: "rotated continuation stopped",
+      message: failureMessage,
       scanId: fallbackScanId,
     },
   });
   assertNoError(rotatedFailure);
+  assert.equal(
+    rotatedFailure.result.structuredContent.scan.failureMessage,
+    failureMessage,
+  );
   assert.equal(
     rotatedFailure.result.structuredContent.scan.progress.status,
     "failed",

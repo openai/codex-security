@@ -28,6 +28,7 @@ try {
   await testMissingInventoryIsReported();
   await testWorkersCannotPrepareInventory();
   await testBoundScopeFailurePreservesPreviousInventory();
+  await testPythonLaunchErrors();
   await testInvalidDiffTargetPreservesPreviousInventory();
 } finally {
   await temporaryDirectories.cleanup();
@@ -119,15 +120,15 @@ async function testPrepareUsesTheExistingStandardGenerator() {
 async function testPrepareListsIgnoredTrackedFilesOnce() {
   const fixture = await createFixture("ignored tracked files");
   await runGit(fixture.repoRoot, "init", "-q");
-  await fixture.writeRepositoryFile(".gitignore", "generated/\n");
+  await fixture.writeRepositoryFile(".gitignore", "-generated/\n");
   for (const name of ["a.ts", "b.ts"]) {
     await fixture.writeRepositoryFile(
-      `generated/${name}`,
+      `-generated/${name}`,
       "export const value = 1;\n",
     );
   }
-  await runGit(fixture.repoRoot, "add", "--force", "--", "generated");
-  const context = { ...fixture.scan, scope: "generated" };
+  await runGit(fixture.repoRoot, "add", "--force", "--", "-generated");
+  const context = { ...fixture.scan, scope: "-generated" };
 
   assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
     reviewItemsTotal: 2,
@@ -136,7 +137,7 @@ async function testPrepareListsIgnoredTrackedFilesOnce() {
     limit: 1,
   });
   assert.deepEqual(first, {
-    items: [{ path: "generated/a.ts" }],
+    items: [{ path: "-generated/a.ts" }],
     nextCursor: "1",
   });
   assert.deepEqual(
@@ -144,7 +145,7 @@ async function testPrepareListsIgnoredTrackedFilesOnce() {
       cursor: first.nextCursor,
       limit: 1,
     }),
-    { items: [{ path: "generated/b.ts" }] },
+    { items: [{ path: "-generated/b.ts" }] },
   );
 }
 
@@ -422,6 +423,34 @@ async function testInvalidDiffTargetPreservesPreviousInventory() {
     assert.equal(
       await readFile(fixture.scanInventory, "utf8"),
       "src/original.ts\n",
+    );
+  }
+}
+
+async function testPythonLaunchErrors() {
+  const fixture = await createFixture("python launch failure");
+  const pythonCommand = path.join(fixture.root, "python");
+  for (const code of process.platform === "win32"
+    ? ["ENOENT"]
+    : ["ENOENT", "EACCES"]) {
+    if (code === "EACCES") await writeFile(pythonCommand, "", { mode: 0o600 });
+    await assert.rejects(
+      inventory.prepareCodexSecurityReviewItems({
+        ...fixture.scan,
+        pythonCommand,
+      }),
+      (error: Error & { cause?: NodeJS.ErrnoException }) => {
+        assert.equal(error.cause?.code, code);
+        assert.ok(
+          error.message.includes(`spawn ${pythonCommand} ${code}`),
+          error.message,
+        );
+        assert.equal(
+          error.message.includes("Reinstall or update"),
+          code === "ENOENT",
+        );
+        return true;
+      },
     );
   }
 }

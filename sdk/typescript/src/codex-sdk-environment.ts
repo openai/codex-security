@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join } from "node:path";
 import { PluginBootstrapError } from "./errors.js";
@@ -8,8 +8,12 @@ export function bundledCodexSdkEnvironment(
   environment: Record<string, string>,
 ): Record<string, string> {
   // An SDK executable override disables its bundled-tool PATH setup.
-  const toolsDirectory = join(dirname(dirname(command)), "codex-path");
+  let toolsDirectory: string;
   try {
+    toolsDirectory = join(
+      dirname(realpathSync.native(dirname(command))),
+      "codex-path",
+    );
     if (!statSync(toolsDirectory).isDirectory()) return environment;
   } catch {
     return environment;

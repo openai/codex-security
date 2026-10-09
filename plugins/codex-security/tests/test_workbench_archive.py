@@ -70,6 +70,27 @@ def stored_paths(state, scan_id):
         )
 
 
+def workflow(state, workflow_id="synthetic-workflow", **payload):
+    return run_workbench(
+        state,
+        "finding-workflow",
+        input_text=json.dumps({"id": workflow_id, "action": "get", **payload}),
+    )["workflow"]
+
+
+@pytest.fixture
+def workflow_scan(previous_scan):
+    state, _, output, scan_id = previous_scan
+    workflow(state, action="bind", binding={"scanId": scan_id, "scanDir": str(output)})
+    workflow(
+        state,
+        action="complete",
+        stage="scan",
+        result={"sarifPath": str(output / "exports" / "results.sarif"), "threadId": "synthetic"},
+    )
+    return previous_scan
+
+
 def test_concurrent_registration_keeps_running_scan_output(previous_scan):
     state, target, output, scan_id = previous_scan
 
@@ -85,9 +106,10 @@ def test_concurrent_registration_keeps_running_scan_output(previous_scan):
     assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
 
 
-def test_only_one_concurrent_registration_archives_previous_output(previous_scan):
-    state, target, output, scan_id = previous_scan
+def test_only_one_concurrent_registration_archives_previous_output(workflow_scan):
+    state, target, output, scan_id = workflow_scan
     mark_stopped(state, scan_id)
+    saved_workflow = workflow(state)
 
     def attempt(_):
         try:
@@ -103,6 +125,33 @@ def test_only_one_concurrent_registration_archives_previous_output(previous_scan
     assert (archive / "report.md").read_text() == "previous scan\n"
     assert list(output.iterdir()) == []
     assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
+    saved_workflow["scanDir"] = str(archive)
+    saved_workflow["stages"]["scan"]["result"]["sarifPath"] = str(archive / "exports/results.sarif")
+    assert workflow(state) == saved_workflow
+    assert (
+        workflow(state, action="bind", binding={"scanId": scan_id, "scanDir": str(archive)})
+        == saved_workflow
+    )
+
+
+@pytest.mark.parametrize("result", [None, {}, {"sarifPath": None}, {"sarifPath": "unrelated"}])
+def test_archiving_preserves_other_workflow_bindings_and_result_metadata(previous_scan, result):
+    state, target, output, scan_id = previous_scan
+    mark_stopped(state, scan_id)
+    bindings = {
+        "matching": {"scanId": scan_id, "scanDir": str(output)},
+        "copied-directory": {"scanId": scan_id, "scanDir": str(output.with_name("copy"))},
+        "other-scan": {"scanId": str(uuid.uuid4()), "scanDir": str(output)},
+    }
+    before = {}
+    for workflow_id, binding in bindings.items():
+        workflow(state, workflow_id, action="bind", binding=binding)
+        before[workflow_id] = workflow(
+            state, workflow_id, action="complete", stage="scan", result=result
+        )
+    registered = register(state, target, output, "--archive-existing")
+    before["matching"]["scanDir"] = registered["archivedScanDir"]
+    assert {workflow_id: workflow(state, workflow_id) for workflow_id in bindings} == before
 
 
 def test_registration_rejection_restores_files_and_database(previous_scan):
@@ -115,9 +164,10 @@ def test_registration_rejection_restores_files_and_database(previous_scan):
     assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
 
 
-def test_commit_failure_restores_archived_output(previous_scan, monkeypatch):
-    state, target, output, scan_id = previous_scan
+def test_commit_failure_restores_archived_output(workflow_scan, monkeypatch):
+    state, target, output, scan_id = workflow_scan
     mark_stopped(state, scan_id)
+    saved_workflow = workflow(state)
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     module = runpy.run_path(str(SCRIPT))
     connection = module["connect"]()
@@ -147,6 +197,7 @@ def test_commit_failure_restores_archived_output(previous_scan, monkeypatch):
     assert (output / "report.md").read_text() == "previous scan\n"
     assert list(output.parent.glob("scan.previous-*")) == []
     assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
+    assert workflow(state) == saved_workflow
 
 
 def test_legacy_caller_can_supply_already_archived_output(previous_scan):
