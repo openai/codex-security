@@ -1029,11 +1029,11 @@ export async function securityPolicyDiff(
       },
     );
     const releaseFailedInput = () => {
-      if (
-        inputError === undefined ||
-        (child.exitCode === null && child.signalCode === null)
-      )
+      if (inputError === undefined) return;
+      if (child.exitCode === null && child.signalCode === null) {
+        if (child.pid !== undefined) reject(inputError);
         return;
+      }
       child.stdout!.destroy();
       child.stderr!.destroy();
     };
