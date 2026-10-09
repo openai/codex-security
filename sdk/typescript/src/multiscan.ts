@@ -803,10 +803,14 @@ async function inspectLock(
     ownerId?: string;
     hostname?: string;
     processStartedAt?: number;
-  };
+  } | null;
   try {
     identity = JSON.parse(owner) as typeof identity;
   } catch {
+    return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
+  }
+
+  if (identity === null) {
     return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
   }
 

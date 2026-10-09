@@ -1788,6 +1788,42 @@ describe("multiscan", () => {
     expect((await lstat(lock)).isDirectory()).toBe(true);
   });
 
+  test("recovers an expired supervisor lock with a null owner record", async () => {
+    const { paths } = await repositoryFixture("expired-null-owner");
+    const lock = join(paths.output, ".lock");
+    const ownerPath = join(lock, "owner.json");
+    await mkdir(lock, { recursive: true, mode: 0o700 });
+    await writeFile(ownerPath, "null", { mode: 0o600 });
+    const expired = new Date(Date.now() - 120_000);
+    await utimes(ownerPath, expired, expired);
+
+    const summary = await runMultiscan(
+      options(paths, client(completeRunWithoutAwait)),
+    );
+
+    expect(summary).toMatchObject({ completed: 1, failed: 0 });
+    await expect(access(lock)).rejects.toThrow();
+    expect(
+      (await readdir(paths.output)).some((name) =>
+        name.startsWith(".lock.stale-"),
+      ),
+    ).toBe(false);
+  });
+
+  test("preserves a fresh supervisor lock with a null owner record", async () => {
+    const { paths } = await repositoryFixture("fresh-null-owner");
+    const lock = join(paths.output, ".lock");
+    const ownerPath = join(lock, "owner.json");
+    await mkdir(lock, { recursive: true, mode: 0o700 });
+    await writeFile(ownerPath, "null", { mode: 0o600 });
+
+    await expect(
+      runMultiscan(options(paths, client(completeRunWithoutAwait))),
+    ).rejects.toThrow("A multiscan supervisor is already running.");
+    expect(await readFile(ownerPath, "utf8")).toBe("null");
+    expect((await lstat(lock)).isDirectory()).toBe(true);
+  });
+
   test("recovers an interrupted stale-lock recovery claim", async () => {
     const { paths } = await repositoryFixture(
       "interrupted-recovery",
