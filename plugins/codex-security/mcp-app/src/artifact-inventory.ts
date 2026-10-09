@@ -161,11 +161,14 @@ export async function listCodexSecurityReviewItems(
 async function readReviewItems(
   context: ArtifactContext,
 ): Promise<ReviewItem[]> {
-  const source = decodeUtf8(
-    await readFile(
-      await artifactSourcePath(context, inventoryComponents, label),
-    ),
-  );
+  const path = await artifactSourcePath(context, inventoryComponents, label);
+  const contents = await readFile(path).catch((error: unknown) => {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  });
+  const source = decodeUtf8(contents);
   const rows: ReviewItem[] = [];
 
   for (const [index, line] of source.split(/\r?\n/u).entries()) {
