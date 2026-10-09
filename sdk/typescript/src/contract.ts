@@ -12,7 +12,11 @@ import {
 import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import { regexes } from "zod";
-import { ContractValidationError, abortReason } from "./errors.js";
+import {
+  ContractValidationError,
+  abortReason,
+  errorMessage,
+} from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
   ContractObject as JsonRecord,
@@ -59,6 +63,8 @@ export interface LoadedContract {
   coverage: CoverageDocument;
 }
 
+export class ContractSchemaError extends ContractValidationError {}
+
 type LoadContractOptions = {
   pluginRoot: string;
   expectedScanId?: string;
@@ -78,6 +84,10 @@ export async function loadContractWithScanDirectory(
   scanDirectory: string,
   options: LoadContractOptions,
 ): Promise<{ contract: LoadedContract; scanDirectory: string }> {
+  const validators = await loadContractValidators(
+    options.pluginRoot,
+    options.signal,
+  );
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
@@ -94,17 +104,10 @@ export async function loadContractWithScanDirectory(
   throwIfAborted(options.signal);
   let findingsPayload: unknown = payloads["findings.json"];
 
-  const ajv = createValidator();
-  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
-    const schema = await readJson(
-      join(options.pluginRoot, "schemas", schemaName),
-      options.signal,
-    );
-    let validate: ReturnType<typeof ajv.compile>;
+  for (const { filename, schemaName, validate } of validators) {
     let payload: unknown;
     let valid: boolean;
     try {
-      validate = ajv.compile(schema);
       payload =
         filename === "findings.json" ? findingsPayload : payloads[filename];
       const validatePayload = (payload: unknown) => {
@@ -120,7 +123,7 @@ export async function loadContractWithScanDirectory(
         valid = validatePayload(payload);
       }
     } catch {
-      throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
+      throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
     }
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
@@ -973,6 +976,34 @@ function createValidator(): Ajv2020 {
     validate: validRfc3339DateTime,
   });
   return ajv;
+}
+
+async function loadContractValidators(
+  pluginRoot: string,
+  signal?: AbortSignal,
+) {
+  const ajv = createValidator();
+  const validators = [];
+  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
+    const schema = await readJson(
+      join(pluginRoot, "schemas", schemaName),
+      signal,
+    ).catch((error: unknown) => {
+      throwIfAborted(signal);
+      throw new ContractSchemaError(errorMessage(error), { cause: error });
+    });
+    try {
+      const validate = ajv.compile(schema);
+      if ("$async" in validate && validate.$async === true) {
+        throw new Error("asynchronous JSON Schema validation is unsupported");
+      }
+      validators.push({ filename, schemaName, validate });
+    } catch {
+      throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
+    }
+    throwIfAborted(signal);
+  }
+  return validators;
 }
 
 async function sha256ScanFile(

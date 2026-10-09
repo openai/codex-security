@@ -5,6 +5,7 @@ import { realpathSync } from "node:fs";
 import {
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readFile,
   readdir,
@@ -22,6 +23,7 @@ import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
+import { ContractSchemaError, loadContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
@@ -35,7 +37,11 @@ import {
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
-import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
+import {
+  requireSecureOutputAncestry,
+  resolvePluginPath,
+  validateOutputDir,
+} from "./runtime.js";
 import { DiffTarget, type ScanMode } from "./targets.js";
 import {
   meetsSeverity,
@@ -217,13 +223,36 @@ export async function runMultiscan(
   const output = await ensureOutputDirectory(requestedOutput);
   await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
+  let pluginWorkspace: string | undefined;
+  let pluginRoot: Promise<string> | undefined;
+  const resumePluginRoot = (): Promise<string> =>
+    (pluginRoot ??= (async () => {
+      if (options.config.pluginPath !== undefined) {
+        pluginWorkspace = await mkdtemp(join(output, ".resume-plugin-"));
+      }
+      return await resolvePluginPath(
+        options.config.pluginPath,
+        pluginWorkspace ?? output,
+        options.signal,
+      );
+    })());
   try {
-    const result = await runCampaign(resolvedOptions, tasks, output);
+    const result = await runCampaign(
+      resolvedOptions,
+      tasks,
+      output,
+      resumePluginRoot,
+    );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
       : result;
   } finally {
-    await unlock();
+    await Promise.all([
+      unlock(),
+      pluginWorkspace === undefined
+        ? undefined
+        : rm(pluginWorkspace, { recursive: true, force: true }),
+    ]);
   }
 }
 
@@ -231,6 +260,7 @@ async function runCampaign(
   options: MultiscanOptions,
   tasks: MultiscanTask[],
   output: string,
+  resumePluginRoot: () => Promise<string>,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
@@ -263,6 +293,7 @@ async function runCampaign(
     options.recoverScan !== undefined,
   );
   const pending: MultiscanTask[] = [];
+  const rejectedCompleted = new Set<string>();
   let completed = 0;
   let incomplete = 0;
   let policyFailed = false;
@@ -303,11 +334,26 @@ async function runCampaign(
       task.id,
       `attempt-${receipt.attempt}`,
     );
+    const selectedOutputMatches =
+      receipt.outputDir === artifactOutput ||
+      receipt.outputDir === selectedArtifactOutput;
+    const artifactsPresent =
+      selectedOutputMatches && (await hasArtifacts(artifactOutput));
     if (
-      (receipt.outputDir === artifactOutput ||
-        receipt.outputDir === selectedArtifactOutput) &&
-      (await hasArtifacts(artifactOutput))
+      receipt.status === "completed" &&
+      selectedOutputMatches &&
+      (!(await hasCompleteContract(
+        artifactOutput,
+        await resumePluginRoot(),
+        options.signal,
+      )) ||
+        !artifactsPresent)
     ) {
+      rejectedCompleted.add(artifactOutput);
+      pending.push(task);
+      continue;
+    }
+    if (artifactsPresent) {
       if (receipt.status !== "failed" && receipt.warnings?.length) {
         warnings.push({ repository: task.id, warnings: receipt.warnings });
         for (const warning of receipt.warnings) {
@@ -409,7 +455,12 @@ async function runCampaign(
             | (Pick<ScanResult, "coverage" | "cost" | "findings"> &
                 Partial<Pick<ScanResult, "threatModelPath">>)
             | undefined;
-          if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
+          if (
+            options.recoverScan !== undefined &&
+            retry === 0 &&
+            attempt > 0 &&
+            !rejectedCompleted.has(scanDir)
+          ) {
             const existing = await lstat(scanDir).catch(undefinedIfMissingFile);
             if (existing !== undefined) {
               await ensureOutputDirectory(scanDir);
@@ -1036,6 +1087,22 @@ async function hasArtifacts(path: string): Promise<boolean> {
     }
     return true;
   } catch {
+    return false;
+  }
+}
+
+async function hasCompleteContract(
+  path: string,
+  pluginRoot: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    signal?.throwIfAborted();
+    const contract = await loadContract(path, { pluginRoot, signal });
+    return contract.coverage.completeness === "complete";
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof ContractSchemaError) throw error;
     return false;
   }
 }

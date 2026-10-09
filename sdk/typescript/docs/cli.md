@@ -698,6 +698,12 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
+A receipt claiming complete coverage is skipped only when its canonical artifacts
+and seal remain valid and its saved coverage is complete. Otherwise, a new attempt
+is queued, including with `--recover`, while the old artifacts remain available.
+Missing or invalid plugin schemas stop resume without starting another scan.
+Results recorded with incomplete coverage remain terminal with their existing
+warning.
 Changes to project configuration, extracted knowledge-base text, staged document
 filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` selections
 require a new output directory. Version 1 manifests also require a new directory

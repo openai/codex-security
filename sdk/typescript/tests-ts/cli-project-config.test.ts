@@ -9,6 +9,7 @@ import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture } from "./plugin-root.js";
 import { rejecting, throwing } from "./support/errors.js";
 import {
   createCliTest,
@@ -384,17 +385,12 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     return fakeSecurity(async (_repository, options = {}) => {
       selected.push(options);
       const result = fakeResult(["high"]);
-      await mkdir(options.outputDir!, { recursive: true });
-      for (const [name, content] of Object.entries({
-        "scan-manifest.json": result.manifest,
-        "findings.json": result.findings,
-        "coverage.json": result.coverage,
-        "report.md": "Synthetic report.",
-      }))
-        await writeFile(
-          join(options.outputDir!, name),
-          typeof content === "string" ? content : JSON.stringify(content),
-        );
+      await mkdir(options.outputDir!, { recursive: true, mode: 0o700 });
+      await copyCompletedScanFixture(options.outputDir!);
+      await writeFile(
+        join(options.outputDir!, "report.md"),
+        "Synthetic report.",
+      );
       return result;
     });
   };
