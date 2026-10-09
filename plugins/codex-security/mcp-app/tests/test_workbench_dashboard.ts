@@ -321,3 +321,40 @@ test("dashboard searches legacy records with missing or null titles", (t) => {
   );
   assert.equal(dashboard(db, { ...query, query: "absent" }).total, 0);
 });
+
+test("dashboard preserves exact lone-surrogate display without lossy search matches", (t) => {
+  const db = database(t);
+  const titles = [
+    "high\ud800title",
+    "low\udc00title",
+    "paired\ud83d\udca0title",
+  ];
+  for (const [index, title] of titles.entries()) {
+    const id = `surrogate-${index}`;
+    const stored = insert(db, id, "synthetic-repository", title);
+    const result = dashboard(db, {
+      view: "findings",
+      sort: "title",
+      limit: 50,
+      offset: 0,
+      id,
+    });
+    assert.equal(result.detail?.item.title, title);
+    assert.deepEqual(
+      result.detail?.finding,
+      stored,
+      "display does not change the canonical finding",
+    );
+    const matches = dashboard(db, {
+      view: "findings",
+      sort: "title",
+      limit: 50,
+      offset: 0,
+      query: title.toWellFormed(),
+    });
+    assert.deepEqual(
+      matches.items.map((item) => item.id),
+      title.isWellFormed() ? [id] : [],
+    );
+  }
+});

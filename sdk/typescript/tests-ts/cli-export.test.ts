@@ -68,9 +68,6 @@ describe("CLI", () => {
       Path: "C:\\Python;C:\\Windows\\System32",
       PYTHON: "/managed/python",
       XDG_CACHE_HOME: "/managed/cache",
-      LD_LIBRARY_PATH: "/managed/libraries",
-      DYLD_LIBRARY_PATH: "/managed/dylibs",
-      DYLD_FALLBACK_LIBRARY_PATH: "/managed/fallback-libraries",
       PYTHONUTF8: "1",
       TMPDIR: "/tmp",
     });

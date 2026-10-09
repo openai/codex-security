@@ -30,8 +30,18 @@ class FindingsHttpError extends CodexSecurityError {
     message: string,
     signal?: AbortSignal,
   ): Promise<FindingsHttpError> {
-    // Gateways can return plain text or HTML instead of the service's JSON error.
-    const body: unknown = await response.json().catch(() => undefined);
+    // Service errors are JSON; other gateway bodies need not finish to report HTTP failure.
+    const mediaType = response.headers
+      .get("Content-Type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    let body: unknown;
+    if (mediaType === "application/json") {
+      body = await response.json().catch(() => undefined);
+    } else {
+      void response.body?.cancel().catch(() => undefined);
+    }
     signal?.throwIfAborted();
     const error = parseFindingsErrorResponse(body);
     return new FindingsHttpError(

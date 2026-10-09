@@ -16,7 +16,13 @@ test("lookup preserves the service error code and explanation", async () => {
     "http://synthetic.test",
     undefined,
     async () =>
-      Response.json({ error: "finding_not_indexed", message }, { status: 404 }),
+      Response.json(
+        { error: "finding_not_indexed", message },
+        {
+          status: 404,
+          headers: { "Content-Type": "Application/JSON; charset=utf-8" },
+        },
+      ),
   );
   await expect(
     client.potentialDuplicates("synthetic", scope),
@@ -54,7 +60,10 @@ test("publishing preserves cancellation while reading an error response", async 
   const reason = new Error("Synthetic caller cancellation");
   const request = mock(async (_url: URL, init: RequestInit) => {
     expect(init.signal).toBe(controller.signal);
-    const response = new Response(null, { status: 409 });
+    const response = new Response(null, {
+      status: 409,
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+    });
     response.json = async () => {
       controller.abort(reason);
       throw new DOMException("Synthetic aborted body read", "AbortError");

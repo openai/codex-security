@@ -3,6 +3,7 @@ import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type {
   DeepScanRunState,
+  CodexWorkerDiagnostic,
   PersistedDeepScanWorker,
   DeepScanLogEvent,
 } from "../src/deep-scan/types.js";
@@ -1193,6 +1194,51 @@ async function testCancellationClearsRetryWait() {
     callsAtCancellation,
     "canceling a retry delay must not launch another attempt",
   );
+}
+
+async function testGenericDiagnosticsPreserveMissingResultRetries() {
+  for (const code of [
+    undefined,
+    "file_change_failed",
+    "artifact_tool_failed",
+  ] as const) {
+    for (const genericFirst of [false, true]) {
+      const diagnostics: CodexWorkerDiagnostic[] = [
+        {
+          code: "worker_error",
+          message: "Synthetic stream reconnect notification.",
+        },
+      ];
+      if (code)
+        diagnostics.push({
+          code,
+          message: "Synthetic recognized worker failure.",
+        });
+      if (!genericFirst) diagnostics.reverse();
+      const { fixture, store } = await coordinatorFixture();
+      const executor = new FakeExecutor({
+        invalidDiscoveryAttempts: 1,
+        discoveryDiagnostics: diagnostics,
+      });
+      const terminal = await runCoordinator(fixture, store, executor, {
+        retryDelaysMs: [1],
+      });
+      assert.equal(terminal?.status, "succeeded", terminal?.error);
+      assert.deepEqual(executor.discoveryResumeThreadIds, [
+        undefined,
+        code === "file_change_failed"
+          ? undefined
+          : executor.discoveryThreadIds[0],
+      ]);
+      for (const diagnostic of diagnostics) {
+        assert.ok(
+          store.workerUpdates.some((update) =>
+            update.error?.includes(diagnostic.message),
+          ),
+        );
+      }
+    }
+  }
 }
 
 async function testMissingDiscoveryResultResumesExistingThread(
@@ -4140,6 +4186,7 @@ try {
   await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();
   await testDiscoveryPhasePersistenceFailureStopsDispatch();
   await testCancellationClearsRetryWait();
+  await testGenericDiagnosticsPreserveMissingResultRetries();
   await testMissingDiscoveryResultResumesExistingThread();
   await testMissingDiscoveryResultResumesExistingThread(true);
   await testInvalidArtifactsRetry();

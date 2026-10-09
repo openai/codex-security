@@ -4,7 +4,7 @@ import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { z } from "incur";
 import Papa from "papaparse";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { Finding, FindingsDocument } from "./models.js";
 
 export const CSV_TARGET_ID = "codex-security-csv-import";
@@ -118,9 +118,10 @@ export async function parseImportedFindings(
     // the CSV parser already skips.
     payload = JSON.parse(source.replace(/^\uFEFF/u, ""));
   } catch (error) {
-    throw new CodexSecurityError("Findings JSON could not be parsed.", {
-      cause: error,
-    });
+    throw new CodexSecurityError(
+      `Findings JSON could not be parsed. ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
   if (
     payload === null ||

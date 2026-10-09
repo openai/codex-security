@@ -134,6 +134,8 @@ test("preserves owned worker tool failure diagnostics", async () => {
     [
       bundledFunction(runtime, recordHelper!),
       bundledFunction(runtime, "isSandboxNamespaceExhaustion"),
+      bundledFunction(runtime, "isCodeModeFrameError"),
+      bundledFunction(runtime, "appendStreamDiagnostic"),
       bundledFunction(runtime, "appendUniqueDiagnostic"),
       diagnosticSource,
       "return appendItemDiagnostic;",
