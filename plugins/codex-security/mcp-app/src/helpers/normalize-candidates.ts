@@ -419,6 +419,34 @@ export function createCandidateNormalizer(
   };
 }
 
+export interface CandidateNormalizationInput {
+  repoRoot: string;
+  scopePath: string;
+  allowMissing: boolean;
+  sources?: ReadonlyMap<string, CandidateSource>;
+  candidates: unknown[];
+}
+
+export function normalizeCandidateBatch(input: CandidateNormalizationInput) {
+  const normalizer = createCandidateNormalizer(
+    input.repoRoot,
+    input.scopePath,
+    input.allowMissing,
+    input.sources,
+  );
+  for (const [index, candidate] of input.candidates.entries()) {
+    try {
+      normalizer.add(candidate);
+    } catch (error) {
+      throw new Error(
+        `discovery candidates: candidate input row ${index + 1}: ${(error as Error).message}`,
+        { cause: error },
+      );
+    }
+  }
+  return normalizer.finish();
+}
+
 function argumentsFor(args: string[]) {
   const { values, tokens } = parseArgs({
     args,
