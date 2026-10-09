@@ -268,6 +268,9 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
     expect(result.manifest.scan.scope.runtimeStatus).toBe("imported");
     expect(result.coverage.completeness).toBe("unknown");
+    expect(result.coverage.surfaces).toMatchObject([
+      { disposition: "reported" },
+    ]);
     expect(result.turnResult["imported"]).toBe(true);
     expect(result.threadId).toBe("");
     expect(await readFile(result.reportPath, "utf8")).toContain(
@@ -315,6 +318,41 @@ test.each(["csv", "json"] as const)(
     expect(imported.format).toBe(format);
     expect(imported.sourcePath).not.toBe(context.options.sourcePath);
     expect(await readFile(imported.sourcePath, "utf8")).toBe(context.source);
+  },
+);
+
+test.each(["csv", "json"] as const)(
+  "%s imports without findings do not claim a reported or analyzed surface",
+  async (format) => {
+    const context = await fixture(format);
+    const source =
+      format === "csv"
+        ? `${csvColumns.join(",")}\n`
+        : JSON.stringify({ findings: [] });
+    await writeFile(context.options.sourcePath, source);
+    const result = completed(
+      await importScan(context.options, context.dependencies),
+    );
+    expect(result.manifest.scan.status).toBe("completed");
+    expect(result.findings.findings).toEqual([]);
+    expect(result.coverage).toMatchObject({
+      completeness: "unknown",
+      surfaces: [],
+    });
+    const sourceRef = `artifacts/import/source.${format}`;
+    expect(result.manifest.scan["extensions"]).toMatchObject({
+      import: { format, sourceRef, findingCount: 0 },
+    });
+    expect(await readFile(join(result.scanDir, sourceRef), "utf8")).toBe(
+      source,
+    );
+    expect(await readFile(result.reportPath, "utf8")).not.toContain(
+      "Reported |",
+    );
+    expect((await storedScans(context))[0]).toMatchObject({
+      status: "complete",
+      occurrence_count: 0,
+    });
   },
 );
 
