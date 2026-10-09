@@ -200,6 +200,12 @@ describe("custom validation", () => {
       "not_applicable",
       "deferred",
     );
+    const counterEvidence =
+      "The protected caller checks a separate precondition.";
+    const limitations = "The alternate configuration was not exercised.";
+    output.validations[0]!.validation.counterevidence_or_proof_gap =
+      counterEvidence;
+    output.validations[0]!.validation.remaining_uncertainty = limitations;
     output.validations[0]!.severity = {
       level: "medium",
       rationale: "Requires an uncommon configuration.",
@@ -252,7 +258,11 @@ describe("custom validation", () => {
       severity: output.validations[0]!.severity,
       confidence: { level: "medium" },
       attackPath: { impact: output.validations[0]!.impact },
-      validation: { disposition: "reportable" },
+      validation: {
+        disposition: "reportable",
+        counterEvidence: [counterEvidence],
+        limitations: [limitations],
+      },
     });
     const coverage = await json<CoverageDocument>(
       join(f.scanDir, "coverage.json"),
@@ -346,6 +356,10 @@ describe("custom validation", () => {
     );
     expect(saved.findings).toHaveLength(3);
     for (const [index, finding] of saved.findings.entries()) {
+      expect(finding.validation).toMatchObject({
+        counterEvidence: [],
+        limitations: [],
+      });
       expect(finding.identity).toEqual(f.findings.findings[index]!.identity);
       expect(finding.locations).toEqual(f.findings.findings[index]!.locations);
       expect(finding.attackPath).toEqual({
@@ -621,6 +635,10 @@ describe("custom validation", () => {
                     const output = result(
                       scenario === "dismissed" ? "suppressed" : "reportable",
                     );
+                    output.validations[0]!.validation.counterevidence_or_proof_gap =
+                      "Synthetic counterevidence from validation.";
+                    output.validations[0]!.validation.remaining_uncertainty =
+                      "Synthetic limitation from validation.";
                     if (scenario === "incomplete") {
                       output.status = "incomplete";
                       output.reason =
@@ -735,6 +753,11 @@ describe("custom validation", () => {
         }
         const completed = await pending;
         if (scenario === "standard") {
+          const report = await readFile(join(scanDir, "report.md"), "utf8");
+          expect(report).toContain(
+            "Synthetic counterevidence from validation.",
+          );
+          expect(report).toContain("Synthetic limitation from validation.");
           expect(
             activities.filter(
               ({ description }) => description === validationActivity,

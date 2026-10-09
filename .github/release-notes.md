@@ -11,7 +11,7 @@
 - share common tool annotations ([#1258](https://github.com/openai/codex-security/pull/1258))
 - preserve trailing whitespace in Git paths ([#1135](https://github.com/openai/codex-security/pull/1135))
 - reject a destination that aliases the source database ([#1138](https://github.com/openai/codex-security/pull/1138))
-- surface run warnings in campaign summaries ([#1172](https://github.com/openai/codex-security/pull/1172))
+- surface run warnings in campaign summaries (#1172) ([9c3df08](https://github.com/openai/codex-security/commit/9c3df087ed169e63b2a7272dac30502cb498a821))
 - align sealed scan reader compatibility ([#1175](https://github.com/openai/codex-security/pull/1175))
 - run consistent checks for Markdown changes ([#1257](https://github.com/openai/codex-security/pull/1257))
 - align triage graders with supported behavior ([#1245](https://github.com/openai/codex-security/pull/1245))
@@ -99,7 +99,7 @@
 - preserve severity assessments for each scan ([#1058](https://github.com/openai/codex-security/pull/1058))
 - show active reviews and result consolidation during Deep Scan ([#1253](https://github.com/openai/codex-security/pull/1253))
 - keep bulk-scan knowledge and settings stable on resume ([#1059](https://github.com/openai/codex-security/pull/1059))
-- reject plaintext remote login URLs ([#1331](https://github.com/openai/codex-security/pull/1331))
+- reject plaintext remote login URLs (#1331) ([4c1dcbb](https://github.com/openai/codex-security/commit/4c1dcbb64ca7cc52178c693922f574ac67929919))
 - keep unusable DOCX numeric references as literal text ([#123](https://github.com/openai/codex-security/pull/123))
 - finish cancellation when preflight ignores termination ([#1049](https://github.com/openai/codex-security/pull/1049))
 - install MCP dependencies before plugin build ([#1285](https://github.com/openai/codex-security/pull/1285))
@@ -190,6 +190,7 @@
 - keep expected answers hidden and preserve each case’s settings ([#1261](https://github.com/openai/codex-security/pull/1261))
 - remove the local findings serve command ([#1340](https://github.com/openai/codex-security/pull/1340))
 - update Node types and string-width ([#1545](https://github.com/openai/codex-security/pull/1545))
+- preserve import and export representations ([#1510](https://github.com/openai/codex-security/pull/1510))
 
 <!-- release-section: highlights:end -->
 
