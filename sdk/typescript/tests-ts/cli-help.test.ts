@@ -19,8 +19,6 @@ async function help(args: readonly string[], columns?: number) {
     onRepositoryCommand: () => unexpected("runRepositoryCommand"),
     onUpdateCheck: async () => unexpected("checkForUpdate"),
   });
-  deps.prepareAuthenticationHome = async () =>
-    unexpected("prepareAuthenticationHome");
   deps.importScan = async () => unexpected("importScan");
   const code = await main(
     args,
@@ -65,7 +63,10 @@ describe("CLI help", () => {
     expect(sectionFor("login")).toBeGreaterThan(sectionFor("scan"));
     expect(sectionFor("init")).toBe(sectionFor("login"));
     expect(sectionFor("completions")).toBeGreaterThan(sectionFor("scan"));
-    expect(text).toContain("codex-security scan .");
+    expect(text).toContain("Aliases: cs");
+    for (const command of ["login", "policy .", "scan .", "findings"]) {
+      expect(text).toContain(`  codex-security ${command}`);
+    }
     expect(text).toContain("<command> --help");
   });
 
@@ -120,7 +121,7 @@ describe("CLI help", () => {
     }
   });
 
-  test.each(["validate", "login", "logout", "serve"])(
+  test.each(["validate", "login", "logout"])(
     "%s does not promise unsupported JSON command output",
     async (command) => {
       const text = await help([command, "--help"]);

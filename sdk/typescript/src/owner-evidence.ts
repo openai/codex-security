@@ -65,15 +65,16 @@ export async function ownerRepository(
   );
   if (executable === null)
     throw new CodexSecurityError("Git is required to suggest owners.");
-  const run = async (cwd: string, args: string[]) => {
+  const run = async (cwd: string, args: string[], encoding: BufferEncoding) => {
     signal?.throwIfAborted();
     const { stdout } = await execFile(executable.executable, args, {
       cwd,
       env: { ...executable.environment, GIT_NO_LAZY_FETCH: "1" },
       signal,
       maxBuffer: Infinity,
+      encoding: "buffer",
     });
-    return stdout;
+    return stdout.toString(encoding);
   };
   const [gitDirectory, commonDirectory, ...objectDirectories] =
     await gitMetadataDirectories(repository, signal, {
@@ -93,24 +94,34 @@ export async function ownerRepository(
   }
   await requireBoundMetadata(metadataDirectories, objectDirectories, signal);
   // Blame otherwise reads an uncommitted .mailmap from the working directory.
-  const git = (...args: string[]) =>
-    run(gitDirectory, [
-      `--git-dir=${gitDirectory}`,
-      "--literal-pathspecs",
-      "-c",
-      "core.bare=true",
-      ...args,
-    ]);
+  const gitOutput = (encoding: BufferEncoding, ...args: string[]) =>
+    run(
+      gitDirectory,
+      [
+        `--git-dir=${gitDirectory}`,
+        "--literal-pathspecs",
+        "-c",
+        "core.bare=true",
+        "-c",
+        "i18n.logOutputEncoding=UTF-8",
+        ...args,
+      ],
+      encoding,
+    );
+  const git = (...args: string[]) => gitOutput("utf8", ...args);
   const revision = (await git("rev-parse", "--verify", "HEAD^{commit}")).trim();
   const files = new Set(
-    (await git("ls-tree", "-r", "-z", "--full-tree", revision))
+    (await gitOutput("latin1", "ls-tree", "-r", "-z", "--full-tree", revision))
       .split("\0")
       .filter((record) => /^100(?:644|755) blob /u.test(record))
       .map((record) => record.slice(record.indexOf("\t") + 1)),
   );
   const shallow =
     (await git("rev-parse", "--is-shallow-repository")).trim() === "true";
-  return { git, revision, files, shallow };
+  // Latin-1 keys preserve Git's filename bytes, including unrelated non-UTF-8 names.
+  const hasFile = (path: string) =>
+    path.isWellFormed() && files.has(Buffer.from(path).toString("latin1"));
+  return { git, revision, hasFile, shallow };
 }
 
 /** Neither references nor objects may link into another checkout. */
@@ -156,7 +167,7 @@ export async function collectOwnerEvidence(
   finding: OwnerFinding,
   repository: Awaited<ReturnType<typeof ownerRepository>>,
 ): Promise<OwnerContext> {
-  const { git, revision, files, shallow } = repository;
+  const { git, revision, hasFile, shallow } = repository;
   const context: OwnerContext = {
     identities: [],
     evidence: [],
@@ -191,7 +202,7 @@ export async function collectOwnerEvidence(
     ".github/CODEOWNERS",
     "CODEOWNERS",
     "docs/CODEOWNERS",
-  ].find((path) => files.has(path));
+  ].find(hasFile);
   if (codeownersPath !== undefined) {
     const source = await git(
       "cat-file",
@@ -206,7 +217,7 @@ export async function collectOwnerEvidence(
     } else {
       const rules = parseCodeowners(source);
       for (const { path } of finding.locations) {
-        if (!files.has(path)) continue;
+        if (!hasFile(path)) continue;
         const rule = codeownersForPath(rules, path);
         if (rule === undefined) continue;
         const owner = rule.owners[0];
@@ -231,7 +242,7 @@ export async function collectOwnerEvidence(
     }
   }
   for (const path of new Set(finding.locations.map(({ path }) => path))) {
-    if (!files.has(path)) {
+    if (!hasFile(path)) {
       context.limitations.push(`Not a regular file at HEAD: ${path}`);
       continue;
     }

@@ -20,19 +20,6 @@
         }
       }
     },
-    "updatesPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["attackPaths"],
-      "properties": {
-        "attackPaths": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/attackPathUpdate"
-          }
-        }
-      }
-    },
     "attackPathUpdate": {
       "type": "object",
       "additionalProperties": false,
