@@ -46,6 +46,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -62,7 +63,9 @@ try {
   await buildServer(runtimeBundle, {
     define: {
       __dirname: JSON.stringify(path.join(bundledPluginRoot, "mcp")),
-      "import.meta.url": "__filename",
+      "import.meta.url": JSON.stringify(
+        pathToFileURL(path.join(bundledPluginRoot, "mcp", "server.mjs")).href,
+      ),
     },
     logOverride: { "empty-import-meta": "silent" },
     target: "node20",

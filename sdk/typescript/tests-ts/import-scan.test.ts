@@ -26,6 +26,7 @@ import { runCommand } from "./support/shell.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import { TestClient } from "./support/api-client.js";
 
 const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -553,6 +554,94 @@ test.each(["bundled", "legacy"])(
   },
 );
 
+test.each(["root", "child", "linked", "inverse", "aliased", "aliased-child"])(
+  "legacy archive preserves the active workbench at a %s state path",
+  async (layout) => {
+    const context = await fixture();
+    const outputDir = join(context.root, "results");
+    await mkdir(outputDir, { mode: 0o700 });
+    let stateDirectory =
+      layout === "root"
+        ? outputDir
+        : layout === "inverse"
+          ? context.stateDirectory
+          : join(outputDir, "state");
+    if (layout === "linked" || layout.startsWith("aliased")) {
+      await mkdir(context.stateDirectory, { mode: 0o700 });
+      await symlink(
+        context.stateDirectory,
+        stateDirectory,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
+    if (layout.startsWith("aliased")) {
+      const alias = join(context.root, "alias");
+      await symlink(
+        context.root,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      stateDirectory = join(alias, "results", "state");
+      if (layout === "aliased-child")
+        stateDirectory = join(stateDirectory, "child");
+    }
+    if (layout === "inverse") {
+      const inside = join(outputDir, "state");
+      await mkdir(inside, { mode: 0o700 });
+      await symlink(
+        inside,
+        stateDirectory,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
+    context.dependencies.environment.CODEX_SECURITY_STATE_DIR = stateDirectory;
+    const first = completed(
+      await importScan(
+        {
+          ...context.options,
+          outputDir: join(context.root, "previous"),
+        },
+        context.dependencies,
+      ),
+    );
+    const repository = join(context.root, "repository");
+    await mkdir(repository);
+    await writeFile(
+      join(repository, "example.ts"),
+      "export const value = 1;\n",
+    );
+    const client = new TestClient(
+      {
+        ...context.options.config,
+        pluginPath: await legacyArchivePlugin(context),
+      },
+      { ...context.dependencies, runWorkbench },
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          mock: true,
+          outputDir,
+          archiveExisting: true,
+        }),
+      ).rejects.toThrow("active workbench database");
+      const saved = await runWorkbench(context.workbenchOptions, [
+        "get-scan",
+        "--scan-id",
+        first.manifest.scan.id,
+      ]);
+      expect((saved["scan"] as { scanId: string }).scanId).toBe(
+        first.manifest.scan.id,
+      );
+      expect(await readFile(first.manifestPath, "utf8")).toContain(
+        first.manifest.scan.id,
+      );
+    } finally {
+      await client.close();
+    }
+  },
+);
+
 test.each(["active scan", "missing parent"])(
   "legacy registration restores output after rejecting %s",
   async (reason) => {
@@ -659,7 +748,7 @@ test.each(["failure", "abort"] as const)(
     const controller = new AbortController();
     const run: typeof runWorkbench = async (options, args, input) => {
       if (args[0] === "prepare-scan-completion" && mode === "failure") {
-        throw new Error("Synthetic import completion failure");
+        throw new Error("--synthetic-import-completion-failure");
       }
       const result = await runWorkbench(options, args, input);
       if (args[0] === "register-cli-scan" && mode === "abort")
@@ -677,7 +766,7 @@ test.each(["failure", "abort"] as const)(
       await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
     else
       await expect(operation).rejects.toThrow(
-        "Synthetic import completion failure",
+        "--synthetic-import-completion-failure",
       );
     const scans = await storedScans(context);
     expect(scans).toHaveLength(1);

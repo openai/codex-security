@@ -113,6 +113,9 @@ jobs:
     needs: validate-title
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -131,6 +134,10 @@ jobs:
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Check devcontainer dependency cooldown
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node --experimental-strip-types sdk/typescript/scripts/check-devcontainer-cooldown.mts
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting
@@ -270,6 +277,10 @@ jobs:
       - name: Inspect installed package
         working-directory: sdk/typescript
         run: node scripts/check-package.mjs ../../dist/*.tgz
+
+      - name: Check Action against the release candidate
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        uses: ./.github/actions/check-action-candidate
 
   mcp:
     name: MCP app tests
@@ -411,9 +422,14 @@ jobs:
           path: reports/python.xml
           if-no-files-found: warn
           retention-days: 14
-      - name: Build SDK and type-check eval tooling
+      - name: Set up Node.js for triage evals
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: pnpm --dir sdk/typescript run build:evals
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+      - name: Set up triage eval dependencies and host runtime
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: pnpm --dir evals/triage-finding run setup
       - name: Test deterministic triage eval contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         working-directory: evals/triage-finding
@@ -522,7 +538,7 @@ jobs:
     needs: [validate-title, package]
     runs-on: windows-latest
     timeout-minutes: 20
-    strategy:
+    strategy: &windows-node-strategy
       fail-fast: false
       matrix:
         node: ["22.13.0", "24"]
@@ -549,10 +565,7 @@ jobs:
         windows-test,
         windows-verify,
       ]
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["22.13.0", "24"]
+    strategy: *windows-node-strategy
     steps:
       - name: Require every Windows coverage job
         if: needs.validate-title.result != 'success' || (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')

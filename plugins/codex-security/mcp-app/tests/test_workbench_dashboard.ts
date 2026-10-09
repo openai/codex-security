@@ -167,6 +167,43 @@ test("dashboard preserves NUL text through display, filters, search, and sorting
   assert.deepEqual(groups.detail?.group?.findingIds, [first, second]);
 });
 
+test("dashboard searches decoded repository names in findings and groups", (t) => {
+  const db = database(t);
+  const names = [
+    "repo\\folder",
+    'repo"quote',
+    "repo\0nul",
+    "repo\nline",
+    "répo/ΟΣ",
+  ];
+  names.forEach((name, index) => {
+    insert(db, String(index), name);
+    db.prepare("INSERT INTO finding_dedupe_groups VALUES (?, 'created')").run(
+      `group-${index}`,
+    );
+    db.prepare("INSERT INTO finding_dedupe_group_members VALUES (?, ?)").run(
+      `group-${index}`,
+      String(index),
+    );
+  });
+  for (const view of ["findings", "groups"] as const) {
+    for (const name of names) {
+      const query = { view, sort: "title", limit: 50, offset: 0 } as const;
+      const found = dashboard(db, { ...query, query: name.toUpperCase() });
+      assert.equal(found.total, 1, name);
+      assert.deepEqual(found.items[0].repositoryIds, [name]);
+      assert.deepEqual(
+        found.items,
+        dashboard(db, { ...query, repository: name }).items,
+      );
+      assert.equal(
+        dashboard(db, { ...query, query: JSON.stringify(name) }).total,
+        0,
+      );
+    }
+  }
+});
+
 test("dashboard rejects malformed Unicode query keys without aliasing stored values", (t) => {
   const db = database(t);
   const stored = insert(db, "record-\ufffd", "scope-\ufffd", "Title\ufffd");
@@ -227,4 +264,97 @@ test("dashboard reads its counts and rows from one WAL snapshot", async (t) => {
     { id: "repository", label: "repository" },
   ]);
   assert.equal(dashboard(db, query).total, 2);
+});
+
+test("dashboard preserves JSON-escaped surrogate titles without replacement-character search hits", (t) => {
+  const db = database(t);
+  const titles = [
+    "Title\ud800",
+    "Title\udfff",
+    "Title�",
+    "Title🙂",
+    "Title\0value",
+  ];
+  const documents = titles.map((title, index) =>
+    insert(db, String(index), "repository", title),
+  );
+  const query = {
+    view: "findings",
+    sort: "title",
+    limit: 50,
+    offset: 0,
+  } as const;
+  for (const [index, title] of titles.entries()) {
+    const result = dashboard(db, { ...query, id: String(index) });
+    assert.equal(
+      result.items.find((item) => item.id === String(index))?.title,
+      title,
+    );
+    assert.equal(result.detail?.item.title, title);
+    assert.deepEqual(result.detail?.finding, documents[index]);
+  }
+  assert.deepEqual(
+    dashboard(db, { ...query, query: "�" }).items.map((item) => item.id),
+    ["2"],
+  );
+});
+
+test("dashboard searches legacy records with missing or null titles", (t) => {
+  const db = database(t);
+  insert(db, "missing", "repository");
+  insert(db, "null", "repository");
+  db.exec(`
+    UPDATE findings SET details_json = json_remove(details_json, '$.title') WHERE id = 'missing';
+    UPDATE findings SET details_json = json_set(details_json, '$.title', NULL) WHERE id = 'null';
+  `);
+  const query = {
+    view: "findings",
+    sort: "activity",
+    limit: 50,
+    offset: 0,
+  } as const;
+  assert.deepEqual(
+    dashboard(db, { ...query, query: "repository" }).items.map(
+      (item) => item.id,
+    ),
+    ["missing", "null"],
+  );
+  assert.equal(dashboard(db, { ...query, query: "absent" }).total, 0);
+});
+
+test("dashboard preserves exact lone-surrogate display without lossy search matches", (t) => {
+  const db = database(t);
+  const titles = [
+    "high\ud800title",
+    "low\udc00title",
+    "paired\ud83d\udca0title",
+  ];
+  for (const [index, title] of titles.entries()) {
+    const id = `surrogate-${index}`;
+    const stored = insert(db, id, "synthetic-repository", title);
+    const result = dashboard(db, {
+      view: "findings",
+      sort: "title",
+      limit: 50,
+      offset: 0,
+      id,
+    });
+    assert.equal(result.detail?.item.title, title);
+    assert.deepEqual(
+      result.detail?.finding,
+      stored,
+      "display does not change the canonical finding",
+    );
+    const matches = dashboard(db, {
+      view: "findings",
+      sort: "title",
+      limit: 50,
+      offset: 0,
+      query: title.toWellFormed(),
+    });
+    assert.deepEqual(
+      matches.items.map((item) => item.id),
+      title.isWellFormed() ? [id] : [],
+    );
+  }
 });

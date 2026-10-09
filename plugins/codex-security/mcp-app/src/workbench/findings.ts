@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { parseJson, stringifyJson } from "../helpers/json";
-import { requireSqliteText } from "./database";
+import { requireSqliteText, timestampOrder } from "./database";
 import { transaction } from "./transaction";
 
 export interface Finding {
@@ -127,7 +127,7 @@ export function listStoredFindings(
     const rows = database
       .prepare(
         `SELECT details_json FROM findings WHERE details_json IS NOT NULL
-        ORDER BY created_at, id LIMIT ? OFFSET ?`,
+        ORDER BY ${timestampOrder(database, "created_at")}, id LIMIT ? OFFSET ?`,
       )
       .all(limit, offset);
     const nextOffset = offset + rows.length;

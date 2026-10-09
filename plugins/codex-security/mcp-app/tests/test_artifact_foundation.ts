@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -17,13 +18,13 @@ import path from "node:path";
 import { importSource } from "./import-module.ts";
 
 const io = await importSource(
-  new URL("../src/artifact-io.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-io.ts"),
 );
 const contextApi = await importSource(
-  new URL("../src/artifact-context.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-context.ts"),
 );
 const writerApi = await importSource(
-  new URL("../artifact-writer-main.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../artifact-writer-main.ts"),
   {
     plugins: [
       {
@@ -40,7 +41,7 @@ const writerApi = await importSource(
   },
 );
 const schemas = await importSource(
-  new URL("../src/artifact-schema-loader.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-schema-loader.ts"),
 );
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
@@ -408,6 +409,27 @@ async function testSafeJsonAndJsonl() {
     ),
     /row 1 does not match its artifact schema: candidate_id: required/,
   );
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    try {
+      await chmod(destination, 0o000);
+      for (const read of [
+        io.readArtifactText,
+        io.readArtifactTextWithMetadata,
+      ]) {
+        await assert.rejects(
+          read(context, components, "discovery_candidates"),
+          (error: Error & { cause?: NodeJS.ErrnoException }) => {
+            assert.equal(error.cause?.code, "EACCES");
+            assert.ok(error.message.includes("EACCES"));
+            assert.ok(error.message.includes(destination));
+            return true;
+          },
+        );
+      }
+    } finally {
+      await chmod(destination, 0o600);
+    }
+  }
 }
 
 async function testAtomicReplacement() {

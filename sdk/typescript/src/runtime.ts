@@ -1,13 +1,12 @@
+import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
-import { isNonEmptyString } from "./value.js";
+import { isNonEmptyString, notify } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   constants,
   createWriteStream,
-  existsSync,
-  readdirSync,
   type BigIntStats,
   type Stats,
 } from "node:fs";
@@ -36,6 +35,7 @@ import {
   basename,
   dirname,
   extname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -55,6 +55,7 @@ import {
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
+  LocalPluginBootstrapError,
   PluginPythonUnavailableError,
   type ProtectedScanPathKind,
   SandboxUnavailableError,
@@ -1568,6 +1569,16 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+const WORKBENCH_ARGUMENTS_PROGRAM = String.raw`
+import json, sys
+sys.argv[2:] = json.loads(sys.stdin.buffer.readline())
+`;
+const WORKBENCH_SCRIPT_PROGRAM = String.raw`
+import runpy, sys
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+`;
+
 const ARCHIVE_READY = "codex-security-archive-ready\n";
 const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
 import io, json, runpy, sys
@@ -1582,6 +1593,22 @@ def before_archive():
     if control.readline() != "\n":
         raise SystemExit("Scan registration canceled before archival.")
 workbench["main"](before_archive=before_archive)
+`;
+
+// Internal publication callers use only the SDK's bundled workbench.
+const PUBLICATION_PROGRAM = String.raw`
+import json, runpy, sys
+from contextlib import closing
+workbench = runpy.run_path(sys.argv[1])
+context = workbench["_WORKBENCH_PUBLICATION_CONTEXT"]
+payload = json.load(sys.stdin, parse_constant=workbench["reject_non_finite_json"])
+handler = getattr(workbench["publication"], sys.argv[2].replace("-", "_"))
+if sys.argv[2] == "inspect-linear-publication":
+    result = handler(context, payload)
+else:
+    with closing(workbench["connect"]()) as connection:
+        result = handler(context, connection, payload)
+print(json.dumps(result, allow_nan=False, sort_keys=True))
 `;
 
 const workbenchComparisonSupport = new Map<
@@ -1635,6 +1662,25 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
+    const publicationInput =
+      input !== undefined &&
+      arguments_.length === 1 &&
+      [
+        "inspect-linear-publication",
+        "prepare-linear-publication",
+        "record-linear-publications",
+      ].includes(arguments_[0]!);
+    // OS argv cannot carry NUL, but workbench text fields can.
+    const framedArguments =
+      !native && arguments_.some((argument) => argument.includes("\0"));
+    let program = archiveHandshake
+      ? ARCHIVE_REGISTRATION_PROGRAM
+      : publicationInput
+        ? PUBLICATION_PROGRAM
+        : undefined;
+    if (framedArguments)
+      program =
+        WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
     const result = await runCodexCommand(
       { command },
       native
@@ -1644,9 +1690,9 @@ export async function runWorkbench(
             "-X",
             "utf8",
             "-B",
-            ...(archiveHandshake ? ["-c", ARCHIVE_REGISTRATION_PROGRAM] : []),
+            ...(program === undefined ? [] : ["-c", program]),
             script,
-            ...arguments_,
+            ...(framedArguments ? [] : arguments_),
           ],
       pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
@@ -1662,6 +1708,10 @@ export async function runWorkbench(
         : input,
       signal,
       archiveHandshake,
+      // Match native argv's UTF-8 encoding for the private argument frame.
+      framedArguments
+        ? `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`
+        : undefined,
     );
     if (!result.success) {
       throw new Error(
@@ -1726,6 +1776,17 @@ export async function runWorkbench(
         const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
         const archiveDir = await planOutputArchive(scanDir);
         if (archiveDir !== null) {
+          const stateDirectory = codexSecurityStateDirectory(
+            options.environment,
+          );
+          for (let path = stateDirectory; ; path = dirname(path)) {
+            if (isWithin(scanDir, await canonicalConfigPath(path))) {
+              throw new Error(
+                "The scan artifact directory cannot contain the active workbench database.",
+              );
+            }
+            if (dirname(path) === path) break;
+          }
           const savedScans = await savedScanIdentities(scanDir);
           signal?.throwIfAborted();
           await rename(scanDir, archiveDir);
@@ -1794,22 +1855,9 @@ export async function runWorkbench(
     }
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
-    const databaseFailure =
-      /\b(?:unable to open database file|attempt to write a readonly database|readonly database|disk i\/o error)\b/iu.test(
-        detail,
-      );
     const failure =
       options.failureMessage ?? "Could not run the Codex Security workbench";
-    throw new CodexSecurityError(
-      databaseFailure
-        ? `${failure}: cannot open the workbench database at ${join(
-            options.stateDirectory ??
-              codexSecurityStateDirectory(options.environment),
-            "workbench.sqlite3",
-          )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
-        : `${failure}: ${detail}`,
-      { cause: error },
-    );
+    throw new CodexSecurityError(`${failure}: ${detail}`, { cause: error });
   }
   let result: unknown;
   try {
@@ -2133,7 +2181,7 @@ async function prepareOutputDirectory(
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
         await rename(path, archiveDir);
-        onOutputArchived?.(archiveDir);
+        notify(() => onOutputArchived?.(archiveDir));
         existing = null;
       }
     }
@@ -2562,26 +2610,32 @@ export async function resolvePluginPath(
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (pluginPath === undefined) {
-    return await bundledPluginRoot();
-  }
+  try {
+    if (pluginPath === undefined) {
+      return await bundledPluginRoot();
+    }
 
-  const path = resolve(expandHome(pluginPath));
-  const metadata = await lstat(path).catch(() => null);
-  if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
-    return await extractPluginZip(
-      path,
-      join(workspace, "extracted-plugin"),
-      signal,
+    const path = resolve(expandHome(pluginPath));
+    const metadata = await lstat(path).catch(() => null);
+    if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
+      return await extractPluginZip(
+        path,
+        join(workspace, "extracted-plugin"),
+        signal,
+      );
+    }
+    if (metadata?.isDirectory()) {
+      throwIfSignalAborted(signal);
+      return await validatePluginRoot(path);
+    }
+    throw new PluginBootstrapError(
+      `Plugin path must be a directory or ZIP: ${path}`,
     );
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError)
+      throw error;
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  if (metadata?.isDirectory()) {
-    throwIfSignalAborted(signal);
-    return await validatePluginRoot(path);
-  }
-  throw new PluginBootstrapError(
-    `Plugin path must be a directory or ZIP: ${path}`,
-  );
 }
 
 export async function createMarketplace(
@@ -2589,20 +2643,26 @@ export async function createMarketplace(
   pluginRoot: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  throwIfSignalAborted(signal);
-  const root = await realpath(pluginRoot);
-  const marketplace = join(codexHome, "sdk-marketplace");
-  const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
-  await copyPluginTree(root, pluginDestination, signal);
-  const projection = await legacyPluginProjection(pluginDestination, signal);
-  for (const [path, file] of projection?.files ?? []) {
-    const destination = join(pluginDestination, path);
-    await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, file.contents, { mode: file.mode, signal });
-    if (file.mode !== undefined) await chmod(destination, file.mode);
+  try {
+    throwIfSignalAborted(signal);
+    const root = await realpath(pluginRoot);
+    const marketplace = join(codexHome, "sdk-marketplace");
+    const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
+    await copyPluginTree(root, pluginDestination, signal);
+    const projection = await legacyPluginProjection(pluginDestination, signal);
+    for (const [path, file] of projection?.files ?? []) {
+      const destination = join(pluginDestination, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, file.contents, { mode: file.mode, signal });
+      if (file.mode !== undefined) await chmod(destination, file.mode);
+    }
+    await writeMarketplaceManifest(marketplace, signal);
+    return marketplace;
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError)
+      throw error;
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  await writeMarketplaceManifest(marketplace, signal);
-  return marketplace;
 }
 
 async function writeMarketplaceManifest(
@@ -2746,45 +2806,24 @@ export function resolveCodexCommand(
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
   const expanded =
-    configured === undefined ? undefined : expandHome(configured, environment);
+    configured === undefined
+      ? undefined
+      : expandExecutableHome(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
   ) {
-    return { command: resolve(expanded) };
+    return {
+      command:
+        process.platform === "win32"
+          ? resolve(expanded)
+          : isAbsolute(expanded)
+            ? expanded
+            : `${process.cwd()}${sep}${expanded}`,
+    };
   }
 
-  const platform = process.platform === "android" ? "linux" : process.platform;
-  const packageName = `@openai/codex-${platform}-${process.arch}`;
-  let packageJson: string;
-  try {
-    const require = createRequire(import.meta.url);
-    const codexPackageJson = require.resolve("@openai/codex/package.json");
-    packageJson = createRequire(codexPackageJson).resolve(
-      `${packageName}/package.json`,
-    );
-  } catch (error) {
-    throw new PluginBootstrapError(
-      `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
-      { cause: error },
-    );
-  }
-  const vendor = join(dirname(packageJson), "vendor");
-  const target = readdirSync(vendor, { withFileTypes: true }).find((entry) =>
-    entry.isDirectory(),
-  );
-  const command = join(
-    vendor,
-    target?.name ?? "",
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  );
-  if (target === undefined || !existsSync(command)) {
-    throw new PluginBootstrapError(
-      `The ${packageName} package does not contain the Codex executable. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
-    );
-  }
-  return { command };
+  return { command: resolveBundledCodexExecutable() };
 }
 
 export function executablePathForSpawn(command: string): string {
@@ -2814,7 +2853,14 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const projection = await legacyPluginProjection(root, options.signal);
+  const projection = await legacyPluginProjection(root, options.signal).catch(
+    (error: unknown) => {
+      if (options.signal?.aborted) throw error;
+      throw new LocalPluginBootstrapError(errorMessage(error), {
+        cause: error,
+      });
+    },
+  );
   const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
   const command =
@@ -2826,7 +2872,7 @@ export async function bootstrapPlugin(
   const run = options.runCodex ?? runPluginCommand;
   const existing = await lstat(marketplace).catch(nullIfMissingFileError);
   if (existing !== null && !existing.isDirectory()) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
     );
   }
@@ -3079,18 +3125,21 @@ export async function pluginMetadata(
     }
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
-    throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
-      cause: error,
-    });
+    throw new LocalPluginBootstrapError(
+      `Invalid Codex plugin directory: ${root}`,
+      {
+        cause: error,
+      },
+    );
   }
   if (!isRecord(manifest) || manifest["name"] !== PLUGIN_NAME) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have name 'codex-security'.",
     );
   }
   const version = manifest["version"];
   if (typeof version !== "string" || version.trim().length === 0) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have a non-empty version.",
     );
   }
@@ -3193,6 +3242,7 @@ export function pluginExecutionEnvironment(
   return {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
+    CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
 }
@@ -3249,6 +3299,7 @@ export async function runCodexCommand(
   input?: string | Uint8Array,
   signal?: AbortSignal,
   archiveHandshake = false,
+  stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
@@ -3306,6 +3357,7 @@ export async function runCodexCommand(
     if (signal?.aborted) abort();
   }
   try {
+    if (stdinPrefix !== undefined) child.stdin.write(stdinPrefix);
     if (archiveHandshake) child.stdin.write(`${JSON.stringify(input ?? "")}\n`);
     else child.stdin.end(input);
     return await completion;
@@ -3501,7 +3553,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandHome(candidate, environment)
+      ? expandExecutableHome(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3555,6 +3607,17 @@ export function sameFile(left: string, right: string): Promise<boolean> {
       leftMetadata.ino === rightMetadata.ino,
     () => false,
   );
+}
+
+function expandExecutableHome(
+  value: string,
+  environment: ProcessEnvironment,
+): string {
+  const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
+  // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
+  return path.startsWith("~/")
+    ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
+    : expandHome(path, environment);
 }
 
 export function expandHome(
