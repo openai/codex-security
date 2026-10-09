@@ -3,6 +3,56 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test.each([
+    [
+      "spaced Chinese",
+      "权限校验失败 导致任意用户读取其他用户的私人扫描结果",
+      ["权限校验失败", "导致任意用户读取其他用户的私人扫", "描结果"],
+    ],
+    [
+      "unspaced Chinese",
+      "中文".repeat(20),
+      ["中文".repeat(8), "中文".repeat(8), "中文".repeat(4)],
+    ],
+    ["mixed text", "a".repeat(31) + "中文", ["a".repeat(31), "中文"]],
+    [
+      "combining marks",
+      "e\u0301".repeat(33),
+      ["e\u0301".repeat(32), "e\u0301"],
+    ],
+    ["joined emoji", "👩‍💻".repeat(17), ["👩‍💻".repeat(16), "👩‍💻"]],
+    ["long ASCII word", "a".repeat(65), ["a".repeat(32), "a".repeat(32), "a"]],
+    [
+      "English words",
+      "A finding title with several words that should wrap",
+      ["A finding title with several", "words that should wrap"],
+    ],
+  ] as const)(
+    "wraps %s titles at terminal columns",
+    (_name, title, expected) => {
+      for (const color of [false, true]) {
+        const output = renderScanHistory(
+          {
+            repository: "/repo",
+            findings: [{ title, severity: "high", path: "source.ts" }],
+          },
+          "findings",
+          { columns: 48, color },
+        );
+        const lines = stripVTControlCharacters(output).split("\n");
+        const start = lines.findIndex((line) => line.startsWith("    HIGH"));
+        const end = lines.indexOf("              source.ts");
+        expect(lines.slice(start, end)).toEqual(
+          expected.map(
+            (line, index) =>
+              `${index === 0 ? "    HIGH      " : "              "}${line}`,
+          ),
+        );
+        if (color) expect(output).toContain("\u001B[31mHIGH    \u001B[0m");
+      }
+    },
+  );
+
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {

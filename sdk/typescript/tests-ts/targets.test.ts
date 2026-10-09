@@ -60,6 +60,27 @@ function git(repo: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 }
 
+function validateCommittedDiffWithCredentialConfig(repo: string) {
+  return spawnSync(
+    process.execPath,
+    [
+      "-e",
+      "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
+      fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+      repo,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.extraHeader",
+        GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
+      },
+    },
+  );
+}
+
 async function createRepositoryGitShim(
   directory: string,
   marker: string,
@@ -381,24 +402,7 @@ describe("scan target normalization", () => {
     await chmod(hook, 0o700);
     git(repo, "config", "core.fsmonitor", hook);
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        "-e",
-        "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
-        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
-        repo,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_CONFIG_COUNT: "1",
-          GIT_CONFIG_KEY_0: "http.extraHeader",
-          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
-        },
-      },
-    );
+    const result = validateCommittedDiffWithCredentialConfig(repo);
 
     expect(result.status).toBe(0);
     expect(existsSync(leaked)).toBe(false);
@@ -433,24 +437,7 @@ describe("scan target normalization", () => {
     );
     await utimes(join(repo, "src", "app.ts"), new Date(0), new Date(0));
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        "-e",
-        "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
-        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
-        repo,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_CONFIG_COUNT: "1",
-          GIT_CONFIG_KEY_0: "http.extraHeader",
-          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
-        },
-      },
-    );
+    const result = validateCommittedDiffWithCredentialConfig(repo);
 
     expect(result.status).toBe(0);
     expect(existsSync(executed)).toBe(true);
