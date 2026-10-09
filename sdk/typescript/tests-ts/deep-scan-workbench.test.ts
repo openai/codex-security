@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { CoverageDocument } from "../src/models.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { workbenchCommand as workbench } from "./support/workbench-command.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
@@ -599,48 +600,19 @@ describe("deep scan workbench ownership", () => {
         0,
       );
       if (existingDeferred) {
-        await Promise.all([
-          writeFile(
-            join(scanDir, "scan-manifest.json"),
-            JSON.stringify({
-              scan: {
-                target: {
-                  kind: "directory_snapshot",
-                  targetId,
-                  displayName: "repository",
-                },
-                scope: { limitations: [], validationMode: "incomplete" },
-              },
-            }),
-          ),
-          writeFile(
-            join(scanDir, "findings.json"),
-            JSON.stringify({ findings: [] }),
-          ),
-          writeFile(
-            join(scanDir, "coverage.json"),
-            JSON.stringify({
-              completeness: "partial",
-              inventoryStrategy,
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: [
-                {
-                  id: "candidate-001",
-                  candidateId: "candidate-001",
-                  reason:
-                    "Existing candidate validation dependency was unavailable.",
-                  paths: ["src/source.py"],
-                },
-                {
-                  id: "candidate-deferred",
-                  candidateId: "candidate-deferred",
-                  reason: "Existing runtime policy could not be inspected.",
-                  paths: ["src/source.py"],
-                },
-              ],
-            }),
-          ),
+        await writePartialScanArtifacts(scanDir, targetId, inventoryStrategy, [
+          {
+            id: "candidate-001",
+            candidateId: "candidate-001",
+            reason: "Existing candidate validation dependency was unavailable.",
+            paths: ["src/source.py"],
+          },
+          {
+            id: "candidate-deferred",
+            candidateId: "candidate-deferred",
+            reason: "Existing runtime policy could not be inspected.",
+            paths: ["src/source.py"],
+          },
         ]);
       }
       const warning =
@@ -1205,34 +1177,8 @@ describe("deep scan workbench ownership", () => {
 
     const reason =
       "The configured discovery time limit elapsed before any source review completed.";
-    await Promise.all([
-      writeFile(
-        join(scanDir, "scan-manifest.json"),
-        JSON.stringify({
-          scan: {
-            target: {
-              kind: "directory_snapshot",
-              targetId,
-              displayName: "repository",
-            },
-            scope: { limitations: [], validationMode: "incomplete" },
-          },
-        }),
-      ),
-      writeFile(
-        join(scanDir, "findings.json"),
-        JSON.stringify({ findings: [] }),
-      ),
-      writeFile(
-        join(scanDir, "coverage.json"),
-        JSON.stringify({
-          completeness: "partial",
-          inventoryStrategy: "repository",
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [{ id: "source-review", reason }],
-        }),
-      ),
+    await writePartialScanArtifacts(scanDir, targetId, "repository", [
+      { id: "source-review", reason },
     ]);
     const completed = command(["complete-scan", "--scan-id", scanId])[
       "scan"
@@ -1547,6 +1493,40 @@ describe("deep scan workbench ownership", () => {
     expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
   });
 });
+
+function writePartialScanArtifacts(
+  scanDir: string,
+  targetId: string,
+  inventoryStrategy: CoverageDocument["inventoryStrategy"],
+  deferred: CoverageDocument["deferred"],
+) {
+  return Promise.all([
+    writeFile(
+      join(scanDir, "scan-manifest.json"),
+      JSON.stringify({
+        scan: {
+          target: {
+            kind: "directory_snapshot",
+            targetId,
+            displayName: "repository",
+          },
+          scope: { limitations: [], validationMode: "incomplete" },
+        },
+      }),
+    ),
+    writeFile(join(scanDir, "findings.json"), JSON.stringify({ findings: [] })),
+    writeFile(
+      join(scanDir, "coverage.json"),
+      JSON.stringify({
+        completeness: "partial",
+        inventoryStrategy,
+        surfaces: [],
+        explicitExclusions: [],
+        deferred,
+      }),
+    ),
+  ]);
+}
 
 function workbenchCommand(
   python: string | null,

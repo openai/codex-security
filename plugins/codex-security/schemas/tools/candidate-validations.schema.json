@@ -26,10 +26,7 @@
       "required": ["validations"],
       "properties": {
         "validations": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/validationUpdate"
-          }
+          "$ref": "#/$defs/input/properties/validations"
         }
       }
     },
@@ -134,18 +131,7 @@
           "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
         },
         "preconditions": {
-          "anyOf": [
-            {
-              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-            },
-            {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-              }
-            }
-          ]
+          "$ref": "#/$defs/validationRecord/properties/evidence"
         }
       }
     }
