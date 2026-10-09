@@ -8,10 +8,19 @@ import { parse } from "smol-toml";
 import { loadBundledRuntime } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
-import type {
-  DeepWorkerParentSandbox,
-  DeepWorkerScratchAccess,
-} from "../../../plugins/codex-security/mcp-app/src/deep-scan/parent-sandbox.js";
+
+type DeepWorkerParentSandbox = {
+  filesystemDenies: readonly string[];
+  literalFilesystemDenies?: readonly string[];
+  globScanMaxDepth?: number;
+  filesystemWriteRules?: readonly { path: string; access: "read" | "write" }[];
+  filesystemRootWritable?: boolean;
+  filesystemRootWritePath?: string;
+};
+type DeepWorkerScratchAccess = {
+  writePath: string;
+  readOnlyPaths: readonly string[];
+};
 
 const fixtures = createApiTestFixtures("deep scratch permissions ");
 afterEach(fixtures.cleanup);
@@ -323,46 +332,49 @@ test("concrete write grants do not depend on the parent cwd metadata", async () 
   }
 });
 
-test("keeps bracketed scratch paths and read carveouts literal in the native profile", async () => {
-  const { root, target, policy, parent } = await scratchFixture();
-  const writable = path.join(root, "workspace[fixture]");
-  const scratch = path.join(writable, "worker", "scratch");
-  const readonly = path.join(scratch, "private[keep]");
-  await promises.mkdir(writable);
-  const sandbox = parent(entry(writable, "write"), entry(readonly, "read"));
-  const grant = await policy.scratch(sandbox, scratch, target);
-  expect(grant).toEqual({ writePath: scratch, readOnlyPaths: [readonly] });
-  const configuration = parse(policy.overrides(sandbox, grant).join("\n"));
-  expect(configuration["permissions"]).toEqual({
-    codex_security_deep_scan_worker: {
-      extends: ":read-only",
-      filesystem: {
-        ":root": "read",
-        [scratch]: { ".": "write" },
-        [readonly]: { ".": "read" },
-        glob_scan_max_depth: 8,
+test.each(["[fixture]", "fixture]"])(
+  "keeps scratch paths containing %s and read carveouts literal in the native profile",
+  async (suffix) => {
+    const { root, target, policy, parent } = await scratchFixture();
+    const writable = path.join(root, `workspace${suffix}`);
+    const scratch = path.join(writable, "worker", "scratch");
+    const readonly = path.join(scratch, `private${suffix}`);
+    await promises.mkdir(writable);
+    const sandbox = parent(entry(writable, "write"), entry(readonly, "read"));
+    const grant = await policy.scratch(sandbox, scratch, target);
+    expect(grant).toEqual({ writePath: scratch, readOnlyPaths: [readonly] });
+    const configuration = parse(policy.overrides(sandbox, grant).join("\n"));
+    expect(configuration["permissions"]).toEqual({
+      codex_security_deep_scan_worker: {
+        extends: ":read-only",
+        filesystem: {
+          ":root": "read",
+          [scratch]: { ".": "write" },
+          [readonly]: { ".": "read" },
+          glob_scan_max_depth: 8,
+        },
+        network: { enabled: false },
       },
-      network: { enabled: false },
-    },
-  });
-  const denied = parent(
-    entry(writable, "write"),
-    entry(path.dirname(scratch), "deny"),
-  );
-  expect(denied.literalFilesystemDenies).toEqual([path.dirname(scratch)]);
-  expect(await policy.scratch(denied, scratch, target)).toBeUndefined();
-  expect(parse(policy.overrides(denied).join("\n"))["permissions"]).toEqual({
-    codex_security_deep_scan_worker: {
-      extends: ":read-only",
-      filesystem: {
-        ":root": "read",
-        [path.dirname(scratch)]: { ".": "deny" },
-        glob_scan_max_depth: 8,
+    });
+    const denied = parent(
+      entry(writable, "write"),
+      entry(path.dirname(scratch), "deny"),
+    );
+    expect(denied.literalFilesystemDenies).toEqual([path.dirname(scratch)]);
+    expect(await policy.scratch(denied, scratch, target)).toBeUndefined();
+    expect(parse(policy.overrides(denied).join("\n"))["permissions"]).toEqual({
+      codex_security_deep_scan_worker: {
+        extends: ":read-only",
+        filesystem: {
+          ":root": "read",
+          [path.dirname(scratch)]: { ".": "deny" },
+          glob_scan_max_depth: 8,
+        },
+        network: { enabled: false },
       },
-      network: { enabled: false },
-    },
-  });
-});
+    });
+  },
+);
 
 test.each([".git", ".agents", ".codex"])(
   "preserves the %s metadata carveout unless explicitly writable",

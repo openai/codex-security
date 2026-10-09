@@ -428,7 +428,7 @@ function workerPermissionProfile(
 
 function scratchFilesystemEntry(path: string, access: "read" | "write") {
   // Preserve literal path components such as brackets using native point access.
-  return [path, /[*?\[]/.test(path) ? { ".": access } : access];
+  return [path, /[*?\[\]]/.test(path) ? { ".": access } : access];
 }
 
 function scratchInstructions(

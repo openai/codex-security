@@ -48,6 +48,7 @@ type Preflight = WorkerOptions & {
 async function bundledExecutor(
   environment: Record<string, string>,
   preflightCheck: (input: Preflight) => Promise<void> = async () => {},
+  inheritedEnvironment: Record<string, string> = {},
 ) {
   const runtime = await loadBundledRuntime();
   const parentStart = runtime.indexOf(
@@ -128,7 +129,10 @@ async function bundledExecutor(
     profileConfigOverrides,
     DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID: "codex_security_deep_scan_worker",
     snapshotWorkerEnvironment: async () => ({ ...environment }),
-    workerRuntimeSettings: async () => ({ config: {} }),
+    workerRuntimeSettings: async () => ({
+      config: {},
+      environment: inheritedEnvironment,
+    }),
     environmentVariable: (env: Record<string, string>, key: string) => env[key],
     preflightDeepScanWorkerPermissionProfile: async (input: Preflight) => {
       preflights.push({ ...input, env: { ...input.env } });
@@ -213,7 +217,13 @@ function profile(options: WorkerOptions) {
 }
 
 function temporaryEnvironment(environment: Record<string, string>) {
-  return [environment["TMPDIR"], environment["TMP"], environment["TEMP"]];
+  return ["TMPDIR", "TMP", "TEMP"].map((name) =>
+    process.platform === "win32"
+      ? Object.entries(environment).find(
+          ([key]) => key.toUpperCase() === name,
+        )?.[1]
+      : environment[name],
+  );
 }
 
 test("bundled discovery workers retain their authorized scratch across fresh, resumed, and retried turns", async () => {
@@ -223,6 +233,12 @@ test("bundled discovery workers retain their authorized scratch across fresh, re
     const denied = path.join(item.scratch, "**", "*.secret");
     const { Worker, launches, preflights } = await bundledExecutor(
       item.environment,
+      undefined,
+      {
+        Tmpdir: item.environment.TMPDIR,
+        Tmp: item.environment.TMP,
+        Temp: item.environment.TEMP,
+      },
     );
     const worker = new Worker({
       artifactContext: item.artifactContext,
@@ -268,6 +284,13 @@ test("bundled discovery workers retain their authorized scratch across fresh, re
       expect(temporaryEnvironment(launch.options.env)).toEqual(
         Array(3).fill(item.scratch),
       );
+      for (const name of ["TMPDIR", "TMP", "TEMP"]) {
+        const keys = Object.keys(launch.options.env).filter(
+          (key) => key.toUpperCase() === name,
+        );
+        expect(keys).toHaveLength(process.platform === "win32" ? 1 : 2);
+        expect(launch.options.env[name]).toBe(item.scratch);
+      }
       expect(launch.input).toContain(JSON.stringify(item.scratch));
       expect(preflights[index]!.configOverrides).toEqual(
         launch.options.configOverrides,

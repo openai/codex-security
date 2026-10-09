@@ -551,7 +551,7 @@ function isValidSpecialPath(value: Record<string, unknown>): boolean {
 }
 
 function hasGlobMetacharacters(value: string): boolean {
-  return value.includes("*") || value.includes("?") || value.includes("[");
+  return /[*?\[\]]/.test(value);
 }
 
 function unsupportedParentSandbox(reason: string): DeepScanNonRetryableError {
