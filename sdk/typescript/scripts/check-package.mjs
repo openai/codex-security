@@ -157,6 +157,7 @@ const allowedFiles = new Set([
     "classify-severity",
     "classify-scan-severity",
     "severity-store",
+    "cloud-endpoint",
     "cloud-publish",
     "external-findings-publish",
     "external-import-contract",
