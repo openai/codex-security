@@ -2517,12 +2517,7 @@ describe("CodexSecurity orchestration", () => {
         // Still wait for close, and retain unexpected errors and the deadline.
         const closed = new Promise<void>((resolve, reject) => {
           const onError = (error: NodeJS.ErrnoException) => {
-            if (
-              error.code !== "ECONNRESET" ||
-              boundary === "commit" ||
-              boundary === "rollback"
-            )
-              reject(error);
+            if (error.code !== "ECONNRESET") reject(error);
           };
           const onAbort = () => reject(deadline.reason);
           socket!.once("error", onError);
