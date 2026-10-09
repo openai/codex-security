@@ -749,7 +749,7 @@ describe("CLI MCP scans", () => {
             workers: 2,
             maxCostUsd: 5,
             onBudgetApproaching: undefined,
-            outputDir: "/synthetic/results",
+            outputDir: resolve("/synthetic/results"),
           }),
         }),
       ]);
