@@ -2394,8 +2394,10 @@ async function executeWorkbench(
         ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
         : process.env,
       encoding: "utf8" as const,
-      // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
-      maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
+      // Preserve complete artifact bytes and issue receipt diagnostics/history.
+      maxBuffer: ["read-artifact", "finding-issues"].includes(args[0] ?? "")
+        ? Infinity
+        : 4 * 1024 * 1024,
       timeout,
     },
   );

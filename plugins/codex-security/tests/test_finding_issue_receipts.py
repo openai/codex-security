@@ -216,6 +216,32 @@ def test_records_id_only_acceptance_and_failed_readback_without_losing_create(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("operation", ["create", "update", "reuse"])
+def test_readback_replay_preserves_the_accepted_receipt_url(tmp_path: Path, operation: str) -> None:
+    scan_dir, validated = source(tmp_path)
+    state = tmp_path / "state"
+    accepted = receipt_for(
+        validated, operation=operation, url="https://issues.example.test/browse/SEC-101"
+    )
+    issues(state, scan_dir, "record", receipts=[accepted])
+    readback = {"status": "verified"}
+    replayed = issues(
+        state,
+        scan_dir,
+        "record",
+        receipts=[
+            {**accepted, "url": "https://issues.example.test/browse/SEC-999", "readback": readback}
+        ],
+    )
+    expected = {
+        **accepted,
+        "scanId": validated["manifest"]["scan"]["id"],
+        "readback": readback,
+    }
+    assert replayed["receipts"] == [expected]
+    assert issues(state, scan_dir, "inspect")["receipts"] == [expected]
+
+
 @pytest.mark.parametrize(
     "destination",
     [

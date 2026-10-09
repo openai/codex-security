@@ -80,7 +80,10 @@ try {
   assert.equal(accepted.receipts.length, 1);
   assert.equal(accepted.receipts[0].issueIdentifier, "APP-1");
   assert.equal(accepted.receipts[0].readback, undefined);
-  const readback = { status: "failed", error: "Issue read access denied." };
+  const readback = {
+    status: "failed",
+    error: `Issue read access denied. ${"x".repeat(4 * 1024 * 1024)}`,
+  };
   await call("record_codex_security_finding_issues", {
     ...source,
     destination: jira,

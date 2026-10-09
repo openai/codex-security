@@ -261,7 +261,7 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (occurrence_id, destination_key, external_id, operation)
                         DO UPDATE SET
-                            external_url = COALESCE(excluded.external_url, external_url),
+                            external_url = COALESCE(external_url, excluded.external_url),
                             readback_json = COALESCE(excluded.readback_json, readback_json),
                             updated_at = excluded.updated_at
                         """,
