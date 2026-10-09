@@ -120,11 +120,10 @@ package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
 
-`scripts/run-ci-tests.mts` assigns the longest measured files first. Its
-`ci-test-durations.json` records per-file seconds from CI reports.
-Every new test file is included automatically with a one-second estimate.
-Refresh those estimates from the uploaded reports when adding or splitting
-expensive files; estimates affect scheduling, never whether a test runs.
+`scripts/run-ci-tests.mts` discovers every shared test file and passes the
+inventory to Bun's native `--shard` option. Bun sorts the file paths and assigns
+them round-robin across the shards. New files are included automatically;
+there is no timing table to update when adding or splitting tests.
 To reproduce one Windows shard locally after building the plugin, run
 `node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
 
@@ -149,9 +148,6 @@ that breaks the Ink UI tests under isolation. Keep the trial pin until a newer
 release passes the full SDK suite in every mode. Required CI and the mutation
 trial remain on Bun 1.3.14.
 
-Keep the measured file-balanced runner until the native runner has
-matching inventories and acceptable Windows timings. Before promotion, compare
-native and file-balanced shards using the same commit and Bun version.
 Keep the machine-policy test serial. Do not replace the full required suite
 with `--changed`: Python files, schemas, fixtures, and workflows loaded at
 runtime are not necessarily part of Bun's import graph.
