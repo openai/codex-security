@@ -212,20 +212,6 @@ def test_bounded_finding_details_ignores_malformed_root_cause_alias() -> None:
     assert bounded["code_evidence"] == [{"id": "legacy-source", "code": "legacy_source()"}]
 
 
-@pytest.mark.parametrize("field", ["codeEvidence", "code_evidence"])
-@pytest.mark.parametrize("lines", ["41,44", "41.0,44.0", "4.1e1,4.4e1"])
-def test_bounded_finding_details_preserves_integer_line_values(field: str, lines: str) -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
-    start, end = json.loads(f"[{lines}]")
-    evidence = {"id": "source", "code": "example()", "startLine": start, "endLine": end}
-
-    bounded = preview["bounded_finding_details"]({field: [evidence]})
-
-    assert bounded[field] == [{"id": "source", "code": "example()", "startLine": 41, "endLine": 44}]
-    assert evidence["startLine"] == start
-    assert evidence["endLine"] == end
-
-
 def test_bounded_finding_details_strips_invalid_legacy_evidence_fields() -> None:
     preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     original = {
@@ -385,16 +371,3 @@ def test_bounded_finding_details_filters_malformed_evidence_before_limiting() ->
     )
 
     assert bounded["code_evidence"] == [{"id": "valid", "code": "valid_source()"}]
-
-
-def test_exact_decimal_values_stay_within_the_existing_preview_budget() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
-    from workbench.json_numbers import JsonFloat, dumps_json
-
-    finding = {"attackPath": {"observations": [JsonFloat("1.0000000000000001")] * 300}}
-    bounded = preview["bounded_finding_details"](finding)["attackPath"]
-    encoded = dumps_json(bounded, separators=(",", ":"))
-
-    assert bounded["observations"]
-    assert "1.0000000000000001" in encoded
-    assert len(encoded.encode()) <= preview["FINDING_ATTACK_PATH_PREVIEW_BYTES"]

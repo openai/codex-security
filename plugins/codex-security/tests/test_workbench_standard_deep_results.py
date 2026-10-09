@@ -1671,10 +1671,7 @@ def test_archived_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     assert findings[0]["summary"] == reduced["findings"][0]["summary"]
 
 
-@pytest.mark.parametrize("line_type", [int, float])
-def test_recovery_selects_strongest_same_finding_checkpoint(
-    tmp_path: Path, line_type: type[int] | type[float]
-) -> None:
+def test_recovery_selects_strongest_same_finding_checkpoint(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = tmp_path / "contract"
@@ -1684,16 +1681,10 @@ def test_recovery_selects_strongest_same_finding_checkpoint(
     weak["severity"]["level"] = "low"
     weak["confidence"]["level"] = "low"
     weak["summary"] = "Earlier weak checkpoint evidence."
-    location = weak["locations"][0]
-    weak["locations"] = [{**location, "startLine": 1, "endLine": end} for end in (3, 2)]
     strong = copy.deepcopy(weak)
     strong["severity"]["level"] = "high"
     strong["confidence"]["level"] = "high"
     strong["summary"] = "Later strong checkpoint evidence."
-    for location in strong["locations"][1:]:
-        for field in ("startLine", "endLine"):
-            if field in location:
-                location[field] = line_type(location[field])
     checkpoint_dir = result_path.parent / "checkpoints"
     checkpoint_dir.mkdir()
     for name, finding in (("0" * 64, weak), ("f" * 64, strong)):
@@ -1708,9 +1699,7 @@ def test_recovery_selects_strongest_same_finding_checkpoint(
 
     fail_deep_scan(state_dir, codex_home, scan_id, message="Stopped between checkpoints.")
 
-    findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
-    assert len(findings) == 1
-    retained = findings[0]
+    retained = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     assert retained["severity"]["level"] == "high"
     assert retained["confidence"]["level"] == "high"
     assert retained["summary"] == "Later strong checkpoint evidence."
@@ -1808,30 +1797,8 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
     assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == ("partial")
 
 
-@pytest.mark.parametrize("source_findings", [False, True])
-@pytest.mark.parametrize(
-    "variant",
-    [
-        "integer",
-        "location",
-        "evidence",
-        "score",
-        "extension",
-        "fraction",
-        "boolean",
-        "string",
-        "raw-fraction",
-        "raw-long-fraction",
-        "raw-underflow",
-        "raw-large-underflow",
-        "raw-exponent",
-        "deep-extension",
-    ],
-)
 def test_recovery_does_not_promote_already_retained_historical_finding(
     tmp_path: Path,
-    source_findings: bool,
-    variant: str,
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
@@ -1839,35 +1806,14 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     contract_dir.mkdir()
     write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
     historical = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
-    historical["extensions"] = {"candidateId": "candidate-refined-location", "observation": 1}
+    historical["extensions"] = {"candidateId": "candidate-refined-location"}
     historical["provenance"]["candidateId"] = "candidate-refined-location"
     historical["locations"][0]["startLine"] = 1
     historical["locations"][0]["endLine"] = 2
     historical["severity"]["level"] = "critical"
-    historical["severity"].update(score=9, scoringSystem="CVSS:3.1")
     historical["confidence"]["level"] = "high"
     historical.pop("identity")
     checkpoint_historical = copy.deepcopy(historical)
-    if variant == "deep-extension":
-        deep: object = 1.5
-        for _ in range(350):
-            deep = {"nested": deep}
-        checkpoint_historical["extensions"]["deep"] = deep
-    if variant in {"location", "evidence"}:
-        for location in checkpoint_historical[
-            "locations" if variant == "location" else "codeEvidence"
-        ]:
-            for field in ("startLine", "endLine"):
-                if field in location:
-                    location[field] = float(location[field])
-    elif variant in {"score", "fraction"}:
-        checkpoint_historical["severity"]["score"] = 9.0 if variant == "score" else 9.5
-    elif variant in {"extension", "boolean", "string"}:
-        checkpoint_historical["extensions"]["observation"] = {
-            "extension": 1.0,
-            "boolean": True,
-            "string": "1",
-        }[variant]
     historical["provenance"]["originalCandidates"] = [
         {"candidateId": "candidate-refined-location", "title": historical["title"]}
     ]
@@ -1880,10 +1826,7 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     current["provenance"]["previousFindings"] = [copy.deepcopy(historical)]
     source_finding = copy.deepcopy(current)
     source_finding["provenance"].pop("sourceFindings", None)
-    if source_findings:
-        current["provenance"]["sourceFindings"] = [
-            {"id": f"{worker_id}:0", "finding": source_finding}
-        ]
+    current["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": source_finding}]
 
     worker_document = json.loads(worker_result.read_text())
     worker_document["findings"] = [current]
@@ -1891,26 +1834,7 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     checkpoint = copy.deepcopy(worker_document)
     checkpoint["complete"] = False
     checkpoint["findings"] = [checkpoint_historical]
-    raw_token = {
-        "raw-fraction": "1.0000000000000001",
-        "raw-long-fraction": "1.0000000000000000000000000000000000000001",
-        "raw-underflow": "1e-400",
-        "raw-large-underflow": "1e-9999999999999999999",
-        "raw-exponent": "1e0",
-    }.get(variant)
-    if raw_token is None:
-        checkpoint_path = write_checkpoint(worker_result.parent / "checkpoints", checkpoint)
-    else:
-        raw = (
-            json.dumps(checkpoint)
-            .replace('"observation": 1', f'"observation": {raw_token}')
-            .encode()
-        )
-        checkpoint_dir = worker_result.parent / "checkpoints"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = checkpoint_dir / f"{hashlib.sha256(raw).hexdigest()}.json"
-        checkpoint_path.write_bytes(raw)
-    source_bytes = {file: file.read_bytes() for file in (worker_result, checkpoint_path)}
+    write_checkpoint(worker_result.parent / "checkpoints", checkpoint)
     committed_standard_reducer(state_dir, codex_home, scan_dir, scan_id, worker_id, worker_result)
 
     fail_deep_scan(
@@ -1920,91 +1844,10 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
     failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["findingCount"] == 1
     retained = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
-    assert {file: file.read_bytes() for file in source_bytes} == source_bytes
-    if variant in {
-        "fraction",
-        "boolean",
-        "string",
-        "raw-fraction",
-        "raw-long-fraction",
-        "raw-underflow",
-        "raw-large-underflow",
-        "deep-extension",
-    }:
-        assert retained["locations"][0]["startLine"] == 1
-        assert retained["severity"]["level"] == "critical"
-        # Represented history can map a different identity and location to this row.
-        assert retained["identity"]["anchor"] == "candidate-refined-location"
-        assert any(
-            item["locations"][0]["startLine"] == 1
-            and item["severity"]["score"] == 9
-            and type(item["extensions"]["observation"]) is int
-            and item["extensions"]["observation"] == 1
-            for item in workbench_saved_results._retained_findings(retained)
-        )
-    else:
-        assert retained["locations"][0]["startLine"] == 2
-        assert retained["severity"]["level"] == "medium"
-        assert retained["confidence"]["level"] == "medium"
-        assert retained["provenance"]["previousFindings"] == [historical]
-
-
-@pytest.mark.parametrize(
-    ("parent_value", "worker_value", "distinct"),
-    [
-        (1, 1.0, False),
-        (1, True, True),
-        (0, False, True),
-        (1, "1", True),
-        (1, ["number", 1, "1", "0x0"], True),
-    ],
-)
-def test_recovery_distinguishes_parent_and_worker_json_values(
-    tmp_path: Path, parent_value: object, worker_value: object, distinct: bool
-) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
-    finding["extensions"] = {"observation": {"value": parent_value}}
-    parent = saved_draft(scan_id, findings=[finding])
-    parent_checkpoint = write_checkpoint(scan_dir / "checkpoints", parent)
-    (scan_dir / "checkpoint-head.json").write_text(
-        json.dumps({"checkpoint": parent_checkpoint.name})
-    )
-    worker = copy.deepcopy(parent)
-    worker["findings"][0]["extensions"]["observation"]["value"] = worker_value
-    worker_result.write_text(json.dumps(worker))
-    source_bytes = {file: file.read_bytes() for file in (parent_checkpoint, worker_result)}
-
-    fail_deep_scan(state_dir, codex_home, scan_id)
-
-    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    findings = json.loads((scan_dir / "findings.json").read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    binding = saved_binding("deep_repository", status="failed")
-    binding.update(target=manifest["scan"]["target"], scope=manifest["scan"]["scope"])
-    replay = replay_saved_results(
-        workbench_saved_results,
-        (manifest, findings, coverage),
-        scan_dir,
-        scan_id,
-        binding,
-        [saved_discovery_worker(worker_result.parent, worker_id)],
-    )
-    for document in (findings, replay[1]):
-        assert len(document["findings"]) == 1
-        values = [
-            item["extensions"]["observation"]["value"]
-            for item in workbench_saved_results._retained_findings(document["findings"][0])
-        ]
-        # Python equality alone conflates booleans with numbers.
-        assert json.dumps(values) == json.dumps(
-            [parent_value, worker_value] if distinct else [parent_value]
-        )
-    assert {file: file.read_bytes() for file in source_bytes} == source_bytes
+    assert retained["locations"][0]["startLine"] == 2
+    assert retained["severity"]["level"] == "medium"
+    assert retained["confidence"]["level"] == "medium"
+    assert retained["provenance"]["previousFindings"] == [historical]
 
 
 def test_recovery_retains_same_worker_checkpoint_version_as_history(
@@ -3228,9 +3071,7 @@ def test_parent_closure_cannot_discard_reopened_worker_same_id(
     assert pending["coverage"]["deferred"][0] in first[2]["deferred"]
 
 
-@pytest.mark.parametrize(
-    "layout", ["newer_raw", "newer_head", "legacy", "legacy_parent", "legacy_parent_newer_head"]
-)
+@pytest.mark.parametrize("layout", ["newer_raw", "newer_head", "legacy", "legacy_parent"])
 def test_parent_head_preserves_newer_and_frozen_observations(
     tmp_path: Path, generic_review_recovery, layout: str
 ) -> None:
@@ -3242,7 +3083,7 @@ def test_parent_head_preserves_newer_and_frozen_observations(
     head = tmp_path / "checkpoint-head.json"
     selected = pending_checkpoint if layout == "newer_head" else closed_checkpoint
     head.write_text(json.dumps({"checkpoint": selected.name}))
-    head_time = 400 if layout in {"newer_head", "legacy_parent_newer_head"} else 200
+    head_time = 400 if layout == "newer_head" else 200
     os.utime(head, ns=(head_time, head_time))
     original_head = head.read_bytes()
     write_saved_parent(tmp_path, closed, 350 if layout.startswith("legacy") else 100)
@@ -3263,10 +3104,10 @@ def test_parent_head_preserves_newer_and_frozen_observations(
         stopped=True,
         reason="interrupted",
         frozen_source_digests=frozen,
-        allow_frozen_legacy_parent=layout.startswith("legacy_parent"),
+        allow_frozen_legacy_parent=layout == "legacy_parent",
     )
     assert first is not None
-    expected_pending = not layout.startswith("legacy_parent")
+    expected_pending = layout != "legacy_parent"
     assert (pending["coverage"]["deferred"][0] in first[2]["deferred"]) is expected_pending
     preserved = first[0]["scan"]["preservedSources"]
     assert any(path.startswith("checkpoint-heads/") for path in preserved) is (layout != "legacy")
