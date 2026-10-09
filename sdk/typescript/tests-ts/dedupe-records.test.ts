@@ -1,4 +1,5 @@
 import { expect, test, mock } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import { DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
@@ -129,6 +130,12 @@ test("records groups original observations and retrieved neighbors with unique r
         requests.push(review);
         expect(review.trustedInstructions).toContain("approved repository");
         expect(review.findingSchema).toHaveProperty("required");
+        const validateFinding = new Ajv2020({ strict: false }).compile(
+          JSON.parse(JSON.stringify(review.findingSchema)) as object,
+        );
+        const finding = original.observations[0]!.finding;
+        expect(validateFinding(finding)).toBe(true);
+        expect(validateFinding({ ...finding, title: "" })).toBe(false);
         expect(review).not.toHaveProperty("validate");
         expect(review).not.toHaveProperty("findingIds");
         for (const finding of assigned(review))
