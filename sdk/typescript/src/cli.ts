@@ -7575,6 +7575,8 @@ async function parsePatchReviewSubject(
       ),
     );
   }
+  if (reported === undefined && context.paths.length === 0)
+    return { status: "empty", reasons: [] };
   if (reported !== undefined) {
     if (context.paths.length === 0) return { status: "invalid" };
     response = JSON.stringify({

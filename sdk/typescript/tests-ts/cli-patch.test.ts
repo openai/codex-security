@@ -2814,6 +2814,34 @@ describe("scan and patch workflow", () => {
     },
   );
 
+  test("skips selected reviews when a direct-input patch makes no changes", async () => {
+    let invocations = 0;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "Synthetic security issue",
+        "--review-minimality",
+        "--review-style",
+        "--json",
+      ],
+      {
+        onRepositoryCommand: () => "",
+        onCodex: (_args, output) => {
+          invocations += 1;
+          output!.stdout.write(
+            output!.appServer!.sandbox === "read-only"
+              ? JSON.stringify({ status: "approved", findings: [] })
+              : "The existing code is already safe.",
+          );
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("No patch was applied");
+    expect(invocations).toBe(1);
+  });
+
   test("excludes non-Git review baselines inside the target from patch files", async () => {
     if (
       runTestInSubprocess(
