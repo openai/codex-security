@@ -1413,9 +1413,13 @@ process.stdout.write(JSON.stringify({
         `status code ${status}`,
         `status_code=${status}`,
         `{"status":${status}}`,
+        `{"status":"${status}"}`,
+        `status code: "${status}"`,
+        `status='${status}'`,
       ].map((detail) => [detail, advice] as const),
       ...[
         `parse failed on line ${status}`,
+        `parse failed on line "${status}"`,
         `failed after ${status} bytes`,
         `${status} bytes read`,
         status,

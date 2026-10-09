@@ -17,6 +17,10 @@ const turnFailures = {
     message: "This request was refused in accordance with the safety policy.",
     codexErrorInfo: "other",
   },
+  "policy-terse-turn": {
+    message: "Refused due to the safety policy",
+    codexErrorInfo: "other",
+  },
   "failed-turn": {
     message: "Rate limit exceeded",
     codexErrorInfo: "usageLimitExceeded",
