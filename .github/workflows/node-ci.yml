@@ -113,6 +113,9 @@ jobs:
     needs: validate-title
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -131,6 +134,10 @@ jobs:
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Check devcontainer dependency cooldown
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node --experimental-strip-types sdk/typescript/scripts/check-devcontainer-cooldown.mts
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting
@@ -522,7 +529,7 @@ jobs:
     needs: [validate-title, package]
     runs-on: windows-latest
     timeout-minutes: 20
-    strategy:
+    strategy: &windows-node-strategy
       fail-fast: false
       matrix:
         node: ["22.13.0", "24"]
@@ -549,10 +556,7 @@ jobs:
         windows-test,
         windows-verify,
       ]
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["22.13.0", "24"]
+    strategy: *windows-node-strategy
     steps:
       - name: Require every Windows coverage job
         if: needs.validate-title.result != 'success' || (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')
