@@ -39,11 +39,9 @@ const screeningDecisionSchema = z.discriminatedUnion("decision", [
   screeningDistinctSchema.strict(),
 ]);
 // The host assigns exact slot names; finding IDs stay out of model output.
-const screeningSchema = z
-  .object({
-    decisions: z.record(z.string(), screeningDecisionSchema),
-  })
-  .strict();
+const screeningSchema = z.strictObject({
+  decisions: z.record(z.string(), screeningDecisionSchema),
+});
 
 function requireMergedFinding(result: DuplicateDecision): void {
   if (result.decision !== "SAME") return;
