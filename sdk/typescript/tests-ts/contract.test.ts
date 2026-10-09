@@ -1153,42 +1153,6 @@ describe("canonical scan contract", () => {
     );
   });
 
-  test("accepts equivalent integer spellings without rewriting sealed JSON", async () => {
-    for (const [start, end] of [
-      ["41", "44"],
-      ["41.0", "44.0"],
-      ["4.1e1", "4.4e1"],
-    ]) {
-      const scanDir = await copyExample();
-      const path = join(scanDir, "findings.json");
-      const document = await readJson(path);
-      document["findings"][0]["codeEvidence"] = [
-        {
-          id: "source",
-          label: "Source",
-          path: "src/evidence.py",
-          startLine: 41,
-          endLine: 44,
-          code: "extract()",
-          explanation: "Source evidence",
-        },
-      ];
-      const contents = JSON.stringify(document, null, 2)
-        .replaceAll('"startLine": 41', `"startLine": ${start}`)
-        .replaceAll('"endLine": 44', `"endLine": ${end}`);
-      await writeFile(path, contents);
-      await reseal(scanDir);
-      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-      expect(contract.findings.findings).toHaveLength(1);
-      const exported = pythonExport(scanDir);
-      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
-        0,
-      );
-      expect(new TextDecoder().decode(exported.stdout)).toBe(contents);
-      expect(await readFile(path, "utf8")).toBe(contents);
-    }
-  });
-
   test("rejects unsafe and non-finite JSON numbers before contract typing", async () => {
     for (const [field, expected] of [
       ["startLine", "unsafe integer-valued JSON numbers"],

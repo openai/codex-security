@@ -51,7 +51,6 @@ import { openPromise as openZip } from "yauzl";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
-  ContractValidationError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
@@ -65,7 +64,6 @@ import {
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
-import { parseJsonNumbers } from "./json-numbers.js";
 import {
   isWithin,
   resolveTrustedExecutable,
@@ -1848,9 +1846,8 @@ export async function runWorkbench(
   }
   let result: unknown;
   try {
-    result = parseJsonNumbers(stdout, "Codex Security workbench response");
+    result = JSON.parse(stdout);
   } catch (error) {
-    if (error instanceof ContractValidationError) throw error;
     throw new CodexSecurityError(
       "The Codex Security workbench returned invalid JSON.",
       { cause: error },

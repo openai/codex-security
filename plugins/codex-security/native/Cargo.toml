@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "=3.13.0", default-features = false, features = ["napi8"] }
+napi = { version = "=3.14.0", default-features = false, features = ["napi8"] }
 napi-derive = "=3.6.10"
 
 [target.'cfg(unix)'.dependencies]
