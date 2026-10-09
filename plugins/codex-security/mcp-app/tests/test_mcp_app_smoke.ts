@@ -1315,7 +1315,7 @@ try {
     code: "ENOENT",
   });
 
-  const dashQuery = await requestAndWait(8999, "tools/call", {
+  const dashQuery = await request(8999, "tools/call", {
     name: "list_codex_security_scans",
     arguments: { query: "--synthetic-query", limit: 50 },
   });
