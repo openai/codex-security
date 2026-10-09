@@ -3,12 +3,15 @@ import { mock, test } from "node:test";
 import { Thread } from "@openai/codex-sdk";
 import type {
   CodexWorkerRequest,
+  CodexWorkerResult,
   DeepScanRunState,
   DeepScanWorkerMutation,
 } from "../src/deep-scan/types.js";
 import type { DeepScanCoordinator } from "../src/deep-scan/coordinator.js";
 import {
   DeepScanCoordinatorRegistry,
+  DeepScanNonRetryableError,
+  FakeExecutor,
   WorkbenchDeepScanStore,
   fixtureRun,
   temporaryDirectories,
@@ -18,15 +21,22 @@ try {
   for (const scenario of [
     "deadline",
     "concurrent",
+    "acceptance",
+    "acceptance canceled",
     "user cancellation",
     "terminal state",
     "ordinary failure",
   ] as const) {
     await test(`preserves coordinator authority through ${scenario}`, async () => {
       const concurrent = scenario === "concurrent";
+      const acceptance = scenario.startsWith("acceptance");
+      const userCanceled = [
+        "user cancellation",
+        "acceptance canceled",
+      ].includes(scenario);
       const fixture = await fixtureRun({
-        workers: concurrent ? 2 : 1,
-        maxDiscoveryRuns: concurrent ? 2 : 1,
+        workers: concurrent || acceptance ? 2 : 1,
+        maxDiscoveryRuns: concurrent || acceptance ? 2 : 1,
       });
       const run = { ...fixture.run, coordinatorGeneration: 2 };
       const replacement: DeepScanRunState =
@@ -51,8 +61,10 @@ try {
             return { deepScan: run };
           case "upsert-deep-scan-worker": {
             if (
-              args.includes("--sdk-thread-id") ||
-              (concurrent && metadataMutations > 0)
+              acceptance
+                ? value("--status") === "succeeded"
+                : args.includes("--sdk-thread-id") ||
+                  (concurrent && metadataMutations > 0)
             ) {
               if (
                 args.includes("--sdk-thread-id") &&
@@ -115,6 +127,8 @@ try {
       });
       const secondQueued = Promise.withResolvers<void>();
       const firstMetadata = Promise.withResolvers<void>();
+      const acceptanceConfirmed = Promise.withResolvers<void>();
+      let acceptanceSignal: AbortSignal;
       const updateWorker = store.updateWorker.bind(store);
       let queued = 0;
       store.updateWorker = async (update: DeepScanWorkerMutation) => {
@@ -122,14 +136,40 @@ try {
           secondQueued.resolve();
           await firstMetadata.promise;
         }
-        return updateWorker(update);
+        try {
+          return await updateWorker(update);
+        } catch (error) {
+          if (acceptance && update.status === "succeeded") {
+            acceptanceConfirmed.resolve();
+            await new Promise<void>((resolve) => {
+              if (acceptanceSignal.aborted) resolve();
+              else
+                acceptanceSignal.addEventListener("abort", () => resolve(), {
+                  once: true,
+                });
+            });
+          }
+          throw error;
+        }
       };
       const executorErrors: Error[] = [];
       let executions = 0;
       let coordinator: DeepScanCoordinator;
       const executor = {
-        async run(request: CodexWorkerRequest): Promise<never> {
+        async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
           const sequence = ++executions;
+          if (acceptance) {
+            if (sequence === 1) {
+              acceptanceSignal = request.signal;
+              return new FakeExecutor().run(request);
+            }
+            await acceptanceConfirmed.promise;
+            if (userCanceled)
+              coordinator.cancel("Synthetic user cancellation.");
+            throw new DeepScanNonRetryableError(
+              "Synthetic independent worker failure.",
+            );
+          }
           if (concurrent) await secondQueued.promise;
           // Only the process event source is synthetic; SDK iterator cleanup is real.
           const thread: Thread = Reflect.construct(Thread, [
@@ -183,7 +223,7 @@ try {
         const terminal = await coordinator.wait(undefined, 5_000);
         assert.equal(
           terminal?.status,
-          scenario === "user cancellation"
+          userCanceled
             ? "canceled"
             : scenario === "ordinary failure"
               ? "failed"
@@ -191,9 +231,8 @@ try {
         );
         assert.equal(
           terminal?.coordinatorGeneration,
-          ["terminal state", "user cancellation", "ordinary failure"].includes(
-            scenario,
-          )
+          userCanceled ||
+            ["terminal state", "ordinary failure"].includes(scenario)
             ? 2
             : 3,
         );
@@ -208,8 +247,9 @@ try {
         } else {
           assert.equal(
             reads,
-            ["terminal state", "user cancellation"].includes(scenario) ? 1 : 3,
+            scenario === "terminal state" || userCanceled ? 1 : 3,
           );
+          if (acceptance) assert.equal(executions, 2);
           if (concurrent) {
             assert.equal(queuedFailureSeen, true);
             assert.equal(executions, 1);

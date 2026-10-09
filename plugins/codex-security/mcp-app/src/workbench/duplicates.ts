@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
-import { equalFindingJson, parseJson } from "../helpers/json";
+import { parseJson } from "../helpers/json";
 import { transaction } from "./transaction";
 import { requireSqliteText } from "./database";
 
@@ -95,14 +96,13 @@ export function findPotentialDuplicates(
     // Stable sorting keeps insertion-time / finding-ID order for ties.
     ranked.sort((a, b) => b.similarity - a.similarity);
     const selected = [findingId, ...ranked.slice(0, 50).map(({ id }) => id)];
-    const serializedDocuments = database
+    const documents = database
       .prepare(
         `SELECT findings.details_json FROM json_each(?) AS selected
          JOIN findings ON findings.id = selected.value ORDER BY selected.key`,
       )
       .all(JSON.stringify(selected))
-      .map((row) => row.details_json as string);
-    const documents = serializedDocuments.map(parseJson);
+      .map((row) => parseJson(row.details_json as string));
     const [finding, ...potentialDuplicates] = documents;
     if (expectedCacheKeys === undefined)
       return { finding, potentialDuplicates };
@@ -111,7 +111,7 @@ export function findPotentialDuplicates(
     );
     const sourceSnapshots = new Map<string, unknown>();
     const findingDocuments = new Map(
-      selected.map((id, index) => [id, serializedDocuments[index]!]),
+      selected.map((id, index) => [id, documents[index]]),
     );
     for (const row of database
       .prepare(
@@ -139,7 +139,10 @@ export function findPotentialDuplicates(
       if (
         typeof row.source_json === "string" &&
         typeof row.occurrence_json === "string" &&
-        equalFindingJson(row.occurrence_json, findingDocuments.get(id)!)
+        isDeepStrictEqual(
+          parseJson(row.occurrence_json),
+          findingDocuments.get(id),
+        )
       )
         sourceSnapshots.set(id, JSON.parse(row.source_json));
     }

@@ -2487,6 +2487,13 @@ async function testRetryNotificationDoesNotInterruptTurn() {
       subagents: 3,
     });
     assert.equal(result.threadId, "fixture-thread-id");
+    assert.deepEqual(result.diagnostics, [
+      {
+        code: "worker_error",
+        message:
+          "Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)",
+      },
+    ]);
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--model"), false);
     assertConfigOverrides(invocation.argv, {
@@ -2823,10 +2830,8 @@ function testCodeModeFrameDiagnosticBoundaries() {
       result: resultWithText(message),
     });
     assert.deepEqual(diagnostics, [
-      {
-        code: "artifact_tool_failed",
-        message,
-      },
+      { code: "worker_error", message },
+      { code: "artifact_tool_failed", message },
     ]);
   }
   for (const item of [

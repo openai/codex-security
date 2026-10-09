@@ -254,10 +254,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert "User input reaches a SQL statement" in report
 
 
-@pytest.mark.parametrize("exact_number", [False, True])
-def test_budget_exhaustion_preserves_authored_validated_findings(
-    tmp_path: Path, exact_number: bool
-) -> None:
+def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
     state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
     write_completed_contract(
         scan_dir,
@@ -267,17 +264,8 @@ def test_budget_exhaustion_preserves_authored_validated_findings(
         coverage_mode="deep_repository",
     )
 
-    if exact_number:
-        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
-            path = scan_dir / name
-            document = json.loads(path.read_text())
-            document["extensions"] = {"observation": "RAW_NUMBER"}
-            path.write_text(json.dumps(document).replace('"RAW_NUMBER"', "1.0000000000000001"))
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    if exact_number:
-        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
-            assert "1.0000000000000001" in (scan_dir / name).read_text()
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]

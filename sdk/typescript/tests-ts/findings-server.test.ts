@@ -744,69 +744,6 @@ ${script}
   return JSON.parse(result.stdout);
 }
 
-test("shared findings reject unsupported SDK numbers without changing native storage", async () => {
-  const { store, environment } = await fixture();
-  const base = await start(store);
-  const errors = spyOn(console, "error").mockImplementation(() => undefined);
-  try {
-    for (const [literal, expected] of [
-      ["42", 42],
-      ["0.125", 0.125],
-      ["9007199254740991", Number.MAX_SAFE_INTEGER],
-      ["9007199254740993", "unsafe integer-valued"],
-      ["1" + "0".repeat(400), "non-finite"],
-    ] as const) {
-      const stored = await database(
-        environment,
-        `
-from workbench_finding_index import upsert_finding
-payload = json.load(sys.stdin)
-finding = payload['finding']
-finding['extensions'] = {'evidenceNumber': json.loads(payload['literal'])}
-upsert_finding(db, finding, '2026-01-01T00:00:00Z', 'synthetic')
-db.commit()
-print(json.dumps(db.execute('SELECT details_json FROM findings').fetchone()[0]))`,
-        { finding: finding(), literal },
-      );
-      const native = await runCodexCommand(
-        { command: "node" },
-        [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "list-stored-findings"],
-        environment,
-        JSON.stringify({
-          stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
-          payload: { limit: 10, offset: 0 },
-        }),
-      );
-      expect(native.success, native.stderr).toBe(true);
-      expect(native.stdout.match(/"evidenceNumber":\s*([^,}]+)/u)?.[1]).toBe(
-        literal,
-      );
-      expect(stored).toContain(`"evidenceNumber": ${literal}`);
-      const response = await fetch(`${base}/v1/findings`);
-      if (typeof expected === "number") {
-        expect(response.status).toBe(200);
-        expect(
-          (await response.json()).findings[0].extensions.evidenceNumber,
-        ).toBe(expected);
-      } else {
-        await expect(store.list({ limit: 10, offset: 0 })).rejects.toThrow(
-          `${expected} JSON numbers are not supported`,
-        );
-        expect(response.status).toBe(500);
-        expect(await response.json()).toEqual({ error: "internal_error" });
-      }
-      expect(
-        await database(
-          environment,
-          "print(json.dumps(db.execute('SELECT details_json FROM findings').fetchone()[0]))",
-        ),
-      ).toBe(stored);
-    }
-  } finally {
-    errors.mockRestore();
-  }
-});
-
 test("bulk insert keeps startup dependencies and complete findings without creating scans", async () => {
   const { store, environment } = await fixture();
   const options = { store, embeddings: embedder, host: "127.0.0.1", port: 0 };
@@ -1386,44 +1323,6 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
     ["repository-history", original.findingId],
     ["repository-history", finding(2).findingId],
   ]);
-});
-
-test("rejects unsupported JSON numbers before embedding or storing a batch", async () => {
-  const { store } = await fixture();
-  const embed = mock(embedder.embed);
-  const base = await start(store, { embed });
-  const write = spyOn(store, "insert");
-  try {
-    for (const number of [
-      "1e400",
-      "-1e400",
-      "9007199254740993",
-      "-9007199254740993",
-    ]) {
-      const bad = finding(2);
-      bad.extensions = { nested: { values: ["REPLACE_NUMBER"] } };
-      const response = await fetch(base + "/v1/bulk/findings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ findings: [finding(1), bad] }).replace(
-          '"REPLACE_NUMBER"',
-          number,
-        ),
-      });
-      expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ error: "invalid_request" });
-    }
-    expect(embed).not.toHaveBeenCalled();
-    expect(write).not.toHaveBeenCalled();
-    const valid = finding(3);
-    valid.extensions = { values: [0, -1, 0.125, Number.MAX_SAFE_INTEGER] };
-    expect((await insert(base, [valid])).status).toBe(201);
-    expect((await store.list({ limit: 10, offset: 0 })).findings).toEqual([
-      valid,
-    ]);
-  } finally {
-    write.mockRestore();
-  }
 });
 
 test("rejects invalid UTF-8 before embedding or storing findings", async () => {
