@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readCloudCredentials } from "./cloud-publish.js";
+import { cloudBaseUrl, DEFAULT_CLOUD_BASE_URL } from "./cloud-endpoint.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   codexSecurityStateDirectory,
@@ -25,7 +26,6 @@ import type {
   SourceReportSummary,
 } from "./external-import-models.js";
 
-const BASE_URL = "https://chatgpt.com/backend-api/aardvark/external";
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 
 /** CLI and plugin callers prepare the same immutable request before approval. */
@@ -58,6 +58,7 @@ export interface ExternalPublicationProgress {
 
 /** Counts describe acknowledged receipts, even when later transport or readback fails. */
 export interface ExternalPublicationResult {
+  cloudApiUrl: string;
   status: "complete" | "partial" | "interrupted";
   read: number;
   ready: number;
@@ -89,6 +90,7 @@ interface SavedSubmission {
 }
 
 export interface ExternalPublicationPreview extends VendorFindings {
+  cloudApiUrl: string;
   accountId: string;
   destination: ImportRepository;
   source: FindingImportRequest["source"];
@@ -245,6 +247,8 @@ export async function prepareExternalPublication(
   }
   progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
+  const apiBaseUrl = cloudBaseUrl(environment);
+  const cloudApiUrl = `${apiBaseUrl}/external`;
   const credentials = await (
     dependencies.credentials ?? (() => readCloudCredentials(environment))
   )();
@@ -256,7 +260,7 @@ export async function prepareExternalPublication(
     // Allow upload and response transport around the server's publication budget.
     const timeout = AbortSignal.timeout(body ? 60_000 : 30_000);
     const response = await (dependencies.fetch ?? globalThis.fetch)(
-      `${BASE_URL}${endpoint}`,
+      `${cloudApiUrl}${endpoint}`,
       {
         method: body ? "POST" : "GET",
         headers: {
@@ -325,6 +329,9 @@ export async function prepareExternalPublication(
   const key = hash(
     "sha256",
     canonicalJson([
+      // Keep existing production checkpoints readable; other deployments must
+      // never share a saved request or receipt with the production default.
+      ...(apiBaseUrl === DEFAULT_CLOUD_BASE_URL ? [] : [apiBaseUrl]),
       credentials.account_id,
       destination.id,
       destination.repo_connector_id,
@@ -481,6 +488,7 @@ export async function prepareExternalPublication(
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,
+    cloudApiUrl,
     accountId: credentials.account_id,
     destination,
     source,
@@ -537,6 +545,7 @@ export async function prepareExternalPublication(
                 });
           }
           return {
+            cloudApiUrl,
             status:
               parsed.excluded.length || counts.error ? "partial" : "complete",
             read: parsed.read,

@@ -1,7 +1,11 @@
 import { readFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import { gunzip } from "node:zlib";
 import { CodexSecurityError } from "./errors.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
+
+const decompressGzip = promisify(gunzip);
 
 export interface VendorFinding {
   source_finding_id: string;
@@ -56,6 +60,14 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
     );
   }
   const assetType = text(asset?.["type"]);
+  const repositoryAsset =
+    assetType === "REPOSITORY_BRANCH" ||
+    asset?.["nativeType"] === "github#repositoryBranch";
+  // Wiz repository reports prefix root-relative paths with '/'. Workload paths
+  // are not source locations and must remain only in the original evidence.
+  const locationPath = text(record["locationPath"]);
+  const repositoryPath =
+    repositoryAsset && locationPath ? locationPath.replace(/^\/+/, "") : null;
   const digest =
     text(asset?.["imageDigest"]) ??
     text(record["imageDigest"]) ??
@@ -74,8 +86,7 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
   ) {
     throw new Error("Wiz updatedAt is not a valid timestamp.");
   }
-  // Container paths and lastDetectedAt are retained in source_data; neither is a
-  // repository location or proof that the entire vendor record was updated.
+  // lastDetectedAt is not proof that the entire vendor record was updated.
   const evidence = {
     title:
       text(record["title"]) ??
@@ -94,14 +105,14 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
               text(artifact?.["codeLibraryLanguage"]) ??
               text(record["codeLibraryLanguage"]),
             installed_version: version,
-            manifest_path: null,
+            manifest_path: repositoryPath,
             fixed_versions: text(record["fixedVersion"])
               ? [record["fixedVersion"]]
               : [],
           },
         ]
       : [],
-    locations: [],
+    locations: repositoryPath ? [{ path: repositoryPath }] : [],
     branch: null,
     code_revision: null,
     source_scan_id: null,
@@ -122,6 +133,13 @@ function records(payload: unknown): unknown[] {
   if (!envelope)
     throw new Error(
       "Expected finding objects or a Wiz vulnerabilityFindings response.",
+    );
+  if (
+    object(envelope["scannersRunStatuses"]) &&
+    object(envelope["codeAnalyzerDetails"])
+  )
+    throw new Error(
+      "This is a Wiz Code & Build Scan event, which contains scan metadata rather than vulnerability records. In Vulnerability Findings, filter the repository and selection, then choose Save as → Report with JSON format and Detailed columns. Download that report instead of Raw Event.",
     );
   if (Array.isArray(envelope["errors"]) && envelope["errors"].length > 0) {
     throw new Error(
@@ -154,10 +172,15 @@ export async function readVendorFindings(
 ): Promise<VendorFindings> {
   let input: unknown[];
   try {
+    // Wiz's default report export is gzip, sometimes with a .json filename.
+    // Inspect the bytes rather than requiring users to rename their download.
+    const bytes = await readFile(path);
+    const decoded =
+      bytes[0] === 0x1f && bytes[1] === 0x8b
+        ? await decompressGzip(bytes)
+        : bytes;
     // A replacement character would change vendor identities and retained evidence.
-    const contents = new TextDecoder("utf-8", { fatal: true }).decode(
-      await readFile(path),
-    );
+    const contents = new TextDecoder("utf-8", { fatal: true }).decode(decoded);
     let payload: unknown;
     try {
       payload = JSON.parse(contents);

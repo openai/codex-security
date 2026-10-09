@@ -577,24 +577,25 @@ For filesystem and approval behavior, see the
 
 ### Environment variables
 
-| Variable                                                                    | Effect                                                             |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                      |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                  |
-| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                          |
-| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                            |
-| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.             |
-| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.         |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                   |
-| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.          |
-| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                   |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                           |
-| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.             |
-| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                         |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                              |
-| `CI`                                                                        | Disable interactive update notices.                                |
-| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`. |
+| Variable                                                                    | Effect                                                                                                               |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                        |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                    |
+| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                            |
+| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                              |
+| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                               |
+| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                           |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                     |
+| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                            |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                     |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                             |
+| `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`. |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                               |
+| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                           |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                  |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                                                                                |
+| `CI`                                                                        | Disable interactive update notices.                                                                                  |
+| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`.                                                   |
 
 Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
@@ -803,17 +804,34 @@ Before the first import:
 1. Select an existing repository in Codex Security Cloud and copy its repository
    URL (for example, a GitHub URL) or Cloud repository ID. The repository needs an
    authorized environment, but does not need a completed native scan.
-2. Use your authorized Wiz connection to read selected package vulnerability
-   records and save their JSON. Include `id`, `name`, `detailedName`,
-   `vendorSeverity` (or `severity`), and `vulnerableAsset.id`; retain the available
-   package, image, and source metadata. The command does not fetch Wiz data or
-   accept CSV exports. See the accepted input formats below.
+2. In Wiz **Vulnerability Findings**, filter to the intended repository and
+   findings. Choose **Save as → Report**, select **Repository Branch** as the
+   resource type (remove the default Virtual Machine selection), **JSON** format,
+   and **Detailed** columns. Retain the repository filter and download the completed
+   report. Gzip compression can stay enabled; the importer detects it even when
+   the download is named `.json`. **Raw Event** on Code & Build Scans exports scan
+   metadata, not finding records. CSV is not supported.
+   Alternatively, read selected package vulnerability records through your
+   authorized Wiz connection and save their JSON. Include `id`, `name`,
+   `detailedName`, `vendorSeverity` (or `severity`), and `vulnerableAsset.id`;
+   retain available package, image, and source metadata. The command does not
+   fetch from Wiz.
 3. Choose a stable source key such as `TENANT_ID/vulnerability-finding`. Reuse it
    for that Wiz tenant and finding class across exports. Do not create a new key
    for each project filter or import; that creates different source identities.
 4. Check the ChatGPT account used by your existing file-backed Codex Security
    login. API-key-only and keyring-only logins are not supported for Cloud
    publication. See the credential-storage instructions below.
+
+For an alternate Cloud deployment, set `CODEX_SECURITY_CLOUD_BASE_URL` to its
+API root before previewing or uploading, for example
+`https://cloud.example.test/backend-api/aardvark`. Use a login issued by that
+deployment and an isolated `CODEX_SECURITY_STATE_DIR` for testing. The endpoint
+does not change your login or sign you into another deployment. An invalid or
+empty configured URL stops the import before authentication or network requests.
+With the variable unset, the existing production endpoint remains the default.
+The older `CODEX_SECURITY_CLOUD_PUBLISH_URL` overrides only the final native scan
+publication endpoint; it does not route vendor imports.
 
 Preview the selection and destination:
 
@@ -828,7 +846,8 @@ destination and resume the same saved submission. This command reads the
 authorized destination and current source versions during
 preview. It uses the same saved ChatGPT file login as scan publication. The Cloud
 repository needs an existing environment; no native scan is required. Review the
-account, repository, environments, findings, and exclusions, then rerun without
+Cloud API endpoint, account, repository, environments, findings, and exclusions,
+then rerun without
 `--dry-run`. The default terminal prompt is No; `--yes` confirms a previously
 reviewed input for scripts or the plugin. Without a terminal or `--yes`, no upload
 occurs. Existing source findings keep their Cloud environment; new findings use
@@ -839,9 +858,11 @@ exclusions. `--dry-run --format json` retains all normalized findings and comple
 evidence for inspection. A prompt explicitly includes any records that will be
 skipped.
 
-Input can be a Wiz vulnerability finding, an array, a complete
+Input can be a downloaded Wiz JSON vulnerability report, a vulnerability finding,
+an array, a complete
 `data.vulnerabilityFindings.nodes` response, or JSONL with one vendor record per
-line. A response that advertises another page is rejected: save the explicitly
+line. Plain and gzip-compressed files are accepted. A response that advertises
+another page is rejected: save the explicitly
 selected records as an array. Normalized JSONL is also accepted:
 
 ```json
@@ -859,8 +880,9 @@ Use Wiz's finding `id`, not a CVE, as identity. Keep the source key stable acros
 exports; a selected project filter does not change the vendor namespace. Confirm
 that the selected assets or builds map to this repository. The raw Wiz adapter
 retains each record in `source_data`, uses reported severity, and leaves unknown
-branch/revision and repository locations empty. Container paths are retained as
-vendor evidence rather than interpreted as source-code locations. It does not
+branch/revision empty. Repository-branch findings retain their repository-relative
+file paths; container and other workload paths remain vendor evidence rather than
+source-code locations. It does not
 fetch from Wiz, assess findings, or change vendor or Cloud triage decisions.
 Findings from external network scans are excluded from this package vulnerability
 mapping.
@@ -872,7 +894,11 @@ exactly. Invalid records appear in `excluded` with their source ID and reason.
 Requests contain at most 100 findings and respect the Cloud payload limits.
 Before uploading, the publisher saves request IDs and bodies privately under
 the configured Codex Security state directory. After an uncertain response,
-repeat the same command with unchanged input to resume those requests. A reset
+repeat the same command with unchanged input and Cloud API endpoint to resume those
+requests. Different deployments have separate saved submissions, including when
+their account and repository IDs match. The preview and result include
+`cloudApiUrl` so scripts can verify which API received the findings; this is an
+API endpoint, not a link to the Cloud UI. A reset
 retires the old request without republishing; review and explicitly approve a
 fresh invocation.
 

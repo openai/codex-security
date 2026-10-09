@@ -512,6 +512,33 @@ describe("Cloud publication", () => {
     expect(requestedUrl).toBe(publishUrl);
   });
 
+  test("uses the shared Cloud API base while preserving the publication URL override", async () => {
+    const { scan, environment } = await fixture();
+    const cloudBase = "https://cloud.example.test/pilot/backend-api/aardvark";
+    const urls: string[] = [];
+    const fetch = async (url: string | URL | Request) => {
+      urls.push(String(url));
+      return Response.json(receipt);
+    };
+    await publishScanToCloud(scan, {
+      environment: {
+        ...environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: `${cloudBase}/`,
+      },
+      fetch,
+    });
+    const publishUrl = "https://other-cloud.example.test/publish";
+    await publishScanToCloud(scan, {
+      environment: {
+        ...environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: cloudBase,
+        CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl,
+      },
+      fetch,
+    });
+    expect(urls).toEqual([`${cloudBase}/cli/findings`, publishUrl]);
+  });
+
   test("reuses the dedicated Codex Security login and honors an explicit logout", async () => {
     const { scan, environment } = await fixture();
     const home = codexSecurityCredentialHome(environment);

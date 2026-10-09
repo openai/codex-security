@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import {
@@ -50,6 +51,93 @@ const normalized = (id = "vendor-1", severity = "high") => ({
     severity,
     source_data: { id },
   },
+});
+
+test("Wiz's gzip JSON report retains finding identity, evidence and repository locations", async () => {
+  const report = {
+    id: "vendor-report-1",
+    name: "CVE-2026-0001",
+    detailedName: "example-package",
+    version: "1.2.3",
+    fixedVersion: "1.2.4",
+    vendorSeverity: "HIGH",
+    detectionMethod: "LIBRARY",
+    description: "Reported vulnerable package in the repository lockfile.",
+    locationPath: "/pnpm-lock.yaml",
+    lastDetectedAt: "2026-01-01T00:00:00Z",
+    vulnerableAsset: {
+      id: "vendor-repository-branch-1",
+      nativeType: "github#repositoryBranch",
+      name: "example/project/main",
+      cloudProviderURL: "https://github.com/example/project/tree/main",
+    },
+  };
+  const f = await fixture();
+  // Wiz can keep the .json filename while compression is enabled.
+  await writeFile(
+    f.file,
+    gzipSync(
+      [report, { ...report, id: "vendor-report-2" }]
+        .map((record) => JSON.stringify(record))
+        .join("\n"),
+    ),
+  );
+  const parsed = await readVendorFindings(f.file);
+  expect(parsed.read).toBe(2);
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]).toMatchObject({
+    source_finding_id: report.id,
+    evidence: {
+      severity: "high",
+      packages: [{ name: "example-package", manifest_path: "pnpm-lock.yaml" }],
+      locations: [{ path: "pnpm-lock.yaml" }],
+      source_updated_at: null,
+      code_revision: null,
+      source_data: report,
+    },
+  });
+  const result = await (
+    await prepareExternalPublication(f.file, options, f.deps)
+  ).publish();
+  expect(result.counts.created).toBe(2);
+  expect(result.verified).toBe(2);
+
+  await writeFile(
+    f.file,
+    JSON.stringify([
+      {
+        ...report,
+        vulnerableAsset: { id: "workload-1", type: "CONTAINER_IMAGE" },
+      },
+    ]),
+  );
+  const workload = await readVendorFindings(f.file);
+  expect(workload.findings[0]!.evidence.locations).toEqual([]);
+  expect(
+    workload.findings[0]!.evidence.packages?.[0]?.manifest_path,
+  ).toBeNull();
+});
+
+test("a Wiz Raw Event export explains the finding-report path before contacting Cloud", async () => {
+  const f = await fixture({
+    id: "scan-event-1",
+    codeAnalyzerDetails: { commit: { ref: "main" } },
+    scannersRunStatuses: {
+      vulnerabilities: { enabled: true, status: "SUCCESS" },
+    },
+    analytics: { numVulnerabilityFindings: 3 },
+  });
+  let contactedCloud = false;
+  await expect(
+    prepareExternalPublication(f.file, options, {
+      ...f.deps,
+      fetch: async () => {
+        contactedCloud = true;
+        throw new Error("Unexpected Cloud request");
+      },
+    }),
+  ).rejects.toThrow("scan metadata rather than vulnerability records");
+  expect(contactedCloud).toBe(false);
 });
 
 async function fixture(records: unknown = [normalized()]) {
@@ -2027,6 +2115,83 @@ test("repository URLs and IDs share the same resumable destination", async () =>
   expect((await retry.publish()).status).toBe("complete");
   expect(f.posts[1]).toBe(f.posts[0]);
 });
+
+test("Cloud deployment routing covers every request and isolates saved retries", async () => {
+  const f = await fixture();
+  const cloudBase = "https://cloud.example.test/pilot/backend-api/aardvark";
+  const requested: string[] = [];
+  const deps = {
+    ...f.deps,
+    environment: {
+      ...f.deps.environment,
+      CODEX_SECURITY_CLOUD_BASE_URL: `${cloudBase}///`,
+    },
+    fetch: async (url: string, init: RequestInit) => {
+      requested.push(url);
+      expect(url.startsWith(`${cloudBase}/external/`)).toBe(true);
+      return f.deps.fetch(url, init);
+    },
+  };
+  f.state.brokenReadback = true;
+  const prepared = await prepareExternalPublication(f.file, options, deps);
+  expect(prepared.preview.cloudApiUrl).toBe(`${cloudBase}/external`);
+  await expect(prepared.publish()).rejects.toThrow("resume the saved request");
+  const otherDeployment = await prepareExternalPublication(f.file, options, {
+    ...f.deps,
+    environment: {
+      ...f.deps.environment,
+      CODEX_SECURITY_CLOUD_BASE_URL:
+        "https://other-cloud.example.test/backend-api/aardvark",
+    },
+  });
+  expect(otherDeployment.preview.resumed).toBe(false);
+  const retry = await prepareExternalPublication(f.file, options, deps);
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.requests).toEqual(prepared.preview.requests);
+  f.state.brokenReadback = false;
+  const result = await retry.publish();
+  expect(result.cloudApiUrl).toBe(`${cloudBase}/external`);
+  expect(result.verified).toBe(1);
+  expect(f.posts).toHaveLength(1);
+  expect(requested.some((url) => url.includes("/repositories?"))).toBe(true);
+  expect(requested.some((url) => url.includes("/source_reports?"))).toBe(true);
+  expect(requested.some((url) => url.endsWith("/finding_imports"))).toBe(true);
+  expect(requested.some((url) => url.includes("/source_reports/"))).toBe(true);
+});
+
+test.each([
+  "",
+  "  ",
+  "/relative",
+  "file:///tmp/cloud",
+  "https://user:password@cloud.example.test",
+  "https://cloud.example.test?deployment=pilot",
+  "https://cloud.example.test#pilot",
+])(
+  "invalid Cloud base URL fails before authentication or network: %s",
+  async (baseUrl) => {
+    const f = await fixture();
+    let calls = 0;
+    await expect(
+      prepareExternalPublication(f.file, options, {
+        ...f.deps,
+        environment: {
+          ...f.deps.environment,
+          CODEX_SECURITY_CLOUD_BASE_URL: baseUrl,
+        },
+        credentials: async () => {
+          calls++;
+          throw new Error("Unexpected credential read");
+        },
+        fetch: async () => {
+          calls++;
+          throw new Error("Unexpected network request");
+        },
+      }),
+    ).rejects.toThrow("CODEX_SECURITY_CLOUD_BASE_URL");
+    expect(calls).toBe(0);
+  },
+);
 
 test("read lookups and verification run concurrently with bounded requests and ordered input", async () => {
   const f = await fixture(
