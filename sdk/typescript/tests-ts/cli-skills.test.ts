@@ -1410,6 +1410,9 @@ process.stdout.write(JSON.stringify({
       ...[
         `HTTP ${status}`,
         `HTTP/1.1 ${status}`,
+        `HTTP code: ${status}`,
+        `HTTPError:${status}`,
+        `HTTP error code: ${status}`,
         `status code ${status}`,
         `status_code=${status}`,
         `{"status":${status}}`,
@@ -1421,6 +1424,7 @@ process.stdout.write(JSON.stringify({
         `parse failed on line ${status}`,
         `parse failed on line "${status}"`,
         `failed after ${status} bytes`,
+        `error code: ${status}`,
         `${status} bytes read`,
         status,
       ].map((detail) => [detail, null] as const),
