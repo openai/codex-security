@@ -71,12 +71,13 @@ const CUSTOM_CA_ENV_KEYS = [
 ];
 
 function nativeAbsolutePath(path: string, base = process.cwd()): string {
-  // Unix resolves symlink/.. through the filesystem; Windows resolves it lexically.
-  return process.platform === "win32"
-    ? resolve(base, path)
-    : isAbsolute(path)
-      ? path
-      : `${base}/${path}`;
+  // Leave absolute path spelling to native handling of verbatim paths and symlinks.
+  if (
+    isAbsolute(path) &&
+    (process.platform !== "win32" || parse(path).root.length > 1)
+  )
+    return path;
+  return process.platform === "win32" ? resolve(base, path) : `${base}/${path}`;
 }
 
 function localCaEnvironment(

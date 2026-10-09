@@ -42,6 +42,50 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
+test("absolute source paths retain native spelling in launch and checkpoint settings", async () => {
+  const home = await temporaryDirectory();
+  const repository = await sourceCheckout();
+  const path =
+    process.platform === "win32"
+      ? String.raw`\\?\C:\certificates\..\bundle.pem`
+      : `${home}/linked/../bundle.pem`;
+  const environment = {
+    PATH: process.env["PATH"],
+    SystemRoot: process.env["SystemRoot"],
+    CODEX_HOME: home,
+    CODEX_SECURITY_STATE_DIR: join(home, "state"),
+    OPENAI_API_KEY: "synthetic-review-key",
+    NODE_EXTRA_CA_CERTS: path,
+  };
+  for (const environmentId of ["local", "source-executor"]) {
+    await writeFile(
+      join(home, "environments.toml"),
+      stringify({
+        environments: [
+          { id: "source-executor", program: process.execPath, cwd: path },
+        ],
+      }),
+    );
+    const source = await sourceForTest(
+      {
+        mcp_servers: {
+          source: {
+            command: process.execPath,
+            cwd: path,
+            environment_id: environmentId,
+          },
+        },
+      },
+      environment,
+      repository,
+    );
+    expect(source.server["cwd"]).toBe(path);
+    if (environmentId === "local")
+      expect(source.caEnvironment?.["NODE_EXTRA_CA_CERTS"]).toBe(path);
+    else expect(source.executor?.["cwd"]).toBe(path);
+  }
+});
+
 test.each(["local", "executor"])(
   "native %s cwd preserves directory-link traversal and review identity",
   async (mode) => {
