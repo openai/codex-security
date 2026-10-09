@@ -193,48 +193,38 @@ const reason = z
   .string()
   .min(1)
   .refine((value) => value.trim().length > 0);
-const findingPairSchema = z
-  .object({
-    beforeOccurrenceId: z.string(),
-    afterOccurrenceId: z.string(),
-    reason,
-  })
-  .strict();
-const comparisonSchema = z
-  .object({
-    matches: z.array(
-      z
-        .object({
-          beforeOccurrenceIds: z.array(z.string()).min(1),
-          afterOccurrenceIds: z.array(z.string()).min(1),
-          confidence: z.literal("high"),
-          reason,
-        })
-        .strict(),
-    ),
-    uncertain: z.array(findingPairSchema),
-    related: z.array(findingPairSchema).optional(),
-  })
-  .strict();
+const findingPairSchema = z.strictObject({
+  beforeOccurrenceId: z.string(),
+  afterOccurrenceId: z.string(),
+  reason,
+});
+const comparisonSchema = z.strictObject({
+  matches: z.array(
+    z.strictObject({
+      beforeOccurrenceIds: z.array(z.string()).min(1),
+      afterOccurrenceIds: z.array(z.string()).min(1),
+      confidence: z.literal("high"),
+      reason,
+    }),
+  ),
+  uncertain: z.array(findingPairSchema),
+  related: z.array(findingPairSchema).optional(),
+});
 
-const evidenceRequestSchema = z
-  .object({
-    kind: z.literal("evidence"),
-    beforeOccurrenceIds: z.array(z.string()),
-    afterOccurrenceIds: z.array(z.string()),
-    offset: z.number().int().nonnegative(),
-  })
-  .strict();
+const evidenceRequestSchema = z.strictObject({
+  kind: z.literal("evidence"),
+  beforeOccurrenceIds: z.array(z.string()),
+  afterOccurrenceIds: z.array(z.string()),
+  offset: z.number().int().nonnegative(),
+});
 type EvidenceRequest = z.infer<typeof evidenceRequestSchema>;
 const matchingTurnSchema = comparisonSchema.extend({
   request: z
     .union([
-      z
-        .object({
-          kind: z.literal("catalogue"),
-          page: z.number().int().nonnegative(),
-        })
-        .strict(),
+      z.strictObject({
+        kind: z.literal("catalogue"),
+        page: z.number().int().nonnegative(),
+      }),
       evidenceRequestSchema,
     ])
     .nullable()
