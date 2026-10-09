@@ -66,9 +66,6 @@ must describe the actual source; it does not authorize additional repository
 access. Unknown extension fields are preserved. This does not require creating
 scan manifests or other saved-scan artifacts.
 
-Numeric finding values must be finite; integer-valued numbers must be safe
-JavaScript integers. Unsupported numbers are rejected before any review.
-
 Observation IDs are host-owned, nonempty strings, unique within `observations`.
 Supply the pending observations and their retrieved neighbors together as original
 observations. Each `candidateRelationships` entry selects one anchor to process;
