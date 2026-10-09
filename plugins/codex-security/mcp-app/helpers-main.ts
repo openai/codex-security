@@ -15,6 +15,7 @@ import { rankPoolCommand } from "./src/helpers/rank-pool";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
+import { configPreflightCommand } from "./src/helpers/config-preflight";
 
 let commandLine = isMainThread ? process.argv.slice(2) : [];
 if (isMainThread && process.platform === "win32") {
@@ -60,6 +61,8 @@ const workbenchUsage: Record<string, string> = {
 };
 if (!isMainThread) {
   parentPort!.postMessage(normalizeCandidateBatch(workerData));
+} else if (command === "config-preflight") {
+  process.exitCode = configPreflightCommand(args);
 } else if (command === "resolve-security-md") {
   process.exitCode = resolveSecurityMdCommand(args, posixHome);
 } else if (command === "normalize-candidates") {
@@ -130,7 +133,7 @@ if (!isMainThread) {
   });
 } else {
   console.error(
-    `Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+    `Usage: launch_codex_security_mcp[.cmd] --helper <config-preflight | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
   );
   process.exitCode = 2;
 }

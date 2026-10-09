@@ -1,7 +1,7 @@
 import { nodeCommand } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
@@ -18,6 +18,7 @@ import {
   preparedRuntime,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -361,15 +362,50 @@ describe("CodexSecurity orchestration", () => {
                 [repository]: { trust_level: "trusted" },
               },
             });
-            expect(input).toContain(
-              `--config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")}`,
+            const configArgument = /--config "[^"]+"/u.exec(input)?.[0];
+            expect(configArgument).toBe(
+              process.platform === "win32"
+                ? '--config "%CODEX_SECURITY_CONFIG_PATH%"'
+                : `--config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")}`,
             );
             expect(input).toContain("--effective-config");
+            if (process.platform === "win32") {
+              const launcher = windowsHelperFixture(root, {
+                CODEX_SECURITY_CONFIG_PATH: configPath!,
+                CODEX_HOME: join(root, "denied"),
+              });
+              await cp(
+                join(PLUGIN_ROOT, "preflight"),
+                join(launcher.plugin, "preflight"),
+                { recursive: true },
+              );
+              for (const powershell of launcher.powershells) {
+                const result = await launcher.run(
+                  powershell,
+                  "references/config-preflight.md",
+                  {
+                    "<plugin_dir>": launcher.plugin,
+                    "<scan-working-directory>": repository,
+                    "<capability-profile>": "security_scan",
+                    "<active-config-argument>": configArgument!,
+                    "<true|false>": "true",
+                    "<verified-multi-agent-runtime-arguments>":
+                      "--multi-agent-runtime-owner native --multi-agent-runtime-version v2 --multi-agent-session-cap 12 --multi-agent-runtime-provenance tool-surface --effective-config features.goals=true",
+                  },
+                );
+                expect(result.status, result.diagnostics).toBe(0);
+                expect(
+                  JSON.parse(result.stdout).config_paths,
+                  result.diagnostics,
+                ).toEqual([configPath]);
+              }
+            }
             const shellEnvironment = options.env as Record<string, string>;
             const helper = execFileSync(
-              interpreter!,
+              Bun.which("node")!,
               [
-                join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+                join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+                "config-preflight",
                 "--skill",
                 "security-scan",
                 "--config",
