@@ -2,8 +2,10 @@ import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { runDeepScan } from "../src/deep-scan.js";
+import { ScanCostTracker } from "../src/cost.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -133,6 +135,103 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       "thread.started",
       "turn.completed",
     ]);
+});
+
+test("preserves complete worker usage and cost after direct engine completion", async () => {
+  const { root, pluginRoot } = await fixture();
+  const codexHome = join(root, "codex-home");
+  const scanDir = join(root, "scan");
+  await mkdir(scanDir);
+  await writeSession(
+    codexHome,
+    "discovery-session",
+    {
+      input_tokens: 1_000,
+      cached_input_tokens: 200,
+      cache_write_input_tokens: 100,
+      output_tokens: 100,
+    },
+    {
+      cwd: join(
+        scanDir,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "1",
+        "output",
+      ),
+      timestamp: "2026-07-26T12:00:01.000Z",
+    },
+  );
+  await writeSession(
+    codexHome,
+    "reducer-session",
+    {
+      input_tokens: 500,
+      cached_input_tokens: 50,
+      cache_write_input_tokens: 40,
+      output_tokens: 60,
+    },
+    {
+      cwd: join(scanDir, "artifacts"),
+      timestamp: "2026-07-26T12:00:02.000Z",
+    },
+  );
+  await writeFile(
+    join(codexHome, "sessions", "owner.jsonl"),
+    JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: "engine-session",
+        cwd: scanDir,
+        timestamp: "2026-07-26T12:00:00.000Z",
+      },
+    }) + "\n",
+  );
+  const events = runDeepScan({
+    preflightCommand: { command: "/synthetic/codex" },
+    pluginRoot,
+    repository: root,
+    scanDir,
+    scanId: "usage-scan",
+    prompt: "Synthetic audit.",
+    signal: new AbortController().signal,
+    codexOptions: {
+      env: {
+        PATH: process.env["PATH"]!,
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_SCAN_DIR: scanDir,
+        SYNTHETIC_RECEIPT: join(root, "engine.json"),
+        SYNTHETIC_THREAD_ID: "engine-session",
+      },
+    },
+  });
+  expect((await events.next()).value).toMatchObject({
+    type: "thread.started",
+    thread_id: "engine-session",
+  });
+  const tracker = new ScanCostTracker({
+    codexHome,
+    scanDirectory: scanDir,
+    model: "gpt-6.1-sol",
+  });
+  tracker.start("engine-session");
+  const running = await tracker.refresh();
+  const completed = (await events.next()).value;
+  expect(completed?.type).toBe("turn.completed");
+  const final = await tracker.stop(completed?.["usage"]);
+  expect(running.usage).toEqual({
+    input_tokens: 1_500,
+    cached_input_tokens: 250,
+    cache_write_input_tokens: 140,
+    output_tokens: 160,
+    reasoning_output_tokens: 0,
+    total_tokens: 1_660,
+  });
+  expect(running.cost).not.toBeNull();
+  expect(final).toEqual(running);
+  expect(final.cost?.cacheWriteInputTokensReported).toBeUndefined();
+  expect((await events.next()).done).toBe(true);
 });
 
 test("waits for the direct engine to stop when the scan is canceled", async () => {

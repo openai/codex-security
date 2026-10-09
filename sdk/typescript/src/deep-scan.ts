@@ -106,7 +106,12 @@ export async function* runDeepScan(
   // existing scan tracker from the native sessions below this scan directory.
   yield {
     type: "turn.completed",
-    usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 },
+    usage: {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+    },
   };
 }
 
