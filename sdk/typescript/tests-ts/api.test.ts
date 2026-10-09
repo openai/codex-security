@@ -2236,7 +2236,7 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([false, true])(
-    "archives accepted output before starting, cancellation=%s",
+    "archives accepted output before starting, cancellation=%j",
     async (cancelRegistration) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -2513,18 +2513,27 @@ describe("CodexSecurity orchestration", () => {
         expect(
           await readFile(join(root, "registration-input.json"), "utf8"),
         ).toBe(submitted!);
-        const closed = once(socket, "close", { signal: deadline }).catch(
-          (error: NodeJS.ErrnoException) => {
-            // Terminating the paused helper resets this fixture socket on Windows.
-            // Once archival starts, the helper must instead finish normally.
+        // Terminating the paused child can reset its socket on Windows.
+        // Still wait for close, and retain unexpected errors and the deadline.
+        const closed = new Promise<void>((resolve, reject) => {
+          const onError = (error: NodeJS.ErrnoException) => {
             if (
               error.code !== "ECONNRESET" ||
               boundary === "commit" ||
               boundary === "rollback"
             )
-              throw error;
-          },
-        );
+              reject(error);
+          };
+          const onAbort = () => reject(deadline.reason);
+          socket!.once("error", onError);
+          socket!.once("close", () => {
+            socket!.removeListener("error", onError);
+            deadline.removeEventListener("abort", onAbort);
+            resolve();
+          });
+          if (deadline.aborted) onAbort();
+          else deadline.addEventListener("abort", onAbort, { once: true });
+        });
         if (cancel === "close") closing = client.close();
         else controller.abort();
         if (boundary === "commit" || boundary === "rollback") {
