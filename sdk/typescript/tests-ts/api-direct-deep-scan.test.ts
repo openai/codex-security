@@ -3,7 +3,7 @@ import { hash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
@@ -122,12 +122,13 @@ test.each(["configured", "managed"] as const)(
     await mkdir(repository);
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
-    const environment = {
-      PATH: "",
-      ...(selection === "configured"
+    const inheritedTools = join(root, "operator-tools");
+    await mkdir(inheritedTools);
+    const runtimeEnvironment: Record<string, string> =
+      selection === "configured"
         ? { CODEX_MCP_NODE_PATH: join(root, "managed-node") }
-        : { XDG_CACHE_HOME: join(root, "managed-cache") }),
-    };
+        : { XDG_CACHE_HOME: join(root, "managed-cache") };
+    const environment = { PATH: inheritedTools, ...runtimeEnvironment };
     const parentTurn = mock(async (prompt: string) => {
       expect(prompt).toContain("start_codex_security_deep_scan");
       throw new Error("parent route reached");
@@ -150,7 +151,10 @@ test.each(["configured", "managed"] as const)(
           environment,
         }),
         createCodex: (options) => {
-          expect(options.env).toMatchObject(environment);
+          expect(options.env).toMatchObject(runtimeEnvironment);
+          expect(options.env?.["PATH"]?.split(delimiter)).toContain(
+            inheritedTools,
+          );
           expect(options.config).toMatchObject({
             model: "gpt-6.1-sol",
             model_reasoning_effort: "high",
