@@ -25,6 +25,8 @@ import {
   nativeCloudDestination as destination,
 } from "./support/cloud-import.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { loadContract } from "../src/contract.js";
+import { CodexSecurityError } from "../src/errors.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -529,6 +531,145 @@ describe("native Cloud publication", () => {
 });
 
 describe("native Cloud preflight and diagnostics", () => {
+  test.each(["failed", "canceled", "interrupted"] as const)(
+    "rejects a sealed zero-finding %s directory before credentials or network",
+    async (status) => {
+      const { scan } = await fixture();
+      const manifestPath = join(scan, "scan-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.scan.status = status;
+      for (const name of ["findings.json", "coverage.json"]) {
+        const path = join(scan, name);
+        const document = JSON.parse(await readFile(path, "utf8"));
+        if (name === "findings.json") document.findings = [];
+        else {
+          document.completeness = "partial";
+          document.surfaces = [];
+        }
+        const contents = JSON.stringify(document);
+        await writeFile(path, contents);
+        manifest.scan.artifacts.find(
+          (item: { path: string }) => item.path === name,
+        ).sha256 = createHash("sha256").update(contents).digest("hex");
+      }
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      const loaded = await loadContract(scan, { pluginRoot: PLUGIN_ROOT });
+      expect(loaded.manifest.scan.status).toBe(status);
+      expect(loaded.findings.findings).toEqual([]);
+      for (const dryRun of [true, false]) {
+        await expect(
+          publishScanToCloud(scan, {
+            dryRun,
+            environment: {},
+            fetch: async () => {
+              throw new Error("unexpected network");
+            },
+          }),
+        ).rejects.toThrow(`requires a completed scan; this scan is ${status}`);
+      }
+    },
+  );
+
+  test.each(["broken-success", "malformed-success", "broken-error"] as const)(
+    "retains response failure detail and recovery guidance for %s",
+    async (scenario) => {
+      const { scan, environment } = await fixture();
+      const cloud = server();
+      const failure = new Error("synthetic response body transport failure");
+      let caught: unknown;
+      try {
+        await publishScanToCloud(scan, {
+          environment,
+          fetch: async (url, request) => {
+            if (request.method === "GET") return cloud.fetch(url, request);
+            if (scenario === "malformed-success")
+              return new Response('{"protocol_version":');
+            return new Response(
+              new ReadableStream({
+                pull(body) {
+                  body.error(failure);
+                },
+              }),
+              { status: scenario === "broken-error" ? 503 : 200 },
+            );
+          },
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CodexSecurityError);
+      const error = caught as CodexSecurityError;
+      expect(error.cause).toBeInstanceOf(Error);
+      expect(error.message).toContain((error.cause as Error).message);
+      expect(error.message).toContain("Repeat the same publication to resume");
+      expect(error.message).toContain(
+        scenario === "broken-error" ? "HTTP 503" : "not confirmed",
+      );
+      if (scenario !== "malformed-success") expect(error.cause).toBe(failure);
+    },
+  );
+
+  test.each([200, 503])(
+    "preserves cancellation when an HTTP %i body fails",
+    async (status) => {
+      const { scan, environment } = await fixture();
+      const cloud = server();
+      const controller = new AbortController();
+      const cancellation = new Error("synthetic cancellation reason");
+      await expect(
+        publishScanToCloud(scan, {
+          environment,
+          signal: controller.signal,
+          fetch: async (url, request) => {
+            if (request.method === "GET") return cloud.fetch(url, request);
+            return new Response(
+              new ReadableStream({
+                pull(body) {
+                  controller.abort(cancellation);
+                  body.error(
+                    new Error("synthetic body failure after cancellation"),
+                  );
+                },
+              }),
+              { status },
+            );
+          },
+        }),
+      ).rejects.toBe(cancellation);
+    },
+  );
+
+  test("resumes an accepted finalization after losing its response body without reupload", async () => {
+    const { scan, environment } = await fixture();
+    const cloud = server();
+    let dropped = false;
+    const fetch = async (url: string, request: RequestInit) => {
+      const response = await cloud.fetch(url, request);
+      if (url.endsWith("/finalize") && !dropped) {
+        dropped = true;
+        return new Response(
+          new ReadableStream({
+            pull(body) {
+              body.error(new Error("synthetic lost finalization response"));
+            },
+          }),
+        );
+      }
+      return response;
+    };
+    await expect(
+      publishScanToCloud(scan, { environment, fetch }),
+    ).rejects.toThrow("resume its immutable upload session");
+    expect(cloud.calls.filter((call) => call.method === "PUT")).toHaveLength(4);
+    const before = cloud.calls.length;
+    const replay = await publishScanToCloud(scan, { environment, fetch });
+    expect(replay.publication?.upload_status).toBe("accepted");
+    expect(cloud.calls.slice(before).map((call) => call.method)).toEqual([
+      "GET",
+      "POST",
+    ]);
+  });
+
   test("reports a rejected create request with the service detail and no uploads", async () => {
     const { scan, environment } = await fixture();
     const cloud = server();

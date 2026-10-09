@@ -29,6 +29,10 @@ export function requireCloudScanEligibility({
   manifest,
   coverage,
 }: LoadedContract): string {
+  if (manifest.scan.status !== "completed")
+    throw new CodexSecurityError(
+      `Cloud publication requires a completed scan; this scan is ${manifest.scan.status}.`,
+    );
   const { target, scope } = manifest.scan;
   if (
     !["git_revision", "git_worktree"].includes(target.kind) ||

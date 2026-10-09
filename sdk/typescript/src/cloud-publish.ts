@@ -18,7 +18,11 @@ import type {
   ImportedScanReceipt,
   ImportArtifactDeclaration,
 } from "./cloud-import-models.js";
-import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  errorMessage,
+} from "./errors.js";
 import type { Finding } from "./models.js";
 import {
   bundledPluginRoot,
@@ -107,6 +111,10 @@ async function cloudRequest(
     ? AbortSignal.any([dependencies.signal, timeout])
     : timeout;
   let response: Response;
+  let payload: unknown;
+  let failure = "Cloud publication was not confirmed.";
+  let recovery =
+    "Repeat the same publication to resume its immutable upload session.";
   try {
     response = await (dependencies.fetch ?? globalThis.fetch)(
       `${base.replace(/\/$/u, "")}${path}`,
@@ -123,31 +131,34 @@ async function cloudRequest(
         signal,
       },
     );
+    if (!response.ok) {
+      failure = `Cloud publication failed (HTTP ${response.status}).`;
+      recovery =
+        response.status === 401
+          ? "Sign in with ChatGPT again."
+          : response.status === 403
+            ? "Current access to the selected environment and repository is required."
+            : response.status === 404 || response.status === 410
+              ? "This deployment does not support native scan imports; no legacy publication was attempted."
+              : method === "POST" && path === "" && response.status < 500
+                ? "Resolve this rejection before retrying publication."
+                : "Repeat the same publication to resume after resolving the error.";
+    }
+    payload = response.ok ? await response.json() : await response.text();
   } catch (cause) {
     dependencies.signal?.throwIfAborted();
     throw new CodexSecurityError(
-      "Cloud publication was not confirmed. Repeat the same publication to resume its immutable upload session.",
+      `${failure} ${errorMessage(cause)} ${recovery}`,
       { cause },
     );
   }
   if (!response.ok) {
-    const detail = await response.text();
     dependencies.signal?.throwIfAborted();
-    const recovery =
-      response.status === 401
-        ? "Sign in with ChatGPT again."
-        : response.status === 403
-          ? "Current access to the selected environment and repository is required."
-          : response.status === 404 || response.status === 410
-            ? "This deployment does not support native scan imports; no legacy publication was attempted."
-            : method === "POST" && path === "" && response.status < 500
-              ? "Resolve this rejection before retrying publication."
-              : "Repeat the same publication to resume after resolving the error.";
     throw new CodexSecurityError(
-      `Cloud publication failed (HTTP ${response.status}). ${detail}${detail ? " " : ""}${recovery}`,
+      `${failure} ${payload}${payload ? " " : ""}${recovery}`,
     );
   }
-  return response.json();
+  return payload;
 }
 
 export async function listCloudDestinations(
