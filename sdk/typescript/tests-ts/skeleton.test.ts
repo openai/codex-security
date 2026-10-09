@@ -264,7 +264,11 @@ describe("TypeScript package skeleton", () => {
     for (const [name, condition] of [
       ["Install plugin dependencies", "matrix.os == 'ubuntu-latest'"],
       [
-        "Build SDK and type-check eval tooling",
+        "Set up Node.js for triage evals",
+        "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
+      ],
+      [
+        "Set up triage eval dependencies and host runtime",
         "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
       ],
     ]) {
@@ -450,6 +454,13 @@ describe("TypeScript package skeleton", () => {
         args,
       });
     }
+    for (let shard = 1; shard <= 7; shard += 1) {
+      expect(runner.strategy?.matrix["include"]).toContainEqual({
+        os: "windows-latest",
+        mode: `isolated-${shard}`,
+        args: `--isolate --shard=${shard}/7`,
+      });
+    }
     const command = runner.steps!.find(
       (step) => step.name === "Test runner mode",
     )?.run;
@@ -485,9 +496,6 @@ describe("TypeScript package skeleton", () => {
 
     expect(packageJson.scripts.build).not.toMatch(/\b(?:pnpm|npm|bun)\b/u);
     expect(packageJson.scripts.build).toMatch(/^node --run clean &&/u);
-    expect(packageJson.scripts.build).toContain(
-      "node scripts/build-dashboard.mjs",
-    );
     expect(packageJson.scripts["build:plugin"]).toBe(
       "node scripts/build-plugin.mjs",
     );

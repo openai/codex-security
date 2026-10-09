@@ -20,16 +20,6 @@
         }
       }
     },
-    "updatesPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["validations"],
-      "properties": {
-        "validations": {
-          "$ref": "#/$defs/input/properties/validations"
-        }
-      }
-    },
     "validationUpdate": {
       "type": "object",
       "additionalProperties": false,
