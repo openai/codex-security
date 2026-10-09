@@ -6,7 +6,6 @@ import {
   type WorkbenchCommandOptions,
 } from "../runtime.js";
 import { FindingsError } from "./errors.js";
-import { validateJsonNumbers } from "../json-numbers.js";
 import type { DashboardQuery, DashboardSnapshot } from "./dashboard-types.js";
 import type { FindingDedupeGroup } from "../finding-dedupe-groups.js";
 import type {
@@ -36,8 +35,6 @@ export class SqliteFindingsStore implements FindingsStore {
     entries: readonly EmbeddedFinding[],
     repositoryId?: string,
   ): Promise<string[]> {
-    for (const { finding } of entries)
-      validateJsonNumbers(finding, "Findings storage input");
     const result = await this.run<{ findingIds: string[] }>("store-findings", {
       entries,
       repositoryId,
