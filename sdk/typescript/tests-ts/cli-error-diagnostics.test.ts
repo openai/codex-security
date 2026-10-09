@@ -13,6 +13,8 @@ const controls = "\u001b]52;c;U1lOVEhFVElD\u0007\u009b2J";
 const detail = `Synthetic sk-proj-SYNTHETIC_KEY_123 ${controls}\nsecond diagnostic line`;
 const escapedDetail =
   "Synthetic sk-proj-SYNTHETIC_KEY_123  ]52;c;U1lOVEhFVElD  2J\nsecond diagnostic line";
+const escapedSingleLineDetail =
+  "Synthetic sk-proj-SYNTHETIC_KEY_123  ]52;c;U1lOVEhFVElD  2J second diagnostic line";
 
 test("feedback escapes real config diagnostics only at the text output boundary", async () => {
   const root = await temporaryDirectory("feedback-config-diagnostic-", true);
@@ -84,9 +86,7 @@ for (const scenario of [
     const { stdout, stderr, runCli } = createCliTest(main);
     expect(await runCli(args, deps)).toBe(2);
     expect(stderr.text()).toContain(
-      scenario === "scan run"
-        ? escapedDetail.replace("\n", " ")
-        : escapedDetail,
+      scenario === "scan run" ? escapedSingleLineDetail : escapedDetail,
     );
     expect(stderr.text()).not.toContain(controls);
     if (
@@ -95,7 +95,7 @@ for (const scenario of [
       scenario.startsWith("scan")
     ) {
       expect(JSON.parse(stdout.text()).message).toContain(
-        scenario === "scan run" ? escapedDetail.replace("\n", " ") : detail,
+        scenario === "scan run" ? escapedSingleLineDetail : detail,
       );
     } else {
       expect(stdout.text()).toBe("");
