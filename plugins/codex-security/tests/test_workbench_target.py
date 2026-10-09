@@ -27,6 +27,20 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+def add_submodule_gitlink(repository: Path, revision: str, scope: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
+        ],
+        cwd=repository,
+        check=True,
+    )
+
+
 def set_default_subprocess_encoding(monkeypatch: pytest.MonkeyPatch, encoding: str) -> None:
     run = subprocess.run
 
@@ -303,17 +317,7 @@ def test_submodule_checks_preserve_target_alias_spelling(
     scoped.mkdir(exist_ok=True)
     submodule = scoped / "submodule"
     revision = initialize_git_repository(submodule)
-    subprocess.run(
-        [
-            "git",
-            "update-index",
-            "--add",
-            "--cacheinfo",
-            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
-        ],
-        cwd=target,
-        check=True,
-    )
+    add_submodule_gitlink(target, revision, scope)
     alias = tmp_path / ("alias" if alias_kind == "symlink" else "TARGET")
     if alias_kind == "symlink":
         alias.symlink_to(target, target_is_directory=True)
@@ -640,17 +644,7 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
     (scoped / "fixture.py").write_text("synthetic = True\n")
     submodule = scoped / "submodule"
     submodule.mkdir()
-    subprocess.run(
-        [
-            "git",
-            "update-index",
-            "--add",
-            "--cacheinfo",
-            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
-        ],
-        cwd=repository,
-        check=True,
-    )
+    add_submodule_gitlink(repository, revision, scope)
     selected = scoped
     if alias_kind != "original":
         alias = tmp_path / ("selected-alias" if alias_kind == "symlink" else "REPOSITORY")
