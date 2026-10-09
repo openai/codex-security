@@ -2412,7 +2412,6 @@ def require_reviewed_patch_applied(
     excluded = (Path(scan["scan_dir"]),)
     # Unborn repositories still need their config while metadata junctions are deferred.
     git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
-    repository = target
     pathspec = None
     if not unversioned:
         repository, pathspec = git_worktree_context(target)
