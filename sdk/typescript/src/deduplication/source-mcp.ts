@@ -6,7 +6,7 @@ import {
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, parse, resolve, win32 } from "node:path";
+import { basename, isAbsolute, join, parse, resolve, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { parse as parseToml } from "smol-toml";
@@ -41,6 +41,10 @@ export interface SourceMcp {
   executor?: JsonObject;
   executorLaunchDirectory?: string;
   executorEnvironment?: Record<string, string>;
+  executableEnvironment?: {
+    source?: JsonObject;
+    executor?: JsonObject;
+  };
 }
 
 type StartCodex = (
@@ -278,6 +282,22 @@ async function sourceExecutor(
   return selected;
 }
 
+function executableEnvironment(
+  command: JsonValue | undefined,
+  ...environments: (ProcessEnvironment | undefined)[]
+): JsonObject | undefined {
+  if (typeof command !== "string" || basename(command) !== command) return;
+  const names = process.platform === "win32" ? ["PATH", "PATHEXT"] : ["PATH"];
+  return Object.fromEntries(
+    names.map((name) => [
+      name,
+      environments
+        .map((environment) => environmentEntry(environment ?? {}, name))
+        .find((value) => value !== undefined) ?? null,
+    ]),
+  );
+}
+
 export async function resolveSourceMcp(
   name: string,
   environment: ProcessEnvironment,
@@ -452,6 +472,21 @@ export async function resolveSourceMcp(
   }
   // An empty array clears the native list; omitting it would restore inheritance.
   if (server["env_vars"] !== undefined) server["env_vars"] = remaining;
+  const executorVariables = executor?.["env"] as ProcessEnvironment | undefined;
+  const executorSelection = executableEnvironment(
+    executor?.["program"],
+    executorVariables,
+    reviewEnvironment,
+  );
+  // Remote source commands keep their native environment resolution.
+  const sourceSelection =
+    environmentId === "local"
+      ? executableEnvironment(
+          server["command"],
+          server["env"] as ProcessEnvironment | undefined,
+          reviewEnvironment,
+        )
+      : undefined;
   return {
     name,
     configPath: join(configuredCodexHome(environment), "config.toml"),
@@ -463,6 +498,18 @@ export async function resolveSourceMcp(
       ? {}
       : { executorLaunchDirectory }),
     ...(Object.keys(executorEnvironment).length ? { executorEnvironment } : {}),
+    ...(sourceSelection === undefined && executorSelection === undefined
+      ? {}
+      : {
+          executableEnvironment: {
+            ...(sourceSelection === undefined
+              ? {}
+              : { source: sourceSelection }),
+            ...(executorSelection === undefined
+              ? {}
+              : { executor: executorSelection }),
+          },
+        }),
   };
 }
 

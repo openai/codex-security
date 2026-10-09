@@ -614,7 +614,8 @@ credential home before using it. Local HTTP servers need no local executor.
 
 Resume checkpoints include the selected connection, referenced environment
 values, executor configuration, and caller directory when an executor inherits
-it. Changed source settings cause saved reviews to be checked again. Completed
+it. Host executable search paths used by source or executor commands also participate
+in checkpoints. Changed source settings cause saved reviews to be checked again. Completed
 results and pending writes can resume without reconnecting to the source. Native
 resource reads retain Codex behavior and the server's repository permissions.
 

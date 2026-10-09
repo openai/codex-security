@@ -3,10 +3,16 @@ import {
   spawn,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
-import { existsSync } from "node:fs";
+import { constants, existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify } from "smol-toml";
@@ -1186,5 +1192,227 @@ test.each(["C:\\repos\\project", "C:/repos/project"])(
     await expect(sourceMcpInstructions(source, repository)).rejects.toThrow(
       "origin remote",
     );
+  },
+);
+
+test.each(["local-source", "source-executor"] as const)(
+  "checkpoints follow native PATH selection for %s and preserve effective overrides",
+  async (kind) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    const captured = join(home, "selected-source.txt");
+    const sourceScript = join(home, "source.mjs");
+    const executorScript = join(home, "executor.mjs");
+    const stopScript = join(home, "stop.mjs");
+    const record = `import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+writeFileSync(process.argv[2], readFileSync(join(dirname(process.execPath), "selection.txt")));`;
+    await writeFile(sourceScript, `${record}\nprocess.exit(1);`);
+    await writeFile(
+      executorScript,
+      `${record}\nimport { spawnSync } from "node:child_process";
+process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { stdio: "inherit" }).status ?? 1);`,
+    );
+    await writeFile(stopScript, "process.exit(1);");
+    const paths: string[] = [];
+    for (const selected of ["first", "second"]) {
+      const directory = join(home, selected);
+      await mkdir(directory);
+      await copyFile(
+        process.execPath,
+        join(
+          directory,
+          process.platform === "win32"
+            ? "source-fixture.exe"
+            : "source-fixture",
+        ),
+        constants.COPYFILE_FICLONE,
+      );
+      await writeFile(join(directory, "selection.txt"), selected);
+      paths.push(`${directory}${delimiter}${process.env["PATH"] ?? ""}`);
+    }
+    let modelRequests = 0;
+    const endpoint = createServer((request, response) => {
+      if (request.url?.includes("responses")) modelRequests++;
+      response
+        .writeHead(200, { "Content-Type": "application/json" })
+        .end('{"data":[]}');
+    });
+    await new Promise<void>((resolve) =>
+      endpoint.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      const port = (endpoint.address() as { port: number }).port;
+      const store = checkpointWorkbench("source-path", { repository });
+      const workflow = new FindingWorkflow(
+        "source-path",
+        {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(home, "state"),
+        },
+        store.run,
+      );
+      const snapshot = await workflow.sourceSnapshot(repository);
+      let calls = 0;
+      const review: CodexReview<{ source: string }> = {
+        stage: "pair-review",
+        model: "gpt-5.6-sol",
+        effort: "low",
+        prompt: "Compare synthetic source findings.",
+        schema: {
+          type: "object",
+          properties: { source: { type: "string" } },
+          required: ["source"],
+          additionalProperties: false,
+        },
+        validate: (value) => value as { source: string },
+      };
+      const digests: string[] = [];
+      for (const phase of [
+        "first",
+        "second",
+        "fixed-first",
+        "fixed-second",
+        "unrelated",
+      ] as const) {
+        const fixed = phase.startsWith("fixed-") || phase === "unrelated";
+        const environment = {
+          [process.platform === "win32" ? "Path" : "PATH"]:
+            paths[phase === "second" || phase === "fixed-second" ? 1 : 0],
+          ...(process.platform === "win32"
+            ? { Pathext: process.env["PATHEXT"] }
+            : {}),
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(home, "state"),
+          OPENAI_API_KEY: "synthetic-review-key",
+          ...(phase === "unrelated" ? { UNRELATED_SETTING: "changed" } : {}),
+        };
+        const override = fixed
+          ? { [process.platform === "win32" ? "pAtH" : "PATH"]: paths[0]! }
+          : undefined;
+        if (kind !== "local-source")
+          await writeFile(
+            join(home, "environments.toml"),
+            stringify({
+              environments: [
+                {
+                  id: "source-executor",
+                  program: "source-fixture",
+                  args: [
+                    executorScript,
+                    captured,
+                    resolveCodexCommand(environment).command,
+                  ],
+                  cwd: repository,
+                  ...(override ? { env: override } : {}),
+                },
+              ],
+            }),
+          );
+        const source = await sourceForTest(
+          {
+            model_provider: "fixture",
+            model_providers: {
+              fixture: {
+                name: "Synthetic fixture",
+                wire_api: "responses",
+                base_url: `http://127.0.0.1:${port}/v1`,
+                request_max_retries: 0,
+              },
+            },
+            mcp_servers: {
+              source: {
+                command:
+                  kind === "source-executor"
+                    ? process.execPath
+                    : "source-fixture",
+                args:
+                  kind === "source-executor"
+                    ? [stopScript]
+                    : [sourceScript, captured],
+                ...(kind !== "local-source"
+                  ? { environment_id: "source-executor" }
+                  : {}),
+                ...(kind !== "source-executor" && override
+                  ? { env: override }
+                  : {}),
+                startup_timeout_sec: 2,
+              },
+            },
+          },
+          environment,
+          repository,
+        );
+        await expect(
+          new CodexReviewRunner(
+            environment,
+            undefined,
+            AbortSignal.timeout(15_000),
+            repository,
+            undefined,
+            undefined,
+            undefined,
+            source,
+          ).run(review),
+        ).rejects.toThrow(/required.*source|source.*required/i);
+        const selected = await readFile(captured, "utf8");
+        expect(selected).toBe(phase === "second" ? "second" : "first");
+        const digest = await reviewSettingsDigest(environment, undefined, {
+          mcp: source,
+          repository,
+        });
+        digests.push(digest);
+        const checkpoint = new CheckpointedReviewRunner(
+          workflow,
+          {
+            async run<T>(request: CodexReview<T>): Promise<T> {
+              calls++;
+              return request.validate({ source: selected });
+            },
+          },
+          snapshot,
+          { allRepositories: true },
+          digest,
+        );
+        expect(await checkpoint.run(review)).toEqual({ source: selected });
+      }
+      expect(digests[0]).not.toBe(digests[1]);
+      expect(digests[2]).toBe(digests[3]);
+      expect(digests[3]).toBe(digests[4]);
+      expect(calls).toBe(3);
+      expect(modelRequests).toBe(0);
+    } finally {
+      endpoint.closeAllConnections();
+      await new Promise<void>((resolve) => endpoint.close(() => resolve()));
+    }
+  },
+);
+
+test.skipIf(process.platform !== "win32")(
+  "source checkpoints include case-insensitive PATHEXT selection",
+  async () => {
+    const repository = await sourceCheckout();
+    const environment = {
+      CODEX_HOME: await temporaryDirectory(),
+      Path: process.env["PATH"],
+      Pathext: ".EXE;.COM",
+      SystemRoot: process.env["SystemRoot"],
+      OPENAI_API_KEY: "synthetic-review-key",
+    };
+    const digest = async () =>
+      reviewSettingsDigest(environment, undefined, {
+        mcp: await sourceForTest(
+          { mcp_servers: { source: { command: "synthetic-source-command" } } },
+          environment,
+          repository,
+        ),
+        repository,
+      });
+    const original = await digest();
+    environment.Pathext = ".COM;.EXE";
+    expect(await digest()).not.toBe(original);
   },
 );
