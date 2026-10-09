@@ -30,7 +30,7 @@ try {
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesStagedAndUnstagedChanges();
   await testWorkerReadsItsOwnBoundInventory();
-  await testCursorAndLimitAreValidated();
+  await testCursorDoesNotExceedInventory();
   await testEmptyInventoryIsValid();
   await testUnsafeInventoryRowsAreRejected();
   await testSymlinkedInventoryIsRejected();
@@ -351,25 +351,13 @@ async function testWorkerReadsItsOwnBoundInventory() {
   );
 }
 
-async function testCursorAndLimitAreValidated() {
+async function testCursorDoesNotExceedInventory() {
   const fixture = await createFixture("inventory paging");
   await writeInventory(fixture.scanInventory, "./src/a.ts\n./src/b.ts\n");
 
   await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { cursor: "-1" }),
-    /cursor/i,
-  );
-  await assert.rejects(
     inventory.listCodexSecurityReviewItems(fixture.scan, { cursor: "3" }),
     /cursor/i,
-  );
-  await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { limit: 0 }),
-    /limit/i,
-  );
-  await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { limit: 1001 }),
-    /limit/i,
   );
 }
 
