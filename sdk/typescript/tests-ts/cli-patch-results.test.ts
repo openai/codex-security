@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -11,7 +11,10 @@ import { createCliTest } from "./support/cli-run.js";
 type FixtureOptions = NonNullable<Parameters<typeof dependencies>[0]>;
 const execFileAsync = promisify(execFile);
 
-async function repositoryFixture({ initializeGit = true } = {}) {
+async function repositoryFixture({
+  initializeGit = true,
+  initialCommit = true,
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(), "patch-results-"));
   const runRepositoryCommand: NonNullable<
     FixtureOptions["onRepositoryCommand"]
@@ -33,7 +36,7 @@ async function repositoryFixture({ initializeGit = true } = {}) {
       await git("config", "user.name", "Synthetic User");
       await git("config", "user.email", "synthetic@example.test");
       await git("add", ".");
-      await git("commit", "-m", "Synthetic fixture");
+      if (initialCommit) await git("commit", "-m", "Synthetic fixture");
     }
   } catch (error) {
     await rm(directory, { recursive: true, force: true });
@@ -174,12 +177,25 @@ lines.on("line", (line) => {
     expect(await fixture.git("write-tree")).toBe(index);
   });
 
-  test.each([false, true])(
-    "checks patch changes outside a Git repository: %j",
-    async (apply) => {
-      await using fixture = await repositoryFixture({ initializeGit: false });
+  test.each([
+    ["directory", false],
+    ["directory", true],
+    ["unborn Git", false],
+    ["unborn Git", true],
+  ] as const)(
+    "checks patch changes in %s with source edits: %j",
+    async (kind, apply) => {
+      const initializeGit = kind === "unborn Git";
+      await using fixture = await repositoryFixture({
+        initializeGit,
+        initialCommit: false,
+      });
+      const index = initializeGit ? await fixture.git("write-tree") : null;
+      const metadata = join(fixture.directory, initializeGit ? ".git" : ".svn");
+      await mkdir(metadata, { recursive: true });
       const outcome = await fixture.patch(["Synthetic issue"], {
         onCodex: async () => {
+          await writeFile(join(metadata, "synthetic-state"), "updated\n");
           if (apply)
             await writeFile(join(fixture.directory, "app.ts"), "fixed\n");
           return 0;
@@ -189,13 +205,35 @@ lines.on("line", (line) => {
       expect(outcome.result).toMatchObject({
         applied: apply,
         filesChanged: apply ? 1 : 0,
+        files: apply ? ["app.ts"] : [],
       });
+      if (index !== null) expect(await fixture.git("write-tree")).toBe(index);
       if (!apply)
         expect(outcome.result.error).toMatchObject({
           code: "NO_PATCH_APPLIED",
         });
     },
   );
+
+  test.each([
+    ["missing commit", `${"1".repeat(40)}\n`],
+    ["malformed ref", "broken\n"],
+  ])("does not patch a Git checkout with a %s", async (_kind, ref) => {
+    await using fixture = await repositoryFixture({ initialCommit: false });
+    await writeFile(
+      join(fixture.directory, ".git", "refs", "heads", "main"),
+      ref,
+    );
+    let started = false;
+    const outcome = await fixture.patch(["Synthetic issue"], {
+      onCodex: () => {
+        started = true;
+        return 0;
+      },
+    });
+    expect(outcome.status).toBe(2);
+    expect(started).toBe(false);
+  });
 
   test("rejects a verified saved-finding result when no files change", async () => {
     await using fixture = await repositoryFixture();

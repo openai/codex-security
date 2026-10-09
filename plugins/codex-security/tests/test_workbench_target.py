@@ -27,6 +27,33 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize("git", [False, True])
+def test_directory_snapshots_exclude_svn_metadata(tmp_path: Path, git: bool) -> None:
+    target = tmp_path / "target"
+    if git:
+        initialize_unborn_git_repository(target)
+    else:
+        target.mkdir()
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "pristine" / "base"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    if git:
+        subprocess.run(["git", "add", "--force", "."], cwd=target, check=True)
+
+    original = directory_content_digest(target)
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    assert count_files(target) == 1
+    for path in metadata:
+        path.write_text("metadata changed\n")
+    assert directory_content_digest(target) == original
+    assert count_files(target) == 1
+    source.write_text("source changed\n")
+    assert directory_content_digest(target) != original
+
+
 def add_submodule_gitlink(repository: Path, revision: str, scope: str) -> None:
     subprocess.run(
         [

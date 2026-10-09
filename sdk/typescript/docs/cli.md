@@ -276,9 +276,12 @@ codex-security scan . --working-tree
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
+Whole-codebase and path scans also accept ordinary directories, including SVN
+working copies. Their source inventories exclude `.git` and `.svn` metadata.
+
 `--diff` scans committed changes; `--working-tree` scans staged and unstaged
-changes. Deep scans support whole repositories and path scopes. Working-tree
-snapshots include untracked nested Git repositories. Initialized submodules must
+changes. Both require Git. Deep scans support whole repositories and path scopes.
+Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
@@ -1302,6 +1305,9 @@ The token needs code-scanning read access; access failures reject the import.
 `validate` assesses candidates; `patch` fixes and verifies them. Both accept files
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
+
+Basic patching also works in ordinary directories and Git worktrees before their
+first commit. Directory change tracking excludes `.git` and `.svn` metadata.
 
 ```bash
 codex-security validate "Possible SQL injection" --effort high

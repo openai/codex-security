@@ -32,7 +32,12 @@ from rank_preview import (
     preview_for,
     preview_for_bytes,
 )
-from workbench_target import git_blob_samples, git_command, git_directory_snapshot_paths
+from workbench_target import (
+    SOURCE_METADATA_DIRECTORIES,
+    git_blob_samples,
+    git_command,
+    git_directory_snapshot_paths,
+)
 
 JsonRow = dict[str, object]
 
@@ -186,11 +191,11 @@ def scope_candidates(repo: Path, scope_path: Path) -> Iterable[Path]:
         "--hidden",
         "--no-require-git",
         "--null",
-        # Also exclude descendants when the scope starts inside .git.
+        # Also exclude descendants when the scope starts inside metadata.
         "--glob",
-        "!**/.git",
+        "!**/{.git,.svn}",
         "--glob",
-        "!**/.git/**",
+        "!**/{.git,.svn}/**",
         "--",
         str(scope_path.relative_to(repo)),
     ]
@@ -250,7 +255,7 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
                 continue
             rel = path.relative_to(repo)
             directly_requested = path in directly_requested_files
-            if ".git" in rel.parts:
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(rel.parts):
                 continue
 
             preview, is_binary = preview_for(path, args.preview_bytes)
@@ -286,7 +291,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                 relative = path.resolve(strict=True).relative_to(repo)
             except (OSError, ValueError):
                 continue
-            if ".git" in relative.parts:
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(relative.parts):
                 continue
             rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
 

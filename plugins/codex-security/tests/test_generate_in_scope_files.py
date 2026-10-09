@@ -173,6 +173,26 @@ def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
     assert "./app/ignored.skip" not in paths
 
 
+@pytest.mark.parametrize("scope", [".", ".svn", "vendor/.svn/pristine/base"])
+def test_inventory_excludes_svn_metadata_even_when_tracked(tmp_path: Path, scope: str) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, ".svn/wc.db")
+    write_file(repository, "vendor/.svn/pristine/base")
+    write_file(repository, ".gitignore", b".svn/\n")
+    git(repository, "add", "--force", ".svn", "vendor/.svn")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 0, result.stderr
+    paths = output.read_text(encoding="utf-8").splitlines()
+    assert all(".svn" not in PurePosixPath(path).parts for path in paths)
+    if scope == ".":
+        assert "./app/routes.py" in paths
+    else:
+        assert paths == []
+
+
 @pytest.mark.parametrize(
     ("scope", "absolute"),
     [

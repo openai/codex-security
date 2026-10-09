@@ -12,7 +12,7 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import git_blob_samples, git_command
+from workbench_target import SOURCE_METADATA_DIRECTORIES, git_blob_samples, git_command
 
 
 class InventoryError(ValueError):
@@ -94,11 +94,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--hidden",
         "--path-separator",
         "/",
-        # Prune Git metadata and its contents even when the scope starts inside .git.
+        # Prune metadata and its contents even when the scope starts inside it.
         "--glob",
-        "!**/.git",
+        "!**/{.git,.svn}",
         "--glob",
-        "!**/.git/**",
+        "!**/{.git,.svn}/**",
         "--",
         scope,
     ]
@@ -146,7 +146,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         inventory.seek(0)
         rows: list[bytes] = []
         for path in inventory.read().split(b"\0"):
-            if not path:
+            if not path or not SOURCE_METADATA_DIRECTORIES.isdisjoint(os.fsdecode(path).split("/")):
                 continue
             if b"\n" in path or b"\r" in path:
                 raise InventoryError(
