@@ -70,16 +70,31 @@ export function extractTriageResult(
   failureMessage = "Could not find a parseable triage-finding/v0 JSON result",
 ) {
   const text = outputText(output);
+  try {
+    const parsed = JSON.parse(text) as TriageResult;
+    if (parsed && parsed.schema_version === "triage-finding/v0") return parsed;
+  } catch {
+    // The result may be surrounded by prose or Markdown fences.
+  }
   const fencedBlocks: [number, string][] = [];
   const openingFence = /```(?:json)?\s*/gi;
   // Complete JSON strings may contain backticks, but never literal line breaks.
-  const tokens = /"(?:\\.|[^"\\\r\n])*"|```/g;
+  const tokens = /"|```/g;
+  const quoted = /"(?:\\.|[^"\\\r\n])*(")?/y;
+  // Escaped quotes within an unterminated string cannot start complete strings.
+  let unterminatedUntil = 0;
   let opening;
   while ((opening = openingFence.exec(text))) {
     const start = openingFence.lastIndex;
     tokens.lastIndex = start;
     let token;
-    while ((token = tokens.exec(text)) && token[0] !== "```") {}
+    while ((token = tokens.exec(text)) && token[0] !== "```") {
+      if (token.index < unterminatedUntil) continue;
+      quoted.lastIndex = token.index;
+      const string = quoted.exec(text)!;
+      if (string[1]) tokens.lastIndex = quoted.lastIndex;
+      else unterminatedUntil = quoted.lastIndex;
+    }
     if (!token) break;
     fencedBlocks.push([opening.index, text.slice(start, token.index).trim()]);
     openingFence.lastIndex = tokens.lastIndex;
@@ -96,7 +111,7 @@ export function extractTriageResult(
           .sort((left, right) => left[0] - right[0])
           .map(([, body]) => body)
       : [text.slice(start, end + 1)];
-  for (const candidate of [text, ...candidates]) {
+  for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as TriageResult;
       if (parsed && parsed.schema_version === "triage-finding/v0") {

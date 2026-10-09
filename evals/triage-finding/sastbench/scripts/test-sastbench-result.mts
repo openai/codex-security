@@ -38,6 +38,21 @@ assert.throws(
     ),
   { message: "Could not find a parseable triage-finding/v0 JSON result" },
 );
+const truncated =
+  '```json\n{"schema_version":"triage-finding/v0","findings":[{"evidence":["' +
+  '\\"x'.repeat(32_000);
+assert.throws(() => extractTriageResult(truncated), {
+  message: "Could not find a parseable triage-finding/v0 JSON result",
+});
+const truncatedMetrics = addSastBenchMetrics(
+  extensionContext({
+    caseId: "sastbench-000000",
+    expectedGroundTruth: "true_positive",
+    output: truncated,
+  }),
+).result;
+assert.equal(truncatedMetrics.metadata.sastbench.status, "invalid_output");
+assert.equal(truncatedMetrics.namedScores.invalid_output, 1);
 const inlineSecond = triageResult("confirmed");
 inlineSecond.findings[0].evidence = [];
 for (const output of [
@@ -49,6 +64,7 @@ for (const output of [
     JSON.stringify(triageResult("not_actionable")) +
     "\n```",
   fenced.replaceAll("\n", "\r\n"),
+  truncated + "\n```\n" + fenced,
   'Prose {"other": true}\n' + fenced.replaceAll("```", "   ```"),
   '```json\n"invalid\n```\n' + fenced,
   'Prose {"other": true} ```json ' +
