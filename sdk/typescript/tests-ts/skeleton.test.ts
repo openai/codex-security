@@ -436,17 +436,12 @@ describe("TypeScript package skeleton", () => {
     expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
     expect(runner.strategy?.matrix["mode"]).toEqual([
       "baseline",
-      "isolated-1",
-      "isolated-2",
-      "isolated-3",
-      "isolated-4",
-      "isolated-5",
-      "isolated-6",
-      "isolated-7",
+      "isolated",
       "parallel",
     ]);
     for (const [mode, args] of [
       ["baseline", ""],
+      ["isolated", "--isolate"],
       ["parallel", "--parallel=2"],
     ] as const) {
       expect(runner.strategy?.matrix["include"]).toContainEqual({
@@ -456,6 +451,7 @@ describe("TypeScript package skeleton", () => {
     }
     for (let shard = 1; shard <= 7; shard += 1) {
       expect(runner.strategy?.matrix["include"]).toContainEqual({
+        os: "windows-latest",
         mode: `isolated-${shard}`,
         args: `--isolate --shard=${shard}/7`,
       });
