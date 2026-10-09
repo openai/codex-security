@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.*",
     "test:cli": "node --import tsx scripts/cli-integration.ts",
     "build": "node scripts/build.mjs",
     "check-dist": "node scripts/build.mjs --check",
