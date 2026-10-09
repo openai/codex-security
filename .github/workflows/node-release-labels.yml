@@ -32,18 +32,29 @@ jobs:
           set -euo pipefail
 
           release_note_label() {
-            case "$1" in
-              feat:* | feat\(*\):* | feat!:* | feat\(*\)!:*)
+            local type="$1" breaking_marker="$2" scope="$3"
+            if [[ "$breaking_marker" == "!" ]]; then
+              printf '%s\n' breaking-change
+              return 0
+            fi
+
+            case "$type" in
+              feat)
                 printf '%s\n' enhancement
                 ;;
-              fix:* | fix\(*\):* | fix!:* | fix\(*\)!:*)
+              fix)
                 printf '%s\n' bug
                 ;;
-              docs:* | docs\(*\):* | docs!:* | docs\(*\)!:*)
+              docs)
                 printf '%s\n' documentation
                 ;;
-              release:* | release\(*\):* | release!:* | release\(*\)!:* | test:* | test\(*\):* | test!:* | test\(*\)!:*)
+              release | test)
                 printf '%s\n' skip-release-notes
+                ;;
+              chore)
+                if [[ "$scope" == "(release)" ]]; then
+                  printf '%s\n' skip-release-notes
+                fi
                 ;;
               *)
                 return 0
@@ -51,57 +62,84 @@ jobs:
             esac
           }
 
+          title_sentinel="__CODEX_SECURITY_TITLE_END__"
           current_title="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER" \
-              --jq '.title'
+              --jq '.title | @base64' |
+              node --input-type=module --eval '
+                import { readFileSync } from "node:fs";
+                process.stdout.write(
+                  Buffer.from(readFileSync(0, "utf8"), "base64"),
+                );
+              ' &&
+              printf '%s' "$title_sentinel"
           )"
-          label="$(release_note_label "$current_title")"
+          current_title="${current_title%"$title_sentinel"}"
+          conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
+          if [[ "$current_title" == *$'\n'* ||
+                "$current_title" == *$'\r'* ||
+                ! "$current_title" =~ $conventional_title ]]; then
+            echo "Pull request title must follow <type>[optional scope][!]: <description>." >&2
+            exit 1
+          fi
+          type="${BASH_REMATCH[1]}"
+          scope="${BASH_REMATCH[2]:-}"
+          breaking_marker="${BASH_REMATCH[3]:-}"
+          label="$(release_note_label "$type" "$breaking_marker" "$scope")"
           current_labels="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
               --jq '.[].name'
           )"
 
-          preserve_skip_label=false
-          while IFS= read -r current_label; do
-            if [[ "$current_label" == "skip-release-notes" ]]; then
-              skip_label_actors="$(
-                gh api \
-                  "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline?per_page=100" \
-                  --paginate \
-                  --jq '.[] | select(.event == "labeled" and .label.name == "skip-release-notes") | if (.actor.login // "") == "" then "__unattributed__" else .actor.login end'
-              )"
-              skip_label_actor=""
-              while IFS= read -r event_actor; do
-                skip_label_actor="$event_actor"
-              done <<< "$skip_label_actors"
-
-              if [[ "$skip_label_actor" != "github-actions[bot]" ]]; then
-                echo "Preserving existing skip-release-notes label."
-                preserve_skip_label=true
-              fi
-              break
-            fi
-          done <<< "$current_labels"
+          label_events=""
+          if [[ -n "$current_labels" ]]; then
+            label_events="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline?per_page=100" \
+                --paginate \
+                --jq '.[] | select(.event == "labeled") | [.label.name, (.actor.login // "__unattributed__")] | @tsv'
+            )"
+          fi
 
           label_already_present=false
+          manual_category_present=false
+          bot_labels=""
           while IFS= read -r current_label; do
             case "$current_label" in
-              enhancement | bug | documentation | skip-release-notes)
-                if [[ "$current_label" == "skip-release-notes" &&
-                      "$preserve_skip_label" == true ]]; then
-                  if [[ "$current_label" == "$label" ]]; then
+              breaking-change | enhancement | bug | documentation | skip-release-notes)
+                label_actor=""
+                while IFS=$'\t' read -r event_label event_actor; do
+                  if [[ "$event_label" == "$current_label" ]]; then
+                    label_actor="$event_actor"
+                  fi
+                done <<< "$label_events"
+                if [[ "$label_actor" != "github-actions[bot]" ]]; then
+                  echo "Preserving existing $current_label label."
+                  if [[ "$current_label" != "skip-release-notes" || "$current_label" == "$label" ]]; then
                     label_already_present=true
                   fi
-                elif [[ "$current_label" != "$label" ]]; then
-                  gh api --method DELETE \
-                    "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$current_label" \
-                    --silent
+                  if [[ "$current_label" != "skip-release-notes" ]]; then
+                    manual_category_present=true
+                  fi
                 else
-                  label_already_present=true
+                  bot_labels+="$current_label"$'\n'
                 fi
                 ;;
             esac
           done <<< "$current_labels"
+
+          while IFS= read -r current_label; do
+            if [[ -z "$current_label" ]]; then
+              continue
+            fi
+            if [[ "$manual_category_present" == true || "$current_label" != "$label" ]]; then
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$current_label" \
+                --silent
+            else
+              label_already_present=true
+            fi
+          done <<< "$bot_labels"
 
           if [[ -z "$label" ]]; then
             echo "No automatic release-note category applies."
@@ -113,21 +151,35 @@ jobs:
             exit 0
           fi
 
-          if [[ "$label" == "skip-release-notes" ]]; then
+          ensure_repository_label() {
+            local name="$1" color="$2" description="$3"
             if ! gh api \
-              "repos/$GITHUB_REPOSITORY/labels/skip-release-notes" \
+              "repos/$GITHUB_REPOSITORY/labels/$name" \
               --silent >/dev/null 2>&1; then
               if ! gh api --method POST "repos/$GITHUB_REPOSITORY/labels" \
-                -f name=skip-release-notes \
-                -f color=ededed \
-                -f description="Omit internal changes from generated release notes" \
+                -f "name=$name" \
+                -f "color=$color" \
+                -f "description=$description" \
                 --silent >/dev/null 2>&1; then
                 gh api \
-                  "repos/$GITHUB_REPOSITORY/labels/skip-release-notes" \
+                  "repos/$GITHUB_REPOSITORY/labels/$name" \
                   --silent >/dev/null
               fi
             fi
-          fi
+          }
+
+          case "$label" in
+            breaking-change)
+              ensure_repository_label \
+                breaking-change b60205 \
+                "Breaking change called out in generated release notes"
+              ;;
+            skip-release-notes)
+              ensure_repository_label \
+                skip-release-notes ededed \
+                "Omit internal changes from generated release notes"
+              ;;
+          esac
 
           gh api --method POST \
             "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \

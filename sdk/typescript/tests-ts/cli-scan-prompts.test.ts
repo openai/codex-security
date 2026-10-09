@@ -1,40 +1,39 @@
 import { spawnSync } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { runCapturedCli, captureCli } from "./support/cli-run.js";
 
 describe("CLI scan prompts", () => {
-  test("loads scan and post-scan prompt files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
+  test("loads scan, validation, and post-scan prompt files", async () => {
+    const root = await temporaryDirectory("codex-security-cli-prompts-");
     try {
       await Promise.all([
         writeFile(join(root, "scan.md"), "Review authentication boundaries.\n"),
+        writeFile(
+          join(root, "validation.md"),
+          "Run the integration fixture.\n",
+        ),
         writeFile(join(root, "follow-up.md"), "Draft confirmed fixes.\n"),
       ]);
       let options: unknown;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           [
             "scan",
             ".",
             "--scan-prompt-file",
             "scan.md",
+            "--validation-prompt-file",
+            "validation.md",
             "--post-scan-prompt-file",
             "follow-up.md",
             "--json",
           ],
-          capture().stream,
-          capture().stream,
           dependencies({
             currentDirectory: root,
             onTurn: (_repository, value) => (options = value),
@@ -43,6 +42,7 @@ describe("CLI scan prompts", () => {
       ).toBe(0);
       expect(options).toMatchObject({
         scanPrompt: "Review authentication boundaries.\n",
+        validationPrompt: "Run the integration fixture.\n",
         postScanPrompt: "Draft confirmed fixes.\n",
       });
     } finally {
@@ -51,7 +51,7 @@ describe("CLI scan prompts", () => {
   });
 
   test("rejects linked prompt files without rejecting selected external files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
+    const root = await temporaryDirectory("codex-security-cli-prompts-");
     try {
       const repository = join(root, "repository");
       const repositoryAlias = join(root, "repository-alias");
@@ -74,7 +74,11 @@ describe("CLI scan prompts", () => {
         process.platform === "win32" ? "junction" : "dir",
       );
 
-      for (const option of ["--scan-prompt-file", "--post-scan-prompt-file"]) {
+      for (const [option, property] of [
+        ["--scan-prompt-file", "scanPrompt"],
+        ["--validation-prompt-file", "validationPrompt"],
+        ["--post-scan-prompt-file", "postScanPrompt"],
+      ] as const) {
         for (const [directory, target, input] of [
           [repository, ".", "linked-prompt.md"],
           [repository, ".", join("linked-directory", "external-prompt.md")],
@@ -94,24 +98,20 @@ describe("CLI scan prompts", () => {
             join("linked-directory", "external-prompt.md"),
           ],
         ] as const) {
-          let started = false;
-          const stderr = capture();
+          const onTurn = mock();
+          const stderr = captureCli(main, "stderr");
           expect(
-            await main(
+            await stderr.run(
               ["scan", target, option, input, "--json"],
-              capture().stream,
-              stderr.stream,
               dependencies({
                 currentDirectory: directory,
-                onTurn: () => {
-                  started = true;
-                },
+                onTurn,
               }),
             ),
           ).toBe(2);
           expect(stderr.text()).toContain("Input files must");
           expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_PROMPT");
-          expect(started).toBe(false);
+          expect(onTurn).not.toHaveBeenCalled();
         }
 
         for (const [directory, target] of [
@@ -121,10 +121,9 @@ describe("CLI scan prompts", () => {
         ] as const) {
           let selected: unknown;
           expect(
-            await main(
+            await runCapturedCli(
+              main,
               ["scan", target, option, external, "--json"],
-              capture().stream,
-              capture().stream,
               dependencies({
                 currentDirectory: directory,
                 onTurn: (_repository, value) => (selected = value),
@@ -132,8 +131,7 @@ describe("CLI scan prompts", () => {
             ),
           ).toBe(0);
           expect(selected).toMatchObject({
-            [option === "--scan-prompt-file" ? "scanPrompt" : "postScanPrompt"]:
-              "SYNTHETIC_EXTERNAL_PROMPT\n",
+            [property]: "SYNTHETIC_EXTERNAL_PROMPT\n",
           });
         }
       }
@@ -143,7 +141,7 @@ describe("CLI scan prompts", () => {
   });
 
   test("combines shared and repository-specific bulk scan prompts", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
+    const root = await temporaryDirectory("codex-security-cli-prompts-");
     try {
       const repository = join(root, "repository");
       for (const args of [
@@ -176,11 +174,16 @@ describe("CLI scan prompts", () => {
           `id,repository,revision,prompt\nsample,${repository},${revision},Focus on authorization.\n`,
         ),
         writeFile(join(root, "scan.md"), "Review authentication boundaries.\n"),
+        writeFile(
+          join(root, "validation.md"),
+          "Run the integration fixture.\n",
+        ),
         writeFile(join(root, "follow-up.md"), "Draft confirmed fixes.\n"),
       ]);
       let options: unknown;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           [
             "bulk-scan",
             "repositories.csv",
@@ -188,12 +191,12 @@ describe("CLI scan prompts", () => {
             "results",
             "--scan-prompt-file",
             "scan.md",
+            "--validation-prompt-file",
+            "validation.md",
             "--post-scan-prompt-file",
             "follow-up.md",
             "--json",
           ],
-          capture().stream,
-          capture().stream,
           dependencies({
             currentDirectory: root,
             onTurn: (_repository, value) => (options = value),
@@ -203,8 +206,67 @@ describe("CLI scan prompts", () => {
       expect(options).toMatchObject({
         scanPrompt:
           "Review authentication boundaries.\n\nFocus on authorization.",
+        validationPrompt: "Run the integration fixture.\n",
         postScanPrompt: "Draft confirmed fixes.\n",
       });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not silently drop custom validation on a saved rerun", async () => {
+    const root = await temporaryDirectory("codex-security-cli-validation-");
+    try {
+      await writeFile(
+        join(root, "validation.md"),
+        "Validate with the fixture.\n",
+      );
+      const onTurn = mock<(repository: string, options: unknown) => void>();
+      const deps = dependencies({
+        currentDirectory: root,
+        onTurn,
+        onWorkbench: () => ({
+          scanId: "saved",
+          recipe: {
+            repository: root,
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
+            validationMode: "custom",
+          },
+        }),
+      });
+      const error = captureCli(main, "stderr");
+      expect(await error.run(["scans", "rerun", "saved", "--json"], deps)).toBe(
+        2,
+      );
+      expect(error.text()).toContain("--validation-prompt-file");
+      expect(onTurn.mock.lastCall?.[1]).toBeUndefined();
+      expect(
+        await runCapturedCli(
+          main,
+          [
+            "scans",
+            "rerun",
+            "saved",
+            "--validation-prompt-file",
+            "validation.md",
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(onTurn.mock.lastCall?.[1]).toMatchObject({
+        validationPrompt: "Validate with the fixture.\n",
+      });
+      await writeFile(join(root, "validation.md"), " \n");
+      expect(
+        await runCapturedCli(
+          main,
+          ["scan", ".", "--validation-prompt-file", "validation.md", "--json"],
+          deps,
+        ),
+      ).toBe(2);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

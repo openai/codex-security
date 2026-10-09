@@ -1,2 +1,4 @@
 [test]
 randomize = true
+coverageSkipTestFiles = true
+coveragePathIgnorePatterns = ["tests-ts/**", "**/node_modules/**", "dist/**"]

@@ -1,16 +1,15 @@
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runNodePython } from "./support/python-probe.js";
 
-function validatePreflightIssues(issues: object[]) {
+function validatePreflightIssues(issues: object[], stdin = false) {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
-  return spawnSync(
+  const serialized = JSON.stringify(issues);
+  return runNodePython(
     python!,
     [
-      "-I",
-      "-B",
       "-c",
       [
         "import json, sys",
@@ -18,17 +17,19 @@ function validatePreflightIssues(issues: object[]) {
         "from workbench_cli import parse_args",
         "from workbench_progress import preflight_issues_json",
         "args = parse_args('Synthetic workbench progress')",
-        "issues = json.loads(preflight_issues_json(args.preflight_issues_json))",
+        "payload = sys.stdin.read() if args.preflight_issues_json_stdin else args.preflight_issues_json",
+        "issues = json.loads(preflight_issues_json(payload))",
         "print(json.dumps({'count': len(issues), 'reasonLength': len(issues[0]['reason'])}))",
       ].join("\n"),
       join(PLUGIN_ROOT, "scripts"),
       "update-progress",
       "--scan-id",
       "00000000-0000-4000-8000-000000000000",
-      "--preflight-issues-json",
-      JSON.stringify(issues),
+      ...(stdin
+        ? ["--preflight-issues-json-stdin"]
+        : ["--preflight-issues-json", serialized]),
     ],
-    { encoding: "utf8" },
+    { input: stdin ? serialized : undefined },
   );
 }
 
@@ -54,6 +55,19 @@ describe("workbench preflight progress", () => {
     expect(JSON.parse(result.stdout)).toEqual({
       count: 24,
       reasonLength: 1_000,
+    });
+  });
+
+  test("accepts the declared maximum through stdin", () => {
+    const issues = Array.from({ length: 32 }, () => issue("x".repeat(1_200)));
+    expect(JSON.stringify(issues).length).toBeGreaterThan(32 * 1024);
+
+    const result = validatePreflightIssues(issues, true);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      count: 32,
+      reasonLength: 1_200,
     });
   });
 

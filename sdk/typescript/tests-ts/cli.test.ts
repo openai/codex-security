@@ -1,20 +1,18 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { resolving } from "./support/promises.js";
+import { parseJsonLines } from "./support/json.js";
 import {
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { delimiter, join, normalize } from "node:path";
-import { Writable } from "node:stream";
+import { delimiter, join, normalize, resolve } from "node:path";
+import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test } from "bun:test";
-import { parse as parseToml } from "smol-toml";
+import { describe, expect, test, mock } from "bun:test";
 import type {
   CodexSecurityConfig,
   JsonObject,
@@ -24,6 +22,8 @@ import type {
 import {
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
+  LocalPluginBootstrapError,
+  PluginBootstrapError,
   DiffTarget,
   InvalidTargetError,
   OutputDirectoryError,
@@ -48,13 +48,63 @@ import {
   scanModelConfiguration,
 } from "../src/config.js";
 import {
+  warningResult,
+  savedRecipe,
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
   capture,
   dependencies,
   fakePreflight,
   fakeResult,
+  mustNotInitializeCodex,
+  fakeSecurity,
+  failingSecurity,
+  fakeInterval,
 } from "./cli-fixtures.js";
+import { runCommand } from "./support/shell.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { fail, throwing } from "./support/errors.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
+
+function scanDependencies(run: Parameters<typeof fakeSecurity>[0]) {
+  return { ...dependencies(), createSecurity: () => fakeSecurity(run) };
+}
+
+const profileScenarios = [
+  {
+    overrides: [
+      'profile="review"',
+      'model="gpt-5.6-sol"',
+      'model_reasoning_effort="low"',
+      'profiles.review.model="gpt-5.6-terra"',
+      'profiles.review.model_reasoning_effort="high"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "high",
+  },
+  {
+    overrides: [
+      'profile="review"',
+      'model_reasoning_effort="low"',
+      'profiles.review.model="gpt-5.6-terra"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "low",
+  },
+  {
+    overrides: [
+      'profile="review"',
+      'model="gpt-5.6-terra"',
+      'profiles.review.model_reasoning_effort="medium"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "medium",
+  },
+] as const;
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
@@ -78,41 +128,111 @@ async function multiscanInventory(root: string): Promise<void> {
       "initial",
     ],
   ]) {
-    expect(spawnSync("git", args, { encoding: "utf8" }).status).toBe(0);
+    const result = await runCommand("git", args);
+    expect(result.status, result.stderr).toBe(0);
   }
-  const revision = spawnSync("git", ["-C", repository, "rev-parse", "HEAD"], {
-    encoding: "utf8",
-  }).stdout.trim();
+  const { status, stdout, stderr } = await runCommand("git", [
+    "-C",
+    repository,
+    "rev-parse",
+    "HEAD",
+  ]);
+  expect(status, stderr).toBe(0);
   await writeFile(
     join(root, "repositories.csv"),
-    `id,repository,revision\nsample,${repository},${revision}\n`,
+    `id,repository,revision\nsample,${repository},${stdout.trim()}\n`,
   );
 }
 
 describe("CLI", () => {
+  test("preserves typed local plugin failure origin and diagnostic details", async () => {
+    const cause = new Error("Synthetic plugin preparation detail.");
+    const localFailure = new LocalPluginBootstrapError(
+      "Synthetic plugin preparation failed.",
+      { cause },
+    );
+    const installerFailure = new PluginBootstrapError(
+      "Synthetic plugin connection failed.",
+    );
+    expect(localFailure).toBeInstanceOf(PluginBootstrapError);
+    expect(localFailure.cause).toBe(cause);
+    expect(installerFailure).not.toBeInstanceOf(LocalPluginBootstrapError);
+    for (const [failure, classification] of [
+      [localFailure, "local"],
+      [installerFailure, "network_error"],
+    ] as const) {
+      for (const format of ["json", "jsonl"] as const) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const deps = dependencies({
+          onRun: () => {
+            throw failure;
+          },
+        });
+        expect(
+          await runCli(["scan", ".", "--verbose", "--format", format], deps),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          status: "failed",
+          code: "SCAN_FAILED",
+        });
+        expect(stderr.text()).toContain(failure.message);
+        expect(stderr.text()).toContain(
+          `scan.failed classification="${classification}"`,
+        );
+        expect(JSON.parse(stdout.text()).message).toContain(failure.message);
+      }
+    }
+  });
+
+  test("passes the safety identifier as a per-scan option", async () => {
+    const onTurn = mock<(repository: string, options: unknown) => void>();
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        ["scan", "--safety-identifier", "synthetic-user", ".", "--json"],
+        dependencies({
+          onTurn,
+        }),
+      ),
+    ).toBe(0);
+    const options = onTurn.mock.lastCall?.[1];
+    expect(options).toMatchObject({ safetyIdentifier: "synthetic-user" });
+    expect(stderr.text()).not.toContain("synthetic-user");
+  });
+
   test("exposes Incur help, schemas, manifests, and completions", async () => {
     const root = capture();
     const stderr = capture();
     expect(await main([], root.stream, stderr.stream, dependencies())).toBe(0);
     expect(root.text()).toContain("Usage: codex-security <command>");
+    expect(root.text()).toContain("Aliases: cs");
     expect(root.text()).toContain("bulk-scan");
     expect(root.text()).toContain("install-hook");
     expect(root.text()).not.toContain("multiscan");
-    expect(root.text()).toContain("Integrations:");
     expect(root.text()).toContain("completions");
-    expect(root.text()).toContain("--llms, --llms-full");
+    expect(root.text()).toContain("--llms");
+    expect(root.text()).toContain("--llms-full");
     expect(stderr.text()).toBe("");
 
-    const schema = capture();
+    const schema = captureCli(main, "stdout");
     expect(
-      await main(
+      await schema.run(
         ["scan", "--schema", "--format", "json"],
-        schema.stream,
-        capture().stream,
         dependencies(),
       ),
     ).toBe(0);
-    expect(JSON.parse(schema.text())).toMatchObject({
+    const scanSchema = JSON.parse(schema.text()) as {
+      args: Record<string, unknown>;
+      options: Record<string, unknown>;
+      output?: {
+        anyOf?: Array<{
+          properties?: Record<string, { const?: string; type?: string }>;
+          required?: string[];
+          additionalProperties?: boolean;
+        }>;
+      };
+    };
+    expect(scanSchema).toMatchObject({
       args: { properties: { repository: { type: "string" } } },
       options: {
         properties: {
@@ -125,8 +245,10 @@ describe("CLI", () => {
           maxTimeHours: { type: "number", maximum: 96 },
           model: { type: "string" },
           verbose: { type: "boolean" },
+          showCost: { type: "boolean", default: false },
           effort: {
-            enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+            type: "string",
+            minLength: 1,
           },
           provider: {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
@@ -139,13 +261,23 @@ describe("CLI", () => {
         },
       },
     });
+    const failureSchema = scanSchema.output?.anyOf?.find(
+      (variant) => variant.properties?.["code"]?.const === "SCAN_FAILED",
+    );
+    expect(failureSchema).toMatchObject({
+      properties: {
+        status: { const: "failed" },
+        code: { const: "SCAN_FAILED" },
+        message: { type: "string" },
+      },
+      required: ["status", "code", "message"],
+      additionalProperties: false,
+    });
 
-    const rerunSchema = capture();
+    const rerunSchema = captureCli(main, "stdout");
     expect(
-      await main(
+      await rerunSchema.run(
         ["scans", "rerun", "--schema", "--format", "json"],
-        rerunSchema.stream,
-        capture().stream,
         dependencies(),
       ),
     ).toBe(0);
@@ -154,12 +286,10 @@ describe("CLI", () => {
       options: { properties: { verbose: { type: "boolean" } } },
     });
 
-    const matchSchema = capture();
+    const matchSchema = captureCli(main, "stdout");
     expect(
-      await main(
+      await matchSchema.run(
         ["scans", "match", "--schema", "--format", "json"],
-        matchSchema.stream,
-        capture().stream,
         dependencies(),
       ),
     ).toBe(0);
@@ -168,12 +298,10 @@ describe("CLI", () => {
       options: { properties: { all: { type: "boolean" } } },
     });
 
-    const falsePositiveSchema = capture();
+    const falsePositiveSchema = captureCli(main, "stdout");
     expect(
-      await main(
+      await falsePositiveSchema.run(
         ["findings", "false-positive", "--schema", "--format", "json"],
-        falsePositiveSchema.stream,
-        capture().stream,
         dependencies(),
       ),
     ).toBe(0);
@@ -191,16 +319,17 @@ describe("CLI", () => {
       },
     });
 
-    const manifest = capture();
-    expect(
-      await main(["--llms"], manifest.stream, capture().stream, dependencies()),
-    ).toBe(0);
+    const manifest = captureCli(main, "stdout");
+    expect(await manifest.run(["--llms"], dependencies())).toBe(0);
     expect(manifest.text()).toContain("codex-security scan [repository]");
     expect(manifest.text()).toContain(
       "codex-security install-hook [repository]",
     );
     expect(manifest.text()).toContain("codex-security bulk-scan [input]");
     expect(manifest.text()).toContain("codex-security export [scanDir]");
+    expect(manifest.text()).toContain(
+      "codex-security import github <repository>",
+    );
     expect(manifest.text()).toContain("codex-security validate <findings...>");
     expect(manifest.text()).toContain(
       "codex-security verify-fix [findings...]",
@@ -220,54 +349,61 @@ describe("CLI", () => {
     );
     expect(manifest.text()).toContain("codex-security info");
 
-    const completions = capture();
-    expect(
-      await main(
-        ["completions", "bash"],
-        completions.stream,
-        capture().stream,
-        dependencies(),
-      ),
-    ).toBe(0);
+    const completions = captureCli(main, "stdout");
+    expect(await completions.run(["completions", "bash"], dependencies())).toBe(
+      0,
+    );
     expect(completions.text()).toContain('export COMPLETE="bash"');
+    for (const name of ["codex-security", "cs"]) {
+      expect(completions.text()).toMatch(
+        new RegExp(`^complete .+ ${name}$`, "mu"),
+      );
+    }
   });
 
   test("documents every public command argument and option", async () => {
     const commands = [
+      ["policy"],
       ["scan"],
+      ["scan", "import"],
+      ["scan-components"],
+      ["dedupe"],
+      ["classify-severity"],
+      ["suggest-owners"],
       ["bulk-scan"],
       ["export"],
       ["validate"],
+      ["verify-fix"],
       ["patch"],
       ["login"],
       ["logout"],
+      ["feedback"],
       ["info"],
       ["install-hook"],
+      ["init"],
+      ["serve"],
+      ["publish", "scan"],
+      ["publish", "check"],
+      ["import", "github"],
       ["scans", "list"],
+      ["scans", "logs"],
+      ["scans", "resume"],
       ["scans", "show"],
       ["scans", "rerun"],
       ["scans", "match"],
       ["scans", "compare"],
       ["findings", "false-positive"],
+      ["findings", "list"],
     ] as const;
 
     for (const command of commands) {
-      const help = capture();
-      const schema = capture();
-      expect(
-        await main(
-          [...command, "--help"],
-          help.stream,
-          capture().stream,
-          dependencies(),
-        ),
-      ).toBe(0);
+      const help = captureCli(main, "stdout");
+      const schema = captureCli(main, "stdout");
+      expect(await help.run([...command, "--help"], dependencies())).toBe(0);
       expect(help.text()).not.toMatch(/--[a-z][a-z0-9-]*[A-Z][A-Za-z0-9-]*/u);
       expect(
-        await main(
+        await schema.run(
           [...command, "--schema", "--format", "json"],
-          schema.stream,
-          capture().stream,
           dependencies(),
         ),
       ).toBe(0);
@@ -281,9 +417,21 @@ describe("CLI", () => {
         };
       };
 
-      for (const argument of Object.values(
+      const argumentLabels = help
+        .text()
+        .split("\n\n")
+        .find((section) => section.startsWith("Arguments:\n"))
+        ?.split("\n")
+        .filter((line) => /^ {2}\S/u.test(line))
+        .map((line) => line.trim().split(/\s/u)[0]);
+      for (const [name, argument] of Object.entries(
         definitions.args?.properties ?? {},
       )) {
+        const label = name.replace(
+          /[A-Z]/gu,
+          (letter) => `-${letter.toLowerCase()}`,
+        );
+        expect(argumentLabels).toContain(label);
         expect(typeof argument.description).toBe("string");
         expect(argument.description?.trim().length).toBeGreaterThan(0);
       }
@@ -296,151 +444,6 @@ describe("CLI", () => {
         expect(typeof option.description).toBe("string");
         expect(option.description?.trim().length).toBeGreaterThan(0);
       }
-    }
-  });
-
-  test("documents user-facing environment and deep-scan configuration", async () => {
-    const readme = await readFile(new URL("../README.md", import.meta.url), {
-      encoding: "utf8",
-    });
-    const publicReadme = await readFile(
-      new URL("../../../README.md", import.meta.url),
-      { encoding: "utf8" },
-    );
-
-    for (const documentation of [readme, publicReadme]) {
-      expect(documentation).toContain("https://chatgpt.com/cyber");
-    }
-
-    for (const setting of [
-      "OPENAI_API_KEY",
-      "CODEX_API_KEY",
-      "CODEX_SECURITY_LOG_LEVEL",
-      "LOG_LEVEL",
-      "CODEX_SECURITY_STATE_DIR",
-      "CODEX_HOME",
-      "PYTHON",
-      "GH_HOST",
-      "GH_TOKEN",
-      "GITHUB_TOKEN",
-      "CODEX_SECURITY_GIT_HOST",
-      "CODEX_SECURITY_IMAGE",
-      "CODEX_SECURITY_USER",
-      "CODEX_SECURITY_SECCOMP",
-      "CODEX_SECURITY_CSV",
-      "CODEX_SECURITY_RESULTS",
-      "CODEX_SECURITY_STATE",
-      "CODEX_SECURITY_NO_UPDATE_NOTICE",
-      "NO_UPDATE_NOTIFIER",
-      "CODEX_SECURITY_NPM_REGISTRY",
-      "npm_config_registry",
-      "NPM_CONFIG_REGISTRY",
-      "NO_COLOR",
-      "TERM",
-      "CI",
-      "features.multi_agent_v2.max_concurrent_threads_per_session",
-      "agents.max_threads",
-      "$CODEX_HOME/codex-security/config.toml",
-      "[deep_scan]",
-      "stop_after_no_new",
-      "max_discovery_runs",
-      "max_time_hours",
-    ]) {
-      expect(readme).toContain(setting);
-    }
-    expect(readme).toMatch(
-      /\|\s*`CODEX_SECURITY_LOG_LEVEL`\s*\|\s*CLI-only\b/u,
-    );
-    expect(readme).toMatch(/\|\s*`LOG_LEVEL`\s*\|\s*CLI-only\b/u);
-  });
-
-  test("keeps documented runtime and deep-scan defaults accurate", async () => {
-    const readme = await readFile(new URL("../README.md", import.meta.url), {
-      encoding: "utf8",
-    });
-    const documentedConfigs = [
-      ...readme.matchAll(/^```toml\s*\n([\s\S]*?)\n```\s*$/gmu),
-    ].map(([, config]) => parseToml(config!));
-    const documentedRuntime = documentedConfigs.find(
-      (config) => "cli_auth_credentials_store" in config,
-    );
-    expect(documentedRuntime).toMatchObject({
-      cli_auth_credentials_store:
-        DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"],
-      model: DEFAULT_SCAN_MODEL_CONFIGURATION.model,
-      model_reasoning_effort: DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort,
-    });
-
-    const features = DEFAULT_CODEX_CONFIG["features"] as JsonObject;
-    const multiAgent = features["multi_agent_v2"] as JsonObject;
-    expect(documentedRuntime).toMatchObject({
-      features: {
-        multi_agent_v2: {
-          max_concurrent_threads_per_session:
-            multiAgent["max_concurrent_threads_per_session"],
-        },
-      },
-    });
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const root = await mkdtemp(join(tmpdir(), "codex-security-deep-defaults-"));
-
-    try {
-      const result = spawnSync(
-        python!,
-        [
-          fileURLToPath(
-            new URL(
-              "../_bundled_plugin/scripts/deep_scan_config.py",
-              import.meta.url,
-            ),
-          ),
-          "--available-parallelism",
-          "12",
-        ],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_HOME: join(root, "codex-home"),
-            PYTHONDONTWRITEBYTECODE: "1",
-          },
-          timeout: 30_000,
-        },
-      );
-
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe("");
-
-      const defaults = JSON.parse(result.stdout) as {
-        workers: number;
-        subagents: number;
-        stopAfterNoNew: number;
-        stopAfterConsecutiveErrors: number;
-        maxDiscoveryRuns: number;
-        maxTimeHours: number;
-      };
-      expect(defaults.workers).toBe(4);
-      const documentedDeepScan = documentedConfigs.find(
-        (config) =>
-          typeof config["deep_scan"] === "object" &&
-          config["deep_scan"] !== null &&
-          "stop_after_consecutive_errors" in config["deep_scan"],
-      );
-      expect(documentedDeepScan).toMatchObject({
-        deep_scan: {
-          workers: 4,
-          subagents: defaults.subagents,
-          stop_after_no_new: defaults.stopAfterNoNew,
-          stop_after_consecutive_errors: defaults.stopAfterConsecutiveErrors,
-          max_discovery_runs: defaults.maxDiscoveryRuns,
-          max_time_hours: defaults.maxTimeHours,
-        },
-      });
-    } finally {
-      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -462,21 +465,19 @@ describe("CLI", () => {
         ],
       },
     };
-    const calls: Array<readonly string[]> = [];
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies({
-      onWorkbench: (args) => {
-        calls.push(args);
-        return response;
-      },
+    const calls = mock((_args: readonly string[]) => {
+      return response;
     });
-    deps.createSecurity = () => {
-      throw new Error("finding feedback must not initialize Codex");
-    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = dependencies({
+      onWorkbench: calls,
+    });
+    deps.createSecurity = () =>
+      fail("finding feedback must not initialize Codex");
 
     expect(
-      await main(
+      await runCli(
         [
           "findings",
           "false-positive",
@@ -485,12 +486,10 @@ describe("CLI", () => {
           reason,
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
-    expect(calls).toEqual([
+    expect(calls.mock.calls.map(([value]) => value)).toEqual([
       [
         "set-finding-triage",
         "--occurrence-id",
@@ -508,34 +507,29 @@ describe("CLI", () => {
   });
 
   test("requires a reason before marking a finding as a false positive", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    let workbenchCalled = false;
+    const { stderr, runCli } = createCliTest(main);
+
+    const onWorkbench = mock<() => {}>().mockReturnValue({});
 
     expect(
-      await main(
+      await runCli(
         ["findings", "false-positive", "occurrence-1", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
-          onWorkbench: () => {
-            workbenchCalled = true;
-            return {};
-          },
+          onWorkbench,
         }),
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("reason");
-    expect(workbenchCalled).toBe(false);
+    expect(onWorkbench).not.toHaveBeenCalled();
   });
 
   test("preserves false-positive workbench failures", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    let started = false;
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const onRun = mock();
 
     expect(
-      await main(
+      await runCli(
         [
           "findings",
           "false-positive",
@@ -544,37 +538,31 @@ describe("CLI", () => {
           "Not reachable from untrusted input.",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies({
-          onRun: () => {
-            started = true;
-          },
-          onWorkbench: () => {
-            throw new Error(
-              `Could not update finding ${SYNTHETIC_CREDENTIALS}`,
-            );
-          },
+          onRun,
+          onWorkbench: () =>
+            fail(`Could not update finding ${SYNTHETIC_CREDENTIALS}`),
         }),
       ),
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(SYNTHETIC_CREDENTIALS);
     expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
-    expect(started).toBe(false);
+    expect(onRun).not.toHaveBeenCalled();
   });
 
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
     const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-cli-pre-commit-")),
+      await temporaryDirectory("codex-security-cli-pre-commit-"),
     );
     try {
-      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
-      execFileSync(
-        "git",
+      for (const args of [
+        ["init", "-q", root],
         ["-C", root, "config", "core.hooksPath", ".custom hooks"],
-        { timeout: 10_000 },
-      );
+      ]) {
+        const result = await runCommand("git", args);
+        expect(result.status, result.stderr).toBe(0);
+      }
       let started = false;
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
@@ -582,12 +570,10 @@ describe("CLI", () => {
         onRun: () => (started = true),
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const stdout = capture();
+        const stdout = captureCli(main, "stdout");
         expect(
-          await main(
+          await stdout.run(
             ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
-            stdout.stream,
-            capture().stream,
             deps,
           ),
         ).toBe(0);
@@ -608,12 +594,10 @@ describe("CLI", () => {
         hook,
         "#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity medium\n",
       );
-      const migratedHook = capture();
+      const migratedHook = captureCli(main, "stdout");
       expect(
-        await main(
+        await migratedHook.run(
           ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
-          migratedHook.stream,
-          capture().stream,
           deps,
         ),
       ).toBe(0);
@@ -625,15 +609,8 @@ describe("CLI", () => {
       expect(migrated.failOnSeverity).toBe("medium");
       expect(await readFile(hook, "utf8")).toBe(trustedHook);
 
-      const existingHook = capture();
-      expect(
-        await main(
-          ["install-hook", "."],
-          capture().stream,
-          existingHook.stream,
-          deps,
-        ),
-      ).toBe(2);
+      const existingHook = captureCli(main, "stderr");
+      expect(await existingHook.run(["install-hook", "."], deps)).toBe(2);
       expect(existingHook.text()).toContain("A pre-commit hook already exists");
       expect(await readFile(hook, "utf8")).toContain(
         "--fail-on-severity medium",
@@ -641,12 +618,10 @@ describe("CLI", () => {
 
       const customHook = "#!/bin/sh\nexit 0\n";
       await writeFile(hook, customHook);
-      const customHookError = capture();
+      const customHookError = captureCli(main, "stderr");
       expect(
-        await main(
+        await customHookError.run(
           ["install-hook", ".", "--fail-on-severity", "medium"],
-          capture().stream,
-          customHookError.stream,
           deps,
         ),
       ).toBe(2);
@@ -676,12 +651,15 @@ describe("CLI", () => {
         '#!/bin/sh\nprintf "codex-security\\n" > "$CODEX_SECURITY_HOOK_MARKER"\nexit 0\n',
         { mode: 0o755 },
       );
-      execFileSync(
-        "git",
-        ["-C", root, "add", "-f", "node_modules/.bin/codex-security"],
-        { timeout: 10_000 },
-      );
-      const commit = spawnSync(
+      const staged = await runCommand("git", [
+        "-C",
+        root,
+        "add",
+        "-f",
+        "node_modules/.bin/codex-security",
+      ]);
+      expect(staged.status, staged.stderr).toBe(0);
+      const commit = await runCommand(
         "git",
         [
           "-C",
@@ -698,7 +676,6 @@ describe("CLI", () => {
           "test",
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             CODEX_HOME: join(root, "codex-home"),
@@ -707,11 +684,9 @@ describe("CLI", () => {
             OPENAI_API_KEY: "",
             PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
           },
-          timeout: 10_000,
         },
       );
-      expect(commit.error).toBeUndefined();
-      expect(commit.status).not.toBe(0);
+      expect(commit.status, commit.stderr).toBeGreaterThan(0);
       await expect(stat(maliciousMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -728,15 +703,22 @@ describe("CLI", () => {
   });
 
   test("runs a bulk scan and keeps structured output on stdout", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
+    const root = await temporaryDirectory("codex-security-cli-multiscan-");
+    const architecturePath = join(root, "architecture.md");
+    const threatModelsPath = join(root, "threat-models");
     try {
       await multiscanInventory(root);
-      const stdout = capture();
-      const stderr = capture();
+      await writeFile(architecturePath, "Synthetic architecture context.");
+      await mkdir(threatModelsPath);
+      await writeFile(
+        join(threatModelsPath, "model.md"),
+        "Synthetic threat model.",
+      );
+      const { stdout, stderr, runCli } = createCliTest(main);
       let config: CodexSecurityConfig | undefined;
       let scanOptions: unknown;
       expect(
-        await main(
+        await runCli(
           [
             "bulk-scan",
             "repositories.csv",
@@ -749,14 +731,12 @@ describe("CLI", () => {
             "--effort",
             "high",
             "--knowledge-base",
-            "/shared/architecture.pdf",
-            "--knowledge-base=/shared/threat-models",
+            architecturePath,
+            `--knowledge-base=${threatModelsPath}`,
             "--codex",
             "features.goals=true",
             "--json",
           ],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             currentDirectory: root,
             onConfig: (value) => (config = value),
@@ -780,10 +760,7 @@ describe("CLI", () => {
       });
       expect(scanOptions).toMatchObject({
         mode: "deep",
-        knowledgeBasePaths: [
-          "/shared/architecture.pdf",
-          "/shared/threat-models",
-        ],
+        knowledgeBasePaths: [architecturePath, threatModelsPath],
       });
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
@@ -793,28 +770,28 @@ describe("CLI", () => {
   });
 
   test("expands home-relative bulk scan paths", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-home-"));
+    const root = await temporaryDirectory("codex-security-cli-home-");
     const home = join(root, "home");
     const currentDirectory = join(root, "current");
     const previousHome = process.env["HOME"];
     const previousUserProfile = process.env["USERPROFILE"];
     try {
-      await mkdir(home);
+      await mkdir(home, { mode: 0o700 });
       await mkdir(currentDirectory);
       await multiscanInventory(home);
       process.env["HOME"] = home;
       process.env["USERPROFILE"] = home;
 
-      expect(resolveCliPath(currentDirectory, "~/repositories.csv")).toBe(
-        join(home, "repositories.csv"),
-      );
-      expect(resolveCliPath(currentDirectory, "~person/repositories.csv")).toBe(
-        join(currentDirectory, "~person", "repositories.csv"),
-      );
+      expect<string>(
+        resolveCliPath(currentDirectory, "~/repositories.csv"),
+      ).toBe(join(home, "repositories.csv"));
+      expect<string>(
+        resolveCliPath(currentDirectory, "~person/repositories.csv"),
+      ).toBe(join(currentDirectory, "~person", "repositories.csv"));
 
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       expect(
-        await main(
+        await stdout.run(
           [
             "bulk-scan",
             "~/repositories.csv",
@@ -822,8 +799,6 @@ describe("CLI", () => {
             "~/results",
             "--json",
           ],
-          stdout.stream,
-          capture().stream,
           dependencies({ currentDirectory }),
         ),
       ).toBe(0);
@@ -839,6 +814,43 @@ describe("CLI", () => {
       else process.env["USERPROFILE"] = previousUserProfile;
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("surfaces unsupported effort errors without substituting settings or retrying", async () => {
+    const model = "synthetic-future-model";
+    const effort = "synthetic-future-effort";
+    const message = `Provider does not support reasoning effort '${effort}' for model '${model}'.`;
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    const run = mock(async () => {
+      throw new CodexSecurityError(message);
+    });
+    const createSecurity = mock((_config: CodexSecurityConfig) =>
+      fakeSecurity(run),
+    );
+    deps.createSecurity = createSecurity;
+
+    expect(
+      await main(
+        ["scan", ".", "--model", model, "--effort", effort, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(createSecurity).toHaveBeenCalledTimes(1);
+    expect(createSecurity.mock.lastCall?.[0].codexOverrides).toEqual({
+      model,
+      model_reasoning_effort: effort,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message,
+    });
+    expect(stderr.text()).toContain(message);
   });
 
   test.each([
@@ -857,13 +869,13 @@ describe("CLI", () => {
   ] as const)(
     "routes bulk scans through %s",
     async (_name, provider, model, providerConfig) => {
-      const root = await mkdtemp(join(tmpdir(), `codex-security-${provider}-`));
+      const root = await temporaryDirectory(`codex-security-${provider}-`);
       try {
         await multiscanInventory(root);
         let config: CodexSecurityConfig | undefined;
-        const missingModelError = capture();
+        const missingModelError = captureCli(main, "stderr");
         expect(
-          await main(
+          await missingModelError.run(
             [
               "bulk-scan",
               "repositories.csv",
@@ -872,8 +884,6 @@ describe("CLI", () => {
               "--provider",
               provider,
             ],
-            capture().stream,
-            missingModelError.stream,
             dependencies({
               currentDirectory: root,
               onConfig: (value) => (config = value),
@@ -885,7 +895,8 @@ describe("CLI", () => {
         );
         expect(config).toBeUndefined();
         expect(
-          await main(
+          await runCapturedCli(
+            main,
             [
               "bulk-scan",
               "repositories.csv",
@@ -897,8 +908,6 @@ describe("CLI", () => {
               model,
               "--json",
             ],
-            capture().stream,
-            capture().stream,
             dependencies({
               currentDirectory: root,
               onConfig: (value) => (config = value),
@@ -916,14 +925,14 @@ describe("CLI", () => {
     },
   );
 
-  test("keeps credentials out of bulk-scan failures and progress", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
+  test("preserves diagnostic text in bulk-scan failures and progress", async () => {
+    const root = await temporaryDirectory("codex-security-cli-multiscan-");
     try {
       await multiscanInventory(root);
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [
             "bulk-scan",
             "repositories.csv",
@@ -931,8 +940,6 @@ describe("CLI", () => {
             "results",
             "--json",
           ],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             currentDirectory: root,
             onRun: () => {
@@ -950,8 +957,7 @@ describe("CLI", () => {
         skipped: 0,
       });
       expect(stderr.text()).toContain("sample failed (attempt 1)");
-      expect(stderr.text()).toContain("[redacted]");
-      expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
+      expect(stderr.text()).toContain("scan failed sk-proj-SYNTHETIC_KEY_123");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -994,17 +1000,12 @@ describe("CLI", () => {
         "accounts/fireworks/models/qwen3-235b-a22b",
       ],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       let started = false;
 
       expect(
-        await main(
-          argv,
-          stdout.stream,
-          stderr.stream,
-          dependencies({ onRun: () => (started = true) }),
-        ),
+        await runCli(argv, dependencies({ onRun: () => (started = true) })),
       ).toBe(2);
       expect(started).toBe(false);
       expect(stdout.text()).toBe("");
@@ -1013,28 +1014,20 @@ describe("CLI", () => {
   });
 
   test("requires an output directory for a supplied bulk scan CSV", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
-        ["bulk-scan", "repositories.csv"],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
+      await runCli(["bulk-scan", "repositories.csv"], dependencies()),
     ).toBe(2);
     expect(stderr.text()).toContain("--output-dir is required");
     expect(stdout.text()).toBe("");
   });
 
   test("rejects an output directory without a repository CSV", async () => {
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["bulk-scan", "--output-dir", "results"],
-        capture().stream,
-        stderr.stream,
         dependencies(),
       ),
     ).toBe(2);
@@ -1043,12 +1036,11 @@ describe("CLI", () => {
     );
   });
 
-  test("exposes only typed, read-only SDK metadata over MCP", () => {
-    const child = spawnSync(
+  test("exposes only typed, read-only SDK metadata over MCP", async () => {
+    const child = await runCommand(
       process.execPath,
       [join(import.meta.dir, "../src/cli.ts"), "--mcp"],
       {
-        encoding: "utf8",
         input: [
           '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
           '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
@@ -1060,10 +1052,7 @@ describe("CLI", () => {
       },
     );
     expect(child.status).toBe(0);
-    const responses = child.stdout
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
+    const responses = parseJsonLines(child.stdout);
     const tools = responses.find((response) => response.id === 2).result.tools;
     expect(tools).toHaveLength(1);
     expect(tools[0]).toMatchObject({
@@ -1098,7 +1087,7 @@ describe("CLI", () => {
   }, 30_000);
 
   test("presents interactive scan history and hides abandoned running scans", async () => {
-    const stdout = capture(true);
+    const stdout = captureCli(main, "stdout", true);
     const scan = {
       mode: "standard",
       targetPath: "/demo/juice-shop",
@@ -1147,14 +1136,9 @@ describe("CLI", () => {
     });
     deps.now = () => Date.parse("2026-07-24T12:00:00Z");
 
-    expect(
-      await main(
-        ["scans", "list", "/demo/juice-shop"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await stdout.run(["scans", "list", "/demo/juice-shop"], deps)).toBe(
+      0,
+    );
     const text = stdout.text();
     expect(text).toContain("CODEX SECURITY");
     expect(text).toContain("SCAN HISTORY");
@@ -1175,7 +1159,7 @@ describe("CLI", () => {
   });
 
   test("shows the latest completed scan for the current repository by default", async () => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
       { scans: [{ scanId: "latest-scan" }] },
@@ -1183,10 +1167,8 @@ describe("CLI", () => {
     ];
 
     expect(
-      await main(
+      await stdout.run(
         ["scans", "show", "--json"],
-        stdout.stream,
-        capture().stream,
         dependencies({
           onWorkbench: (args) => responses[calls.push(args) - 1]!,
         }),
@@ -1208,46 +1190,43 @@ describe("CLI", () => {
   });
 
   test("reports when the current repository has no saved scans", async () => {
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
 
-    expect(
-      await main(
-        ["scans", "show"],
-        capture().stream,
-        stderr.stream,
-        dependencies(),
-      ),
-    ).toBe(2);
+    expect(await stderr.run(["scans", "show"], dependencies())).toBe(2);
     expect(stderr.text()).toContain(
       "No completed scans found for the current repository.",
     );
   });
 
-  test("does not emit an ok: true envelope for a failed structured history command", async () => {
-    for (const argv of [
-      ["scans", "show", "--json"],
-      ["scans", "list", "--json"],
-      ["scans", "compare", "before", "after", "--json"],
-      ["scans", "match", "before", "after", "--json"],
-    ]) {
-      const stdout = capture();
-      const stderr = capture();
-      const result = await main(argv, stdout.stream, stderr.stream, {
-        ...dependencies({
-          onWorkbench: () => {
-            throw new Error(
-              "Scan ID prefixes must be at least eight characters.",
-            );
+  test.each([false, true])(
+    "does not emit an ok: true envelope for a failed structured history command with full output %p",
+    async (fullOutput) => {
+      for (const argv of [
+        ["scans", "show", "--json"],
+        ["scans", "list", "--json"],
+        ["scans", "compare", "before", "after", "--json"],
+        ["scans", "match", "before", "after", "--json"],
+        ["scans", "match", "--all", "--json"],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+
+        const result = await runCli(
+          [...argv, ...(fullOutput ? ["--full-output"] : [])],
+          {
+            ...dependencies({
+              onWorkbench: () =>
+                fail("Scan ID prefixes must be at least eight characters."),
+            }),
           },
-        }),
-      });
-      expect(result).toBe(2);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(
-        "Scan ID prefixes must be at least eight characters.",
-      );
-    }
-  });
+        );
+        expect(result).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          "Scan ID prefixes must be at least eight characters.",
+        );
+      }
+    },
+  );
 
   test("shows finding history and optionally reveals linked findings", async () => {
     const findings: JsonObject[] = [
@@ -1284,17 +1263,15 @@ describe("CLI", () => {
     ];
 
     for (const showLinkedFindings of [false, true]) {
-      const stdout = capture(true);
+      const stdout = captureCli(main, "stdout", true);
       expect(
-        await main(
+        await stdout.run(
           [
             "scans",
             "show",
             "scan-1",
             ...(showLinkedFindings ? ["--show-linked-findings"] : []),
           ],
-          stdout.stream,
-          capture().stream,
           dependencies({
             onWorkbench: () => ({
               scan: {
@@ -1343,12 +1320,10 @@ describe("CLI", () => {
   });
 
   test("sanitizes interactive finding text and respects NO_COLOR", async () => {
-    const stdout = capture(true);
+    const stdout = captureCli(main, "stdout", true);
     expect(
-      await main(
+      await stdout.run(
         ["scans", "show", "scan-1"],
-        stdout.stream,
-        capture().stream,
         dependencies({
           environment: { NO_COLOR: "1" },
           onWorkbench: () => ({
@@ -1398,19 +1373,16 @@ describe("CLI", () => {
         },
       ],
     };
+    const onWorkbench = (args: readonly string[]) =>
+      args[0] === "compare-scans"
+        ? { ...response, matchingCached: true }
+        : response;
     for (const argv of [
       ["scans", "compare", "before", "after", "--json"],
       ["scans", "compare", "before", "after", "--format", "yaml"],
     ]) {
-      const stdout = capture(true);
-      expect(
-        await main(
-          argv,
-          stdout.stream,
-          capture().stream,
-          dependencies({ onWorkbench: () => response }),
-        ),
-      ).toBe(0);
+      const stdout = captureCli(main, "stdout", true);
+      expect(await stdout.run(argv, dependencies({ onWorkbench }))).toBe(0);
       expect(stdout.text()).toContain("internal-finding-id");
       expect(stdout.text()).toContain("internal-occurrence-id");
       if (argv.includes("--json")) {
@@ -1418,26 +1390,22 @@ describe("CLI", () => {
       }
     }
 
-    const redirected = capture();
+    const redirected = captureCli(main, "stdout");
     expect(
-      await main(
+      await redirected.run(
         ["scans", "compare", "before", "after"],
-        redirected.stream,
-        capture().stream,
-        dependencies({ onWorkbench: () => response }),
+        dependencies({ onWorkbench }),
       ),
     ).toBe(0);
     expect(redirected.text()).toContain("internal-finding-id");
     expect(redirected.text()).toContain("status: unknown");
     expect(redirected.text()).not.toContain("CODEX SECURITY");
 
-    const filtered = capture(true);
+    const filtered = captureCli(main, "stdout", true);
     expect(
-      await main(
+      await filtered.run(
         ["scans", "compare", "before", "after", "--filter-output", "summary"],
-        filtered.stream,
-        capture().stream,
-        dependencies({ onWorkbench: () => response }),
+        dependencies({ onWorkbench }),
       ),
     ).toBe(0);
     expect(filtered.text()).toContain("persisting: 1");
@@ -1446,15 +1414,13 @@ describe("CLI", () => {
   });
 
   test("prints SDK metadata without starting a scan", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     let started = false;
 
     expect(
-      await main(
+      await runCli(
         ["info", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({ onRun: () => (started = true) }),
       ),
     ).toBe(0);
@@ -1468,18 +1434,14 @@ describe("CLI", () => {
   });
 
   test("filters useful first-run metadata without starting Codex", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
-    deps.createSecurity = () => {
-      throw new Error("info must stay local and read-only");
-    };
+    deps.createSecurity = () => fail("info must stay local and read-only");
 
     expect(
-      await main(
+      await runCli(
         ["info", "--json", "--filter-output", "model,reasoningEffort,nextStep"],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -1492,14 +1454,11 @@ describe("CLI", () => {
   });
 
   test("rejects scan-only filters before running the info command", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         ["info", "--json", "--filter-output", "manifest"],
-        stdout.stream,
-        stderr.stream,
         dependencies(),
       ),
     ).toBe(2);
@@ -1507,10 +1466,48 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("info metadata field");
   });
 
+  test.each([
+    { options: [["--format", "json"]] },
+    { options: [["--filter-output", "model,reasoningEffort"]] },
+    { options: [["--token-limit", "4"]] },
+    {
+      options: [
+        ["--token-offset", "1"],
+        ["--token-limit", "4"],
+      ],
+    },
+  ])("accepts equivalent output option forms %j", async ({ options }) => {
+    const separated = captureCli(main, "stdout");
+    const equals = captureCli(main, "stdout");
+    expect(
+      await separated.run(["info", ...options.flat()], dependencies()),
+    ).toBe(0);
+    expect(
+      await equals.run(
+        ["info", ...options.map(([flag, value]) => `${flag}=${value}`)],
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(equals.text()).toBe(separated.text());
+    expect(equals.text()).not.toBe("");
+  });
+
+  test.each(["--format", "--filter-output", "--token-limit", "--token-offset"])(
+    "rejects missing values for output option %s",
+    async (flag) => {
+      for (const args of [[flag], [flag, "--json"], [`${flag}=`]]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(await runCli(["info", ...args], dependencies())).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(flag);
+      }
+    },
+  );
+
   test("registers the scoped package as the MCP command", async () => {
-    const home = await mkdtemp(join(tmpdir(), "codex-security-mcp-home-"));
+    const home = await temporaryDirectory("codex-security-mcp-home-");
     try {
-      const child = spawnSync(
+      const child = await runCommand(
         process.execPath,
         [
           join(import.meta.dir, "../src/cli.ts"),
@@ -1521,7 +1518,6 @@ describe("CLI", () => {
           "--full-output",
         ],
         {
-          encoding: "utf8",
           env: { ...process.env, HOME: home, USERPROFILE: home },
           timeout: 30_000,
         },
@@ -1544,13 +1540,10 @@ describe("CLI", () => {
 
   test("prints non-TTY progress stages once without starting a timer", () => {
     const stderr = capture();
-    let timers = 0;
+    const setIntervalMock = mock(fakeInterval);
     const progress = new Progress(stderr.stream, {
       now: () => 0,
-      setInterval: () => {
-        timers += 1;
-        return {} as NodeJS.Timeout;
-      },
+      setInterval: setIntervalMock,
       clearInterval: () => {},
     });
 
@@ -1558,13 +1551,13 @@ describe("CLI", () => {
     progress.stopTimer();
 
     expect(stderr.text()).toBe("[00:00] Running scan\n");
-    expect(timers).toBe(0);
+    expect(setIntervalMock).toHaveBeenCalledTimes(0);
   });
 
   test("keeps later progress redraw failures from stopping the scan", () => {
     const stderr = capture(true);
     const write = stderr.stream.write;
-    let redraw: (() => void) | undefined;
+    const setIntervalMock = mock(fakeInterval);
     let failRedraw = false;
     stderr.stream.write = (chunk) => {
       if (failRedraw) throw new Error("Progress redraw failed.");
@@ -1572,24 +1565,21 @@ describe("CLI", () => {
     };
     const progress = new Progress(stderr.stream, {
       now: () => 0,
-      setInterval: (callback) => {
-        redraw = callback;
-        return {} as NodeJS.Timeout;
-      },
+      setInterval: setIntervalMock,
       clearInterval: () => {},
     });
 
     progress.startTimer("Running scan");
     failRedraw = true;
 
-    expect(() => redraw?.()).not.toThrow();
+    expect(() => setIntervalMock.mock.lastCall?.[0]?.()).not.toThrow();
 
     failRedraw = false;
     progress.stopTimer();
   });
 
   test("handles asynchronous progress stream failures while a scan is active", async () => {
-    let redraw: (() => void) | undefined;
+    const setIntervalMock = mock(fakeInterval);
     let failRedraw = false;
     const stream = Object.assign(
       new Writable({
@@ -1608,10 +1598,7 @@ describe("CLI", () => {
     );
     const progress = new Progress(stream, {
       now: () => 0,
-      setInterval: (callback) => {
-        redraw = callback;
-        return {} as NodeJS.Timeout;
-      },
+      setInterval: setIntervalMock,
       clearInterval: () => {},
     });
 
@@ -1621,7 +1608,7 @@ describe("CLI", () => {
       stream.once("error", resolve),
     );
     failRedraw = true;
-    redraw?.();
+    setIntervalMock.mock.lastCall?.[0]?.();
     progress.stopTimer();
     expect(stream.listenerCount("error")).toBe(2);
 
@@ -1710,17 +1697,12 @@ describe("CLI", () => {
           resolve(error);
         });
       });
-      const deps = dependencies();
-      deps.createSecurity = () => ({
-        async run(_repository, options) {
-          if (scenario === "archive") {
-            options?.onOutputArchived?.("/tmp/previous-results");
-            return fakeResult();
-          }
-          throw new CodexSecurityError(failingMessage);
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
+      const deps = scanDependencies(async function (_repository, options) {
+        if (scenario === "archive") {
+          options?.onOutputArchived?.("/tmp/previous-results");
+          return fakeResult();
+        }
+        throw new CodexSecurityError(failingMessage);
       });
 
       expect(
@@ -1735,9 +1717,29 @@ describe("CLI", () => {
     },
   );
 
+  test("passes the workflow ID to scans without changing their JSON output", async () => {
+    const deps = dependencies();
+    const result = fakeResult();
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
+        expect(options?.workflowId).toBe("scan-workflow");
+        return result;
+      });
+    const stdout = captureCli(main, "stdout");
+    expect(
+      await stdout.run(
+        ["scan", ".", "--workflow-id", "scan-workflow", "--json"],
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      scanDir: result.scanDir,
+    });
+  });
+
   test("keeps verbose diagnostics separate from interactive progress", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+
     const result = fakeResult([], "complete", {
       input_tokens: 200,
       cache_write_input_tokens: 100,
@@ -1755,8 +1757,8 @@ describe("CLI", () => {
     deps.clearInterval = (timer) => {
       activeTimers.delete(timer);
     };
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         expect(activeTimers.size).toBe(1);
         options?.onAuthentication?.({
           method: "api_key",
@@ -1778,19 +1780,9 @@ describe("CLI", () => {
         options?.onScanStarted?.();
         expect(activeTimers.size).toBe(1);
         return result;
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
-    });
+      });
 
-    expect(
-      await main(
-        ["scan", ".", "--verbose"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(["scan", ".", "--verbose"], deps)).toBe(0);
     const output = stripVTControlCharacters(stderr.text());
     const diagnosticLines = output
       .split(/[\r\n]+/u)
@@ -1822,54 +1814,41 @@ describe("CLI", () => {
       ["--headless", "--format", "json"],
       ["--headless", "--format", "jsonl"],
     ]) {
-      const stdout = capture();
-      const stderr = capture(true);
-      let timers = 0;
-      const deps = dependencies();
-      deps.setInterval = () => {
-        timers += 1;
-        return {} as NodeJS.Timeout;
-      };
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
 
-      expect(
-        await main(
-          ["scan", ".", ...options],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(0);
+      const setIntervalMock = mock(fakeInterval);
+      const deps = dependencies();
+      deps.setInterval = setIntervalMock;
+
+      expect(await runCli(["scan", ".", ...options], deps)).toBe(0);
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
       expect(stderr.text()).toContain("Preparing scan");
       expect(stderr.text()).toContain("Running scan");
       expect(stderr.text()).not.toContain("\u001B");
       expect(stderr.text()).not.toContain("\r");
-      expect(timers).toBe(0);
+      expect(setIntervalMock).toHaveBeenCalledTimes(0);
     }
   });
 
   test.each([false, true])(
-    "subscribes to session details only with TTY stdin: %s",
+    "subscribes to session details only with TTY stdin: %p",
     async (stdinTTY) => {
       const descriptor = Object.getOwnPropertyDescriptor(
         process.stdin,
         "isTTY",
       );
-      const stderr = capture(true);
+      const stderr = captureCli(main, "stderr", true);
       let subscribed = false;
       try {
         Object.defineProperty(process.stdin, "isTTY", {
           configurable: true,
           value: stdinTTY,
         });
-        const code = await main(
+        const code = await stderr.run(
           ["scan", "."],
-          capture().stream,
-          stderr.stream,
           dependencies({
             onTurn: (_repository, options) => {
-              subscribed =
-                typeof (options as ScanOptions).onSessionEvent === "function";
+              subscribed = typeof options.onSessionEvent === "function";
             },
           }),
         );
@@ -1893,14 +1872,14 @@ describe("CLI", () => {
       { options: [], environment: { TERM: "dumb" }, isTTY: true },
       { options: [], environment: {}, isTTY: false },
     ]) {
-      const stdout = capture();
-      const stderr = capture(isTTY);
+      const { stderr, runCli } = createCliTest(main, { stderr: isTTY });
+
       const result = fakeResult([], "complete", {
         input_tokens: 1_250,
         cached_input_tokens: 200,
         output_tokens: 30,
       });
-      let timers = 0;
+      const setIntervalMock = mock(fakeInterval);
       const deps = dependencies({
         environment,
         result,
@@ -1912,19 +1891,9 @@ describe("CLI", () => {
           { kind: "dispatch", phase: "file_review", planned: 2, started: 2 },
         ],
       });
-      deps.setInterval = () => {
-        timers += 1;
-        return {} as NodeJS.Timeout;
-      };
+      deps.setInterval = setIntervalMock;
 
-      expect(
-        await main(
-          ["scan", ".", ...options],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCli(["scan", ".", ...options], deps)).toBe(0);
       expect(stderr.text()).toContain("[00:00] Preparing scan");
       expect(stderr.text()).toContain(
         "Scan phase: reviewing files (3/8 files).",
@@ -1933,34 +1902,26 @@ describe("CLI", () => {
         "Scan phase: reviewing files (2 workers).",
       );
       expect(stderr.text()).toContain(
-        "Running scan: reviewing files | Workers: 2/2 | Files: 3/8 | Tokens: 1,250 input, 200 cached, 30 output | Cost: $0.00625",
+        "Running scan: reviewing files | Workers: 2/2 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
       );
+      expect(stderr.text()).not.toContain("Cost:");
+      expect(stderr.text()).not.toContain("COST");
       expect(stderr.text()).not.toContain("CODEX SECURITY");
       expect(stderr.text()).not.toContain("\u001B");
       expect(stderr.text()).not.toContain("\r");
-      expect(timers).toBe(0);
+      expect(setIntervalMock).toHaveBeenCalledTimes(0);
     }
   });
 
   test("uses plain progress when rerunning scans in CI", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
 
     expect(
-      await main(
+      await runCli(
         ["scans", "rerun", "scan-original"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           environment: { CI: "true" },
-          onWorkbench: () => ({
-            recipe: {
-              repository: "/original/repository",
-              target: { kind: "repository", paths: [] },
-              mode: "standard",
-              config: {},
-            },
-          }),
+          onWorkbench: () => savedRecipe(),
           scanProgress: [
             { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
           ],
@@ -1974,40 +1935,31 @@ describe("CLI", () => {
   });
 
   test("falls back to plain progress when the dashboard cannot initialize", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
-    let scans = 0;
-    let closed = 0;
-    let timers = 0;
-    const deps = dependencies({
-      onRun: () => {
-        scans += 1;
-      },
-      onClose: () => {
-        closed += 1;
-      },
-    });
-    deps.setInterval = () => {
-      timers += 1;
-      throw new Error("Dashboard timer unavailable.");
-    };
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
 
-    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
-      0,
-    );
-    expect(scans).toBe(1);
-    expect(closed).toBe(1);
-    expect(timers).toBe(1);
+    const onRun = mock();
+    const onClose = mock();
+    const setIntervalMock = mock(throwing("Dashboard timer unavailable."));
+    const deps = dependencies({
+      onRun,
+      onClose,
+    });
+    deps.setInterval = setIntervalMock;
+
+    expect(await runCli(["scan", "."], deps)).toBe(0);
+    expect(onRun).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(setIntervalMock).toHaveBeenCalledTimes(1);
     expect(stderr.text()).toContain("Preparing scan");
     expect(stderr.text()).toContain("Running scan");
   });
 
   test("closes the client when dashboard cleanup cannot restore the terminal", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+
     const write = stderr.stream.write;
     const signals = new FakeSignals();
-    let closed = 0;
+    const onClose = mock();
     stderr.stream.write = (chunk) => {
       if (chunk.toString().includes("\u001B[?25h\u001B[?1049l")) {
         throw new Error("Terminal cleanup failed.");
@@ -2016,26 +1968,22 @@ describe("CLI", () => {
     };
 
     expect(
-      await main(
+      await runCli(
         ["scan", "."],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           signals,
-          onClose: () => {
-            closed += 1;
-          },
+          onClose,
         }),
       ),
     ).toBe(0);
-    expect(closed).toBe(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   });
 
   test("keeps terminal scans in one live dashboard", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+
     const result = fakeResult([], "complete", {
       input_tokens: 17_985,
       cached_input_tokens: 10_496,
@@ -2043,7 +1991,7 @@ describe("CLI", () => {
     });
 
     expect(
-      await main(
+      await runCli(
         [
           "scan",
           "/code/juice-shop",
@@ -2054,8 +2002,6 @@ describe("CLI", () => {
           "--max-cost",
           "2",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           environment: { NO_COLOR: "1" },
           result,
@@ -2134,14 +2080,15 @@ describe("CLI", () => {
     );
     expect(text).not.toContain("thinking ·");
     expect(text).not.toContain("said ·");
-    expect(text).toContain("[redacted]");
-    expect(text).not.toContain("SYNTHETIC_OPENAI_VALUE_123");
+    expect(text).toContain("Bearer sk-proj-SYNTHETIC_OPENAI_VALUE_123");
     expect(text).not.toContain("Building the file inventory");
     expect(text).not.toContain("Running a scan command");
     expect(text).toContain("3 / 1,258 reviewed");
     expect(text).not.toContain("opened");
     expect(text).not.toContain("3 / 6 active");
-    expect(text).toContain("17,985 in · 10,496 cached · 236 out");
+    expect(text.replace(/\s+/gu, " ")).toContain(
+      "unavailable uncached input, 10,496 cache reads, unavailable cache writes, 236 output, 18,221 total",
+    );
     expect(text).toContain("/ $2.00");
     expect(stderr.text()).toContain("\u001B[?1049h");
     expect(stderr.text()).toContain("\u001B[?1049l");
@@ -2149,9 +2096,114 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
+  test.each([false, true])(
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=%j)",
+    async (interactive) => {
+      const { stdout, stderr, runCli } = createCliTest(main, {
+        stderr: interactive,
+      });
+      const deps = dependencies({ environment: { NO_COLOR: "1" } });
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
+          options?.onProgress?.({
+            phase: "preflight",
+            filesCompleted: 0,
+            filesTotal: 128,
+          });
+          expect(options?.onDeepProgress).toBeFunction();
+          const initial = stderr.text();
+          options?.onDeepProgress?.({
+            completed: 0,
+            active: 0,
+            maximum: 16,
+            consolidating: false,
+          });
+          expect(stderr.text()).toBe(initial);
+          options?.onDeepProgress?.({
+            completed: 0,
+            active: 4,
+            maximum: 16,
+            consolidating: false,
+          });
+          expect(stripVTControlCharacters(stderr.text())).toContain(
+            "discovery",
+          );
+          options?.onDeepProgress?.({
+            completed: 2,
+            active: 2,
+            maximum: 16,
+            consolidating: true,
+          });
+          expect(stripVTControlCharacters(stderr.text())).toContain(
+            "consolidating results",
+          );
+          const beforeTerminal = stderr.text().length;
+          options?.onDeepProgress?.({
+            completed: 4,
+            active: 0,
+            maximum: 16,
+            consolidating: false,
+          });
+          const terminal = stripVTControlCharacters(
+            stderr.text().slice(beforeTerminal),
+          );
+          expect(terminal).toContain("consolidating results");
+          expect(terminal).not.toContain("discovery");
+          const beforeDiscovery = stderr.text().length;
+          options?.onDeepProgress?.({
+            completed: 4,
+            active: 2,
+            maximum: 16,
+            consolidating: false,
+          });
+          const resumedDiscovery = stripVTControlCharacters(
+            stderr.text().slice(beforeDiscovery),
+          );
+          expect(resumedDiscovery).toContain("discovery");
+          expect(resumedDiscovery).not.toContain("consolidating results");
+          options?.onDeepProgress?.({
+            completed: 6,
+            active: 0,
+            maximum: 16,
+            consolidating: true,
+          });
+          return fakeResult();
+        });
+
+      expect(
+        await runCli(
+          [
+            "scan",
+            ".",
+            "--mode",
+            "deep",
+            ...(interactive ? [] : ["--headless"]),
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const text = stripVTControlCharacters(stderr.text());
+      expect(text).toContain("Reviews: 0 completed, 4 active, cap 16");
+      expect(text).toContain("Reviews: 2 completed, 2 active, cap 16");
+      if (interactive) {
+        expect(text).not.toContain("STAGE");
+        expect(text).not.toContain("FILES");
+      } else {
+        const running = text
+          .split("\n")
+          .filter((line) => line.includes("Running scan:"))
+          .at(-1);
+        expect(running).toContain("consolidating results");
+        expect(running).not.toContain("Files:");
+      }
+    },
+  );
+
   test("omits stage and file counts from interactive Deep scan dashboards", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+
     const result = fakeResult([], "complete", {
       input_tokens: 1_250,
       cached_input_tokens: 200,
@@ -2159,10 +2211,8 @@ describe("CLI", () => {
     });
 
     expect(
-      await main(
+      await runCli(
         ["scan", "/code/juice-shop", "--mode", "deep"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           environment: { NO_COLOR: "1" },
           result,
@@ -2190,7 +2240,7 @@ describe("CLI", () => {
     expect(text).not.toContain("0 / 1,258 reviewed");
     expect(text).toContain("worker 1 · read routes/login.ts");
     expect(text).toContain("TOKENS");
-    expect(text).toContain("COST");
+    expect(text).not.toContain("COST");
     expect(text).toContain("TIME");
   });
 
@@ -2208,24 +2258,20 @@ describe("CLI", () => {
         ["--format", "jsonl"],
         ["--format=jsonl"],
       ] as const) {
-        let invoked = false;
-        const stdout = capture();
-        const stderr = capture(true);
+        const onCodex = mock<() => number>().mockReturnValue(0);
+        const { stdout, stderr, runCli } = createCliTest(main, {
+          stderr: true,
+        });
 
         expect(
-          await main(
+          await runCli(
             [command, ...arguments_, ...format],
-            stdout.stream,
-            stderr.stream,
             dependencies({
-              onCodex: () => {
-                invoked = true;
-                return 0;
-              },
+              onCodex,
             }),
           ),
         ).toBe(2);
-        expect(invoked).toBe(false);
+        expect(onCodex).not.toHaveBeenCalled();
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toContain(
           `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`,
@@ -2235,24 +2281,19 @@ describe("CLI", () => {
   });
 
   test("rejects CSV stdout when JSON output is requested", async () => {
-    let exported = false;
-    const stdout = capture();
-    const stderr = capture();
+    const exportFindings = mock(resolving(new Uint8Array()));
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
-    deps.exportFindings = async () => {
-      exported = true;
-      return new Uint8Array();
-    };
+    deps.exportFindings = exportFindings;
 
     expect(
-      await main(
+      await runCli(
         ["export", "scan", "--export-format", "csv", "--output", "-", "--json"],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
-    expect(exported).toBe(false);
+    expect(exportFindings).not.toHaveBeenCalled();
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(
       "CSV stdout cannot be combined with JSON output",
@@ -2260,18 +2301,18 @@ describe("CLI", () => {
   });
 
   test("prints export help without initializing Codex", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
-    deps.createSecurity = () => {
-      throw new Error("must not initialize Codex");
-    };
-    expect(
-      await main(["export", "--help"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security export [scanDir]");
-    expect(stdout.text()).toContain("--export-format <csv|json|sarif>");
-    expect(stdout.text()).toContain("--source-root <string>");
+    deps.createSecurity = mustNotInitializeCodex;
+    expect(await runCli(["export", "--help"], deps)).toBe(0);
+    expect(stdout.text()).toContain("Usage: codex-security export [scan-dir]");
+    expect(stdout.text()).toContain("--artifact <artifact>");
+    expect(stdout.text()).toContain("--scan <scan-id>");
+    expect(stdout.text()).toContain("--export-format <format>");
+    expect(stdout.text()).toContain("threatmodel.md");
+    expect(stdout.text()).toContain("--source-root <path>");
+    expect(stdout.text()).toContain("sarif");
     expect(stdout.text()).not.toContain("--format {sarif}");
     expect(stderr.text()).toBe("");
   });
@@ -2294,46 +2335,32 @@ describe("CLI", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(help.text()).toContain("Usage: codex-security scan [repository]");
-    expect(help.text()).toContain("--verbose");
-    expect(help.text()).toContain("--path <array>");
-    expect(help.text()).toContain("--max-cost <number>");
-    expect(help.text()).toContain("--workers <number>");
-    expect(help.text()).toContain("--subagents <number>");
-    expect(help.text()).toContain("--stop-after-no-new <number>");
-    expect(help.text()).toContain("--max-discovery-runs <number>");
-    expect(help.text()).toContain("--max-time-hours <number>");
-    expect(help.text()).toContain("--headless");
-    expect(help.text()).toContain(
-      "Use plain text progress instead of the interactive dashboard.",
-    );
-    expect(help.text()).toContain("--model <string>");
-    expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
-    );
-    expect(help.text()).toContain(
-      `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-    );
-    expect(help.text()).toContain(
-      "--effort <minimal|low|medium|high|xhigh|max>",
-    );
-    expect(help.text()).toContain(
-      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
-    );
-    expect(help.text()).toContain('model_reasoning_effort="high"');
-    expect(help.text()).toContain(
-      "features.multi_agent_v2.max_concurrent_threads_per_session=4",
-    );
-    expect(help.text()).toContain("default: Codex Security state");
-    expect(help.text()).toContain(
-      "codex-security scan . --model gpt-5.6-terra",
-    );
-    expect(help.text()).toContain(
-      "codex-security scan . --model gpt-5.6-terra --effort high",
-    );
-    expect(help.text()).not.toContain("openai:gpt");
-    expect(help.text()).not.toContain("codex-security scan . --path src,tests");
-    expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
+    const text = help.text().replace(/\s+/gu, " ");
+    expect(text).toContain("Usage: codex-security scan [repository]");
+    for (const option of [
+      "--verbose",
+      "--path <path>",
+      "--max-cost <usd>",
+      "--show-cost",
+      "--workers <count>",
+      "--subagents <count>",
+      "--stop-after-no-new <count>",
+      "--max-discovery-runs <count>",
+      "--max-time-hours <hours>",
+      "--headless",
+      "--model <model>",
+      "--provider <provider>",
+      "--effort <effort>",
+    ]) {
+      expect(text).toContain(option);
+    }
+    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.model);
+    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort);
+    expect(text).toContain('model_reasoning_effort="high"');
+    expect(text).toContain("CODEX_SECURITY_STATE_DIR");
+    expect(text).not.toContain("openai:gpt");
+    expect(text).not.toContain("codex-security scan . --path src,tests");
+    expect(stderr.text()).toBe("");
   });
 
   test("documents existing model and reasoning options in bulk-scan help", async () => {
@@ -2348,51 +2375,53 @@ describe("CLI", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(help.text()).toContain("--model <string>");
-    expect(help.text()).toContain(
-      `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-    );
-    expect(help.text()).toContain(
-      "--effort <minimal|low|medium|high|xhigh|max>",
-    );
-    expect(help.text()).toContain(
-      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
-    );
-    expect(help.text()).toContain("--codex <array>");
-    expect(help.text()).toContain('model_reasoning_effort="high"');
-    expect(help.text()).toContain(
-      "features.multi_agent_v2.max_concurrent_threads_per_session=4",
-    );
-    expect(help.text()).toContain("Concurrent repository scans.");
-    expect(help.text()).toContain(
-      "Default scan mode for repositories without a CSV mode.",
-    );
-    expect(help.text()).toContain(
-      "Codex Security plugin directory or ZIP (default: bundled plugin).",
-    );
-    expect(help.text()).toContain(
-      "Python interpreter (default: PYTHON or automatic discovery).",
-    );
-    expect(help.text()).toContain(
-      "codex-security bulk-scan repositories.csv " +
-        "--output-dir /path/outside/repositories/results " +
-        "--workers 4 --max-attempts 3",
-    );
-    expect(help.text()).not.toContain("--outputDir");
-    expect(help.text()).not.toContain("--maxAttempts");
-    expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
-    );
+    const text = help.text().replace(/\s+/gu, " ");
+    expect(text).toContain("--model <model>");
+    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.model);
+    expect(text).toContain("--effort <effort>");
+    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort);
+    expect(text).toContain("--codex <key=value>");
+    expect(text).toContain('model_reasoning_effort="high"');
+    expect(text).toContain("Concurrent repository scans.");
+    expect(text).toContain("--mode <mode>");
+    expect(text).toContain("bundled plugin");
+    expect(text).toContain("PYTHON");
+    expect(text).toContain("codex-security bulk-scan repositories.csv");
+    expect(text).not.toContain("--outputDir");
+    expect(text).not.toContain("--maxAttempts");
+    expect(text).toContain("--provider <provider>");
     expect(stderr.text()).toBe("");
   });
 
   test("selects scan models and reasoning without TOML quoting", async () => {
     for (const [options, expected] of [
       [["--model", "gpt-5.6-terra"], { model: "gpt-5.6-terra" }],
+      [
+        ["--model", "gpt-6-astra", "--effort", "max"],
+        { model: "gpt-6-astra", model_reasoning_effort: "max" },
+      ],
+      [
+        ["--model=gpt-6.1-sol", "--effort=max"],
+        { model: "gpt-6.1-sol", model_reasoning_effort: "max" },
+      ],
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
       [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
+      [["--effort", "none"], { model_reasoning_effort: "none" }],
+      [["--effort", "ultra"], { model_reasoning_effort: "ultra" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
       [["--effort", "max"], { model_reasoning_effort: "max" }],
+      [
+        [
+          "--model",
+          "synthetic-future-model",
+          "--effort",
+          "synthetic-future-effort",
+        ],
+        {
+          model: "synthetic-future-model",
+          model_reasoning_effort: "synthetic-future-effort",
+        },
+      ],
       [
         ["--model", "gpt-5.6-terra", "--effort", "high"],
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
@@ -2418,10 +2447,9 @@ describe("CLI", () => {
     ] as const) {
       let config: CodexSecurityConfig | undefined;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["scan", ".", ...options],
-          capture().stream,
-          capture().stream,
           dependencies({ onConfig: (value) => (config = value) }),
         ),
       ).toBe(0);
@@ -2456,11 +2484,15 @@ describe("CLI", () => {
       ] as const) {
         let config: CodexSecurityConfig | undefined;
         expect(
-          await main(
+          await runCapturedCli(
+            main,
             ["scan", ".", ...options],
-            capture().stream,
-            capture().stream,
-            dependencies({ onConfig: (value) => (config = value) }),
+            dependencies({
+              environment: {
+                [providerConfig.env_key]: "synthetic-provider-key",
+              },
+              onConfig: (value) => (config = value),
+            }),
           ),
         ).toBe(0);
         expect(config?.codexOverrides).toEqual({
@@ -2479,10 +2511,9 @@ describe("CLI", () => {
     ] as const) {
       let config: CodexSecurityConfig | undefined;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["scan", ".", ...options],
-          capture().stream,
-          capture().stream,
           dependencies({
             environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock" },
             onConfig: (value) => (config = value),
@@ -2498,11 +2529,11 @@ describe("CLI", () => {
   });
 
   test("parses repeatable options and every scan target through Incur", async () => {
-    const pathOutput = capture();
+    const pathOutput = captureCli(main, "stdout");
     let pathOptions: unknown;
     let pathConfig: CodexSecurityConfig | undefined;
     expect(
-      await main(
+      await pathOutput.run(
         [
           "scan",
           "repo",
@@ -2533,8 +2564,6 @@ describe("CLI", () => {
           "/tmp/results",
           "--archive-existing",
         ],
-        pathOutput.stream,
-        capture().stream,
         dependencies({
           onConfig: (config) => (pathConfig = config),
           onTurn: (_repository, options) => (pathOptions = options),
@@ -2543,7 +2572,10 @@ describe("CLI", () => {
     ).toBe(0);
     expect(pathOptions).toMatchObject({
       target: ["src", "--fixtures"],
-      knowledgeBasePaths: ["/shared/architecture.pdf", "/shared/threat-models"],
+      knowledgeBasePaths: [
+        resolve("/shared/architecture.pdf"),
+        resolve("/shared/threat-models"),
+      ],
       workers: 2,
       subagents: 0,
       stopAfterNoNew: 3,
@@ -2568,10 +2600,9 @@ describe("CLI", () => {
     ] as const) {
       let target: unknown;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           argv,
-          capture().stream,
-          capture().stream,
           dependencies({
             onTurn: (_repository, options) => {
               target = (options as { target?: unknown }).target;
@@ -2634,6 +2665,66 @@ describe("CLI", () => {
     }
   });
 
+  test("ignores override key whitespace and preserves literal string contents", () => {
+    expect(
+      parseCodexOverrides([
+        ' model = "  example  " ',
+        " agents . max_threads = 4",
+      ]),
+    ).toEqual({ model: "  example  ", agents: { max_threads: 4 } });
+    expect(() =>
+      parseCodexOverrides([
+        "agents.max_threads=4",
+        " agents . max_threads = 8",
+      ]),
+    ).toThrow("Duplicate --codex key");
+    expect(() =>
+      parseCodexOverrides(["agents=4", " agents . max_threads = 8"]),
+    ).toThrow("Conflicting --codex key");
+    expect(() => parseCodexOverrides([' model = "example"'], "other")).toThrow(
+      "--model conflicts with --codex model",
+    );
+    for (const key of ["agents. .limit", "agents. __proto__ .limit"]) {
+      expect(() => parseCodexOverrides([`${key}=1`])).toThrow(
+        "Invalid --codex key",
+      );
+    }
+  });
+
+  test.each(
+    [
+      ["info", "--workers"],
+      ["classify-severity", "--scan", "--rubric", "policy.md"],
+      ["classify-severity", "--scan-dir", "--rubric", "policy.md"],
+      ["classify-severity", "--scan", "latest", "--rubric", "--reprocess"],
+      [
+        "dedupe",
+        "--scan",
+        "--all-repositories",
+        "--findings-url",
+        "http://localhost:3000",
+      ],
+      [
+        "dedupe",
+        "--workflow-id",
+        "--all-repositories",
+        "--findings-url",
+        "http://localhost:3000",
+      ],
+    ].map((args) => ({ args })),
+  )("rejects missing option values before running %j", async ({ args }) => {
+    const deps = dependencies();
+    const unexpected = mock(throwing("Unexpected SDK or workbench call"));
+    deps.classifyScanSeverity = unexpected;
+    deps.classifyScanDirectorySeverity = unexpected;
+    deps.deduplicateScan = unexpected;
+    deps.runWorkbench = unexpected;
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run(args, deps)).toBe(2);
+    expect(stderr.text()).toContain("Missing value for flag:");
+    expect(unexpected).not.toHaveBeenCalled();
+  });
+
   test("does not echo malformed --codex overrides and accepts large values", () => {
     const secret = "SYNTHETIC_TOML_SECRET_MUST_NOT_ECHO";
     let malformed: unknown;
@@ -2678,37 +2769,34 @@ describe("CLI", () => {
       [["scan", ".", "--base", "HEAD"], "--base requires --working-tree"],
       [["scan", ".", "--archive-existing"], "requires --output-dir"],
       [["scan", ".", "--max-cost=0"], "expected number to be >0"],
-      [
-        ["scan", ".", "--workers", "2"],
-        "Deep scan settings require --mode deep",
-      ],
+      [["scan", ".", "--workers", "2"], "Deep scan settings require deep mode"],
       [
         ["scan", ".", "--max-time-hours", "1.5"],
-        "Deep scan settings require --mode deep",
+        "Deep scan settings require deep mode",
       ],
       [
         ["scan", ".", "--mode", "deep", "--workers", "0"],
-        "expected number to be >0",
+        "must be a positive integer",
       ],
       [
         ["scan", ".", "--mode", "deep", "--subagents", "-1"],
-        "expected number to be >=0",
+        "must be a non-negative integer",
       ],
       [
         ["scan", ".", "--mode", "deep", "--stop-after-no-new", "0"],
-        "expected number to be >0",
+        "must be a positive integer",
       ],
       [
         ["scan", ".", "--mode", "deep", "--max-discovery-runs", "0"],
-        "expected number to be >0",
+        "must be a positive integer",
       ],
       [
         ["scan", ".", "--mode", "deep", "--max-time-hours", "0"],
-        "expected number to be >0",
+        "must be a positive number no greater than 96",
       ],
       [
         ["scan", ".", "--mode", "deep", "--max-time-hours", "96.5"],
-        "expected number to be <=96",
+        "must be a positive number no greater than 96",
       ],
       [["scan", ".", "--path="], "--path must not be empty"],
       [
@@ -2728,10 +2816,7 @@ describe("CLI", () => {
         ["scan", ".", "--provider", "fireworks"],
         "--model is required when using --provider fireworks",
       ],
-      [
-        ["scan", ".", "--effort", "ultra"],
-        "--effort must be minimal, low, medium, high, xhigh, or max",
-      ],
+      [["scan", ".", "--effort="], "--effort must not be empty"],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],
       [["scan", ".", "--path", "--dry-run"], "Missing value for flag"],
@@ -2777,6 +2862,18 @@ describe("CLI", () => {
       ],
       [
         ["scan", ".", "--filter-output=findings.findings.title"],
+        "--filter-output is not supported",
+      ],
+      [
+        ["--filter-output", "policy", "scan", ".", "--dry-run"],
+        "--filter-output is not supported",
+      ],
+      [
+        ["--filter-output=policy", "scan", ".", "--dry-run"],
+        "--filter-output is not supported",
+      ],
+      [
+        ["--format", "md", "--filter-output", "policy", "scan", "."],
         "--filter-output is not supported",
       ],
       [
@@ -2826,11 +2923,11 @@ describe("CLI", () => {
       ],
     ];
     for (const [argv, message] of cases) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       let started = false;
       expect(
-        await main(argv, stdout.stream, stderr.stream, {
+        await runCli(argv, {
           ...dependencies({ onRun: () => (started = true) }),
           exportFindings: async () => {
             started = true;
@@ -2849,37 +2946,30 @@ describe("CLI", () => {
       ["scan", "--fail-on-severity", SYNTHETIC_CREDENTIALS],
       ["export", "scan", "--export-format", SYNTHETIC_CREDENTIALS],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(argv, stdout.stream, stderr.stream, dependencies()),
-      ).toBe(2);
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(await runCli(argv, dependencies())).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).not.toContain("SYNTHETIC");
     }
   });
 
   test("honors Incur help before command validation", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
-        ["scan", "--mode", "bogus", "--help"],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
+      await runCli(["scan", "--mode", "bogus", "--help"], dependencies()),
     ).toBe(0);
     expect(stdout.text()).toContain("Usage: codex-security scan [repository]");
     expect(stderr.text()).toBe("");
   });
 
   test("maps configuration and emits JSON only on stdout", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const captured: { config?: CodexSecurityConfig } = {};
-    let repository = "";
-    const exit = await main(
+    const onTurn = mock<(repository: string) => void>();
+    const exit = await runCli(
       [
         "scan",
         "repo",
@@ -2891,15 +2981,11 @@ describe("CLI", () => {
         "features.goals=true",
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         onConfig: (value) => {
           captured.config = value;
         },
-        onTurn: (value) => {
-          repository = value;
-        },
+        onTurn,
       }),
     );
     expect(exit).toBe(0);
@@ -2912,12 +2998,12 @@ describe("CLI", () => {
       pythonPath: "/managed/python",
       codexOverrides: { features: { goals: true } },
     });
-    expect(repository).toBe("repo");
+    expect(onTurn.mock.lastCall?.[0] ?? "").toBe("repo");
   });
 
   test("emits verbose scan lifecycle diagnostics without changing JSON output", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const result = fakeResult(["high"], "complete", {
       input_tokens: 1_250,
       cached_input_tokens: 200,
@@ -2926,8 +3012,8 @@ describe("CLI", () => {
     const deps = dependencies({
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_SECRET_123" },
     });
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         options?.onAuthentication?.({
           method: "api_key",
           source: "OPENAI_API_KEY",
@@ -2952,19 +3038,9 @@ describe("CLI", () => {
         });
         options?.onCost?.(result.cost!);
         return result;
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+      });
 
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain(
       `codex-security: debug: scan.configuration cli_version=${JSON.stringify(VERSION)}`,
@@ -3004,16 +3080,10 @@ describe("CLI", () => {
   });
 
   test("reports the effective default model and reasoning effort in verbose scan diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
+      await runCli(["scan", ".", "--verbose", "--json"], dependencies()),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     const configuration = stderr
@@ -3032,14 +3102,11 @@ describe("CLI", () => {
   });
 
   test("includes selected reasoning effort in verbose scan diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         ["scan", ".", "--effort", "high", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies(),
       ),
     ).toBe(0);
@@ -3051,11 +3118,10 @@ describe("CLI", () => {
   });
 
   test("reports reasoning effort supplied through legacy --codex overrides", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         [
           "scan",
           ".",
@@ -3064,8 +3130,6 @@ describe("CLI", () => {
           "--verbose",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies(),
       ),
     ).toBe(0);
@@ -3074,44 +3138,11 @@ describe("CLI", () => {
   });
 
   test("reports effective model and reasoning settings from the selected Codex profile", async () => {
-    const scenarios = [
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-sol"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="high"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "high",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "low",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="medium"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "medium",
-      },
-    ] as const;
-
-    for (const scenario of scenarios) {
-      const stdout = capture();
-      const stderr = capture();
+    for (const scenario of profileScenarios) {
+      const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(
-        await main(
+        await runCli(
           [
             "scan",
             ".",
@@ -3119,8 +3150,6 @@ describe("CLI", () => {
             "--verbose",
             "--json",
           ],
-          stdout.stream,
-          stderr.stream,
           dependencies(),
         ),
       ).toBe(0);
@@ -3143,26 +3172,17 @@ describe("CLI", () => {
   });
 
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         ["scans", "rerun", "scan-original", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
-          onWorkbench: () => ({
-            recipe: {
-              repository: "/original/repository",
-              target: { kind: "repository", paths: [] },
-              mode: "standard",
-              config: {
-                model: "gpt-original",
-                model_reasoning_effort: "high",
-              },
-            },
-          }),
+          onWorkbench: () =>
+            savedRecipe({
+              model: "gpt-original",
+              model_reasoning_effort: "high",
+            }),
         }),
       ),
     ).toBe(0);
@@ -3177,34 +3197,25 @@ describe("CLI", () => {
   });
 
   test("reports selected profile settings for verbose scan reruns", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         ["scans", "rerun", "scan-original"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           environment: { CODEX_SECURITY_LOG_LEVEL: "debug" },
-          onWorkbench: () => ({
-            recipe: {
-              repository: "/original/repository",
-              target: { kind: "repository", paths: [] },
-              mode: "standard",
-              config: {
-                profile: "review",
-                model: "gpt-5.6-sol",
-                model_reasoning_effort: "low",
-                profiles: {
-                  review: {
-                    model: "gpt-5.6-terra",
-                    model_reasoning_effort: "high",
-                  },
+          onWorkbench: () =>
+            savedRecipe({
+              profile: "review",
+              model: "gpt-5.6-sol",
+              model_reasoning_effort: "low",
+              profiles: {
+                review: {
+                  model: "gpt-5.6-terra",
+                  model_reasoning_effort: "high",
                 },
               },
-            },
-          }),
+            }),
         }),
       ),
     ).toBe(0);
@@ -3254,21 +3265,13 @@ describe("CLI", () => {
       let rerunConfig: CodexSecurityConfig | undefined;
 
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["scans", "rerun", "scan-original", "--json"],
-          capture().stream,
-          capture().stream,
           dependencies({
             environment,
             onConfig: (value) => (rerunConfig = value),
-            onWorkbench: () => ({
-              recipe: {
-                repository: "/original/repository",
-                target: { kind: "repository", paths: [] },
-                mode: "standard",
-                config: savedConfig,
-              },
-            }),
+            onWorkbench: () => savedRecipe(savedConfig),
           }),
         ),
       ).toBe(0);
@@ -3281,117 +3284,75 @@ describe("CLI", () => {
     },
   );
 
-  test("enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL", async () => {
-    const stdout = capture();
-    const stderr = capture();
-
-    expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          environment: { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
-        }),
-      ),
-    ).toBe(0);
+  test.each([
+    [
+      "enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL",
+      ["scan", ".", "--json"],
+      { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.started",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "accepts Promptfoo-compatible LOG_LEVEL as a verbose fallback",
+      ["scan", ".", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "  ",
+        LOG_LEVEL: "  DEBUG  ",
+      },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "prefers CODEX_SECURITY_LOG_LEVEL over a shared LOG_LEVEL",
+      ["scan", ".", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "info",
+        LOG_LEVEL: "debug",
+      },
+      [],
+      ["codex-security: debug:"],
+    ],
+    [
+      "lets --verbose override non-debug environment log levels",
+      ["scan", ".", "--verbose", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "error",
+        LOG_LEVEL: "warn",
+      },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "does not emit verbose diagnostics unless explicitly requested",
+      ["scan", ".", "--json"],
+      {},
+      [],
+      ["codex-security: debug:"],
+    ],
+  ] as const)("%s", async (_name, args, environment, present, absent) => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(args, dependencies({ environment }))).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.started");
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("accepts Promptfoo-compatible LOG_LEVEL as a verbose fallback", async () => {
-    const stdout = capture();
-    const stderr = capture();
-
-    expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "  ",
-            LOG_LEVEL: "  DEBUG  ",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("prefers CODEX_SECURITY_LOG_LEVEL over a shared LOG_LEVEL", async () => {
-    const stdout = capture();
-    const stderr = capture();
-
-    expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "info",
-            LOG_LEVEL: "debug",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).not.toContain("codex-security: debug:");
-  });
-
-  test("lets --verbose override non-debug environment log levels", async () => {
-    const stdout = capture();
-    const stderr = capture();
-
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "error",
-            LOG_LEVEL: "warn",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("does not emit verbose diagnostics unless explicitly requested", async () => {
-    const stdout = capture();
-    const stderr = capture();
-
-    expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).not.toContain("codex-security: debug:");
+    for (const diagnostic of present)
+      expect(stderr.text()).toContain(diagnostic);
+    for (const diagnostic of absent)
+      expect(stderr.text()).not.toContain(diagnostic);
   });
 
   test("keeps verbose dry-run authentication unverified without starting a scan", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    let scanStarted = false;
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const onRun = mock();
     const preflight = {
       ...fakePreflight("."),
       authentication: {
@@ -3402,18 +3363,14 @@ describe("CLI", () => {
     };
 
     expect(
-      await main(
+      await runCli(
         ["scan", ".", "--dry-run", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           environment: {
             OPENAI_API_KEY: "sk-proj-SYNTHETIC_DRY_RUN_SECRET_123",
           },
           preflight,
-          onRun: () => {
-            scanStarted = true;
-          },
+          onRun,
         }),
       ),
     ).toBe(0);
@@ -3423,48 +3380,15 @@ describe("CLI", () => {
     );
     expect(stderr.text()).not.toContain("codex-security: debug: scan.started");
     expect(stderr.text()).not.toContain("SYNTHETIC_DRY_RUN_SECRET");
-    expect(scanStarted).toBe(false);
+    expect(onRun).not.toHaveBeenCalled();
   });
 
   test("reports selected profile configuration consistently in verbose dry runs", async () => {
-    const scenarios = [
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-sol"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="high"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "high",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "low",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="medium"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "medium",
-      },
-    ] as const;
-
-    for (const scenario of scenarios) {
-      const stdout = capture();
-      const stderr = capture();
+    for (const scenario of profileScenarios) {
+      const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(
-        await main(
+        await runCli(
           [
             "scan",
             ".",
@@ -3473,8 +3397,6 @@ describe("CLI", () => {
             "--json",
             ...scenario.overrides.flatMap((override) => ["--codex", override]),
           ],
-          stdout.stream,
-          stderr.stream,
           dependencies(),
         ),
       ).toBe(0);
@@ -3501,29 +3423,17 @@ describe("CLI", () => {
   });
 
   test("classifies provider failures without including upstream context", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stderr, runCli } = createCliTest(main);
+
     const deps = dependencies({
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_KEY_123" },
     });
-    deps.createSecurity = () => ({
-      run: async () => {
-        throw new CodexSecurityError(
-          "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123",
-        );
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+    deps.createSecurity = () =>
+      failingSecurity(
+        "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123",
+      );
 
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(2);
     expect(stderr.text()).toContain(
       'codex-security: debug: scan.failed classification="unauthorized"',
     );
@@ -3534,27 +3444,15 @@ describe("CLI", () => {
   });
 
   test("keeps unclassified provider context out of structured failure diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async () => {
-        throw new CodexSecurityError(
-          "Provider failed for tenant=tenant-private request_id=req-internal",
-        );
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+    const { stdout, stderr, runCli } = createCliTest(main);
 
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    const deps = dependencies();
+    deps.createSecurity = () =>
+      failingSecurity(
+        "Provider failed for tenant=tenant-private request_id=req-internal",
+      );
+
+    expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(2);
 
     const failureDiagnostic = stderr
       .text()
@@ -3569,7 +3467,10 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Provider failed for");
     expect(stderr.text()).toContain("tenant-private");
     expect(stderr.text()).toContain("req-internal");
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+    });
   });
 
   test("preserves provider identifier variants in scan failures", async () => {
@@ -3643,26 +3544,21 @@ describe("CLI", () => {
 
     for (const { message, identifiers } of cases) {
       for (const verbose of [false, true]) {
-        const stdout = capture();
-        const stderr = capture();
+        const { stdout, stderr, runCli } = createCliTest(main);
+
         const deps = dependencies();
-        deps.createSecurity = () => ({
-          run: async () => {
-            throw new CodexSecurityError(message);
-          },
-          preflight: async () => fakePreflight(),
-          close: async () => {},
-        });
+        deps.createSecurity = () => failingSecurity(message);
 
         expect(
-          await main(
+          await runCli(
             ["scan", ".", "--json", ...(verbose ? ["--verbose"] : [])],
-            stdout.stream,
-            stderr.stream,
             deps,
           ),
         ).toBe(2);
-        expect(stdout.text()).toBe("");
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          status: "failed",
+          code: "SCAN_FAILED",
+        });
         expect(stderr.text()).toContain("Provider failed for");
         for (const identifier of identifiers) {
           expect(stderr.text()).toContain(identifier);
@@ -3673,33 +3569,26 @@ describe("CLI", () => {
 
   test("preserves provider identifiers in scanner warnings", async () => {
     for (const verbose of [false, true]) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
-          options?.onWarning?.(
-            'Provider warning {"organizationId":"organization private","requestId":"request private"} tenant=tenant-private',
-          );
-          options?.onWarning?.(
-            `Provider warning ${JSON.stringify({
-              payload: JSON.stringify({
-                organizationId: "organization private",
-                requestId: "request private",
-              }),
-            })}`,
-          );
-          return fakeResult();
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const deps = scanDependencies(async (_repository, options) => {
+        options?.onWarning?.(
+          'Provider warning {"organizationId":"organization private","requestId":"request private"} tenant=tenant-private',
+        );
+        options?.onWarning?.(
+          `Provider warning ${JSON.stringify({
+            payload: JSON.stringify({
+              organizationId: "organization private",
+              requestId: "request private",
+            }),
+          })}`,
+        );
+        return fakeResult();
       });
 
       expect(
-        await main(
+        await runCli(
           ["scan", ".", "--json", ...(verbose ? ["--verbose"] : [])],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(0);
@@ -3714,12 +3603,12 @@ describe("CLI", () => {
   });
 
   test("prevents Unicode line separators from forging verbose diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
     const separators = "\u0085\u2028\u2029";
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         options?.onOutputDirReady?.(
           `/tmp/scan${separators}codex-security: debug: forged`,
         );
@@ -3727,19 +3616,9 @@ describe("CLI", () => {
           `Scanner warning${separators}codex-security: debug: forged`,
         );
         return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+      });
 
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).not.toMatch(/[\u0085\u2028\u2029]/u);
 
@@ -3760,36 +3639,24 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves verbose output paths and observer diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onOutputArchived?.(
-          "/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123",
-        );
-        options?.onOutputDirReady?.(
-          "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_SECRET_123",
-        );
-        options?.onObserverError?.(
-          "onWorkerStatus",
-          new Error(`observer failed ${SYNTHETIC_CREDENTIALS}`),
-        );
-        return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
+  test("preserves verbose output paths and observer errors", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onOutputArchived?.(
+        "/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123",
+      );
+      options?.onOutputDirReady?.(
+        "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_SECRET_123",
+      );
+      options?.onObserverError?.(
+        "onWorkerStatus",
+        new Error(`observer failed ${SYNTHETIC_CREDENTIALS}`),
+      );
+      return fakeResult();
     });
 
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       'codex-security: debug: scan.output_archived archive_dir="/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123"',
@@ -3800,35 +3667,25 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       'codex-security: debug: scan.observer_failed observer="onWorkerStatus"',
     );
-    expect(stderr.text()).toContain("SYNTHETIC");
+    expect(stderr.text()).toContain(
+      `onWorkerStatus observer failed: observer failed ${SYNTHETIC_CREDENTIALS}`,
+    );
   });
 
   test("excludes observer failure context from verbose diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onObserverError?.(
-          "onWorkerStatus",
-          new Error(
-            "Observer failed for tenant=tenant-private request_id=req-internal",
-          ),
-        );
-        return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onObserverError?.(
+        "onWorkerStatus",
+        new Error(
+          "Observer failed for tenant=tenant-private request_id=req-internal",
+        ),
+      );
+      return fakeResult();
     });
 
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
 
     const observerDiagnostic = stderr
@@ -3849,20 +3706,16 @@ describe("CLI", () => {
   });
 
   test("excludes cleanup failure context from verbose diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
-          onClose: () => {
-            throw new Error(
+          onClose: () =>
+            fail(
               "Cleanup failed for tenant=tenant-private request_id=req-internal",
-            );
-          },
+            ),
         }),
       ),
     ).toBe(2);
@@ -3882,30 +3735,26 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Cleanup failed for");
     expect(stderr.text()).toContain("tenant-private");
     expect(stderr.text()).toContain("req-internal");
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+    });
   });
 
   test("reports reconnect progress on stderr and keeps JSON output clean", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        const callbacks = options as {
-          onScanStarted?: () => void;
-          onReconnect?: (attempt: number, maxAttempts: number) => void;
-        };
-        callbacks.onScanStarted?.();
-        callbacks.onReconnect?.(2, 5);
-        return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = scanDependencies(async (_repository, options) => {
+      const callbacks = options as {
+        onScanStarted?: () => void;
+        onReconnect?: (attempt: number, maxAttempts: number) => void;
+      };
+      callbacks.onScanStarted?.();
+      callbacks.onReconnect?.(2, 5);
+      return fakeResult();
     });
 
-    expect(
-      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    expect(await runCli(["scan", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       "Codex connection interrupted; retrying (2/5)",
@@ -3914,26 +3763,19 @@ describe("CLI", () => {
   });
 
   test("renders bounded rate-limit retry details without leaking provider context", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onScanStarted?.();
-        options?.onReconnect?.(2, 5, {
-          reason: "rate_limit",
-          retryAfterSeconds: 1.2,
-        });
-        options?.onReconnect?.(3, 5, { reason: "rate_limit" });
-        return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onScanStarted?.();
+      options?.onReconnect?.(2, 5, {
+        reason: "rate_limit",
+        retryAfterSeconds: 1.2,
+      });
+      options?.onReconnect?.(3, 5, { reason: "rate_limit" });
+      return fakeResult();
     });
 
-    expect(
-      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    expect(await runCli(["scan", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       "Rate limit reached; retrying in 1.2s (2/5).",
@@ -3942,23 +3784,16 @@ describe("CLI", () => {
   });
 
   test("renders safe reconnect causes without forwarding provider messages", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onReconnect?.(1, 5, { reason: "network" });
-        options?.onReconnect?.(2, 5, { reason: "authentication" });
-        options?.onReconnect?.(3, 5, { reason: "authorization" });
-        return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onReconnect?.(1, 5, { reason: "network" });
+      options?.onReconnect?.(2, 5, { reason: "authentication" });
+      options?.onReconnect?.(3, 5, { reason: "authorization" });
+      return fakeResult();
     });
 
-    expect(
-      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    expect(await runCli(["scan", "--json"], deps)).toBe(0);
     expect(stderr.text()).toContain("Network connection interrupted; retrying");
     expect(stderr.text()).toContain("Authentication interrupted; retrying");
     expect(stderr.text()).toContain("Model access interrupted; retrying");
@@ -3971,21 +3806,79 @@ describe("CLI", () => {
       ["403 model access denied for org-private", "model access"],
       ["429 rate limit reached for org-private", "rate limit"],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async () => {
-          throw new CodexSecurityError(message);
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+      const { stderr, runCli } = createCliTest(main);
 
-      expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(2);
+      const deps = dependencies();
+      deps.createSecurity = () => failingSecurity(message);
+
+      expect(await runCli(["scan"], deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
       expect(stderr.text()).not.toContain("org-private");
     }
+  });
+
+  test("emits structured failures for machine-readable scan output", async () => {
+    const message = "This content was flagged for possible cybersecurity risk.";
+    for (const formatArgs of [
+      ["--json"],
+      ["--format", "json"],
+      ["--format", "jsonl"],
+    ] as const) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const deps = dependencies();
+      deps.createSecurity = () => failingSecurity(message);
+
+      expect(await runCli(["scan", ".", ...formatArgs], deps)).toBe(2);
+      expect(JSON.parse(stdout.text().trim())).toEqual({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message,
+      });
+      expect(stderr.text()).toContain(`${message}\n`);
+    }
+  });
+
+  test("reports full-output scan failures in an error envelope", async () => {
+    const message = "This content was flagged for possible cybersecurity risk.";
+    for (const formatArgs of [
+      ["--json"],
+      ["--format", "json"],
+      ["--format", "jsonl"],
+    ] as const) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const deps = dependencies();
+      deps.createSecurity = () => failingSecurity(message);
+
+      expect(
+        await runCli(["scan", ".", ...formatArgs, "--full-output"], deps),
+      ).toBe(2);
+      const envelope = JSON.parse(stdout.text().trim());
+      expect(envelope.ok).toBe(false);
+      expect(envelope.error).toEqual({ code: "SCAN_FAILED", message });
+      expect(envelope).not.toHaveProperty("data");
+      expect(stderr.text()).toContain(`${message}\n`);
+    }
+  });
+
+  test("preserves diagnostic text in full-output scan failures", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = dependencies();
+    deps.createSecurity = () =>
+      failingSecurity(`network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`);
+
+    expect(await runCli(["scan", ".", "--json", "--full-output"], deps)).toBe(
+      2,
+    );
+    expect(JSON.parse(stdout.text()).error).toEqual({
+      code: "SCAN_FAILED",
+      message: `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
+    });
+    expect(stderr.text()).toContain(
+      `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
+    );
   });
 
   test("surfaces underlying scanner errors instead of inventing a model outage", async () => {
@@ -3996,21 +3889,17 @@ describe("CLI", () => {
       "request timed out while reading the scanner response.",
       "Local scan failed: project_directory=/tmp/project tenant_count=2 request_index=3.",
     ]) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async () => {
-          throw new CodexSecurityError(message);
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-      expect(
-        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-      ).toBe(2);
-      expect(stdout.text()).toBe("");
+      const deps = dependencies();
+      deps.createSecurity = () => failingSecurity(message);
+
+      expect(await runCli(["scan", ".", "--json"], deps)).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message,
+      });
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("codex-security:");
       expect(stderr.text()).not.toContain("model service could not be reached");
@@ -4062,25 +3951,13 @@ describe("CLI", () => {
     ];
 
     for (const [, failure] of failures) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async () => {
-          throw failure;
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+      const { stderr, runCli } = createCliTest(main);
 
-      expect(
-        await main(
-          ["scan", ".", "--verbose"],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(2);
+      const deps = scanDependencies(
+        (Promise.reject<never>).bind(Promise, failure),
+      );
+
+      expect(await runCli(["scan", ".", "--verbose"], deps)).toBe(2);
       expect(stderr.text()).toContain((failure as Error).message);
       expect(stderr.text()).toContain('scan.failed classification="local"');
       expect(stderr.text()).not.toContain("cannot access the configured model");
@@ -4099,79 +3976,61 @@ describe("CLI", () => {
         "cannot access the configured model",
       ],
     ] as const) {
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async () => {
-          throw new CodexSecurityError(detail);
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+      deps.createSecurity = () => failingSecurity(detail);
 
-      expect(
-        await main(["scan", "."], capture().stream, stderr.stream, deps),
-      ).toBe(2);
+      expect(await stderr.run(["scan", "."], deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
       expect(stderr.text()).not.toContain("org-private");
     }
   });
 
-  test("preserves underlying network errors", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async () => {
-        throw new CodexSecurityError(
-          `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
-        );
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+  test("preserves diagnostic text in underlying network errors", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
 
-    expect(
-      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(2);
-    expect(stdout.text()).toBe("");
+    const deps = dependencies();
+    deps.createSecurity = () =>
+      failingSecurity(`network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`);
+
+    expect(await runCli(["scan", ".", "--json"], deps)).toBe(2);
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message: `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
+    });
     expect(stderr.text()).toContain(
       `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
     );
-    expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
     expect(stderr.text()).not.toContain("model service could not be reached");
   });
 
   test("reports database connection failures without claiming the model network failed", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async () => {
-        throw new CodexSecurityError(
-          [
-            "Could not save the Codex Security scan: Traceback (most recent call last):",
-            "    with closing(connect()) as connection:",
-            "sqlite3.OperationalError: unable to open database file",
-            "token=sk-proj-SYNTHETIC_DATABASE_SECRET_123",
-          ].join("\n"),
-        );
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+    const { stderr, runCli } = createCliTest(main);
 
-    expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(2);
-    expect(stderr.text()).toContain("Could not save the Codex Security scan");
+    const deps = dependencies();
+    deps.createSecurity = () =>
+      failingSecurity(
+        [
+          "Could not save the Codex Security scan: Traceback (most recent call last):",
+          "    with closing(connect()) as connection:",
+          "sqlite3.OperationalError: unable to open database file",
+          "token=sk-proj-SYNTHETIC_DATABASE_SECRET_123",
+        ].join("\n"),
+      );
+
+    expect(await runCli(["scan"], deps)).toBe(2);
     expect(stderr.text()).toContain("unable to open database file");
     expect(stderr.text()).not.toContain("model service could not be reached");
     expect(stderr.text()).not.toContain("Check your network connection");
-    expect(stderr.text()).toContain("SYNTHETIC_DATABASE_SECRET");
+    expect(stderr.text()).toContain(
+      "token=sk-proj-SYNTHETIC_DATABASE_SECRET_123",
+    );
   });
 
   test("prints only the completion summary for default scans", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const result = fakeResult(["high"], "complete", {
       input_tokens: 1_250,
       cached_input_tokens: 200,
@@ -4180,14 +4039,7 @@ describe("CLI", () => {
     result.manifest.scan.id = "12345678-abcd-4567-abcd-1234567890ab";
     result.manifest.scan.completedAt = "2026-01-01T00:06:37Z";
 
-    expect(
-      await main(
-        ["scan"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({ result }),
-      ),
-    ).toBe(0);
+    expect(await runCli(["scan"], dependencies({ result }))).toBe(0);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Scan complete · 12345678");
     expect(stderr.text()).not.toContain(result.manifest.scan.id);
@@ -4198,8 +4050,7 @@ describe("CLI", () => {
         "  FINDINGS  1 (1 high)",
         "  COVERAGE  complete",
         "  ELAPSED   6m 37s",
-        "  TOKENS    1,250 input, 200 cached, 30 output",
-        "  COST      $0.00625",
+        "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
         "  RESULTS   /tmp/scan",
       ].join("\n"),
     );
@@ -4213,17 +4064,12 @@ describe("CLI", () => {
       [{ NO_COLOR: "1" }, false],
       [{ TERM: "dumb" }, false],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture(true);
+      const { stderr, runCli } = createCliTest(main, { stderr: true });
+
       const result = fakeResult(["medium"]);
 
       expect(
-        await main(
-          ["scan"],
-          stdout.stream,
-          stderr.stream,
-          dependencies({ environment, result }),
-        ),
+        await runCli(["scan"], dependencies({ environment, result })),
       ).toBe(0);
 
       if (color) {
@@ -4252,15 +4098,8 @@ describe("CLI", () => {
       [["--format=yaml"], "manifest:"],
       [["--full-output"], "manifest:"],
     ] as const) {
-      const stdout = capture();
-      expect(
-        await main(
-          ["scan", ...arguments_],
-          stdout.stream,
-          capture().stream,
-          dependencies(),
-        ),
-      ).toBe(0);
+      const stdout = captureCli(main, "stdout");
+      expect(await stdout.run(["scan", ...arguments_], dependencies())).toBe(0);
       expect(stdout.text()).toContain(marker);
     }
   });
@@ -4272,15 +4111,8 @@ describe("CLI", () => {
       ["--token-offset", "1"],
       ["--token-offset", "1", "--token-limit", "4"],
     ] as const) {
-      const stdout = capture();
-      expect(
-        await main(
-          ["scan", ...arguments_],
-          stdout.stream,
-          capture().stream,
-          dependencies(),
-        ),
-      ).toBe(0);
+      const stdout = captureCli(main, "stdout");
+      expect(await stdout.run(["scan", ...arguments_], dependencies())).toBe(0);
       if (arguments_[0] === "--token-count") {
         expect(stdout.text().trim()).toMatch(/^\d+$/u);
         expect(Number(stdout.text().trim())).toBeGreaterThan(0);
@@ -4300,21 +4132,11 @@ describe("CLI", () => {
       "Repository HEAD changed while the scan was running; findings belong to the previous checkout.",
       "Completed findings no longer describe the selected source tree.",
     ]) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
-          options?.onWarning?.(warning, { kind: "target_changed" });
-          return fakeResult();
-        },
-        close: async () => {},
-        preflight: async () => fakePreflight(),
-      });
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-      expect(
-        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-      ).toBe(2);
+      const deps = scanDependencies(warningResult(warning, true));
+
+      expect(await runCli(["scan", ".", "--json"], deps)).toBe(2);
       expect(JSON.parse(stdout.text())).toEqual({
         ...fakeResult().toJSON(),
         warnings: [warning],
@@ -4326,54 +4148,83 @@ describe("CLI", () => {
     }
   });
 
+  test("reports a changed target before incomplete coverage in full-output errors", async () => {
+    const warning =
+      "Completed findings no longer describe the selected source tree.";
+    const message =
+      "Scan target changed during execution; results do not represent the current checkout.";
+    for (const completeness of ["partial", "unknown"] as const) {
+      for (const format of ["json", "jsonl"]) {
+        for (const paginated of [false, true]) {
+          const result = fakeResult(["high"], completeness);
+          const stdout = capture();
+          const stderr = capture();
+          const deps = dependencies();
+          deps.createSecurity = () => ({
+            run: async (_repository, options) => {
+              options?.onWarning?.(warning, { kind: "target_changed" });
+              return result;
+            },
+            close: async () => {},
+            preflight: async () => fakePreflight(),
+          });
+          expect(
+            await main(
+              [
+                "scan",
+                "--format",
+                format,
+                "--full-output",
+                "--fail-on-severity",
+                "high",
+                ...(paginated ? ["--token-limit", "1"] : []),
+              ],
+              stdout.stream,
+              stderr.stream,
+              deps,
+            ),
+          ).toBe(2);
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: paginated
+              ? expect.any(String)
+              : {
+                  coverage: { completeness },
+                  warnings: [warning],
+                },
+          });
+          expect(stderr.text()).toContain(message);
+        }
+      }
+    }
+  });
+
   test("preserves non-target warnings without failing the scan", async () => {
     for (const warning of [
       "Recovered finding: normalized its semantic anchor.",
       "Repository HEAD changed while the scan was running; informational retry recovered.",
     ]) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
-          options?.onWarning?.(warning);
-          return fakeResult();
-        },
-        close: async () => {},
-        preflight: async () => fakePreflight(),
-      });
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-      expect(
-        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-      ).toBe(0);
+      const deps = scanDependencies(warningResult(warning));
+
+      expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
       expect(stderr.text()).toContain(`codex-security: warning: ${warning}`);
     }
   });
 
   test("preserves scan warnings in verbose diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onWarning?.(
-          "Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
-        );
-        return fakeResult();
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
-    });
+    const { stdout, stderr, runCli } = createCliTest(main);
 
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
+    const deps = scanDependencies(
+      warningResult(
+        "Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
       ),
-    ).toBe(0);
+    );
+
+    expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       'codex-security: debug: scan.warning message="Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123"',
@@ -4381,25 +4232,17 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "codex-security: warning: Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
     );
-    expect(stderr.text()).toContain("SYNTHETIC_WARNING_SECRET");
   });
 
   test("prints granted trusted cyber access without warning or corrupting JSON scans", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onTrustedAccessStatus?.("granted");
-        return fakeResult();
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onTrustedAccessStatus?.("granted");
+      return fakeResult();
     });
 
-    expect(
-      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
@@ -4408,23 +4251,15 @@ describe("CLI", () => {
   });
 
   test("prints trusted cyber access guidance without failing or corrupting JSON scans", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onWarning?.(
-          "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
-        );
-        return fakeResult();
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
-    });
+    const { stdout, stderr, runCli } = createCliTest(main);
 
-    expect(
-      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    const deps = scanDependencies(
+      warningResult(
+        "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
+      ),
+    );
+
+    expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       "codex-security: warning: Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber.",
@@ -4433,23 +4268,15 @@ describe("CLI", () => {
   });
 
   test("prints unverified trusted cyber access guidance without corrupting JSON scans", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onWarning?.(
-          "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
-        );
-        return fakeResult();
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
-    });
+    const { stdout, stderr, runCli } = createCliTest(main);
 
-    expect(
-      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    const deps = scanDependencies(
+      warningResult(
+        "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
+      ),
+    );
+
+    expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       "codex-security: warning: Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified.",
@@ -4464,21 +4291,11 @@ describe("CLI", () => {
       "Some cybersecurity requests or findings may be refused because your API organization does not have Trusted Access for Cyber. Apply at https://openai.com/form/enterprise-trusted-access-for-cyber/.",
       "Some cybersecurity requests or findings may be refused because Trusted Access for Cyber for your API organization could not be verified. Check your organization's access or apply at https://openai.com/form/enterprise-trusted-access-for-cyber/.",
     ]) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
-          options?.onWarning?.(warning);
-          return fakeResult();
-        },
-        close: async () => {},
-        preflight: async () => fakePreflight(),
-      });
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-      expect(
-        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-      ).toBe(0);
+      const deps = scanDependencies(warningResult(warning));
+
+      expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
       expect(stderr.text()).toContain(`codex-security: warning: ${warning}\n`);
       expect(stderr.text()).not.toContain("chatgpt.com/cyber");
@@ -4486,29 +4303,21 @@ describe("CLI", () => {
   });
 
   test("reports isolated observer failures without failing the scan", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onObserverError?.(
-          "onWorkerStatus",
-          new Error(`status observer failed ${SYNTHETIC_CREDENTIALS}`),
-        );
-        return fakeResult();
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onObserverError?.(
+        "onWorkerStatus",
+        new Error(`status observer failed ${SYNTHETIC_CREDENTIALS}`),
+      );
+      return fakeResult();
     });
 
-    expect(
-      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       `codex-security: warning: onWorkerStatus observer failed: status observer failed ${SYNTHETIC_CREDENTIALS}`,
     );
-    expect(stderr.text()).toContain("SYNTHETIC_OPENAI_VALUE_123");
   });
 
   test("maps failed scan stdout writes to the runtime-error exit code", async () => {
@@ -4545,13 +4354,11 @@ describe("CLI", () => {
   });
 
   test("reports partial worker capacity on stderr without changing JSON stdout", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["scan", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           workerStatuses: [
             {
@@ -4574,8 +4381,8 @@ describe("CLI", () => {
   });
 
   test("reports scoped scan phases and deduplicates repeated worker updates", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const status = {
       kind: "dispatch",
       phase: "file_review",
@@ -4584,10 +4391,8 @@ describe("CLI", () => {
     } as const;
 
     expect(
-      await main(
+      await runCli(
         ["scan", ".", "--path", "src", "--path", "tests", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({ workerStatuses: [status, status] }),
       ),
     ).toBe(0);
@@ -4602,11 +4407,10 @@ describe("CLI", () => {
   });
 
   test("preserves directory names for absolute scan paths with trailing separators", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         [
           "scan",
           ".",
@@ -4614,8 +4418,6 @@ describe("CLI", () => {
           "/synthetic-parent/trailing-directory/",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies(),
       ),
     ).toBe(0);
@@ -4624,9 +4426,9 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("synthetic-parent");
   });
 
-  test("shows live stage, files, workers, tokens, and cost without a budget", async () => {
-    const stdout = capture();
-    const stderr = capture();
+  test("shows live stage, files, workers, tokens, and opt-in cost without a budget", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const result = fakeResult([], "complete", {
       input_tokens: 1_250,
       cached_input_tokens: 200,
@@ -4634,10 +4436,8 @@ describe("CLI", () => {
     });
 
     expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
+      await runCli(
+        ["scan", ".", "--show-cost", "--json"],
         dependencies({
           result,
           costUpdates: [result.cost!],
@@ -4653,18 +4453,18 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain(
-      "Tokens: 1,250 input, 200 cached, 30 output. Estimated cost: $0.00625 USD.",
+      "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488–$0.01156 (standard, context unknown, cache writes unknown).",
     );
     expect(stderr.text()).toContain("Scan phase: reviewing files (0/8 files).");
     expect(stderr.text()).toContain("Scan phase: reviewing files (3/8 files).");
     expect(stderr.text()).toContain(
-      "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: 1,250 input, 200 cached, 30 output | Cost: $0.00625",
+      "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488–$0.01156",
     );
   });
 
   test("deduplicates live file progress and reports later scan phases", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const discovery = {
       phase: "discovery",
       filesCompleted: 8,
@@ -4672,10 +4472,8 @@ describe("CLI", () => {
     } as const;
 
     expect(
-      await main(
+      await runCli(
         ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           scanProgress: [
             discovery,
@@ -4697,8 +4495,8 @@ describe("CLI", () => {
   });
 
   test("prints a truthful completion summary without changing JSON results", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const result = fakeResult(
       ["critical", "high", "high", "informational"],
       "complete",
@@ -4710,10 +4508,8 @@ describe("CLI", () => {
     );
 
     expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
+      await runCli(
+        ["scan", ".", "--show-cost", "--json"],
         dependencies({
           result,
           workerStatuses: [
@@ -4729,17 +4525,56 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("COVERAGE  complete");
     expect(stderr.text()).toContain("ELAPSED   1s");
     expect(stderr.text()).toContain(
-      "TOKENS    1,250 input, 200 cached, 30 output",
+      "TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
     );
-    expect(stderr.text()).toContain("COST      $0.00625");
+    expect(stderr.text()).toContain(
+      "COST      $0.00488–$0.01156 (standard, context unknown, cache writes unknown)",
+    );
     expect(stderr.text()).toContain(`REPORT    ${result.reportPath}`);
     expect(stderr.text()).toContain("RESULTS   /tmp/scan");
     expect(stderr.text()).not.toContain("Next:");
   });
 
-  test("reports the running cost against the scan budget", async () => {
-    const stdout = capture();
-    const stderr = capture();
+  test.each([
+    [[], {}, true, true, true],
+    [["--headless"], {}, true, true, false],
+    [["--verbose"], {}, true, true, false],
+    [["--json"], {}, true, true, false],
+    [["--format", "jsonl"], {}, true, true, false],
+    [[], { CI: "true" }, true, true, false],
+    [[], { TERM: "dumb" }, true, true, false],
+    [[], {}, false, true, false],
+    [[], {}, true, false, false],
+  ] as const)(
+    "gates budget interaction for flags %j, environment %j, input TTY %p, output TTY %p",
+    async (flags, environment, inputTty, outputTty, expected) => {
+      const input = Object.assign(new PassThrough(), { isTTY: inputTty });
+      let budgetCallback: ScanOptions["onBudgetApproaching"];
+      expect(
+        await main(
+          ["scan", ".", "--max-cost", "20", ...flags],
+          capture().stream,
+          capture(outputTty).stream,
+          {
+            ...dependencies({
+              environment,
+              onTurn: (_repository, options) => {
+                budgetCallback = options.onBudgetApproaching;
+              },
+            }),
+            scanInput: input,
+          },
+        ),
+      ).toBe(0);
+      expect(budgetCallback !== undefined).toBe(expected);
+      expect(input.listenerCount("data")).toBe(0);
+      input.destroy();
+    },
+  );
+
+  test("reports a cost range while preserving the short-context scan budget", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const result = fakeResult([], "complete", {
       input_tokens: 1_250,
       cached_input_tokens: 200,
@@ -4747,20 +4582,24 @@ describe("CLI", () => {
     });
 
     expect(
-      await main(
-        ["scan", ".", "--json", "--max-cost", "0.01"],
-        stdout.stream,
-        stderr.stream,
+      await runCli(
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.01"],
         dependencies({ result, costUpdates: [result.cost!] }),
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-    expect(stderr.text()).toContain("Estimated cost: $0.00625 of $0.01 limit");
+    expect(stderr.text()).toContain("Estimated cost: $0.00488–$0.01156");
+    expect(stderr.text()).toContain(
+      "short-context budget baseline: $0.00488 of $0.01 limit",
+    );
+    expect(stderr.text()).toContain(
+      'estimated_usd=0.00488 cost_estimate="$0.00488–$0.01156 (standard, context unknown, cache writes unknown)"',
+    );
   });
 
   test("includes cache-write tokens in verbose cost diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const result = fakeResult([], "complete", {
       input_tokens: 200,
       cache_write_input_tokens: 200,
@@ -4770,21 +4609,21 @@ describe("CLI", () => {
     expect(result.cost?.cacheWriteInputTokens).toBe(200);
     expect(result.cost?.estimatedUsd).toBeGreaterThan(0);
     expect(
-      await main(
+      await runCli(
         ["scan", ".", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({ result, costUpdates: [result.cost!] }),
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain("codex-security: debug: cost.updated");
     expect(stderr.text()).toContain("cache_write_input_tokens=200");
+    expect(stderr.text()).not.toContain("estimated_usd=");
+    expect(stderr.text()).not.toContain("cost_estimate=");
   });
 
   test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const cost = fakeResult([], "complete", {
       input_tokens: 1_250,
       cached_input_tokens: 200,
@@ -4792,32 +4631,34 @@ describe("CLI", () => {
     }).cost!;
 
     expect(
-      await main(
-        ["scan", ".", "--verbose", "--json", "--max-cost", "0.005"],
-        stdout.stream,
-        stderr.stream,
+      await runCli(
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.004"],
         dependencies({
           onTurn: (_repository, options) => {
-            (options as ScanOptions).onOutputDirReady?.("/tmp/scan");
-            throw new ScanCostLimitExceededError(0.005, cost, "/tmp/scan");
+            options.onOutputDirReady?.("/tmp/scan");
+            throw new ScanCostLimitExceededError(0.004, cost, "/tmp/scan");
           },
         }),
       ),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message: expect.stringContaining("estimated cost"),
+    });
     expect(stderr.text()).toContain(
-      "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at /tmp/scan.",
+      "Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at /tmp/scan.",
     );
     expect(stderr.text()).toMatch(
-      /scan\.configuration[^\n]*max_cost_usd=0\.005/u,
+      /scan\.configuration[^\n]*max_cost_usd=0\.004/u,
     );
     expect(stderr.text()).toContain(
-      'scan.failed classification="cost_limit_exceeded" partial_output=true max_cost_usd=0.005 estimated_usd=0.00625',
+      'scan.failed classification="cost_limit_exceeded" partial_output=true max_cost_usd=0.004 estimated_usd=0.00488',
     );
   });
 
   test("accepts a scan at its estimated cost limit", async () => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     const result = fakeResult([], "complete", {
       input_tokens: 1_250,
       cached_input_tokens: 200,
@@ -4825,10 +4666,8 @@ describe("CLI", () => {
     });
 
     expect(
-      await main(
-        ["scan", ".", "--json", "--max-cost", "0.00625"],
-        stdout.stream,
-        capture().stream,
+      await stdout.run(
+        ["scan", ".", "--json", "--max-cost", "0.00488"],
         dependencies({ result }),
       ),
     ).toBe(0);
@@ -4836,15 +4675,15 @@ describe("CLI", () => {
   });
 
   test("preserves scan progress scope and completion paths", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stderr, runCli } = createCliTest(main);
+
     const result = fakeResult();
     Object.defineProperty(result, "scanDir", {
       value: "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_KEY_123",
     });
 
     expect(
-      await main(
+      await runCli(
         [
           "scan",
           ".",
@@ -4852,8 +4691,6 @@ describe("CLI", () => {
           "src/sk-proj-SYNTHETIC_SCOPE_KEY_123",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies({ result }),
       ),
     ).toBe(0);
@@ -4864,13 +4701,11 @@ describe("CLI", () => {
   });
 
   test("reports parent fallback when delegated workers cannot start", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["scan"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           workerStatuses: [
             {
@@ -4899,22 +4734,18 @@ describe("CLI", () => {
   });
 
   test("validates a dry run without starting a scan", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    let runStarted = false;
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const onRun = mock();
     expect(
-      await main(
+      await runCli(
         ["scan", "repo", "--dry-run"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
-          onRun: () => {
-            runStarted = true;
-          },
+          onRun,
         }),
       ),
     ).toBe(0);
-    expect(runStarted).toBe(false);
+    expect(onRun).not.toHaveBeenCalled();
     expect(stdout.text()).toContain("dryRun: true");
     expect(stdout.text()).toContain("repository: repo");
     expect(stdout.text()).toContain("mode: standard");
@@ -4924,15 +4755,10 @@ describe("CLI", () => {
   });
 
   test("emits a machine-readable dry-run plan", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
-        ["scan", "repo", "--dry-run", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
+      await runCli(["scan", "repo", "--dry-run", "--json"], dependencies()),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual({
       dryRun: true,
@@ -4947,13 +4773,11 @@ describe("CLI", () => {
       ["yaml", "dryRun: true"],
       ["jsonl", '"dryRun":true'],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           ["scan", "repo", "--dry-run", "--format", format],
-          stdout.stream,
-          stderr.stream,
           dependencies(),
         ),
       ).toBe(0);
@@ -4961,12 +4785,10 @@ describe("CLI", () => {
       expect(stderr.text()).not.toContain("Running scan");
     }
 
-    const full = capture();
+    const full = captureCli(main, "stdout");
     expect(
-      await main(
+      await full.run(
         ["scan", "repo", "--dry-run", "--full-output"],
-        full.stream,
-        capture().stream,
         dependencies(),
       ),
     ).toBe(0);
@@ -4975,15 +4797,15 @@ describe("CLI", () => {
   });
 
   test("previews an existing output archive during a dry run", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const preflight: ScanPreflight = {
       ...fakePreflight("repo"),
       outputDir: "/tmp/results",
       archiveDir: "/tmp/results.previous-20260721T031422-1234abcd",
     };
     expect(
-      await main(
+      await runCli(
         [
           "scan",
           "repo",
@@ -4992,8 +4814,6 @@ describe("CLI", () => {
           "--archive-existing",
           "--dry-run",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies({ preflight }),
       ),
     ).toBe(0);
@@ -5004,10 +4824,10 @@ describe("CLI", () => {
   });
 
   test("keeps original archive notices on stderr for JSON scans", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "scan",
           "repo",
@@ -5016,12 +4836,10 @@ describe("CLI", () => {
           "--archive-existing",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           onTurn: (_repository, options) => {
             expect(options).toMatchObject({
-              outputDir: "/tmp/results",
+              outputDir: resolve("/tmp/results"),
               archiveExisting: true,
             });
             (
@@ -5049,13 +4867,11 @@ describe("CLI", () => {
       "low",
       "informational",
     ]);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["scan", "--json", "--fail-on-severity", "high"],
-        stdout.stream,
-        stderr.stream,
         dependencies({ result }),
       ),
     ).toBe(1);
@@ -5067,12 +4883,10 @@ describe("CLI", () => {
       ["scan", "--json"],
       ["scan", "--json", "--fail-on-severity", "high"],
     ]) {
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       expect(
-        await main(
+        await stdout.run(
           arguments_,
-          stdout.stream,
-          capture().stream,
           dependencies({ result: fakeResult(["medium", "low"]) }),
         ),
       ).toBe(0);
@@ -5084,12 +4898,10 @@ describe("CLI", () => {
 
   test("keeps JSON output complete when findings block", async () => {
     const result = fakeResult(["high"]);
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         ["scan", "--json", "--fail-on-severity", "high"],
-        stdout.stream,
-        capture().stream,
         dependencies({ result }),
       ),
     ).toBe(1);
@@ -5099,13 +4911,11 @@ describe("CLI", () => {
   test("does not pass a policy when coverage is incomplete", async () => {
     for (const completeness of ["partial", "unknown"] as const) {
       const result = fakeResult(["high"], completeness);
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           ["scan", "--json", "--fail-on-severity", "critical"],
-          stdout.stream,
-          stderr.stream,
           dependencies({ result }),
         ),
       ).toBe(2);
@@ -5119,16 +4929,11 @@ describe("CLI", () => {
   test("does not report an incomplete scan as successful without a policy", async () => {
     for (const completeness of ["partial", "unknown"] as const) {
       const result = fakeResult(["high"], completeness);
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(
-          ["scan", "--json"],
-          stdout.stream,
-          stderr.stream,
-          dependencies({ result }),
-        ),
-      ).toBe(2);
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(await runCli(["scan", "--json"], dependencies({ result }))).toBe(
+        2,
+      );
       expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
       expect(stderr.text()).toContain(
         `Scan coverage is ${completeness}; results may be incomplete.`,
@@ -5136,20 +4941,233 @@ describe("CLI", () => {
     }
   });
 
-  test("reports SDK errors without a stack trace", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const failing = dependencies();
-    failing.createSecurity = () => ({
-      run: async () => {
-        throw new CodexSecurityError("invalid scan request");
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
-    });
+  test.each(["partial", "unknown"] as const)(
+    "marks %s coverage as a full-output error and keeps the scan results",
+    async (completeness) => {
+      const result = fakeResult(["high"], completeness);
+      for (const format of [
+        ["--json"],
+        ["--format", "json"],
+        ["--format", "jsonl"],
+      ]) {
+        for (const policy of [false, true]) {
+          const stdout = capture();
+          const stderr = capture();
+          expect(
+            await main(
+              [
+                "scan",
+                ".",
+                ...format,
+                "--full-output",
+                ...(policy ? ["--fail-on-severity", "critical"] : []),
+              ],
+              stdout.stream,
+              stderr.stream,
+              dependencies({ result }),
+            ),
+          ).toBe(2);
+          const envelope = JSON.parse(stdout.text());
+          const message = policy
+            ? `Cannot evaluate the failure policy: coverage is ${completeness}.`
+            : `Scan coverage is ${completeness}; results may be incomplete.`;
+          expect(envelope).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: JSON.parse(JSON.stringify(result.toJSON())),
+            meta: { command: "scan" },
+          });
+          expect(stderr.text()).toContain(message);
+          if (format.includes("jsonl"))
+            expect(stdout.text().trim().split("\n")).toHaveLength(1);
+        }
+      }
+    },
+  );
+
+  test.each(["rerun", "resume"] as const)(
+    "reports incomplete %s coverage in the full-output error envelope",
+    async (command) => {
+      for (const completeness of ["partial", "unknown"] as const) {
+        for (const format of ["json", "jsonl"]) {
+          const result = fakeResult(["high"], completeness);
+          const stdout = capture();
+          const stderr = capture();
+          const recipe = {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: command === "resume" ? "deep" : "standard",
+            config: {},
+          };
+          expect(
+            await main(
+              [
+                "scans",
+                command,
+                "scan-original",
+                "--format",
+                format,
+                "--full-output",
+              ],
+              stdout.stream,
+              stderr.stream,
+              dependencies({
+                result,
+                onWorkbench: (args): JsonObject =>
+                  args[0] === "get-cli-scan-resume"
+                    ? {
+                        scanId: "scan-original",
+                        scanDir: "/tmp/saved-scan",
+                        recipe,
+                      }
+                    : args[0] === "get-scan-recipe"
+                      ? { recipe }
+                      : {},
+              }),
+            ),
+          ).toBe(2);
+          const message = `Scan coverage is ${completeness}; results may be incomplete.`;
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: JSON.parse(JSON.stringify(result.toJSON())),
+          });
+          expect(stderr.text()).toContain(message);
+          if (format === "jsonl")
+            expect(stdout.text().trim().split("\n")).toHaveLength(1);
+        }
+      }
+    },
+  );
+
+  test.each(["rerun", "resume"] as const)(
+    "matches the %s full-output error schema to filtered data",
+    async (command) => {
+      const schemaOutput = capture();
+      expect(
+        await main(
+          ["scans", command, "--schema", "--format", "json"],
+          schemaOutput.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      const schema = JSON.parse(schemaOutput.text()).output.anyOf.find(
+        (variant: { properties?: { ok?: { const?: boolean } } }) =>
+          variant.properties?.ok?.const === false,
+      );
+      expect(schema.properties.data).toEqual({});
+      expect(schema.required).toEqual(["ok", "error", "meta"]);
+
+      const result = fakeResult(["high"], "partial");
+      const recipe = {
+        repository: "/original/repository",
+        target: { kind: "repository", paths: [] },
+        mode: command === "resume" ? "deep" : "standard",
+        config: {},
+      };
+      for (const format of ["json", "jsonl"]) {
+        for (const [filter, expected] of [
+          ["cost", null],
+          ["sarifPath", null],
+          ["warnings", undefined],
+          ["threadId", result.threadId],
+          [
+            "findings",
+            {
+              findings: JSON.parse(JSON.stringify(result.toJSON()["findings"])),
+            },
+          ],
+        ] as const) {
+          const output = capture();
+          expect(
+            await main(
+              [
+                "scans",
+                command,
+                "scan-original",
+                "--format",
+                format,
+                "--full-output",
+                "--filter-output",
+                filter,
+              ],
+              output.stream,
+              capture().stream,
+              dependencies({
+                result,
+                onWorkbench: () => ({
+                  scanId: "scan-original",
+                  scanDir: "/tmp/saved-scan",
+                  recipe,
+                }),
+              }),
+            ),
+          ).toBe(2);
+          const envelope = JSON.parse(output.text());
+          expect(envelope).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED" },
+            meta: expect.any(Object),
+          });
+          if (expected === undefined)
+            expect(envelope).not.toHaveProperty("data");
+          else expect(envelope.data).toEqual(expected);
+        }
+      }
+    },
+  );
+
+  test("preserves full-output token controls and the completed findings-policy envelope", async () => {
+    const partial = fakeResult(["high"], "partial");
+    const page = capture();
     expect(
-      await main(["scan", "."], stdout.stream, stderr.stream, failing),
+      await main(
+        ["scan", "--json", "--full-output", "--token-limit", "1"],
+        page.stream,
+        capture().stream,
+        dependencies({ result: partial }),
+      ),
     ).toBe(2);
+    expect(JSON.parse(page.text())).toMatchObject({
+      ok: false,
+      error: { code: "SCAN_FAILED" },
+      data: expect.any(String),
+      meta: { nextOffset: 1 },
+    });
+    const count = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--full-output", "--token-count"],
+        count.stream,
+        capture().stream,
+        dependencies({ result: partial }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(count.text())).toBeNumber();
+    const complete = fakeResult(["high"]);
+    const blocked = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--full-output", "--fail-on-severity", "high"],
+        blocked.stream,
+        capture().stream,
+        dependencies({ result: complete }),
+      ),
+    ).toBe(1);
+    expect(JSON.parse(blocked.text())).toMatchObject({
+      ok: true,
+      data: JSON.parse(JSON.stringify(complete.toJSON())),
+    });
+    expect(JSON.parse(blocked.text())).not.toHaveProperty("error");
+  });
+
+  test("reports SDK errors without a stack trace", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const failing = dependencies();
+    failing.createSecurity = () => failingSecurity("invalid scan request");
+    expect(await runCli(["scan", "."], failing)).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("invalid scan request\n");
     expect(stderr.text()).not.toContain("Running scan");
@@ -5157,31 +5175,17 @@ describe("CLI", () => {
   });
 
   test("does not emit a successful full-output envelope for a failed scan", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const failing = dependencies();
-    failing.createSecurity = () => ({
-      run: async () => {
-        throw new CodexSecurityError("invalid scan request");
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
-    });
-    expect(
-      await main(
-        ["scan", ".", "--full-output"],
-        stdout.stream,
-        stderr.stream,
-        failing,
-      ),
-    ).toBe(2);
+    failing.createSecurity = () => failingSecurity("invalid scan request");
+    expect(await runCli(["scan", ".", "--full-output"], failing)).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("invalid scan request\n");
 
     const unavailableCwd = dependencies();
-    unavailableCwd.currentDirectory = () => {
-      throw new Error("working directory is unavailable");
-    };
+    unavailableCwd.currentDirectory = () =>
+      fail("working directory is unavailable");
     const cwdOutput = capture();
     const cwdError = capture();
     expect(
@@ -5197,14 +5201,14 @@ describe("CLI", () => {
   });
 
   test("explains protected-root output failures without contaminating JSON stdout", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex security's output & "));
+    const root = await temporaryDirectory("codex security's output & ");
     const worktree = join(root, "worktree");
     const repository = join(worktree, "packages", "service");
     const output = join(worktree, "scan");
     const suggestion = join(root, "worktree-codex-security-scan");
     await mkdir(repository, { recursive: true });
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const failing = dependencies();
     failing.createSecurity = () => ({
       run: async () => {
@@ -5216,14 +5220,18 @@ describe("CLI", () => {
 
     try {
       expect(
-        await main(
+        await runCli(
           ["scan", repository, "--output-dir", output, "--json"],
-          stdout.stream,
-          stderr.stream,
           failing,
         ),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message: expect.stringContaining(
+          "Scan output directory must be outside",
+        ),
+      });
       expect(stderr.text()).toContain(
         "Scan output directory must be outside the scanned directory and any enclosing Git worktree.",
       );
@@ -5243,12 +5251,12 @@ describe("CLI", () => {
   });
 
   test("explains when the temporary root is inside the protected scan root", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-tmp-"));
+    const root = await temporaryDirectory("codex-security-cli-tmp-");
     const worktree = join(root, "worktree");
     const temporary = join(worktree, "tmp");
     await mkdir(temporary, { recursive: true });
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const failing = dependencies();
     failing.createSecurity = () => ({
       run: async () => {
@@ -5263,9 +5271,7 @@ describe("CLI", () => {
     });
 
     try {
-      expect(
-        await main(["scan", worktree], stdout.stream, stderr.stream, failing),
-      ).toBe(2);
+      expect(await runCli(["scan", worktree], failing)).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
         "Temporary directory must be outside the scanned directory and any enclosing Git worktree.",
@@ -5279,26 +5285,19 @@ describe("CLI", () => {
   });
 
   test("preserves partial-output guidance for a late protected-root failure", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const partial = "/tmp/codex-security-partial";
-    const failing = dependencies();
-    failing.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onOutputDirReady?.(partial);
-        throw new OutputInsideProtectedRootError(
-          "/tmp/worktree/runtime",
-          "/tmp/worktree",
-          "runtime",
-        );
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
+    const failing = scanDependencies(async (_repository, options) => {
+      options?.onOutputDirReady?.(partial);
+      throw new OutputInsideProtectedRootError(
+        "/tmp/worktree/runtime",
+        "/tmp/worktree",
+        "runtime",
+      );
     });
 
-    expect(
-      await main(["scan", "."], stdout.stream, stderr.stream, failing),
-    ).toBe(2);
+    expect(await runCli(["scan", "."], failing)).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(
       "Isolated Codex runtime directory must be outside the scanned directory and any enclosing Git worktree.",
@@ -5308,34 +5307,25 @@ describe("CLI", () => {
   });
 
   test("preserves complete protected-root diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const protectedRoot =
       "/private/tmp/worktree_sk-proj-SYNTHETIC_ROOT_KEY_123";
     const output = `${protectedRoot}/results_sk-proj-SYNTHETIC_OUTPUT_KEY_123`;
-    const failing = dependencies();
-    failing.createSecurity = () => ({
-      run: async () => {
-        throw new OutputInsideProtectedRootError(output, protectedRoot);
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
+    const failing = scanDependencies(async () => {
+      throw new OutputInsideProtectedRootError(output, protectedRoot);
     });
 
-    expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
-        failing,
-      ),
-    ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(await runCli(["scan", ".", "--json"], failing)).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+    });
     expect(stderr.text()).toContain(`Resolved path:  ${output}`);
     expect(stderr.text()).toContain(`Protected root: ${protectedRoot}`);
   });
 
-  test("preserves caught scan and interruption failures", async () => {
+  test("preserves diagnostic text in caught scan and interruption failures", async () => {
     for (const failure of [
       new CodexSecurityError(`scan failed ${SYNTHETIC_CREDENTIALS}`),
       new ScanInterruptedError(
@@ -5343,23 +5333,16 @@ describe("CLI", () => {
         "/tmp/scan",
       ),
     ]) {
-      const stdout = capture();
-      const stderr = capture();
-      const failing = dependencies();
-      failing.createSecurity = () => ({
-        run: async () => {
-          throw failure;
-        },
-        close: async () => {},
-        preflight: async () => fakePreflight(),
-      });
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-      expect(
-        await main(["scan", "."], stdout.stream, stderr.stream, failing),
-      ).toBe(2);
+      const failing = scanDependencies(
+        (Promise.reject<never>).bind(Promise, failure),
+      );
+
+      expect(await runCli(["scan", "."], failing)).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe(
-        "[00:00] Preparing scan\n" + `scan failed ${SYNTHETIC_CREDENTIALS}\n`,
+        `[00:00] Preparing scan\nscan failed ${SYNTHETIC_CREDENTIALS}\n`,
       );
     }
   });
@@ -5372,8 +5355,8 @@ describe("CLI", () => {
       ["SIGTERM", 143],
     ] as const) {
       const signals = new FakeSignals();
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const deps = dependencies({
         signals,
         onTurn: (_repository, options) => {
@@ -5387,9 +5370,7 @@ describe("CLI", () => {
         },
       });
 
-      expect(
-        await main(["scan", "."], stdout.stream, stderr.stream, deps),
-      ).toBe(expectedExit);
+      expect(await runCli(["scan", "."], deps)).toBe(expectedExit);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(`Partial output was kept at ${path}.`);
     }
@@ -5397,41 +5378,39 @@ describe("CLI", () => {
 
   test("does not report success when SDK cleanup fails", async () => {
     for (const json of [false, true]) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           json ? ["scan", ".", "--json"] : ["scan", "."],
-          stdout.stream,
-          stderr.stream,
           dependencies({
-            onClose: () => {
-              throw new Error("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
-            },
+            onClose: () => fail("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED"),
           }),
         ),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      if (json) {
+        expect(JSON.parse(stdout.text())).toEqual({
+          status: "failed",
+          code: "SCAN_FAILED",
+          message: "SYNTHETIC_AUTH_HOME_CLEANUP_FAILED",
+        });
+      } else {
+        expect(stdout.text()).toBe("");
+      }
       expect(stderr.text()).toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
       expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
     }
   });
 
   test("preserves the original scan failure when SDK cleanup also fails", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["scan", "."],
-        stdout.stream,
-        stderr.stream,
         dependencies({
-          onRun: () => {
-            throw new Error("SYNTHETIC_ORIGINAL_SCAN_FAILED");
-          },
-          onClose: () => {
-            throw new Error("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
-          },
+          onRun: () => fail("SYNTHETIC_ORIGINAL_SCAN_FAILED"),
+          onClose: () => fail("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED"),
         }),
       ),
     ).toBe(2);

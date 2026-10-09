@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { loadBundledRuntime } from "./plugin-root.js";
+import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 
 type WorkerEvent =
   | { type: "thread.started"; thread_id: string }
@@ -8,7 +9,7 @@ type WorkerEvent =
   | { type: "turn.failed"; error: { message: string } };
 
 type WorkerExecutorConstructor = new (settings: {
-  parentSandbox: { filesystem: "workspace-write"; network: "restricted" };
+  parentSandbox: { filesystemDenies: string[] };
 }) => {
   run(request: {
     kind: "discovery";
@@ -17,11 +18,12 @@ type WorkerExecutorConstructor = new (settings: {
     subagents: number;
     signal: AbortSignal;
     onThreadStarted?: () => void;
-  }): Promise<{ finalResponse: string; threadId?: string }>;
+  }): Promise<{ threadId?: string }>;
 };
 
 async function bundledWorkerExecutor(
   events: (signal: AbortSignal) => AsyncGenerator<WorkerEvent>,
+  preflight = async () => ({ useOpenAiApiKey: false }),
 ): Promise<WorkerExecutorConstructor> {
   const runtime = await loadBundledRuntime();
   const source = /var CodexSdkWorkerExecutor = class \{[\s\S]*?\n\};/u.exec(
@@ -36,7 +38,8 @@ async function bundledWorkerExecutor(
   expect(fileSystemImport).toBeDefined();
 
   class FakeCodex {
-    startThread() {
+    startThread(options: { threadSource: string }) {
+      expect(options.threadSource).toBe("security_scan");
       return {
         id: "fixture-worker-thread",
         async runStreamed(_input: string, options: { signal: AbortSignal }) {
@@ -49,8 +52,16 @@ async function bundledWorkerExecutor(
   return new Function(
     "Codex",
     fileSystemImport!,
-    "assertVerifiedParentSandbox",
+    "workerPermissionProfile",
+    "profileConfigOverrides",
+    "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
+    "snapshotWorkerEnvironment",
+    "workerRuntimeSettings",
+    "environmentVariable",
+    "preflightDeepScanWorkerPermissionProfile",
+    "deepScanPermissionProfileFallbackError",
     "resolveCodexPath",
+    "executablePathForSpawn",
     "workerSubagentConfig",
     "appendSafeItemDiagnostic",
     "classifyCodexWorkerError",
@@ -58,8 +69,16 @@ async function bundledWorkerExecutor(
   )(
     FakeCodex,
     { promises: { readFile: async () => "fixture worker prompt" } },
-    () => {},
+    () => ({}),
+    profileConfigOverrides,
+    "codex_security_deep_scan_worker",
+    async () => ({}),
+    async () => ({ config: {} }),
+    () => undefined,
+    preflight,
+    () => undefined,
     () => "/fixture/codex",
+    (path: string) => path,
     () => ({}),
     () => {},
     (error: unknown) => error,
@@ -72,7 +91,7 @@ function runWorker(
   onThreadStarted?: () => void,
 ) {
   return new WorkerExecutor({
-    parentSandbox: { filesystem: "workspace-write", network: "restricted" },
+    parentSandbox: { filesystemDenies: [] },
   }).run({
     kind: "discovery",
     promptPath: "/fixture/prompt.md",
@@ -82,6 +101,23 @@ function runWorker(
     ...(onThreadStarted ? { onThreadStarted } : {}),
   });
 }
+
+test("does not start a bundled worker when its permission profile check fails", async () => {
+  let started = false;
+  const WorkerExecutor = await bundledWorkerExecutor(
+    async function* () {
+      started = true;
+      yield { type: "turn.completed" };
+    },
+    async () => {
+      throw new Error("worker permission profile rejected");
+    },
+  );
+  await expect(
+    runWorker(WorkerExecutor, new AbortController().signal),
+  ).rejects.toThrow("worker permission profile rejected");
+  expect(started).toBe(false);
+});
 
 test("settles completed bundled Deep Scan workers during coordinator cancellation", async () => {
   const parentController = new AbortController();
@@ -114,7 +150,6 @@ test("settles completed bundled Deep Scan workers during coordinator cancellatio
     const result = await runWorker(WorkerExecutor, parentController.signal);
 
     expect(result).toEqual({
-      finalResponse: "worker completed",
       threadId: "fixture-worker-thread",
     });
     expect(iteratorClosed).toBe(true);

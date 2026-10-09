@@ -6,13 +6,21 @@ maintainers.
 
 ## How this repository works
 
-Codex Security is developed in OpenAI's canonical repository and published
-here through a one-way mirror. We can't import pull requests from this
-repository into the canonical source.
+`plugins/codex-security/` is the canonical source for the Codex Security
+plugin. Make plugin changes there.
+
+The npm runtime under `sdk/typescript/_bundled_plugin/` is generated from the
+plugin source by `pnpm run build:plugin` and automatically during `prepack` for
+packages and releases. Do not edit or commit files in that directory. See the
+[SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
+commands.
+
+Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
+source. Deterministic triage checks and the MCP reducer IPC regression remain
+part of normal CI.
 
 Search [existing issues](https://github.com/openai/codex-security/issues)
-before opening a new one. Maintainers can carry accepted changes into the
-canonical source or invite a focused pull request for this public repository.
+before opening a new one.
 
 ## Support for open-source projects
 
@@ -31,6 +39,9 @@ customer data, and security findings before posting.
 
 Open an issue describing the problem and the workflow you want to support.
 Documentation corrections and safe examples are welcome.
+Use synthetic examples when documenting expected behavior.
+Keep example values fictional and safe to share.
+Do not include credentials or private information in examples.
 
 ## Report a security issue
 
@@ -41,9 +52,55 @@ credentials, or sensitive scan results publicly.
 If a scan finds a vulnerability in another project, report it to that
 project's maintainers through their security policy.
 
+## Pull request labels
+
+Keep pull request labels focused on release behavior and material platform
+impact. Do not apply `area:*` labels to pull requests; describe the affected
+surface in the title and description. Issues retain their existing area,
+priority, and status labels. Existing maintainer triage labels can remain on
+pull requests while they identify actionable, unresolved work.
+
+Preserve the release labels `bug`, `enhancement`, `documentation`,
+`breaking-change`, and `skip-release-notes`, including maintainer overrides.
+Follow their [release-note and version semantics](RELEASING.md). Do not replace
+manual `breaking-change` or `skip-release-notes` labels based only on the title.
+
+Use `platform:windows` only when Windows-specific behavior is material to the
+change. Dependabot uses `dependencies` across all package ecosystems. Labels
+are not required to open, test, review, or merge a pull request.
+
 ## Dependency and release maintenance
 
-Maintainers update package dependencies and the committed lockfile in the
-canonical repository. The public release workflow installs that locked graph,
+Maintainers update package dependencies and committed lockfiles with the
+affected source. The public release workflow installs those locked graphs,
 tests the package, and publishes a verified artifact with npm provenance.
 GitHub Actions dependencies are maintained separately in this repository.
+
+Workflow and composite-action changes run `workflow-quality` through the existing
+required Unix CI checks. actionlint validates workflow syntax, and ShellCheck
+checks shell scripts in workflow `run` steps for warnings and errors. zizmor's
+offline checks at medium severity and above cover workflows and composite
+actions. The pinned tool versions are in `.github/workflows/workflow-quality.yml`;
+run these checks locally with:
+
+```bash
+SHELLCHECK_OPTS=--severity=warning actionlint
+zizmor --offline --strict-collection --min-severity medium --config .github/zizmor.yml .github
+```
+
+The actionlint configuration preserves GitHub's supported release queue and
+job-level cache syntax until the linter supports them. The zizmor configuration
+records reviewed privileged triggers and their trust boundaries. Review these
+exceptions when changing the affected workflows.
+
+CI package builds and npm release validation require the production dependency
+audit to pass. Run it locally with `pnpm --dir sdk/typescript run audit:prod`.
+The existing policy checks production dependencies at the high-severity threshold.
+Resolve high or critical advisories, or audit service failures, before retrying.
+
+[GitHub Releases](https://github.com/openai/codex-security/releases) is the
+canonical changelog. Maintainers should follow [RELEASING.md](RELEASING.md) to
+prepare, publish, verify, or repair a release.
+
+See the [SDK testing guide](sdk/typescript/TESTING.md) for local checks,
+test conventions, and the required and experimental CI jobs.

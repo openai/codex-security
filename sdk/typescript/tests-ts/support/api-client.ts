@@ -1,12 +1,19 @@
 import { CodexSecurity } from "../../src/api.js";
 import type { JsonObject } from "../../src/config.js";
+import { throwing } from "./errors.js";
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 
 export const TEST_SNAPSHOT_DIGEST = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
 
-export function mockScanRegistration(args: readonly string[]) {
-  const recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!) as {
+export function mockScanRegistration(
+  args: readonly string[],
+  input?: string,
+): JsonObject {
+  if (!args.includes("--registration-json-stdin") || input === undefined) {
+    throw new Error("missing stdin scan registration");
+  }
+  const recipe = JSON.parse(input).recipe as {
     repositoryRevision?: string;
     target: { kind: string };
   };
@@ -33,8 +40,13 @@ export function mockScanRegistration(args: readonly string[]) {
   };
 }
 
-export function mockWorkbench(args: readonly string[]): JsonObject {
-  if (args[0] === "register-cli-scan") return mockScanRegistration(args);
+export function mockWorkbench(
+  args: readonly string[],
+  input?: string,
+): JsonObject {
+  if (args[0] === "register-cli-scan") {
+    return mockScanRegistration(args, input);
+  }
   if (args[0] === "get-scan-feedback") {
     return {
       scanId: "scan_example_001",
@@ -46,18 +58,27 @@ export function mockWorkbench(args: readonly string[]): JsonObject {
 }
 
 export class TestClient extends CodexSecurity {
+  static withDependencies(
+    dependencies: Partial<NonNullable<ClientArguments[1]>>,
+  ) {
+    return new TestClient({}, dependencies);
+  }
+
   public constructor(
     config: ClientArguments[0],
-    dependencies: Partial<ClientArguments[1]>,
+    dependencies: Partial<NonNullable<ClientArguments[1]>>,
   ) {
     super(
       config,
       {
-        createCodex: () => {
-          throw new Error("Unexpected Codex invocation in test");
-        },
+        createCodex: throwing("Unexpected Codex invocation in test"),
         environment: {},
-        runWorkbench: async (_options, args) => mockWorkbench(args),
+        probeCodexSandbox: async () => {},
+        prepareScanArtifactRestorer: async () => ({
+          restore: async () => {},
+        }),
+        runWorkbench: async (_options, args, input) =>
+          mockWorkbench(args, input),
         ...dependencies,
       },
       { surface: "sdk" },

@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "bun test --timeout 30000 ./tests-ts/cost-model.property.test.ts ./tests-ts/errors.test.ts ./tests-ts/errors.property.test.ts ./tests-ts/worker-progress.test.ts ./tests-ts/worker-progress.property.test.ts"
+  },
+  "mutate": ["src/cost-model.ts", "src/errors.ts", "src/worker-progress.ts"],
+  "coverageAnalysis": "off",
+  "reporters": ["clear-text", "progress", "json", "html"],
+  "concurrency": 2,
+  "thresholds": { "break": 0 }
+}

@@ -1,0 +1,103 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    labels: [dependencies]
+    directories:
+      - /github-action
+      - /sdk/typescript
+      - /plugins/codex-security/mcp-app
+      - /evals/triage-finding
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+      exclude:
+        - openai
+        - "@openai/*"
+    groups:
+      codex:
+        patterns:
+          - "@openai/codex"
+          - "@openai/codex-sdk"
+      codex-security:
+        applies-to: security-updates
+        patterns:
+          - "@openai/codex"
+          - "@openai/codex-sdk"
+      openai:
+        patterns:
+          - openai
+          - "@openai/*"
+      third-party:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: pip
+    labels: [dependencies]
+    directory: /plugins/codex-security
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+      exclude:
+        - openai
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: github-actions
+    labels: [dependencies]
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+      exclude:
+        - "openai/*"
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: docker
+    labels: [dependencies]
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: cargo
+    labels: [dependencies]
+    directory: /plugins/codex-security/native
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: devcontainers
+    labels: [dependencies]
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * *"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope

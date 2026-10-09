@@ -1,0 +1,8 @@
+{
+  "workers": 4,
+  "subagents": 3,
+  "stopAfterNoNew": 4,
+  "stopAfterConsecutiveErrors": 3,
+  "maxDiscoveryRuns": 40,
+  "maxTimeHours": 96
+}

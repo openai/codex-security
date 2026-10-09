@@ -3,6 +3,9 @@ changelog:
     labels:
       - skip-release-notes
   categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
     - title: Features
       labels:
         - enhancement

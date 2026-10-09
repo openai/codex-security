@@ -1,13 +1,77 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
-import { PluginBootstrapError } from "./errors.js";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { parse } from "smol-toml";
+import type { JsonObject } from "./config.js";
+import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
 import {
+  executablePathForSpawn,
+  expandHome,
   runCodexCommand,
   type CodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
+
+/** @internal */
+export function environmentEntry(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested];
+  if (exact !== undefined || process.platform !== "win32") return exact;
+  const upper = requested.toUpperCase();
+  return Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === upper,
+  )?.[1];
+}
+
+/** @internal */
+export function withoutOpenAiApiKeys<Value>(
+  environment: Record<string, Value>,
+): Record<string, Value> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
+  );
+}
+
+/** @internal */
+export function configuredCodexHome(environment: ProcessEnvironment): string {
+  const configured = environmentEntry(environment, "CODEX_HOME");
+  return resolve(
+    expandHome(
+      configured?.trim() ? configured : join(homedir(), ".codex"),
+      environment,
+    ),
+  );
+}
+
+/** @internal */
+export async function readCodexHomeConfig(
+  environment: ProcessEnvironment,
+  signal?: AbortSignal,
+): Promise<JsonObject> {
+  try {
+    return parse(
+      await readFile(join(configuredCodexHome(environment), "config.toml"), {
+        encoding: "utf8",
+        signal,
+      }),
+    ) as JsonObject;
+  } catch (error) {
+    signal?.throwIfAborted();
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new CodexSecurityError(
+      "Could not read the configured Codex provider.",
+    );
+  }
+}
 
 export interface LoginResult {
   success: boolean;
@@ -47,11 +111,15 @@ export class CodexLoginHandle {
   ) {
     void this.#urlReady.promise.catch(() => undefined);
     void this.#deviceReady.promise.catch(() => undefined);
-    this.#child = spawn(command.command, [...args], {
-      env: environment,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    this.#child = spawn(
+      executablePathForSpawn(command.command),
+      [...(command.args ?? []), ...args],
+      {
+        env: environment,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
     this.#child.stdin.end();
     this.#child.stdout.setEncoding("utf8");
     this.#child.stderr.setEncoding("utf8");
@@ -121,8 +189,14 @@ export class CodexLoginHandle {
 
   public cancel(): void {
     this.#canceled = true;
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null)
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
+      // Descendants can retain inherited pipes after the login process exits.
+      // Cancellation must release those pipes so the close event can settle.
+      this.#child.stdin.destroy();
+      this.#child.stdout.destroy();
+      this.#child.stderr.destroy();
       return;
+    }
     this.#child.kill("SIGTERM");
     if (this.#forcedTermination !== undefined) return;
     this.#forcedTermination = setTimeout(() => {
@@ -237,14 +311,30 @@ export async function logout(
   }
 }
 
+/** @internal Authentication settings shared by login and model commands. */
+export const CODEX_AUTH_CONFIG_KEYS = [
+  "cli_auth_credentials_store",
+  "forced_login_method",
+  "forced_chatgpt_workspace_id",
+] as const;
+
+/** @internal Shared login recovery guidance for model commands. */
+export const NO_CREDENTIALS_MESSAGE =
+  "No credentials were found. Run 'codex-security login'. On a remote or headless " +
+  "machine, use 'codex-security login --device-auth' if your workspace allows it. " +
+  "If device auth is disabled, see 'codex-security login --help' for browser login over SSH. " +
+  "For CI, set OPENAI_API_KEY or CODEX_API_KEY.";
+
 function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,
   )) {
     const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
     try {
-      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
       if (
+        parsed.protocol === "https:" &&
         hostname !== "localhost" &&
         !hostname.endsWith(".localhost") &&
         !(isIP(hostname) === 4 && hostname.startsWith("127.")) &&
@@ -265,7 +355,7 @@ function preferredAuthUrl(value: string): string | null {
 }
 
 function userCodeFromOutput(value: string): string | null {
-  const output = plainTerminalText(value);
+  const output = plainTerminalText(value).replace(/https?:\/\/[^\s<>"']+/g, "");
   return (
     output.match(/(?:code|user code)\s*[:=]\s*([A-Z0-9-]{4,})/i)?.[1] ??
     output.match(/\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/)?.[0] ??
