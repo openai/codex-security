@@ -1009,7 +1009,7 @@ describe("CodexSecurity finding validation", () => {
     },
   );
 
-  test("does not overwrite explicit validation output after evidence changes", async () => {
+  test("reuses explicit validation output without overwriting changed evidence", async () => {
     const python = await resolvePluginPython();
     let modelCalls = 0;
     async function* events(): AsyncGenerator<ThreadEvent> {
@@ -1032,6 +1032,15 @@ describe("CodexSecurity finding validation", () => {
     await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
     const request = { ...fixture.options, workflowId: workflow.id };
     const first = await client.validate(request);
+    expect(await client.validate(request)).toEqual(first);
+    expect(modelCalls).toBe(1);
+    if (process.platform !== "win32") {
+      await chmod(first.outputDir, 0o770);
+      await expect(client.validate(request)).rejects.toThrow(
+        "must not be accessible to other users",
+      );
+      await chmod(first.outputDir, 0o700);
+    }
     await writeFile(join(first.outputDir, "proof.txt"), "Changed evidence.\n");
     await expect(client.validate(request)).rejects.toBeInstanceOf(
       OutputDirectoryError,
@@ -1041,6 +1050,60 @@ describe("CodexSecurity finding validation", () => {
       "Changed evidence.\n",
     );
   });
+
+  test.each(["empty", "nonempty"])(
+    "respects a different explicit validation output directory that is %s",
+    async (contents) => {
+      const python = await resolvePluginPython();
+      let modelCalls = 0;
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        modelCalls++;
+        await writeFile(
+          join(fixture.captured.thread!.workingDirectory!, "proof.txt"),
+          `Synthetic evidence ${modelCalls}.\n`,
+        );
+        yield* validationEvents();
+      }
+      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      fixture.workbench.mockImplementation(runWorkbench);
+      const workflow = new FindingWorkflow(
+        "validation-output-destination",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const request = { ...fixture.options, workflowId: workflow.id };
+      const first = await client.validate(request);
+      const outputDir = join(fixture.root, "other-validation");
+      await mkdir(outputDir, { mode: 0o700 });
+      if (contents === "nonempty") {
+        await writeFile(join(outputDir, "proof.txt"), "Existing evidence.\n");
+        await expect(
+          client.validate({ ...request, outputDir }),
+        ).rejects.toBeInstanceOf(OutputDirectoryError);
+        expect(modelCalls).toBe(1);
+        expect(await readFile(join(outputDir, "proof.txt"), "utf8")).toBe(
+          "Existing evidence.\n",
+        );
+      } else {
+        const second = await client.validate({ ...request, outputDir });
+        expect(second.outputDir).toBe(await realpath(outputDir));
+        expect(modelCalls).toBe(2);
+        expect(await readFile(join(outputDir, "proof.txt"), "utf8")).toBe(
+          "Synthetic evidence 2.\n",
+        );
+        expect(await client.validate({ ...request, outputDir })).toEqual(
+          second,
+        );
+        expect(modelCalls).toBe(2);
+      }
+      expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
+        "Synthetic evidence 1.\n",
+      );
+    },
+  );
 
   test.each(["unavailable", "aborted"] as const)(
     "handles %s evidence fingerprints without caching an invalid result",
@@ -1928,12 +1991,15 @@ describe("CodexSecurity finding validation", () => {
         client.validate({ ...options, finding: finding as string }),
       ).rejects.toThrow("nonempty text or a JSON object");
     }
-    await expect(
-      client.validate({
-        ...options,
-        outputDir: join(repositoryPath, "output"),
-      }),
-    ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
+    for (const workflowId of [undefined, "unsafe-validation-output"]) {
+      await expect(
+        client.validate({
+          ...options,
+          workflowId,
+          outputDir: join(repositoryPath, "output"),
+        }),
+      ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
+    }
     await expect(
       client.validate({ ...options, signal: AbortSignal.abort() }),
     ).rejects.toBeInstanceOf(ScanInterruptedError);

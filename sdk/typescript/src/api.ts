@@ -703,10 +703,14 @@ export class CodexSecurity {
         );
       }
       const finding = jsonForPrompt(options.finding);
+      // Cached validation may already own this output. Regeneration below still
+      // requires an empty directory through prepareOutputDir.
       const inputs = await this.#prepareLocalInputs(
         options.repositoryPath,
         options,
         signal,
+        undefined,
+        options.workflowId !== undefined,
       );
       const temporaryRoot = await realpath(tmpdir());
       requireOutputOutsideRepository(
@@ -953,7 +957,12 @@ export class CodexSecurity {
                 );
               }
               const cached = cachedValidationSchema.safeParse(saved);
-              if (cached.success && (await canCache())) {
+              if (
+                cached.success &&
+                (inputs.outputDir === null ||
+                  inputs.outputDir === cached.data.assessment.outputDir) &&
+                (await canCache())
+              ) {
                 const evidence = await workflow.sourceSnapshot(
                   cached.data.assessment.outputDir,
                   { optional: true, evidence: true },
@@ -3723,6 +3732,7 @@ export class CodexSecurity {
     options: ScanOptions,
     signal?: AbortSignal,
     protectedRoots?: readonly string[],
+    allowExistingOutput = false,
   ): Promise<LocalScanInputs> {
     if (
       options.resumeScanId !== undefined &&
@@ -3810,7 +3820,11 @@ export class CodexSecurity {
       (await enclosingGitWorktreeRoot(repo, signal)) ??
       repo;
     protectedRoots ??= [protectedRoot];
-    const requestedOutput = await prepareScanOutputDir(options, protectedRoots);
+    const requestedOutput = await prepareScanOutputDir(
+      options,
+      protectedRoots,
+      allowExistingOutput,
+    );
     const stateDirectory = codexSecurityStateDirectory(
       this.#dependencies.environment,
     );
@@ -4511,10 +4525,13 @@ function scanRecipe({
 async function prepareScanOutputDir(
   options: Pick<ScanOptions, "outputDir" | "archiveExisting" | "resumeScanId">,
   protectedRoots: readonly string[],
+  allowExistingOutput = false,
 ): Promise<string | null> {
   const output = await validateOutputDir(
     options.outputDir,
-    options.resumeScanId !== undefined || options.archiveExisting,
+    allowExistingOutput ||
+      options.resumeScanId !== undefined ||
+      options.archiveExisting,
   );
   if (output !== null) requireOutputOutsideRepositories(protectedRoots, output);
   return output;
