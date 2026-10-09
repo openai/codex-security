@@ -372,9 +372,9 @@ test("saved-scan bootstrap supports IDs, prefixes and latest and persists one du
   }
 });
 
-test.skipIf(process.platform === "win32")(
-  "local native helpers protect a different caller checkout",
-  async () => {
+test.skipIf(process.platform === "win32").each([true, false])(
+  "local native helpers protect a different caller (Git marker: %p)",
+  async (git) => {
     const f = await fixture();
     const seeded = await deduplicateScanInternal(
       f.first.scanId,
@@ -385,7 +385,8 @@ test.skipIf(process.platform === "win32")(
       },
     );
     const caller = join(f.root, "caller");
-    await mkdir(join(caller, ".git"), { recursive: true });
+    await mkdir(caller);
+    if (git) await mkdir(join(caller, ".git"));
     const marker = join(f.root, "caller-node-probed");
     await writeFile(
       join(caller, "node"),
@@ -740,6 +741,81 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+for (const entry of [
+  "bootstrap",
+  "resolver",
+  "named resolver",
+  "dot-name resolver",
+  "configured dot-name resolver",
+  "helper",
+] as const) {
+  test.skipIf(process.platform === "win32")(
+    `non-Git caller PATH is protected before Python probes through ${entry}`,
+    async () => {
+      const f = await fixture();
+      const caller = join(f.root, "non-git-caller");
+      const callerBin = join(caller, "bin");
+      const trustedBin = join(f.root, "trusted-bin");
+      const otherCaller = join(f.root, "other-caller");
+      const linkedBin = join(f.root, "linked-bin");
+      for (const path of [callerBin, trustedBin, otherCaller, linkedBin])
+        await mkdir(path, { recursive: true });
+      await symlink(f.python, join(trustedBin, "python3"));
+      await symlink(f.python, join(trustedBin, ".python"));
+      const marker = join(f.root, "untrusted-python-probed");
+      for (const path of [caller, callerBin]) {
+        const python = join(path, "python3");
+        await writeFile(
+          python,
+          '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+        );
+        await chmod(python, 0o700);
+        await symlink(python, join(path, ".python"));
+      }
+      await symlink(join(callerBin, "python3"), join(linkedBin, "python3"));
+      await symlink(join(callerBin, ".python"), join(linkedBin, ".python"));
+      const runtime = new URL("../src/runtime.ts", import.meta.url).href;
+      const bootstrap = new URL(
+        "../src/saved-scan-bootstrap.ts",
+        import.meta.url,
+      ).href;
+      const script = `
+        import assert from "node:assert/strict";
+        import { realpath } from "node:fs/promises";
+        const { resolvePluginPython, runWorkbench } = await import(${JSON.stringify(runtime)});
+        const options = { environment: process.env, protectedRoot: ${JSON.stringify(f.repository)}, pluginRoot: ${JSON.stringify(PLUGIN_ROOT)} };
+        if (${JSON.stringify(entry)} === "bootstrap") {
+          const { savedScanWorkbench } = await import(${JSON.stringify(bootstrap)});
+          const workbench = await savedScanWorkbench(${JSON.stringify(f.first.scanId)}, { ...options, currentDirectory: ${JSON.stringify(caller)} });
+          assert.equal((await workbench(["get-scan", "--scan-id", ${JSON.stringify(f.first.scanId)}])).scan.scanId, ${JSON.stringify(f.first.scanId)});
+        } else if (${JSON.stringify(entry)} === "helper") {
+          assert.equal((await runWorkbench(options, ["get-scan", "--scan-id", ${JSON.stringify(f.first.scanId)}])).scan.scanId, ${JSON.stringify(f.first.scanId)});
+        } else {
+          const selected = await resolvePluginPython({ ...options, managedRuntimeRoots: [], ...(${JSON.stringify(entry)} === "configured dot-name resolver" ? { configuredPath: ".python" } : {}) });
+          assert.equal(await realpath(selected), await realpath(${JSON.stringify(f.python)}));
+        }
+      `;
+      for (const path of [caller, callerBin, linkedBin]) {
+        const result = spawnSync(process.execPath, ["-e", script], {
+          cwd: entry === "bootstrap" ? otherCaller : caller,
+          env: {
+            ...f.environment,
+            PATH: [path, trustedBin].join(delimiter),
+            XDG_CACHE_HOME: join(f.root, "empty-cache"),
+            ...(entry === "named resolver" ? { PYTHON: "python3" } : {}),
+            ...(entry === "dot-name resolver" ? { PYTHON: ".python" } : {}),
+            TEST_PYTHON_PROBE: marker,
+          },
+          encoding: "utf8",
+        });
+        expect(existsSync(marker)).toBe(false);
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+      }
+    },
+  );
+}
 
 test.skipIf(process.platform === "win32")(
   "Python discovery protects the enclosing checkout of a nested target",

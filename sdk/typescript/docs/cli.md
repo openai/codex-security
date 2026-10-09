@@ -82,8 +82,15 @@ with `requires_openai_auth = true`.
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
-If the home has no credentials, it imports an existing file-based Codex login.
-Logout disables imports until the next login.
+Without an overriding environment API key, scans and status checks import
+existing file-based Codex credentials when this home is empty. Import errors make
+`login status` exit with code 2 and SDK `account()` reject its promise. Logout
+disables imports until you log in again. Status imports and logout share the
+credential-home lock so a concurrent status check cannot restore credentials
+after logout completes.
+
+Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
+`HOME` or `USERPROFILE` environment setting.
 
 If credentials cannot refresh, run `login status`. Retry if the sign-in recently
 changed; otherwise run `logout`, then `login`.
@@ -294,6 +301,13 @@ execution failures with `--json`, JSON, or JSONL output produce:
 ```
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
+A scan that returns partial or unknown coverage uses that failure envelope and
+keeps its available results under `data`. This also applies to `scans rerun` and
+`scans resume`. If the scan target also changed, the error explains that the
+results no longer represent the current checkout. For incomplete `scans rerun` and
+`scans resume` envelopes, `--filter-output` applies to `data`; selecting an
+unavailable field can return `null` or omit `data`.
+
 Saved-scan setup failures use the same output shape with
 `SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
 available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
@@ -541,11 +555,21 @@ account authentication. Explicit `--auth chatgpt` selects stored account auth,
 omits the provider key, and clears any configured experimental bearer token for
 that command. Model, effort, and provider choices carry into patch-risk assessment.
 
+Model requests include Codex Security attribution in `responses_api_metadata`:
+`codex_security_surface` (`cli` or `sdk`), `codex_security_command`,
+`codex_security_package_version`, and `codex_security_plugin_version` when the
+selected plugin declares a version. These fields identify the workflow and
+versions producing a model request; they do not record command starts,
+completions, or failures.
+
 Disable Codex usage analytics and built-in metrics with
-`--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`
-and patch-risk assessment. It does not control configured OpenTelemetry exporters,
-integrations, authentication, or CLI update checks. Validation uses isolated
-configuration; patching and verification preserve ambient project trust.
+`--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
+patch-risk assessment, and Deep Scan discovery and reducer workers, including
+resumed workers. Deep Scan workers also preserve the scan's request metadata.
+Model-request attribution metadata remains attached when analytics are disabled.
+The setting does not control configured OpenTelemetry exporters, integrations,
+authentication, or CLI update checks. Validation uses isolated configuration;
+patching and verification preserve ambient project trust.
 
 For filesystem and approval behavior, see the
 [local security model](../README.md#local-security-model).
@@ -673,7 +697,11 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
-Changed project configuration requires a new output directory.
+Changes to project configuration, extracted knowledge-base text, staged document
+filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` selections
+require a new output directory. Version 1 manifests also require a new directory
+because their original knowledge inputs and direct overrides cannot be verified.
+Worker and retry counts can change when resuming.
 
 ### Recovering failed or interrupted bulk scans
 
@@ -883,7 +911,9 @@ or effort. A successful run also writes `severity-classification.json`, but
 publication reads the database. Original findings and sealed artifacts remain
 unchanged.
 
-Repeat `--finding-id ID` for a subset, such as dedupe's `uniqueFindingIds`.
+Repeat `--finding-id ID` for a subset from the selected scan. Dedupe's
+`uniqueFindingIds` can represent findings from another scan; replace an outside-scan
+representative with a member of its `duplicateGroups` entry from this scan.
 Linear publication defaults to saved classification selection, omits exclusions,
 and uses assessed severity for title and priority. Descriptions retain original
 severity and add the classification rationale. Publication rejects incomplete or
@@ -905,7 +935,10 @@ import {
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   publishScan,
+  type FindingsDocument,
 } from "@openai/codex-security";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 // Assess supplied reports in memory.
 const classification = await classifySeverity(findings, {
@@ -915,9 +948,24 @@ const classification = await classifySeverity(findings, {
 
 // Save assessments for a scan ID or sealed directory.
 await classifyScanSeverity("SCAN_ID", { rubricPath: "/path/to/policy.md" });
+const scanFindings = (
+  JSON.parse(
+    await readFile(join(scanDirectory, "findings.json"), "utf8"),
+  ) as FindingsDocument
+).findings;
+const scanFindingIds = new Set(
+  scanFindings.map((finding) => finding.findingId),
+);
+// dedupeResult was produced by deduplicating this same scan.
+const selectedIds = dedupeResult.uniqueFindingIds.map((representative) => {
+  if (scanFindingIds.has(representative)) return representative;
+  return dedupeResult.duplicateGroups
+    .find((group) => group.includes(representative))!
+    .find((member) => scanFindingIds.has(member))!;
+});
 await classifyScanDirectorySeverity(scanDirectory, {
   rubricPath: "/path/to/policy.md",
-  findingIds: dedupeResult.uniqueFindingIds,
+  findingIds: selectedIds,
 });
 
 // Or supply an in-memory assessment directly to publication.
@@ -947,6 +995,12 @@ codex-security suggest-owners findings.json --source-root /path/to/repo --json >
 Input is a findings document or `{ "findings": [...] }`. The source root
 defaults to the current directory. The command reads committed `HEAD`, relevant
 source, blame, and history; it does not read uncommitted source or assign tickets.
+Finding location paths are relative to the Git worktree root, including when
+`--source-root` points to a subdirectory. A location for `src/handler.ts` keeps
+that prefix; a location of `handler.ts` refers to the root file. Rebase imported
+subdirectory-relative locations to repository-relative paths before suggesting
+owners.
+
 Linked worktrees and bound separate Git directories are supported; borrowed
 external object stores such as `git clone --shared` are rejected.
 
@@ -1024,6 +1078,12 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Keep it private,
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
+
+Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
+Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
+compressed sessions are unavailable to `scans logs`, feedback attachments, and
+`scans resume`. Upgrade Node.js to read or resume these sessions. Plain `.jsonl`
+logs work on all supported runtimes.
 
 ### Resuming an interrupted Deep Scan
 

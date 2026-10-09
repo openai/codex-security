@@ -193,45 +193,6 @@ async function fixture() {
   };
 }
 
-test.each([
-  [undefined, "https://api.openai.com/v1/embeddings"],
-  ["", "https://api.openai.com/v1/embeddings"],
-  [
-    "https://embeddings.example.com/custom/v1/embeddings?api-version=synthetic",
-    "https://embeddings.example.com/custom/v1/embeddings?api-version=synthetic",
-  ],
-])(
-  "local dedupe uses the configured embeddings endpoint %p",
-  async (endpoint, expected) => {
-    const f = await fixture();
-    const request = spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({
-        model: EMBEDDING_MODEL,
-        data: [{ index: 0, embedding: vector }],
-      }),
-    );
-    try {
-      const local = new LocalDeduplication(
-        {
-          ...f.environment,
-          OPENAI_API_KEY: "synthetic-embeddings-key",
-          CODEX_SECURITY_EMBEDDINGS_URL: endpoint,
-        },
-        { repositoryId: f.targetId },
-        f.repository,
-      );
-      await local.prepare(f.document.findings, f.targetId);
-      expect(request).toHaveBeenCalledTimes(1);
-      expect(request.mock.calls[0]?.[0]).toBe(expected);
-      expect(request.mock.calls[0]?.[1]?.headers).toMatchObject({
-        Authorization: "Bearer synthetic-embeddings-key",
-      });
-    } finally {
-      request.mockRestore();
-    }
-  },
-);
-
 test("local dedupe indexes a sealed directory, reuses vectors and never calls the findings API", async () => {
   const f = await fixture();
   const original = await readFile(join(f.scanDir, "findings.json"), "utf8");
@@ -352,6 +313,102 @@ test("saved-scan dedupe uses configured Codex models and efforts for both review
     ["pair-review", "synthetic-configured", "medium"],
   ]);
 });
+
+test.each(["environment", "configuration"])(
+  "workflow ignores native SQLite writes but detects source changes (%s)",
+  async (selection) => {
+    const f = await fixture();
+    const sqliteHome = join(f.repository, "runtime", "native");
+    await mkdir(f.environment.CODEX_HOME, { recursive: true });
+    if (selection === "configuration")
+      await writeFile(
+        join(f.environment.CODEX_HOME, "config.toml"),
+        `sqlite_home = ${JSON.stringify(sqliteHome)}\n`,
+      );
+    await writeFile(join(f.repository, "source.py"), "original source\n");
+    await writeFile(join(f.repository, ".gitignore"), "runtime/\nsource.py\n");
+    const anchor = f.document.findings[0]!;
+    await f.store.insert(
+      [
+        {
+          finding: {
+            ...anchor,
+            findingId: "csf_neighbor",
+            fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
+          },
+          embedding: { model: EMBEDDING_MODEL, vector },
+        },
+      ],
+      f.targetId,
+    );
+    const environment = {
+      ...f.environment,
+      OPENAI_API_KEY: "synthetic-review-key",
+      ...(selection === "environment" ? { CODEX_SQLITE_HOME: sqliteHome } : {}),
+    };
+    let calls = 0;
+    let mutateSource = false;
+    let loseAcknowledgement = true;
+    const options = {
+      repository: f.repository,
+      workflowId: `native-state-${selection}`,
+      embedding: f.embedding,
+    };
+    const dependencies = {
+      environment,
+      runWorkbench: async (args: readonly string[], input?: string) => {
+        const result = await runWorkbench(f.options, args, input);
+        if (args[0] === "store-dedupe-groups" && loseAcknowledgement) {
+          loseAcknowledgement = false;
+          throw new Error("Lost native-state group acknowledgement");
+        }
+        return result;
+      },
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          calls++;
+          await mkdir(sqliteHome, { recursive: true });
+          await writeFile(
+            join(sqliteHome, "state_5.sqlite"),
+            `synthetic native state ${calls}`,
+          );
+          if (mutateSource)
+            await writeFile(
+              join(f.repository, "source.py"),
+              "changed source\n",
+            );
+          const decision = { decision: "SAME", rationale: "Same control" };
+          return review.validate(
+            review.stage === "screening"
+              ? { decisions: { "pair-1": decision } }
+              : decision,
+          );
+        },
+      },
+    };
+    await expect(
+      deduplicateScanDirectoryInternal(f.scanDir, options, dependencies),
+    ).rejects.toThrow("Lost native-state group acknowledgement");
+    expect(calls).toBe(2);
+    await writeFile(
+      join(sqliteHome, "state_5.sqlite-wal"),
+      "later native activity",
+    );
+    expect(
+      (await deduplicateScanDirectoryInternal(f.scanDir, options, dependencies))
+        .deduplicationStatus,
+    ).toBe("completed");
+    expect(calls).toBe(2);
+    mutateSource = true;
+    await expect(
+      deduplicateScanDirectoryInternal(
+        f.scanDir,
+        { ...options, workflowId: `${options.workflowId}-source-change` },
+        dependencies,
+      ),
+    ).rejects.toThrow("Source changed during deduplication");
+  },
+);
 
 test.each([
   "stored-login",

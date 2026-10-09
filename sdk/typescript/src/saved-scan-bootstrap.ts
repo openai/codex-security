@@ -118,6 +118,7 @@ export async function savedScanWorkbench(
     python ??= await resolvePluginPython({
       environment,
       protectedRoot: protectedRoots,
+      currentDirectory: options.currentDirectory,
       signal,
     });
     environment["PYTHON"] = python;
@@ -128,6 +129,7 @@ export async function savedScanWorkbench(
         python,
         signal,
         protectedRoot: protectedRoots,
+        currentDirectory: options.currentDirectory,
         failureMessage: "Could not read Codex Security scan history",
       },
       target ? ["get-scan", "--scan-id", target.id] : args,

@@ -33,6 +33,39 @@ including an `OpenAiFindingEmbedder` with a renewable key callback.
 Custom publication, explicit remote deduplication, Cloud publication, the
 plugin MCP server, and Codex app-server are unchanged.
 
+## Direct storage helpers
+
+Direct callers of the retired Python findings helpers can use the retained Node
+helpers from an installed plugin directory:
+
+```bash
+scripts/launch_codex_security_mcp --helper list-stored-findings < request.json
+```
+
+On Windows, use `scripts\launch_codex_security_mcp.cmd` with the same arguments
+and JSON on stdin. For example, `request.json` selects the existing database:
+
+```json
+{
+  "stateDirectory": "/absolute/path/to/state",
+  "payload": { "limit": 50, "offset": 0 }
+}
+```
+
+Use an absolute Windows path on Windows. The retained helper commands accept
+these `payload` fields:
+
+| Command                     | Payload                                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `store-findings`            | `entries` containing finding and embedding records; optional `repositoryId`.                            |
+| `list-stored-findings`      | Positive integer `limit` and non-negative integer `offset`.                                             |
+| `find-potential-duplicates` | `findingId` and `scope`: either `{ "repositoryId": "REPOSITORY_ID" }` or `{ "allRepositories": true }`. |
+| `store-dedupe-groups`       | `groups`, an array of finding-ID arrays.                                                                |
+| `list-dedupe-groups`        | `findingId`.                                                                                            |
+
+Retained scan commands such as `workbench_db.py list-findings` keep their existing
+interface. The dashboard projection is removed along with the browser dashboard.
+
 ## Publish a scan
 
 Send a completed scan to an independently operated compatible endpoint:
@@ -84,6 +117,10 @@ Publication sends `{findings, repositoryId}`. Candidate requests include either
 workflow retries. Both POST endpoints must persist their writes before
 acknowledging them and return a JSON body. An explicit URL selects this remote
 contract instead of local SQLite. This package no longer implements or hosts the HTTP endpoints.
+
+SDK findings client failures preserve the endpoint's error code and message with
+the HTTP status. Other responses retain the HTTP-status diagnostic. Retry
+behavior uses the HTTP status and `Retry-After`.
 
 ## Deduplicate a scan
 

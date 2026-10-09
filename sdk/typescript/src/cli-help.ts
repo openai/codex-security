@@ -96,7 +96,6 @@ const VALUE_LABELS: Record<string, string> = {
   "filter-output": "keys",
   "token-limit": "count",
   "token-offset": "count",
-  port: "port",
   to: "destination",
 };
 

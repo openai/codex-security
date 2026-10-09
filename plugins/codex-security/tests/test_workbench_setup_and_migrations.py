@@ -11,6 +11,7 @@ import sys
 import uuid
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from threading import Timer
 from unittest import mock
@@ -23,6 +24,7 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_scan,
     get_scan,
     initialize_git_repository,
     load_script,
@@ -82,9 +84,11 @@ EXPECTED_MIGRATIONS = [
     (40, "index finding identity and comparison history"),
     (41, "checkpoint finding severity assessments"),
     (42, "editable scan names"),
-    (43, "version local finding embedding inputs"),
-    (44, "separate local and service embedding caches"),
-    (45, "invalidate local embeddings when finding bodies change"),
+    (43, "preserve severity assessments per scan"),
+    (44, "version local finding embedding inputs"),
+    (45, "separate local and service embedding caches"),
+    (46, "invalidate local embeddings when finding bodies change"),
+    (47, "snapshot deep scan discovery context"),
 ]
 
 
@@ -449,11 +453,7 @@ def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path)
     assert started["results"]["progress"]["coverage"]["filesTotal"] == 1
 
 
-def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    dependency = tmp_path / "dependency"
-    initialize_git_repository(dependency)
-    target = tmp_path / "target"
+def initialize_git_repository_with_submodule(target: Path, dependency: Path) -> None:
     initialize_git_repository(target)
     subprocess.run(
         [
@@ -470,6 +470,14 @@ def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
         check=True,
     )
     subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+
+
+def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    dependency = tmp_path / "dependency"
+    initialize_git_repository(dependency)
+    target = tmp_path / "target"
+    initialize_git_repository_with_submodule(target, dependency)
     saved = create_saved_git_workspace(state_dir, target)
     (target / "vendor/dependency/README.md").write_text("dirty dependency\n")
 
@@ -484,22 +492,7 @@ def test_scan_start_allows_uninitialized_submodule(tmp_path: Path) -> None:
     dependency = tmp_path / "dependency"
     initialize_git_repository(dependency)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     subprocess.run(
         ["git", "submodule", "deinit", "-f", "-q", "--", "vendor/dependency"],
         cwd=target,
@@ -520,22 +513,7 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     (dependency / "README.md").write_text("second revision\n")
     subprocess.run(["git", "commit", "-qam", "Second revision"], cwd=dependency, check=True)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     submodule = target / "vendor/dependency"
     subprocess.run(["git", "checkout", "-q", revision_a], cwd=submodule, check=True)
     subprocess.run(
@@ -564,9 +542,7 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repository, text=True
     ).strip()
-    workspace_id = str(uuid.uuid4())
-    create_workspace(state_dir, workspace_id, "--target-path", str(target))
-    save_workspace(state_dir, workspace_id, str(target), ".", "standard")
+    workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     (repository / "outside.py").write_text("outside = 2\n")
     write_completed_contract(
@@ -620,15 +596,13 @@ def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: boo
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (45,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            len(EXPECTED_MIGRATIONS),
+        )
 
 
 def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     scan_command(state_dir, "complete-scan", scan_id)
     database = state_dir / "workbench.sqlite3"
@@ -749,6 +723,156 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
         if previous_indexes:
             assert indexes == previous_indexes
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_severity_migration_only_copies_assessments_with_matching_scan_occurrences(
+    indexed: bool,
+) -> None:
+    connection, apply_migrations = create_historical_database(43)
+    timestamp = "2026-09-01T00:00:00Z"
+    with connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("workspace", timestamp, timestamp),
+        )
+        for scan_id in ("first-scan", "second-scan"):
+            connection.execute(
+                """INSERT INTO scans (
+                    id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+                    status, phase, started_at, created_at, updated_at
+                ) VALUES (?, 'workspace', '/target', 'revision', '.', 'standard', ?,
+                    'complete', 'reporting', ?, ?, ?)""",
+                (scan_id, f"/scans/{scan_id}", timestamp, timestamp, timestamp),
+            )
+            connection.execute(
+                """INSERT INTO scan_severity_classifications
+                    (scan_id, finding_ids_json, assessed_at) VALUES (?, '["finding"]', ?)""",
+                (scan_id, timestamp),
+            )
+        connection.execute(
+            """INSERT INTO findings
+                (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+                VALUES ('finding', 'fingerprint', 'rule', 'anchor', ?, ?)""",
+            (timestamp, timestamp),
+        )
+        connection.execute(
+            """INSERT INTO finding_severity_assessments
+                (finding_id, occurrence_id, input_sha256, assessed_at, source, decision,
+                    level, rationale)
+                VALUES ('finding', 'second-occurrence', 'digest', ?, 'existing-severity',
+                    'assessed', 'high', 'Saved severity')""",
+            (timestamp,),
+        )
+        if indexed:
+            connection.execute(
+                """INSERT INTO finding_occurrences
+                    (id, finding_id, scan_id, title, summary, severity, confidence,
+                        remediation, created_at)
+                    VALUES ('second-occurrence', 'finding', 'second-scan', 'Title', 'Summary',
+                        'high', 'high', 'Remediation', ?)""",
+                (timestamp,),
+            )
+
+        apply_migrations(connection)
+        apply_migrations(connection)
+
+        migrated = connection.execute(
+            "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
+        ).fetchall()
+        assert [tuple(row) for row in migrated] == (
+            [("second-scan", "second-occurrence")] if indexed else []
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("operation", ["migration", "read"])
+def test_severity_work_scales_with_selected_findings(operation: str) -> None:
+    severity = load_script("workbench_severity")
+    timestamp = "2026-09-01T00:00:00Z"
+
+    def instruction_count(scale: int) -> int:
+        connection, apply_migrations = create_historical_database(43)
+        with closing(connection):
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(
+                "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', ?, ?)",
+                (timestamp, timestamp),
+            )
+            scan_count, findings_per_scan = (
+                (scale, 10) if operation == "migration" else (1, scale * 10)
+            )
+            for scan in range(scan_count):
+                scan_id = f"scan-{scan}"
+                finding_ids = [f"finding-{scan}-{item}" for item in range(findings_per_scan)]
+                connection.execute(
+                    """INSERT INTO scans (
+                        id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+                        status, phase, started_at, created_at, updated_at
+                    ) VALUES (?, 'workspace', '/target', 'revision', '.', 'standard', ?,
+                        'complete', 'reporting', ?, ?, ?)""",
+                    (scan_id, f"/scans/{scan_id}", timestamp, timestamp, timestamp),
+                )
+                connection.execute(
+                    """INSERT INTO scan_severity_classifications
+                        (scan_id, finding_ids_json, assessed_at) VALUES (?, ?, ?)""",
+                    (scan_id, json.dumps(finding_ids), timestamp),
+                )
+                for finding_id in finding_ids:
+                    occurrence_id = f"occurrence-{finding_id}"
+                    connection.execute(
+                        """INSERT INTO findings
+                            (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+                            VALUES (?, ?, 'rule', 'anchor', ?, ?)""",
+                        (finding_id, finding_id, timestamp, timestamp),
+                    )
+                    connection.execute(
+                        """INSERT INTO finding_occurrences
+                            (id, finding_id, scan_id, title, summary, severity, confidence,
+                                remediation, created_at)
+                            VALUES (?, ?, ?, 'Title', 'Summary', 'high', 'high', 'Remediation', ?)""",
+                        (occurrence_id, finding_id, scan_id, timestamp),
+                    )
+                    connection.execute(
+                        """INSERT INTO finding_severity_assessments
+                            (finding_id, occurrence_id, input_sha256, assessed_at, source,
+                                decision, level, rationale)
+                            VALUES (?, ?, 'digest', ?, 'existing-severity', 'assessed',
+                                'high', 'Saved severity')""",
+                        (finding_id, occurrence_id, timestamp),
+                    )
+            connection.commit()
+            if operation == "read":
+                apply_migrations(connection)
+
+            instructions = 0
+
+            def progress() -> int:
+                nonlocal instructions
+                instructions += 100
+                return 0
+
+            connection.set_progress_handler(progress, 100)
+            try:
+                if operation == "migration":
+                    apply_migrations(connection)
+                else:
+                    selected = list(reversed(finding_ids))
+                    result = severity.assessments(connection, selected, scan_id)
+                    assert [assessment["findingId"] for assessment in result] == selected
+            finally:
+                connection.set_progress_handler(None, 0)
+            assert (
+                connection.execute("SELECT COUNT(*) FROM scan_severity_assessments").fetchone()[0]
+                == scan_count * findings_per_scan
+            )
+            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+            return instructions
+
+    small, large = instruction_count(20), instruction_count(200)
+    # Ten times the selected work must not become a quadratic scan of the assessment cache.
+    assert large < small * 20, (small, large)
 
 
 def test_workbench_backfills_repository_targets_only_during_migration() -> None:
@@ -1172,7 +1296,9 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (45,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            EXPECTED_MIGRATIONS[-1][0],
+        )
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",

@@ -33,6 +33,16 @@ Supported runtimes:
   findings. Python 3.10 also needs `tomli`. The findings server (`serve`) uses
   Node’s built-in SQLite and does not require Python.
 
+Reading compressed Codex session logs (`.jsonl.zst`) requires Node.js 22.15.0+
+within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14, compressed sessions
+are unavailable when reading saved activity or attaching scan logs to feedback, and
+scans whose original session is compressed cannot resume. Plain `.jsonl` logs
+work on all supported runtimes.
+
+`LocalPluginBootstrapError` identifies local plugin setup failures and extends
+`PluginBootstrapError`, so existing catches keep working. Knowledge-base
+preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
+
 ## Authentication
 
 Sign in with ChatGPT:
@@ -311,7 +321,9 @@ dispatch status does not mean delegation was skipped. `onSessionEvent` receives
 saved events with thread IDs and worker numbers and can contain source code or
 credentials. Deep scans additionally expose durable independent-review counts
 through `onDeepProgress`: `completed`, `active`, and `maximum`. The maximum is a
-configured cap, not a percentage denominator. `ScanOptions` lists all callbacks.
+configured cap, not a percentage denominator. The optional `consolidating` flag
+reports when results are being combined or the coordinator has finished.
+`ScanOptions` lists all callbacks.
 
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription
 allowance. Use `cost.estimatedUsdRange` for reporting. `maxCostUsd` uses the

@@ -42,6 +42,75 @@ function entry(id: string): Findings.EmbeddedFinding {
   };
 }
 
+for (const formatting of ["spaced", "reordered", "escaped"]) {
+  test(`unchanged service upserts retain local cache and document serialization: ${formatting}`, (t) => {
+    const database = open(t);
+    const original = entry("shared-finding");
+    storeFindings(database, [original], "created");
+    const body =
+      formatting === "reordered"
+        ? Object.fromEntries(Object.entries(original.finding).reverse())
+        : original.finding;
+    const stored = stringifyJson(body, 2).replaceAll(
+      "λ",
+      formatting === "escaped" ? "\\u03bb" : "λ",
+    );
+    database
+      .prepare("UPDATE findings SET details_json = ? WHERE id = ?")
+      .run(stored, original.finding.findingId);
+    database
+      .prepare(
+        "INSERT INTO local_finding_embeddings VALUES (?, 'local-model', '[1,0]', 'local-cache-key')",
+      )
+      .run(original.finding.findingId);
+    const updated = {
+      ...original,
+      embedding: { model: "service-model", vector: [0, 1] },
+    };
+    assert.deepEqual(storeFindings(database, [updated], "updated"), {
+      findingIds: [original.finding.findingId],
+    });
+    assert.equal(
+      database
+        .prepare("SELECT details_json FROM findings WHERE id = ?")
+        .get(original.finding.findingId)?.details_json,
+      stored,
+    );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT cache_key FROM local_finding_embeddings WHERE finding_id = ?",
+        )
+        .get(original.finding.findingId)?.cache_key,
+      "local-cache-key",
+    );
+    assert.equal(
+      database
+        .prepare("SELECT model FROM finding_embeddings WHERE finding_id = ?")
+        .get(original.finding.findingId)?.model,
+      "service-model",
+    );
+    storeFindings(
+      database,
+      [
+        {
+          ...updated,
+          finding: { ...original.finding, title: "Changed finding body" },
+        },
+      ],
+      "changed",
+    );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT cache_key FROM local_finding_embeddings WHERE finding_id = ?",
+        )
+        .get(original.finding.findingId),
+      undefined,
+    );
+  });
+}
+
 test("finding helper help exits without reading stdin", async () => {
   const helper = fileURLToPath(
     new URL(

@@ -21,7 +21,7 @@ import {
 } from "./diagnostics.js";
 
 // Increment when validation or review execution changes without a prompt/schema change.
-const REVIEW_CONTRACT_VERSION = 5;
+const REVIEW_CONTRACT_VERSION = 6;
 
 export async function reviewSettingsDigest(
   environment: NodeJS.ProcessEnv,
@@ -62,6 +62,8 @@ export class CheckpointedReviewRunner {
   async assertSourceUnchanged(): Promise<void> {
     const current = await this.workflow.sourceSnapshot(
       this.source["repository"] as string,
+      false,
+      (this.source["privateStatePaths"] ?? []) as string[],
     );
     if (workflowDigest(current) !== workflowDigest(this.source))
       throw new CodexSecurityError(

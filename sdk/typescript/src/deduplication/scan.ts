@@ -1,16 +1,20 @@
 import { loadContractWithScanDirectory } from "../contract.js";
+import type { CodexSecuritySurface } from "../api.js";
 import { environmentEntry } from "../auth.js";
 import {
   bundledPluginRoot,
   runWorkbench,
   codexSecurityStateDirectory,
+  canonicalizeModelSafePath,
 } from "../runtime.js";
 import {
   resolveCompletedScan,
   type SavedScanDependencies,
 } from "../saved-scan.js";
 import { savedScanWorkbench } from "../saved-scan-bootstrap.js";
-import { CodexReviewRunner } from "./codex-review.js";
+import { CodexReviewRunner, reviewSqliteHome } from "./codex-review.js";
+import { mkdir } from "node:fs/promises";
+import { isWithin } from "../trusted-executable.js";
 import {
   FindingDeduplicator,
   deduplicationConcurrency,
@@ -93,6 +97,7 @@ export async function deduplicateScanDirectory(
 }
 
 type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
+  surface?: CodexSecuritySurface;
   environment?: NodeJS.ProcessEnv;
   reviewer?: DeduplicationReviewer;
   reviewRunner?: Pick<CodexReviewRunner, "run">;
@@ -268,6 +273,8 @@ async function deduplicateResolvedScan(
               await workflow!.sourceSnapshot(
                 repositoryPath,
                 saved.pendingWrite.local.gitDisabled,
+                (saved.pendingWrite.local.source["privateStatePaths"] ??
+                  []) as string[],
               ),
             ))
       ) {
@@ -301,9 +308,26 @@ async function deduplicateResolvedScan(
         repositoryPath,
         undefined,
         options.onDiagnostic,
+        dependencies.surface ?? "sdk",
       );
+    const privateStatePaths: string[] = [];
+    if (workflow && !dependencies.reviewer) {
+      const root = await canonicalizeModelSafePath(repositoryPath);
+      const sqliteHome = await canonicalizeModelSafePath(
+        reviewSqliteHome(reviewEnvironment, reviewConfiguration),
+      );
+      if (isWithin(root, sqliteHome)) {
+        if (isWithin(sqliteHome, root))
+          throw new CodexSecurityError(
+            "Native SQLite storage must not be the reviewed repository root when checkpointing deduplication.",
+          );
+        // Create missing private parents before capturing source; native startup owns the database files.
+        await mkdir(sqliteHome, { recursive: true, mode: 0o700 });
+        privateStatePaths.push(sqliteHome);
+      }
+    }
     const source = workflow
-      ? await workflow.sourceSnapshot(repositoryPath)
+      ? await workflow.sourceSnapshot(repositoryPath, false, privateStatePaths)
       : undefined;
     const checkpoints = workflow
       ? new CheckpointedReviewRunner(

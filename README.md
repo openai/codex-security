@@ -21,10 +21,15 @@ fixing security vulnerabilities in your code.
 Requires Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, and Python 3.10+.
 Python 3.10 also requires `tomli`.
 
+This example explicitly requests Daybreak Blue and requires the corresponding
+access. Without Daybreak access, omit `--cyber-access-program daybreak_blue`
+or use `--cyber-access-program standard`.
+
 ```bash
 npm install @openai/codex-security
 npx @openai/codex-security login
-npx @openai/codex-security scan /path/to/repository
+npx @openai/codex-security scan /path/to/repository \
+  --cyber-access-program daybreak_blue
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
@@ -104,6 +109,10 @@ repository scan, add an OpenAI API key as the repository secret
 `.github/workflows/codex-security.yml`. Replace `REPLACE_WITH_REVIEWED_COMMIT`
 with the full SHA of an Action commit.
 
+This workflow requests Daybreak Blue. Use an API key from a project with Blue
+enabled; without Daybreak access, omit `cyber-access-program` or set it to
+`standard`.
+
 ```yaml
 name: Codex Security
 on:
@@ -118,6 +127,7 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
+      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
       - name: Set up the Ubuntu sandbox
         run: |
           sudo apt-get update
@@ -130,6 +140,7 @@ jobs:
         with:
           model: gpt-5.6-sol
           effort: high
+          cyber-access-program: daybreak_blue
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```

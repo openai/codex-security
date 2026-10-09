@@ -38,7 +38,7 @@ import deep_scan_workbench as deep_scan
 import workbench_native_indexes as native_indexes
 import workbench_progress as progress
 import workbench_publication as publication
-import workbench_remediation as remediation
+import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
@@ -81,7 +81,6 @@ from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_local_dedupe import local_dedupe
-from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
@@ -89,9 +88,6 @@ from workbench_scan_start import (
     scan_diff_identity,
     scan_target_identity,
     stored_diff_target,
-)
-from workbench_scan_start import (
-    compact_timestamp as compact_timestamp,
 )
 from workbench_schema import (
     MIGRATIONS,
@@ -682,6 +678,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_head_revision = inspected["diffTarget"]["headRevision"]
                 diff_content_digest = inspected["diffTarget"].get("contentDigest")
         except SystemExit:
+            # Preserve an incomplete setup so workspace_state can report its validation error.
             pass
     with connection:
         target_id = (
@@ -1891,7 +1888,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 and remediation["pending_action"] is not None
                 and not (
                     remediation["state"] == "failed"
-                    and not remediation_claim_is_active(remediation)
+                    and not remediation_state.remediation_claim_is_active(remediation)
                 )
             ):
                 raise SystemExit(
@@ -2003,7 +2000,7 @@ def request_finding_remediation(
                 "verifying",
             }
             if active_operation and (
-                latest["state"] != "failed" or remediation_claim_is_active(latest)
+                latest["state"] != "failed" or remediation_state.remediation_claim_is_active(latest)
             ):
                 raise SystemExit(
                     "Finish or retry the active remediation operation before regenerating."
@@ -2275,8 +2272,8 @@ def set_finding_remediation(
             )
         if current["pending_action_claim_token"] != action_token:
             raise SystemExit("This remediation host request is owned by a different action token.")
-        remediation.require_transition(current["state"], args.state)
-        remediation.require_pending_action(current, args.state)
+        remediation_state.require_transition(current["state"], args.state)
+        remediation_state.require_pending_action(current, args.state)
         patch_path = current["patch_path"]
         if args.patch_path is not None:
             requested_patch_path = require_scan_relative_file(scan, args.patch_path)
@@ -2592,6 +2589,7 @@ def workspace_state(
                 target = require_target(workspace["target_path"])
                 target_metadata = git_target_metadata(target)
             except SystemExit:
+                # Target metadata is optional; retain the original setup error for the caller.
                 pass
     result["diffTarget"] = validated_diff_target or persisted_diff_target
     result["setupValidation"] = {
@@ -2810,7 +2808,7 @@ def scan_result(
 
 def remediation_availability(scan: sqlite3.Row) -> tuple[bool, str | None]:
     if scan["status"] != "complete":
-        return False, remediation.SCAN_STATUS_ERROR
+        return False, remediation_state.SCAN_STATUS_ERROR
     try:
         current_revision = git_revision(require_scan_target_identity(scan))
     except SystemExit as exc:
@@ -3320,7 +3318,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     with closing(
         connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
     ) as connection:
-        remediation.require_available(connection, args, require_scan)
+        remediation_state.require_available(connection, args, require_scan)
         if args.command == "create-workspace":
             result = create_workspace(connection, args)
         elif args.command == "get-workspace":
@@ -3462,7 +3460,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         elif args.command == "cancel-finding-remediation-request":
             result = scan_context(
                 connection,
-                remediation.cancel_finding_remediation_request(connection, args),
+                remediation_state.cancel_finding_remediation_request(connection, args),
             )
         elif args.command == "set-finding-remediation":
             result = set_finding_remediation(connection, args)

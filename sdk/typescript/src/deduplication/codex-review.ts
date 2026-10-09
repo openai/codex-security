@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { z } from "incur";
+import type { JsonObject } from "../config.js";
 import {
   comparisonEnvironment,
   disabledMcpServers,
@@ -23,6 +24,8 @@ import {
 } from "../runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
 import { VERSION } from "../version.js";
+import type { CodexSecuritySurface } from "../api.js";
+import { codexSecurityRequestMetadata } from "../request-metadata.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
@@ -51,9 +54,7 @@ import {
   type DeduplicationDiagnosticObserver,
 } from "./diagnostics.js";
 
-const reviewErrorSchema = z
-  .object({ reason: z.string().trim().min(1) })
-  .strict();
+const reviewErrorSchema = z.strictObject({ reason: z.string().trim().min(1) });
 
 export interface CodexReview<T> extends Pick<
   DeduplicationReviewRequest,
@@ -134,6 +135,24 @@ function transientCodexError(info: unknown): boolean {
   return false;
 }
 
+export function reviewSqliteHome(
+  environment: NodeJS.ProcessEnv,
+  executionConfig: JsonObject,
+): string {
+  return typeof executionConfig["sqlite_home"] === "string"
+    ? resolve(
+        configuredCodexHome(environment),
+        expandHome(executionConfig["sqlite_home"], environment),
+      )
+    : resolve(
+        expandHome(
+          environmentEntry(environment, "CODEX_SQLITE_HOME")?.trim() ||
+            configuredCodexHome(environment),
+          environment,
+        ),
+      );
+}
+
 export class CodexReviewRunner {
   constructor(
     private readonly environment: NodeJS.ProcessEnv = process.env,
@@ -145,6 +164,7 @@ export class CodexReviewRunner {
       random?: () => number;
     } = {},
     private readonly onDiagnostic?: DeduplicationDiagnosticObserver,
+    private readonly surface: CodexSecuritySurface = "sdk",
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
@@ -257,14 +277,7 @@ export class CodexReviewRunner {
           expandHome(inheritedSqliteHome, environment),
         );
       }
-      const sqliteHome =
-        typeof executionConfig["sqlite_home"] === "string"
-          ? resolve(
-              configuredCodexHome(environment),
-              expandHome(executionConfig["sqlite_home"], environment),
-            )
-          : environmentEntry(environment, "CODEX_SQLITE_HOME")?.trim() ||
-            configuredCodexHome(environment);
+      const sqliteHome = reviewSqliteHome(environment, executionConfig);
       if (hasCommandAuth(config)) {
         args.push(
           ...modelProviderConfigOverride(
@@ -368,7 +381,11 @@ export class CodexReviewRunner {
                 update_plan: { enabled: false },
                 experimental_request_user_input: { enabled: false },
               },
-              responses_api_metadata: { codex_security_surface: "sdk" },
+              responses_api_metadata: {
+                ...(executionConfig["responses_api_metadata"] as
+                  Record<string, string> | undefined),
+                ...codexSecurityRequestMetadata(this.surface, "dedupe"),
+              },
               features: {
                 code_mode: {
                   direct_only_tool_namespaces: ["review_validator"],

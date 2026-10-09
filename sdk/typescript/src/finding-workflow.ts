@@ -141,12 +141,14 @@ export class FindingWorkflow {
   async sourceSnapshot(
     repository: string,
     gitDisabled = false,
+    privateStatePaths: readonly string[] = [],
   ): Promise<JsonObject> {
     return (
       await this.request({
         action: "source",
         repository,
         ...(gitDisabled ? { gitDisabled } : {}),
+        ...(privateStatePaths.length ? { privateStatePaths } : {}),
       })
     )["source"] as JsonObject;
   }

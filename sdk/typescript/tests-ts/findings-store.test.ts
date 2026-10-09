@@ -1,5 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
@@ -8,7 +7,10 @@ import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { EmbeddedFinding } from "../src/server/storage.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-const directories: string[] = [];
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const { temporaryDirectory, cleanup } =
+  createApiTestFixtures("findings-store-");
 const example = (
   JSON.parse(
     await readFile(
@@ -40,14 +42,10 @@ function embedded(
   return { finding: finding(index), embedding: { model, vector } };
 }
 
-afterEach(async () => {
-  for (const directory of directories.splice(0))
-    await rm(directory, { recursive: true, force: true });
-});
+afterEach(cleanup);
 
 async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), "findings-store-"));
-  directories.push(directory);
+  const directory = await temporaryDirectory();
   const environment = {
     ...process.env,
     CODEX_SECURITY_STATE_DIR: join(directory, "state with spaces"),
