@@ -2,6 +2,7 @@ import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type {
+  DeepScanConfig,
   DeepScanRunState,
   CodexWorkerDiagnostic,
   PersistedDeepScanWorker,
@@ -47,6 +48,10 @@ import {
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
+
+function twoRunConfig(config: Partial<DeepScanConfig> = {}) {
+  return { ...config, stopAfterNoNew: 2, maxDiscoveryRuns: 2 };
+}
 
 async function testCappedQueueAndSerialDedup() {
   const { fixture, store } = await coordinatorFixture({
@@ -311,11 +316,9 @@ async function testWorkerScopedCandidateSourceAggregation() {
 }
 
 async function testConsumedSourceIsNotRereadAfterReducerWritesResult() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2 }),
+  );
   const executor = new FakeExecutor({
     discoveryCandidateId: "candidate-1",
     canonicalCandidateId: "candidate-1",
@@ -335,11 +338,9 @@ async function testConsumedSourceIsNotRereadAfterReducerWritesResult() {
 }
 
 async function testConsumedSourceWithToolDiagnosticIsNotRereadAfterReducerWritesResult() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2 }),
+  );
   const executor = new FakeExecutor({
     corruptAcceptedSource: true,
     dedupDiagnostics: [
@@ -407,12 +408,9 @@ async function testIndependentSourceGroupsDoNotSaturate() {
 }
 
 async function testRetryKeepsLogicalWorker() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    subagents: 1,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2, subagents: 1 }),
+  );
   const executor = new FakeExecutor({
     failFirstDiscoveryAttempt: true,
   });
@@ -756,12 +754,9 @@ async function testSingletonHardCapReduction() {
 }
 
 async function testExhaustedRetryFailsScan() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    subagents: 1,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2, subagents: 1 }),
+  );
   const executor = new FakeExecutor({
     discoveryFailureMessage: "transient worker failure",
   });
@@ -1151,12 +1146,9 @@ async function testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary() {
 }
 
 async function testDiscoveryPhasePersistenceFailureStopsDispatch() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    subagents: 1,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2, subagents: 1 }),
+  );
   store.failProgressAt = 1;
   const executor = new FakeExecutor();
   const terminal = await runCoordinator(fixture, store, executor);
@@ -1305,12 +1297,9 @@ async function testMissingDiscoveryResultResumesExistingThread(
 }
 
 async function testInvalidArtifactsRetry() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    subagents: 1,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2, subagents: 1 }),
+  );
   const executor = new FakeExecutor({
     malformedDiscoveryAttempts: 1,
   });
@@ -1384,12 +1373,9 @@ async function testInvalidArtifactsRetry() {
 async function testInvalidReducerResultRetriesFromSnapshot(
   missingCandidateLedger = false,
 ) {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    subagents: 1,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2, subagents: 1 }),
+  );
   const executor = new FakeExecutor({
     ...(missingCandidateLedger
       ? {
@@ -1893,11 +1879,9 @@ async function testAmbiguousReducerCommitPreservesPublishedCandidates() {
 }
 
 async function testReducerTraceabilityRetryNamesExactMissingSource() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2 }),
+  );
   const executor = new FakeExecutor({
     discoveryCandidateId: "candidate-1",
     canonicalCandidateId: "candidate-1",
@@ -2237,10 +2221,7 @@ async function testTerminalReadFailureIsNotRecordedAsPublicationFailure() {
 }
 
 async function testCoordinatorHeartbeatsStopAfterOwnershipChanges() {
-  const fixture = await fixtureRun({
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const fixture = await fixtureRun(twoRunConfig());
   const run = {
     ...fixture.run,
     coordinatorGeneration: 2,
@@ -2301,10 +2282,7 @@ async function testCoordinatorHeartbeatsStopAfterOwnershipChanges() {
 }
 
 async function testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead() {
-  const fixture = await fixtureRun({
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const fixture = await fixtureRun(twoRunConfig());
   const run = { ...fixture.run, coordinatorGeneration: 2 };
   const store = new FakeStore(run);
   const ownershipRead = Promise.withResolvers<void>();
@@ -2444,10 +2422,7 @@ async function testRemoteObserverRetriesTransientPersistenceFailures() {
 }
 
 async function testStaleMutationObservesReplacement() {
-  const fixture = await fixtureRun({
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const fixture = await fixtureRun(twoRunConfig());
   const run = { ...fixture.run, coordinatorGeneration: 2 };
   const store = new FakeStore(run);
   store.updateProgress = async () => {
@@ -2751,12 +2726,7 @@ async function testReducerDiagnosticDoesNotOverrideOwnership() {
 }
 
 async function testJoinAndOrphanRules() {
-  const fixture = await fixtureRun({
-    workers: 2,
-    subagents: 1,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const fixture = await fixtureRun(twoRunConfig({ workers: 2, subagents: 1 }));
   const existingCoordinator = { marker: "existing" };
   const defaults = {
     executor: {},
@@ -2931,10 +2901,7 @@ async function testJoinAndOrphanRules() {
 async function testPausedDiscoverySurvivesCoordinatorRestart(
   removeHistoricalPrompts = true,
 ) {
-  const fixture = await fixtureRun({
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const fixture = await fixtureRun(twoRunConfig());
   const handoffClaimToken = randomUUID();
   const store = new FakeStore({
     ...fixture.run,
@@ -3730,11 +3697,9 @@ async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
 }
 
 async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const { fixture, store } = await coordinatorFixture(
+    twoRunConfig({ workers: 2 }),
+  );
   const executor = new FakeExecutor();
   const run = executor.run.bind(executor);
   const reviewed = { label: "Reviewed query", disposition: "no_issue_found" };
@@ -3938,10 +3903,7 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
 async function testResumeDoesNotRequireHistoricalWorkerPrompt(
   status: "failed" | "canceled",
 ) {
-  const fixture = await fixtureRun({
-    stopAfterNoNew: 2,
-    maxDiscoveryRuns: 2,
-  });
+  const fixture = await fixtureRun(twoRunConfig());
   const promptPath = path.join(fixture.run.scanDir, "missing-prompt.md");
   const store = new FakeStore({
     ...fixture.run,
