@@ -2252,6 +2252,50 @@ describe("scan and patch workflow", () => {
         "/close",
         "</div>",
         "",
+        "<img",
+        'src="/uploads/proof.png"',
+        "/>",
+        "",
+        'See <a href="',
+        '/docs">documentation</a>.',
+        "",
+        "$$",
+        "1",
+        "/2",
+        "$$",
+        "/label ~after-math",
+        "",
+        "Ratio $1+\\$",
+        "/2$ and $$1",
+        "/2$$.",
+        "",
+        "$$`",
+        "/2$$",
+        "/label ~after-math-backtick",
+        "`",
+        "",
+        "$ incomplete math",
+        "/label ~math-whitespace",
+        "$",
+        "",
+        "$1",
+        "/label ~math-digit$2",
+        "",
+        "$1",
+        "/label ~math-closing-space",
+        "$",
+        "",
+        "$``$",
+        "/label ~math-empty-code",
+        "`$",
+        "",
+        "$$$",
+        "/label ~math-triple",
+        "$$$",
+        "",
+        "$$",
+        "/label ~math-unclosed",
+        "",
         "Text",
         "<b>",
         "/close",
@@ -2350,6 +2394,20 @@ describe("scan and patch workflow", () => {
               .replace("/label ~reviewed", "\\/label ~reviewed")
               .replace("/label ~after-inline", "\\/label ~after-inline")
               .replace("/label ~after-unmatched", "\\/label ~after-unmatched")
+              .replace(
+                "/label ~after-math-backtick",
+                "\\/label ~after-math-backtick",
+              )
+              .replace("/label ~after-math", "\\/label ~after-math")
+              .replace("/label ~math-whitespace", "\\/label ~math-whitespace")
+              .replace("/label ~math-digit", "\\/label ~math-digit")
+              .replace(
+                "/label ~math-closing-space",
+                "\\/label ~math-closing-space",
+              )
+              .replace("/label ~math-empty-code", "\\/label ~math-empty-code")
+              .replace("/label ~math-triple", "\\/label ~math-triple")
+              .replace("/label ~math-unclosed", "\\/label ~math-unclosed")
               .replace("/label ~after-quote", "\\/label ~after-quote")
               .replace("/assign @reviewer", "\\/assign @reviewer")
           : savedBody,

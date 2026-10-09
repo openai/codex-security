@@ -46,7 +46,7 @@ import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
-import { fromMarkdown } from "mdast-util-from-markdown";
+import { gitlabPatchDescription } from "./gitlab-patch-description.js";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
@@ -6954,70 +6954,6 @@ async function publishPatchBranch(
     );
     throw error;
   }
-}
-
-function gitlabPatchDescription(body: string): string {
-  const escaped = new Set<number>();
-  let offset = 0;
-  for (;;) {
-    const markdown = body.slice(offset);
-    let closingQuote: RegExpExecArray | null | undefined;
-    for (const node of fromMarkdown(markdown).children) {
-      const { start, end } = node.position!;
-      const quote =
-        node.type === "blockquote"
-          ? /^ {0,3}(>{3,})[ \t]*(?:\r?\n|$)/u.exec(
-              markdown.slice(start.offset),
-            )
-          : null;
-      if (quote) {
-        // GitLab closes fenced quotes before parsing their children, even code.
-        // Resume CommonMark parsing after the matching or longer closing fence.
-        const fence = new RegExp(
-          `^ {0,3}>{${quote[1]!.length},}[ \\t]*(?:\\r?\\n|$)`,
-          "gm",
-        );
-        fence.lastIndex = start.offset! + quote[0].length;
-        closingQuote = fence.exec(markdown);
-        break;
-      }
-      if (node.type !== "paragraph") continue;
-
-      // Preserve code spans using their parsed boundaries, including nested
-      // formatting and backtick runs shorter than the opening delimiter.
-      const inlineCodeRanges: [number, number][] = [];
-      const inlineNodes = [...node.children];
-      for (const inline of inlineNodes) {
-        if (inline.type === "inlineCode")
-          inlineCodeRanges.push([
-            inline.position!.start.offset!,
-            inline.position!.end.offset!,
-          ]);
-        else if ("children" in inline) inlineNodes.push(...inline.children);
-      }
-
-      // Match GitLab's top-level paragraph and HTML exclusions.
-      const paragraphOffset = start.offset! - start.column + 1;
-      const paragraph = markdown.slice(paragraphOffset, end.offset);
-      for (const match of paragraph.matchAll(
-        /^<[^>]+?>\r?\n[\s\S]+?\r?\n<\/[^>]+?>\r?$|^\//gmu,
-      )) {
-        const slashOffset = paragraphOffset + match.index;
-        if (
-          match[0] === "/" &&
-          !inlineCodeRanges.some(
-            ([start, end]) => slashOffset >= start && slashOffset < end,
-          )
-        )
-          escaped.add(offset + slashOffset);
-      }
-    }
-    if (!closingQuote) break;
-    offset += closingQuote.index + closingQuote[0].length;
-  }
-  return body.replace(/^\//gmu, (slash, offset: number) =>
-    escaped.has(offset) ? `\\${slash}` : slash,
-  );
 }
 
 function patchRemoteHost(remote: string): string | undefined {

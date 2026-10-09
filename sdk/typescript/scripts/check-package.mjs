@@ -183,6 +183,7 @@ const allowedFiles = new Set([
     "finding-catalogue",
     "findings-import",
     "github",
+    "gitlab-patch-description",
     "index",
     "import-scan",
     "knowledge-base",
