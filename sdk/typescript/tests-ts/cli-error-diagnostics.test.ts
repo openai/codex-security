@@ -161,6 +161,18 @@ test.each([
     advice: undefined,
   },
   {
+    label: "native refresh recovery",
+    diagnostic:
+      "Synthetic context: your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again. Synthetic artifact recovery failed.",
+    advice: "Please sign in again.",
+  },
+  {
+    label: "expired native refresh",
+    diagnostic:
+      "Synthetic context: your access token could not be refreshed because your refresh token has expired. Please log out and sign in again. Synthetic artifact recovery failed.",
+    advice: "stored ChatGPT sign-in could not be refreshed",
+  },
+  {
     label: "authentication",
     diagnostic: "401 synthetic unauthorized request",
     advice: "Authentication failed",
@@ -200,7 +212,10 @@ test.each([
         expect(stderr.text()).not.toContain(
           "cannot access the configured model",
         );
-      } else expect(stderr.text()).toContain(advice);
+      } else {
+        expect(stderr.text()).toContain(advice);
+        expect(stderr.text().split(advice)).toHaveLength(2);
+      }
       expect(stderr.text()).not.toContain(controls);
       if (json) {
         const output = JSON.parse(stdout.text());
@@ -210,7 +225,10 @@ test.each([
           expect(output.message).not.toContain(
             "cannot access the configured model",
           );
-        } else expect(output.message).toContain(advice);
+        } else {
+          expect(output.message).toContain(advice);
+          expect(output.message.split(advice)).toHaveLength(2);
+        }
       } else expect(stdout.text()).toBe("");
       expect(failure.message).toBe(`${diagnostic}; ${detail}`);
       expect(failure.cause).toBe(cause);
