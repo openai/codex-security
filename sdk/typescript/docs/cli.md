@@ -1433,8 +1433,8 @@ schema, and `completions bash|zsh|fish` for shell completions. Scan output suppo
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
 MCP exposes only read-only `info`, because the transport cannot cancel scans.
 
-For a local findings API and deduplication, see the
-[findings service guide](findings-service.md).
+For local findings storage, deduplication, and custom endpoints, see the
+[findings guide](findings-service.md).
 
 ## Containerized bulk scans
 

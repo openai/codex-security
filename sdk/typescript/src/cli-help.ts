@@ -18,7 +18,7 @@ const COMMAND_GROUPS: readonly Group[] = [
       "publish",
     ],
   ],
-  ["Automate", ["bulk-scan", "scan-components", "install-hook", "serve"]],
+  ["Automate", ["bulk-scan", "scan-components", "install-hook"]],
   ["Setup and support", ["login", "logout", "init", "info", "feedback"]],
 ];
 
@@ -96,7 +96,6 @@ const VALUE_LABELS: Record<string, string> = {
   "filter-output": "keys",
   "token-limit": "count",
   "token-offset": "count",
-  port: "port",
   to: "destination",
 };
 
@@ -204,13 +203,9 @@ function optionRow(row: Row, command: string): Row {
 
 function globalRows(rows: Row[], command: string): Row[] {
   const scan = command === "scan" || command === "scan import";
-  const plainOutput = [
-    "validate",
-    "login",
-    "logout",
-    "serve",
-    "export",
-  ].includes(command);
+  const plainOutput = ["validate", "login", "logout", "export"].includes(
+    command,
+  );
   const visible = rows.filter(({ label }) => {
     if (scan && label.startsWith("--filter-output")) return false;
     return !(

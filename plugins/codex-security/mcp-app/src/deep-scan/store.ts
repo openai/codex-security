@@ -5,6 +5,7 @@ import { writeJsonAtomic } from "./artifacts.js";
 import {
   boundedDeepScanErrorMessage,
   DeepScanNonRetryableError,
+  DeepScanOwnershipChangedError,
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
@@ -284,7 +285,7 @@ export class WorkbenchDeepScanStore {
           ? ["--result-manifest-path", update.resultManifestPath]
           : []),
         ...(update.threadId ? ["--sdk-thread-id", update.threadId] : []),
-        ...(update.error ? ["--error-message", update.error] : []),
+        ...(update.error ? [`--error-message=${update.error}`] : []),
         ...(update.replaceableFailureKind
           ? ["--replaceable-failure-kind", update.replaceableFailureKind]
           : []),
@@ -399,8 +400,7 @@ export class WorkbenchDeepScanStore {
         "--scan-id",
         scanId,
         ...this.coordinatorLeaseArgs(scanId),
-        "--message",
-        message,
+        `--message=${message}`,
         ...(manifestPath ? ["--manifest-path", manifestPath] : []),
         ...(stagedManifestPath
           ? ["--staged-manifest-path", stagedManifestPath]
@@ -424,8 +424,7 @@ export class WorkbenchDeepScanStore {
           ...(coordinatorGeneration === undefined
             ? this.coordinatorLeaseArgs(scanId)
             : ["--coordinator-generation", String(coordinatorGeneration)]),
-          "--message",
-          message,
+          `--message=${message}`,
         ],
         true,
       ),
@@ -490,8 +489,23 @@ export class WorkbenchDeepScanStore {
           : await this.runWorkbench(args, input);
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
-        if (scanId && isStaleCoordinatorGenerationError(error)) {
-          this.coordinatorLeases.delete(scanId);
+        const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;
+        if (lease && isStaleCoordinatorGenerationError(error)) {
+          // Diagnostics can contain paths or user text; only state establishes ownership.
+          const current = await this.get(
+            lease.input.scanId,
+            lease.input.threadId,
+          ).catch(() => undefined);
+          if (
+            current &&
+            (current.status !== "running" ||
+              (current.coordinatorGeneration !== undefined &&
+                lease.run.coordinatorGeneration !== undefined &&
+                current.coordinatorGeneration >
+                  lease.run.coordinatorGeneration))
+          ) {
+            throw new DeepScanOwnershipChangedError(current, error);
+          }
         }
         throw error;
       }

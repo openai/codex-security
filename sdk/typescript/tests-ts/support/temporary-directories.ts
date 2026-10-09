@@ -27,7 +27,10 @@ export function createApiTestFixtures(
   prefix = "codex-security-api-",
   canonicalize = true,
 ) {
-  const temporaryDirectories = createTemporaryDirectories(canonicalize);
+  const temporaryDirectories = createTemporaryDirectories(
+    canonicalize,
+    removeTemporaryDirectory,
+  );
   return {
     temporaryDirectories,
     cleanup: temporaryDirectories.cleanup,
