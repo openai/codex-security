@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { build } from "esbuild";
+import Ajv2020 from "ajv/dist/2020.js";
 import { nodeCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PassThrough, Writable } from "node:stream";
@@ -79,6 +80,8 @@ async function connect(
     clientInfo: { name: "codex-security-test", version: "1.0.0" },
   }).result;
   send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const { tools } = await request<{ tools: Tool[] }>("tools/list").result;
+  const validator = new Ajv2020();
   return {
     input,
     output,
@@ -86,12 +89,29 @@ async function connect(
     serving,
     responses,
     request,
-    call: (name: string, args: object = {}, requestId?: string | number) =>
-      request<CallToolResult>(
+    call: (name: string, args: object = {}, requestId?: string | number) => {
+      const call = request<CallToolResult>(
         "tools/call",
         { name, arguments: args },
         requestId,
-      ),
+      );
+      return {
+        ...call,
+        result: call.result.then((result) => {
+          if (result.structuredContent !== undefined) {
+            const schema = tools.find(
+              (tool) => tool.name === name,
+            )?.outputSchema;
+            expect(schema).toBeDefined();
+            expect(
+              validator.validate(schema!, result.structuredContent),
+              validator.errorsText(),
+            ).toBe(true);
+          }
+          return result;
+        }),
+      };
+    },
     cancel: (requestId: string | number) =>
       send({
         jsonrpc: "2.0",
@@ -457,7 +477,16 @@ describe("CLI MCP scans", () => {
   test("preserves findings and per-call failure status without stopping the server", async () => {
     for (const [result, input, exitCode] of [
       [fakeResult(["high"]), { failOnSeverity: "high" }, 1],
-      [fakeResult([], "partial"), {}, 2],
+      [fakeResult(["high"], "partial"), {}, 2],
+      [
+        fakeResult(["high"], "partial", {
+          input_tokens: 1_250,
+          cached_input_tokens: 200,
+          output_tokens: 30,
+        }),
+        { mode: "deep", maxCost: 0.001 },
+        2,
+      ],
     ] as const) {
       const session = await connect(dependencies({ result }));
       try {
@@ -467,6 +496,13 @@ describe("CLI MCP scans", () => {
           exitCode,
           data: JSON.parse(JSON.stringify(result.toJSON())),
         });
+        if (result.coverage.completeness === "partial") {
+          const error = "Scan coverage is partial; results may be incomplete.";
+          expect(response.structuredContent).toMatchObject({ error });
+          expect(session.stderr.text()).toContain(error);
+        }
+        if ("maxCost" in input)
+          expect(session.stderr.text()).toContain("cost limit");
         expect((await session.call("info").result).isError).not.toBe(true);
       } finally {
         await session.close();
