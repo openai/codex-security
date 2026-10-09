@@ -108,7 +108,18 @@ describe("worker progress events", () => {
     expect(preflight([])).toBeNull();
   });
 
-  test("reads configured worker capacity from a completed preflight", () => {
+  test.each([
+    '"/managed/python" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/config_preflight.py" --profile security_scan',
+    '"$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" --helper config-preflight --profile security_scan',
+    '& "C:\\plugin\\scripts\\launch_codex_security_mcp.cmd" --helper config-preflight --profile security_scan',
+    'node "/plugin/mcp/helpers.mjs" config-preflight --profile security_scan',
+    '/plugin/scripts/launch_codex_security_mcp --helper "config-preflight" --profile security_scan',
+    '& "C:\\plugin\\scripts\\launch_codex_security_mcp.cmd" "--helper" "config-preflight" --profile security_scan',
+    "'/plugin/scripts/launch_codex_security_mcp' '--helper' 'config-preflight' --profile security_scan",
+    'node "/plugin/mcp/helpers.mjs" "config-preflight" --profile security_scan',
+    'node helpers.mjs "config-preflight" --profile security_scan',
+    '"launch_codex_security_mcp" "--helper" "config-preflight" --profile security_scan',
+  ])("reads configured worker capacity from preflight: %s", (command) => {
     const output = JSON.stringify({
       profile: "security_scan",
       status: "ready",
@@ -118,14 +129,7 @@ describe("worker progress events", () => {
       ],
     });
 
-    expect(
-      workerStatusFromEvent(
-        commandEvent(
-          '"/managed/python" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/config_preflight.py" --profile security_scan',
-          output,
-        ),
-      ),
-    ).toEqual({
+    expect(workerStatusFromEvent(commandEvent(command, output))).toEqual({
       kind: "preflight",
       delegation: "available",
       configuredSlots: 8,

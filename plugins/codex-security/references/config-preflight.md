@@ -6,17 +6,29 @@ The top-level parent reads `artifact-storage.md` once before preflight and follo
 
 Load `desktop-config-preflight.md` only after the host explicitly identifies itself as the Codex desktop app.
 
-Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts. Before constructing the first helper command, inspect the current tool surface once and use that discovery result for both the runtime checks and `<verified-multi-agent-runtime-arguments>`. Do not omit active runtime facts from the first invocation and wait for an `incomplete` result before supplying them. The command is written on one line so it works in PowerShell, Command Prompt, and POSIX shells:
+Before constructing the first helper command, inspect the current tool surface once and use that discovery result for both the runtime checks and `<verified-multi-agent-runtime-arguments>`. Do not omit active runtime facts from the first invocation and wait for an `incomplete` result before supplying them. In POSIX shells, use:
 
 ```text
-<python_command> <plugin_dir>/scripts/config_preflight.py --profile <capability-profile> --cwd <scan-working-directory> --runtime-check delegation_available=<true|false> <verified-multi-agent-runtime-arguments>
+<plugin_dir>/scripts/launch_codex_security_mcp --helper config-preflight --profile <capability-profile> --cwd <scan-working-directory> --runtime-check delegation_available=<true|false> <verified-multi-agent-runtime-arguments>
 ```
+
+On Windows, use this PowerShell invocation. Replace the path placeholders inside single quotes with literal paths, doubling any single quote in a path. Replace `<active-config-argument>` with `--config "%CODEX_SECURITY_CONFIG_PATH%"` when that environment variable is set; otherwise remove the placeholder:
+
+```powershell
+$env:preflightPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
+$env:preflightCwd = (Convert-Path -LiteralPath '<scan-working-directory>' -ErrorAction Stop) + '\.'
+cmd.exe /d /v:off /s /c '""%preflightPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper config-preflight --profile <capability-profile> --cwd "%preflightCwd%" <active-config-argument> --runtime-check delegation_available=<true|false> <verified-multi-agent-runtime-arguments>"'
+```
+
+These temporary environment variables belong to the calling shell, not application settings. Resolve paths against PowerShell's current location before CMD starts. The appended `\.` keeps drive roots safe in the quoted directory argument. CMD expands the references once, preserving literal `%` and `!` in path values. Pass additional path arguments through quoted environment references in the same way. This helper uses Node.js and does not need Python.
+
+On macOS, automatic runtime selection prefers a Node runtime that can load the plugin's packaged native addon, trying the remaining runtime locations, including `PATH`. If none can load it, the launcher uses the original first runtime so helpers that do not need the addon still work; commands that need it report their native loading error. An explicit executable `CODEX_MCP_NODE_PATH` remains authoritative.
 
 Determine the runtime-check values from the current tool surface. Delegation tools may be deferred instead of appearing in the initial active tool list. If `tool_search` is available and delegation tools are not already active, search for subagent or multi-agent tools before passing `--runtime-check delegation_available=false`. Pass `false` only after tool discovery fails to expose a usable delegation tool. The `security_diff_scan` profile additionally retains its existing `--runtime-check goal_tools_available=<true|false>`; Standard and Deep profiles do not inspect or require goal tools. Consume the discovered tool namespace as runtime evidence too: when the current tool surface exposes `multi_agent_v1`, replace `<verified-multi-agent-runtime-arguments>` with `--multi-agent-runtime-owner native --multi-agent-runtime-version v1 --multi-agent-runtime-provenance tool-surface`. Do not pass a V2 session cap for V1. For other runtimes, use the verified owner, version, capacity when required, and provenance described below. When static config fully describes the active mode and no session-selected runtime overrides it, remove the placeholder. When the runtime exposes a more accurate effective config value than the user's base config file, add `--effective-config <path>=<json-value>`.
 
 For standard and diff scans, a passed `delegated_workers` check means the runtime supports delegated review and the explicitly invoked scan authorizes it; a worker-slot result is the configured maximum, not a promise that every worker will start. If the runtime forbids delegation, pass `delegation_available=false`, continue on the documented parent fallback, and do not describe configured slots as running workers or reduced coverage.
 
-When `CODEX_SECURITY_CONFIG_PATH` is set, add `--config "$CODEX_SECURITY_CONFIG_PATH"` in POSIX shells or `--config "$env:CODEX_SECURITY_CONFIG_PATH"` in PowerShell. The CLI provides this sanitized, shell-readable copy of the active worker configuration because the credential-bearing `CODEX_HOME` is intentionally inaccessible to repository-influenced commands. Do not substitute an ambient Codex home in that case.
+When `CODEX_SECURITY_CONFIG_PATH` is set, add `--config "$CODEX_SECURITY_CONFIG_PATH"` in POSIX shells or `--config "%CODEX_SECURITY_CONFIG_PATH%"` inside the quoted CMD command above. The CLI provides this sanitized, shell-readable copy of the active worker configuration because the credential-bearing `CODEX_HOME` is intentionally inaccessible to repository-influenced commands. Do not substitute an ambient Codex home in that case.
 
 Otherwise, the helper discovers Codex config paths itself from `--cwd`, which defaults to the current working directory. It reads `/etc/codex/config.toml` on Unix-like hosts or `%ProgramData%\OpenAI\Codex\config.toml` on Windows, then `$CODEX_HOME/config.toml`, resolves `project_root_markers`, checks the matching `[projects."<absolute-project-root>"].trust_level`, and loads trusted project `.codex/config.toml` layers from the project root down to `--cwd`. It does not load project layers unless the user config marks that project root as `trusted`.
 
@@ -33,6 +45,8 @@ Multi-agent config mode is auto-detected when static config fully describes it. 
 ```text
 --multi-agent-runtime-owner native --multi-agent-runtime-version v2 --multi-agent-session-cap <count> --multi-agent-runtime-provenance <app-server|thread-context|tool-surface>
 ```
+
+Pass `--multi-agent-session-cap` as a positive ASCII decimal integer, such as `1000`; an optional leading `+` is accepted. The Node helper does not accept the former Python helper's underscore or localized-digit spellings: use `1000` instead of `1_000` or localized digits.
 
 The V2 session cap includes the root thread. For profiles that evaluate current-session worker capacity, the helper subtracts that root thread when evaluating usable worker slots. For native V2 selected by static config, the documented Codex default session cap is four when no explicit cap is configured. Do not apply that static default to model- or session-selected V2 when a profile needs the active capacity: pass the observed runtime cap, or a blocking capacity requirement remains `incomplete`.
 

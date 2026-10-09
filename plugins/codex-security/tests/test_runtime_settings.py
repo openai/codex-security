@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import runpy
 import sys
 from pathlib import Path
@@ -26,10 +27,8 @@ def test_config_and_state_share_blank_home_semantics(tmp_path, monkeypatch, conf
             expected = Path(configured)
         monkeypatch.setenv("CODEX_HOME", configured)
     deep = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
-    preflight = runpy.run_path(str(SCRIPTS / "config_preflight.py"))
     storage = runpy.run_path(str(SCRIPTS / "workbench" / "storage.py"))
     assert deep["config_path"]() == expected / "codex-security" / "config.toml"
-    assert preflight["DEFAULT_CONFIG"] == expected / "config.toml"
     assert storage["state_dir"]() == expected / "state" / "plugins" / "codex-security"
 
 
@@ -81,10 +80,32 @@ def test_config_and_storage_preserve_literal_home_spaces(tmp_path, monkeypatch, 
     settings = deep["resolve_deep_scan_config"](8)
     assert settings["workers"] == 7
     assert settings["maxTimeHours"] == 0.25
-    preflight = runpy.run_path(str(SCRIPTS / "config_preflight.py"))
-    assert preflight["DEFAULT_CONFIG"].resolve() == home / "config.toml"
-    assert preflight["DEFAULT_CONFIG"].read_text(encoding="utf-8") == 'model = "synthetic"\n'
     storage = runpy.run_path(str(SCRIPTS / "workbench" / "storage.py"))
     selected_state = storage["state_dir"]()
     assert selected_state == state
     assert (selected_state / "existing-state.txt").read_text(encoding="utf-8") == "selected state\n"
+
+
+def test_deep_config_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch):
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+    runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
+    monkeypatch.delitem(sys.modules, "workbench.runtime_toml")
+    monkeypatch.delattr(sys.modules["workbench"], "runtime_toml")
+    real_import = builtins.__import__
+    monkeypatch.setitem(sys.modules, "tomli", tomllib)
+    attempted = []
+
+    def import_without_tomllib(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"tomllib", "tomli"}:
+            attempted.append(name)
+        if name == "tomllib":
+            raise ModuleNotFoundError("No module named 'tomllib'", name="tomllib")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_tomllib)
+    namespace = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
+    assert namespace["tomllib"] is tomllib
+    assert attempted == ["tomllib", "tomli"]

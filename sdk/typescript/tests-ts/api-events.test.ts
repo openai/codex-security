@@ -995,7 +995,7 @@ describe("one-shot scan events", () => {
           id: "command-1",
           type: "command_execution",
           command:
-            "python3 /plugin/scripts/config_preflight.py --profile security_scan",
+            "/plugin/scripts/launch_codex_security_mcp --helper config-preflight --profile security_scan",
           aggregated_output: JSON.stringify({
             profile: "security_scan",
             status: "ready",
