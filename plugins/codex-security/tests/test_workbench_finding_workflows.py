@@ -69,6 +69,47 @@ def test_source_snapshot_excludes_private_storage_without_hiding_source(
         )
 
 
+@pytest.mark.parametrize("location", ["root", "descendant"])
+def test_source_snapshot_preserves_unreadable_directory_errors(
+    workbench_api, workbench_db, tmp_path, monkeypatch, location
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    unreadable = repository if location == "root" else repository / "unreadable"
+    unreadable.mkdir(exist_ok=True)
+    (unreadable / "contents.txt").write_text("source content")
+    private = repository / "native-state"
+    private.mkdir()
+    original_scandir = os.scandir
+    failure = PermissionError("synthetic inaccessible source directory")
+
+    def inspect(path):
+        assert Path(path) != private, "private storage must not be traversed"
+        if Path(path) == unreadable:
+            raise failure
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", inspect)
+
+    def snapshot(excluded):
+        return workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            gitDisabled=True,
+            privateStatePaths=[str(path) for path in excluded],
+        )["source"]
+
+    with pytest.raises(PermissionError) as raised:
+        snapshot([private])
+    assert raised.value is failure
+    if location == "descendant":
+        assert snapshot([private, unreadable])["privateStatePaths"] == sorted(
+            [str(private), str(unreadable)]
+        )
+
+
 @pytest.mark.parametrize("stage", ["scan", "publish", "dedupe"])
 def test_failed_stages_resume_and_completed_results_are_immutable(
     workbench_api, workbench_db, stage

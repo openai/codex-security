@@ -2,15 +2,15 @@ import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   readFile,
   readdir,
   stat,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import * as os from "node:os";
-import { dirname, join, toNamespacedPath } from "node:path";
+import { join, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   inspectPublicationStore,
@@ -269,37 +269,56 @@ describe("read-only publication history", () => {
     ).toEqual([{ seal_manifest_digest: digest }]);
   });
 
-  test("keeps inspection temporaries outside the completed scan", async () => {
+  test("inspects history without temporary-directory access", async () => {
     const fixture = await publicationFixture();
-    const scan = fixture.publication.scanDirectory;
-    const nested = join(scan, "temporary");
-    const alias = join(dirname(fixture.stateDirectory), "temporary-link");
-    await mkdir(nested);
-    await symlink(
-      nested,
-      alias,
-      process.platform === "win32" ? "junction" : "dir",
-    );
-    const temporary = spyOn(os, "tmpdir");
+    const temporary = spyOn(os, "tmpdir").mockImplementation(() => {
+      throw new Error("No temporary directory is available.");
+    });
     try {
-      for (const root of [scan, nested, alias]) {
-        temporary.mockReturnValue(root);
-        await expect(
-          inspectPublicationStore(fixture.publication, fixture.environment),
-        ).rejects.toThrow(/temporary directory must be outside/u);
-        expect(await readdir(scan)).toEqual(["temporary"]);
-        expect(await readdir(nested)).toEqual([]);
-      }
+      await expect(
+        inspectPublicationStore(fixture.publication, fixture.environment),
+      ).resolves.toEqual([]);
     } finally {
       temporary.mockRestore();
     }
   });
 
-  test("forwards cancellation to Python discovery and the workbench and cleans up its input", async () => {
+  test.each([
+    ["-", "{}", /unexpected or missing fields/u],
+    ["broken.json", "{", /broken.json: invalid JSON/u],
+    ["array.json", "[]", /array.json: expected a JSON object/u],
+    ["nonfinite.json", '{"value": NaN}', /nonfinite.json: invalid JSON/u],
+  ] as const)(
+    "preserves public publication file input: %s",
+    async (filename, contents, diagnostic) => {
+      const fixture = await publicationFixture({ createDatabase: false });
+      const directory = await temporaryDirectory();
+      await writeFile(join(directory, filename), contents);
+      const result = runNodePython(
+        fixture.python,
+        [
+          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          "inspect-linear-publication",
+          "--input-file",
+          filename,
+        ],
+        {
+          cwd: directory,
+          env: fixture.environment,
+          input: "THIS IS NOT JSON AND MUST NOT BE READ",
+        },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(diagnostic);
+      expect(existsSync(fixture.stateDirectory)).toBe(false);
+    },
+  );
+
+  test("forwards cancellation to Python discovery and the workbench", async () => {
     const fixture = await publicationFixture();
     const controller = new AbortController();
     const reason = new Error("Synthetic inspection cancellation.");
-    let inputFile = "";
     const inspecting = Promise.withResolvers<void>();
     const python = spyOn(runtime, "resolvePluginPython").mockImplementation(
       async (options) => {
@@ -308,11 +327,13 @@ describe("read-only publication history", () => {
       },
     );
     const workbench = spyOn(runtime, "runWorkbench").mockImplementation(
-      async (options, args) => {
+      async (options, args, input) => {
         inspecting.resolve();
         expect(options.signal).toBe(controller.signal);
-        expect(args[0]).toBe("inspect-linear-publication");
-        inputFile = args[args.indexOf("--input-file") + 1]!;
+        expect(args).toEqual(["inspect-linear-publication"]);
+        expect(JSON.parse(input!)).toMatchObject({
+          scanId: fixture.publication.scanId,
+        });
         await once(options.signal!, "abort");
         throw options.signal!.reason;
       },
@@ -326,8 +347,6 @@ describe("read-only publication history", () => {
       await inspecting.promise;
       controller.abort(reason);
       await expect(pending).rejects.toBe(reason);
-      expect(inputFile).not.toBe("");
-      expect(existsSync(dirname(inputFile))).toBe(false);
     } finally {
       controller.abort(reason);
       workbench.mockRestore();
@@ -718,7 +737,7 @@ connection.close()
     ]);
   });
 
-  test("rejects a missing local scan-history database without creating one", async () => {
+  test("rejects missing and non-regular publication history without initializing it", async () => {
     const fixture = await publicationFixture({ createDatabase: false });
 
     await expect(
@@ -726,7 +745,45 @@ connection.close()
     ).rejects.toThrow(/scan-history database does not exist/u);
 
     expect(existsSync(fixture.stateDirectory)).toBe(false);
+    await mkdir(join(fixture.stateDirectory, "workbench.sqlite3"), {
+      recursive: true,
+    });
+    await expect(
+      preparePublicationStore(fixture.publication, fixture.environment),
+    ).rejects.toThrow(/not a regular file/u);
   });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "preserves actual filesystem permission errors before opening publication history",
+    async () => {
+      const fixture = await publicationFixture({ createDatabase: false });
+      await mkdir(fixture.stateDirectory, { mode: 0o700 });
+      await writeFile(
+        join(fixture.stateDirectory, "workbench.sqlite3"),
+        "synthetic",
+      );
+      await chmod(fixture.stateDirectory, 0);
+      try {
+        for (const operation of [
+          inspectPublicationStore,
+          preparePublicationStore,
+          (
+            publication: PreparedScanPublication,
+            environment: NodeJS.ProcessEnv,
+          ) => recordPublishedIssues(publication, [], environment),
+        ]) {
+          await expect(
+            operation(fixture.publication, fixture.environment),
+          ).rejects.toMatchObject({
+            code: "EACCES",
+            message: expect.stringContaining("workbench.sqlite3"),
+          });
+        }
+      } finally {
+        await chmod(fixture.stateDirectory, 0o700);
+      }
+    },
+  );
 
   test("rejects a scan absent from existing local scan history", async () => {
     const fixture = await publicationFixture({ seedScan: false });

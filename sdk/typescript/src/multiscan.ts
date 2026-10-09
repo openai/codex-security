@@ -1,3 +1,4 @@
+import { notify } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -645,9 +646,7 @@ function notifyProgress(
   options: MultiscanOptions,
   event: Parameters<NonNullable<MultiscanOptions["onProgress"]>>[0],
 ): void {
-  try {
-    void Promise.resolve(options.onProgress?.(event)).catch(() => {});
-  } catch {}
+  notify(() => options.onProgress?.(event));
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {

@@ -764,13 +764,29 @@ export async function gitHistoryIdentity(
   return { commonDirectory, origin };
 }
 
+export function gitOutput(
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+  environment?: NodeJS.ProcessEnv,
+  workingDirectory?: string,
+): Promise<string>;
+export function gitOutput(
+  repository: string,
+  args: readonly string[],
+  signal: AbortSignal | undefined,
+  environment: NodeJS.ProcessEnv | undefined,
+  workingDirectory: string | undefined,
+  encoding: "buffer",
+): Promise<Buffer>;
 export async function gitOutput(
   repository: string,
   args: readonly string[],
   signal?: AbortSignal,
   environment: NodeJS.ProcessEnv = {},
   workingDirectory = repository,
-): Promise<string> {
+  encoding: "utf8" | "buffer" = "utf8",
+): Promise<string | Buffer> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
@@ -786,13 +802,15 @@ export async function gitOutput(
     command.executable,
     ["-c", "core.fsmonitor=false", "-C", workingDirectory, ...args],
     {
-      encoding: "utf8",
+      encoding,
       signal,
       env: { ...command.environment, ...environment },
       maxBuffer: Infinity,
     },
   );
-  return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
+  return typeof stdout === "string"
+    ? stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "")
+    : stdout;
 }
 
 export async function gitMarkerRoot(

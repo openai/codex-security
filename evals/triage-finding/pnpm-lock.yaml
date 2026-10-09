@@ -15,6 +15,9 @@ overrides:
   simple-git@3.36.0>@simple-git/argv-parser: 2.0.1
   socks@2.8.10>ip-address: 10.7.2
 
+patchedDependencies:
+  promptfoo@0.123.1: 9b31e07e280074178b325d59241d9bfd2cd4a94238bfc5fc9bc07daf43f4d7a8
+
 importers:
 
   .:
@@ -27,7 +30,7 @@ importers:
         version: 1.18.34
       promptfoo:
         specifier: 0.123.1
-        version: 0.123.1(@aws-sdk/credential-provider-node@3.972.83)(@aws-sdk/credential-providers@3.1136.0)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.63.0)(socks@2.8.10)
+        version: 0.123.1(patch_hash=9b31e07e280074178b325d59241d9bfd2cd4a94238bfc5fc9bc07daf43f4d7a8)(@aws-sdk/credential-provider-node@3.972.83)(@aws-sdk/credential-providers@3.1136.0)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.63.0)(socks@2.8.10)
 
 packages:
 
@@ -8312,7 +8315,7 @@ snapshots:
 
   promise-limit@2.7.0: {}
 
-  promptfoo@0.123.1(@aws-sdk/credential-provider-node@3.972.83)(@aws-sdk/credential-providers@3.1136.0)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.63.0)(socks@2.8.10):
+  promptfoo@0.123.1(patch_hash=9b31e07e280074178b325d59241d9bfd2cd4a94238bfc5fc9bc07daf43f4d7a8)(@aws-sdk/credential-provider-node@3.972.83)(@aws-sdk/credential-providers@3.1136.0)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.63.0)(socks@2.8.10):
     dependencies:
       '@anthropic-ai/sdk': 0.124.0(zod@4.6.5)
       '@apidevtools/json-schema-ref-parser': 16.0.3(@types/json-schema@7.0.15)
