@@ -413,17 +413,20 @@ export async function resolveSourceMcp(
   const credentialNames = new Set<string>();
   const environmentName = (name: string) =>
     process.platform === "win32" ? name.toUpperCase() : name;
-  const capture = (key: string): string => {
-    // Native reads HTTP credentials from its own process environment. Give each
-    // reference a stable private name so it cannot override Codex runtime settings.
-    const alias = `CODEX_SECURITY_MCP_CREDENTIAL_${createHash("sha256").update(environmentName(key)).digest("hex")}`;
-    const value = environmentEntry(environment, key);
-    if (value !== undefined) credentials[alias] = value;
+  const protectCredential = (key: string): void => {
     credentialNames.add(key);
     if (process.platform === "win32")
       for (const inherited of Object.keys(environment))
         if (environmentName(inherited) === environmentName(key))
           credentialNames.add(inherited);
+  };
+  const capture = (key: string): string => {
+    // Host-resolved references use private names so credentials cannot override
+    // the review's Codex runtime settings.
+    const alias = `CODEX_SECURITY_MCP_CREDENTIAL_${createHash("sha256").update(environmentName(key)).digest("hex")}`;
+    const value = environmentEntry(environment, key);
+    if (value !== undefined) credentials[alias] = value;
+    protectCredential(key);
     return alias;
   };
   if (server["env_http_headers"] !== undefined)
@@ -432,17 +435,27 @@ export async function resolveSourceMcp(
         ([header, variable]) => [header, capture(variable as string)],
       ),
     );
-  if (typeof server["bearer_token_env_var"] === "string")
-    server["bearer_token_env_var"] = capture(server["bearer_token_env_var"]);
+  if (typeof server["bearer_token_env_var"] === "string") {
+    if (environmentId === "local")
+      server["bearer_token_env_var"] = capture(server["bearer_token_env_var"]);
+    else protectCredential(server["bearer_token_env_var"]);
+  }
   // Resolve stdio inheritance from the caller before the isolated review launches.
   // Explicit server values retain native precedence and never become host values.
   const inherited: JsonObject = {};
   const explicit = (server["env"] ?? {}) as JsonObject;
   const explicitNames = new Set(Object.keys(explicit).map(environmentName));
-  const executorEnvironment: Record<string, string> = {};
+  const executorEnvironment: Record<string, string> = Object.create(null);
   const executorEnvironmentNames = new Set(
     Object.keys((executor?.["env"] ?? {}) as JsonObject).map(environmentName),
   );
+  // Native selects executor resolution or legacy host fallback at startup.
+  // Bind the referenced host value as well as the executor configuration.
+  const bearer = server["bearer_token_env_var"];
+  if (environmentId !== "local" && typeof bearer === "string") {
+    const value = environmentEntry(reviewEnvironment, bearer);
+    if (value !== undefined) executorEnvironment[bearer] = value;
+  }
   const remaining: JsonValue[] = [];
   for (const variable of (server["env_vars"] as JsonValue[] | undefined) ??
     []) {
@@ -495,6 +508,14 @@ export async function resolveSourceMcp(
           reviewEnvironment,
         )
       : undefined;
+  // Native local Windows lookup takes child PATH but reads PATHEXT from its host.
+  if (
+    environmentId === "local" &&
+    process.platform === "win32" &&
+    sourceSelection !== undefined
+  )
+    sourceSelection["lookupPATHEXT"] =
+      environmentEntry(reviewEnvironment, "PATHEXT") ?? null;
   // Native HTTP header helpers run on the local review host, independently
   // of stdio server or executor environment overrides.
   const headersHelperSelection =
@@ -511,7 +532,7 @@ export async function resolveSourceMcp(
     configPath: join(configuredCodexHome(environment), "config.toml"),
     server,
     environment: credentials,
-    credentialNames: [...credentialNames],
+    credentialNames: [...credentialNames].sort(),
     ...(executor === undefined ? {} : { executor }),
     ...(executorLaunchDirectory === undefined
       ? {}

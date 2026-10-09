@@ -1445,34 +1445,129 @@ process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { 
 );
 
 test.skipIf(process.platform !== "win32")(
-  "source checkpoints include case-insensitive PATHEXT selection",
+  "local source checkpoints follow host PATHEXT lookup despite a child override",
   async () => {
+    const home = await temporaryDirectory();
     const repository = await sourceCheckout();
-    const environment = {
-      CODEX_HOME: await temporaryDirectory(),
-      Path: process.env["PATH"],
-      Pathext: ".EXE;.COM",
-      SystemRoot: process.env["SystemRoot"],
-      OPENAI_API_KEY: "synthetic-review-key",
-    };
-    const digest = async () =>
-      reviewSettingsDigest(environment, undefined, {
-        mcp: await sourceForTest(
-          { mcp_servers: { source: { command: "synthetic-source-command" } } },
+    const bin = join(home, "bin");
+    await mkdir(bin);
+    for (const extension of ["exe", "com"])
+      await copyFile(process.execPath, join(bin, `source-tool.${extension}`));
+    const captured = join(home, "selected.txt");
+    const script = join(home, "source.mjs");
+    await writeFile(
+      script,
+      `import { writeFileSync } from "node:fs";
+import { extname } from "node:path";
+writeFileSync(process.argv[2], extname(process.execPath).toLowerCase());
+process.exit(1);`,
+    );
+    let modelRequests = 0;
+    const endpoint = createServer((request, response) => {
+      if (request.url?.includes("responses")) modelRequests++;
+      response
+        .writeHead(200, { "Content-Type": "application/json" })
+        .end('{"data":[]}');
+    });
+    await new Promise<void>((resolve) =>
+      endpoint.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      const base = {
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: join(home, "state"),
+        Path: `${bin}${delimiter}${process.env["PATH"] ?? ""}`,
+        SystemRoot: process.env["SystemRoot"],
+        OPENAI_API_KEY: "synthetic-review-key",
+      };
+      const store = checkpointWorkbench("source-pathext", { repository });
+      const workflow = new FindingWorkflow("source-pathext", base, store.run);
+      const snapshot = await workflow.sourceSnapshot(repository);
+      const review: CodexReview<{ extension: string }> = {
+        stage: "pair-review",
+        model: "gpt-5.6-sol",
+        effort: "low",
+        prompt: "Compare synthetic source findings.",
+        schema: { type: "object" },
+        validate: (value) => value as { extension: string },
+      };
+      const digests: string[] = [];
+      let calls = 0;
+      for (const [host, child, extension] of [
+        [".EXE;.COM", ".EXE;.COM", ".exe"],
+        [".COM;.EXE", ".EXE;.COM", ".com"],
+        [".EXE;.COM", ".COM;.EXE", ".exe"],
+      ] as const) {
+        const environment = { ...base, Pathext: host };
+        const source = await sourceForTest(
+          {
+            model_provider: "fixture",
+            model_providers: {
+              fixture: {
+                name: "Synthetic fixture",
+                wire_api: "responses",
+                base_url: `http://127.0.0.1:${(endpoint.address() as { port: number }).port}/v1`,
+                request_max_retries: 0,
+              },
+            },
+            mcp_servers: {
+              source: {
+                command: "source-tool",
+                args: [script, captured],
+                env: { PATHEXT: child },
+                startup_timeout_sec: 1,
+              },
+            },
+          },
           environment,
           repository,
-        ),
-        repository,
-      });
-    const original = await digest();
-    environment.Pathext = ".COM;.EXE";
-    expect(await digest()).not.toBe(original);
+        );
+        await expect(
+          new CodexReviewRunner(
+            environment,
+            undefined,
+            AbortSignal.timeout(15_000),
+            repository,
+            undefined,
+            undefined,
+            undefined,
+            source,
+          ).run(review),
+        ).rejects.toThrow(/required.*source|source.*required/i);
+        expect(await readFile(captured, "utf8")).toBe(extension);
+        const digest = await reviewSettingsDigest(environment, undefined, {
+          mcp: source,
+          repository,
+        });
+        digests.push(digest);
+        const checkpoint = new CheckpointedReviewRunner(
+          workflow,
+          {
+            async run<T>(request: CodexReview<T>): Promise<T> {
+              calls++;
+              return request.validate({ extension });
+            },
+          },
+          snapshot,
+          { allRepositories: true },
+          digest,
+        );
+        expect(await checkpoint.run(review)).toEqual({ extension });
+      }
+      expect(digests[0]).not.toBe(digests[1]);
+      expect(calls).toBe(3);
+      expect(modelRequests).toBe(0);
+    } finally {
+      endpoint.closeAllConnections();
+      await new Promise<void>((resolve) => endpoint.close(() => resolve()));
+    }
   },
 );
 
 test.each([
   "local",
   "executor",
+  "cold-executor",
   "http",
   ...(process.platform === "win32" ? [] : ["missing-ps", "failing-ps"]),
 ])(
@@ -1491,7 +1586,7 @@ test.each([
       sourceScript,
       `
 import { request } from "node:http";
-const ready = request(process.argv[2] + "/ready/" + process.env.SOURCE_REQUEST, { method: "POST" });
+const ready = request(process.argv[2] + "/ready/" + (process.argv[3] ?? process.env.SOURCE_REQUEST), { method: "POST" });
 ready.end(String(process.pid));
 setInterval(() => {}, 1000);
 `,
@@ -1501,6 +1596,7 @@ setInterval(() => {}, 1000);
       Promise.withResolvers<number>(),
     ];
     let modelRequests = 0;
+    let coldStarted = 0;
     const endpoint = createServer((request, response) => {
       if (request.url?.startsWith("/ready/")) {
         let body = "";
@@ -1509,7 +1605,8 @@ setInterval(() => {}, 1000);
           body += chunk;
         });
         request.on("end", () => {
-          ready[Number(request.url!.slice("/ready/".length))]!.resolve(
+          const name = request.url!.slice("/ready/".length);
+          ready[name === "cold" ? coldStarted++ : Number(name)]!.resolve(
             Number(body),
           );
           response.end();
@@ -1563,15 +1660,21 @@ setInterval(() => {}, 1000);
         CODEX_SECURITY_STATE_DIR: join(home, "state"),
         OPENAI_API_KEY: "synthetic-review-key",
       };
-      if (kind === "executor")
+      if (kind === "executor" || kind === "cold-executor")
         await writeFile(
           join(home, "environments.toml"),
           stringify({
             environments: [
               {
                 id: "source-executor",
-                program: resolveCodexCommand(environment).command,
-                args: ["exec-server", "--listen", "stdio"],
+                program:
+                  kind === "cold-executor"
+                    ? process.execPath
+                    : resolveCodexCommand(environment).command,
+                args:
+                  kind === "cold-executor"
+                    ? [sourceScript, url, "cold"]
+                    : ["exec-server", "--listen", "stdio"],
                 cwd: repository,
               },
             ],
@@ -1598,7 +1701,7 @@ setInterval(() => {}, 1000);
                     cwd: repository,
                   }),
               startup_timeout_sec: 60,
-              ...(kind === "executor"
+              ...(kind === "executor" || kind === "cold-executor"
                 ? { environment_id: "source-executor" }
                 : {}),
             },
@@ -1612,6 +1715,8 @@ setInterval(() => {}, 1000);
           new CodexReviewRunner(
             environment,
             (command, args, options) => {
+              if (kind === "cold-executor")
+                expect(options.signal).toBeUndefined();
               const child = spawn(command, args, options);
               children[index] = child;
               return child;
@@ -1641,6 +1746,7 @@ setInterval(() => {}, 1000);
             })
             .catch((error: unknown) => error),
         );
+        await ready[index]!.promise;
       }
       sourcePids.push(
         ...(await Promise.all(ready.map(({ promise }) => promise))),
@@ -1832,4 +1938,300 @@ test("HTTP header-helper checkpoints follow native host lookup and explicit envi
     endpoint.closeAllConnections();
     await new Promise<void>((resolve) => endpoint.close(() => resolve()));
   }
+});
+
+test.each(["capable", "legacy"] as const)(
+  "HTTP %s executor bearer resolution preserves credential ownership and host headers",
+  async (kind) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    const observations: {
+      authorization?: string;
+      header: string | string[] | undefined;
+    }[] = [];
+    let modelRequests = 0;
+    const endpoint = createServer((request, response) => {
+      if (request.url === "/mcp") {
+        observations.push({
+          authorization: request.headers.authorization,
+          header: request.headers["x-source"],
+        });
+        response.writeHead(503).end("Synthetic unavailable source");
+      } else {
+        if (request.url?.includes("responses")) modelRequests++;
+        response
+          .writeHead(200, { "Content-Type": "application/json" })
+          .end('{"data":[]}');
+      }
+    });
+    await new Promise<void>((resolve) =>
+      endpoint.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      const url = `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`;
+      const baseEnvironment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: join(home, "state"),
+        OPENAI_API_KEY: "synthetic-model-key",
+        SOURCE_HEADER: "synthetic-host-header",
+      };
+      const store = checkpointWorkbench("executor-bearer", { repository });
+      const workflow = new FindingWorkflow(
+        "executor-bearer",
+        baseEnvironment,
+        store.run,
+      );
+      const snapshot = await workflow.sourceSnapshot(repository);
+      const review: CodexReview<{ authorization: string }> = {
+        stage: "pair-review",
+        model: "gpt-5.6-sol",
+        effort: "low",
+        prompt: "Compare synthetic source findings.",
+        schema: { type: "object" },
+        validate: (value) => value as { authorization: string },
+      };
+      let calls = 0;
+      const digests: string[] = [];
+      const cases =
+        kind === "legacy"
+          ? ([
+              [
+                "synthetic-host-first",
+                "synthetic-executor-token",
+                "SOURCE_BEARER",
+              ],
+              [
+                "synthetic-host-second",
+                "synthetic-executor-token",
+                "SOURCE_BEARER",
+              ],
+            ] as const)
+          : ([
+              [undefined, "synthetic-executor-token", "SOURCE_BEARER"],
+              [
+                "synthetic-host-first",
+                "synthetic-executor-token",
+                "SOURCE_BEARER",
+              ],
+              [
+                "synthetic-host-second",
+                "synthetic-executor-token",
+                "SOURCE_BEARER",
+              ],
+              [
+                "synthetic-model-key",
+                "synthetic-executor-token",
+                "OPENAI_API_KEY",
+              ],
+              ["synthetic-inherited-first", undefined, "SOURCE_BEARER"],
+              ["synthetic-inherited-second", undefined, "SOURCE_BEARER"],
+            ] as const);
+      for (const [hostToken, executorToken, bearer] of cases) {
+        const environment = {
+          ...baseEnvironment,
+          ...(hostToken === undefined ? {} : { [bearer]: hostToken }),
+        };
+        await writeFile(
+          join(home, "environments.toml"),
+          stringify({
+            environments: [
+              {
+                id: "source-executor",
+                program:
+                  kind === "legacy"
+                    ? process.execPath
+                    : resolveCodexCommand(environment).command,
+                args:
+                  kind === "legacy"
+                    ? [
+                        fileURLToPath(
+                          new URL(
+                            "./fixtures/legacy-source-executor.mjs",
+                            import.meta.url,
+                          ),
+                        ),
+                        resolveCodexCommand(environment).command,
+                      ]
+                    : ["exec-server", "--listen", "stdio"],
+                cwd: repository,
+                env: {
+                  SOURCE_HEADER: "synthetic-executor-header",
+                  ...(executorToken === undefined
+                    ? {}
+                    : { [bearer]: executorToken }),
+                },
+              },
+            ],
+          }),
+        );
+        const source = await sourceForTest(
+          {
+            model_provider: "fixture",
+            model_providers: {
+              fixture: {
+                name: "Synthetic fixture",
+                wire_api: "responses",
+                base_url: `${url}/v1`,
+                request_max_retries: 0,
+              },
+            },
+            mcp_servers: {
+              source: {
+                url: `${url}/mcp`,
+                environment_id: "source-executor",
+                bearer_token_env_var: bearer,
+                env_http_headers: { "X-Source": "SOURCE_HEADER" },
+                startup_timeout_sec: 1,
+              },
+            },
+          },
+          environment,
+          repository,
+        );
+        observations.length = 0;
+        const failure = await new CodexReviewRunner(
+          environment,
+          undefined,
+          AbortSignal.timeout(15_000),
+          repository,
+          undefined,
+          undefined,
+          undefined,
+          source,
+        )
+          .run(review)
+          .then(
+            () => "unexpected success",
+            (error: unknown) => String(error),
+          );
+        expect(failure).toMatch(/required.*source|source.*required/i);
+        if (bearer === "OPENAI_API_KEY") {
+          expect(failure).toContain(
+            "cannot use executor environment variable OPENAI_API_KEY",
+          );
+          expect(observations).toEqual([]);
+          continue;
+        }
+        const expected = `Bearer ${kind === "legacy" ? hostToken : (executorToken ?? hostToken)}`;
+        expect(
+          observations.length,
+          `${bearer}: ${hostToken} / ${executorToken}: ${failure}`,
+        ).toBeGreaterThan(0);
+        expect(
+          observations.every(
+            ({ authorization, header }) =>
+              authorization === expected && header === "synthetic-host-header",
+          ),
+        ).toBe(true);
+        expect(environment.OPENAI_API_KEY).toBe("synthetic-model-key");
+        const digest = await reviewSettingsDigest(environment, undefined, {
+          mcp: source,
+          repository,
+        });
+        digests.push(digest);
+        const checkpoint = new CheckpointedReviewRunner(
+          workflow,
+          {
+            async run<T>(request: CodexReview<T>): Promise<T> {
+              calls++;
+              return request.validate({ authorization: expected });
+            },
+          },
+          snapshot,
+          { allRepositories: true },
+          digest,
+        );
+        expect(await checkpoint.run(review)).toEqual({
+          authorization: expected,
+        });
+        expect(await checkpoint.run(review)).toEqual({
+          authorization: expected,
+        });
+      }
+      // Capabilities are chosen by native startup: retain the host fallback input
+      // even when the current executor uses its own explicit credential instead.
+      if (kind === "legacy") {
+        expect(digests[0]).not.toBe(digests[1]);
+        expect(calls).toBe(2);
+      } else {
+        expect(digests[1]).not.toBe(digests[2]);
+        expect(digests[3]).not.toBe(digests[4]);
+        expect(calls).toBe(5);
+      }
+      expect(modelRequests).toBe(0);
+    } finally {
+      endpoint.closeAllConnections();
+      await new Promise<void>((resolve) => endpoint.close(() => resolve()));
+    }
+  },
+);
+
+test("unchanged native HTTP header maps reuse review checkpoints regardless of map order", async () => {
+  const home = await temporaryDirectory();
+  const repository = await sourceCheckout();
+  const environment = {
+    PATH: process.env["PATH"],
+    SystemRoot: process.env["SystemRoot"],
+    CODEX_HOME: home,
+    CODEX_SECURITY_STATE_DIR: join(home, "state"),
+    SOURCE_ONE: "synthetic-one",
+    SOURCE_TWO: "synthetic-two",
+    SOURCE_THREE: "synthetic-three",
+  };
+  const config = {
+    mcp_servers: {
+      source: {
+        url: "http://127.0.0.1:9/mcp",
+        env_http_headers: {
+          "X-One": "SOURCE_ONE",
+          "X-Two": "SOURCE_TWO",
+          "X-Three": "SOURCE_THREE",
+        },
+      },
+    },
+  };
+  await writeFile(join(home, "config.toml"), stringify(config));
+  const store = checkpointWorkbench("header-order", { repository });
+  const workflow = new FindingWorkflow("header-order", environment, store.run);
+  const snapshot = await workflow.sourceSnapshot(repository);
+  const review: CodexReview<{ cached: boolean }> = {
+    stage: "pair-review",
+    model: "gpt-5.6-sol",
+    effort: "low",
+    prompt: "Compare synthetic source findings.",
+    schema: { type: "object" },
+    validate: (value) => value as { cached: boolean },
+  };
+  let calls = 0;
+  const digests = new Set<string>();
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const source = await resolveSourceMcp(
+      "source",
+      environment,
+      undefined,
+      repository,
+    );
+    const digest = await reviewSettingsDigest(environment, undefined, {
+      mcp: source,
+      repository,
+    });
+    digests.add(digest);
+    const checkpoint = new CheckpointedReviewRunner(
+      workflow,
+      {
+        async run<T>(request: CodexReview<T>): Promise<T> {
+          calls++;
+          return request.validate({ cached: true });
+        },
+      },
+      snapshot,
+      { allRepositories: true },
+      digest,
+    );
+    expect(await checkpoint.run(review)).toEqual({ cached: true });
+  }
+  expect(digests.size).toBe(1);
+  expect(calls).toBe(1);
 });

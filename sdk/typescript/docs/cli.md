@@ -607,6 +607,9 @@ outside model shell access and cannot override the review’s Codex settings. St
 native precedence: explicit `env` values override inherited `env_vars` only in
 the MCP child. Local stdio paths are resolved from the caller's directory;
 executor-owned paths retain native handling.
+Environment-backed HTTP headers resolve on the host. Bearer-token variables for
+executor-backed HTTP connections use native executor lookup when supported,
+with native host fallback for older executors.
 
 When stored authentication selects another Codex home, any same-named server and
 its executor must have matching definitions in both homes. OAuth credentials are

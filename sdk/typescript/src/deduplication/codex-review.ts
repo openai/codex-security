@@ -338,7 +338,7 @@ export class CodexReviewRunner {
           },
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
-          signal: this.signal,
+          signal: source === undefined ? this.signal : undefined,
         },
       );
       const closed = new Promise<void>((resolve) =>
@@ -347,6 +347,7 @@ export class CodexReviewRunner {
       const lines = createInterface({
         input: child.stdout,
         crlfDelay: Infinity,
+        signal: source === undefined ? undefined : this.signal,
       });
       let processError: Error | undefined;
       let inputError: Error | undefined;
@@ -477,6 +478,7 @@ export class CodexReviewRunner {
         });
       };
       try {
+        this.signal?.throwIfAborted();
         send({
           id: 1,
           method: "initialize",
@@ -708,7 +710,6 @@ export class CodexReviewRunner {
         );
       } finally {
         lines.close();
-        child.stdin.end();
         const canceledSource = source !== undefined && this.signal?.aborted;
         let force = Boolean(canceledSource);
         try {
@@ -716,6 +717,7 @@ export class CodexReviewRunner {
           // HTTP startup has no child and must be stopped in the app-server.
           if (canceledSource) force = stopSourceChildren(child) === 0;
         } finally {
+          child.stdin.end();
           if (child.exitCode === null)
             child.kill(force ? "SIGKILL" : "SIGTERM");
           await closed;
