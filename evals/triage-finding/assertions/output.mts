@@ -73,9 +73,7 @@ export function extractTriageResult(
   const candidates = [
     text,
     ...Array.from(
-      text.matchAll(
-        /^[\t ]*```(?:json)?[\t ]*\r?\n([\s\S]*?)^[\t ]*```[\t ]*\r?$/gim,
-      ),
+      text.matchAll(/^[\t ]*```[^\r\n]*\r?\n([\s\S]*?)^[\t ]*```[\t ]*\r?$/gm),
       (match) => match[1],
     ),
   ];

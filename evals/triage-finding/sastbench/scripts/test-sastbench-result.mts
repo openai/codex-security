@@ -45,6 +45,7 @@ for (const output of [
   JSON.stringify(triageResult("confirmed"), null, 2),
   fenced.replace("```json", "```"),
   fenced.replaceAll("\n", "\r\n"),
+  "```typescript\nconst value = 1;\n```\n\n" + fenced,
   'Prose {"other": true}\n' + fenced.replaceAll("```", "   ```"),
   '```json\n"invalid\n```\n' + fenced,
 ]) {
