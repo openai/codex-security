@@ -1,5 +1,5 @@
+import { readJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, mock } from "bun:test";
 import { Tiktoken } from "js-tiktoken/lite";
@@ -13,12 +13,9 @@ import {
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const example = (
-  JSON.parse(
-    await readFile(
-      join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
-      "utf8",
-    ),
-  ) as FindingsDocument
+  await readJson<FindingsDocument>(
+    join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+  )
 ).findings[0]!;
 const encoding = new Tiktoken(cl100kBase);
 
@@ -27,6 +24,33 @@ function vector(axis = 0): number[] {
   values[axis] = 1;
   return values;
 }
+
+test.each(["headers", "body"])(
+  "preserves cancellation during embedding response %s",
+  async (stage) => {
+    const controller = new AbortController();
+    const canceled = new Error("Synthetic cancellation");
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async (_url, init) => {
+        expect(init.signal).toBe(controller.signal);
+        if (stage === "body") {
+          const response = new Response();
+          response.json = async () => {
+            controller.abort(canceled);
+            throw new TypeError("Canceled body read");
+          };
+          return response;
+        }
+        controller.abort(canceled);
+        throw new TypeError("Canceled transport");
+      },
+      undefined,
+      controller.signal,
+    );
+    await expect(embedder.embed([example])).rejects.toBe(canceled);
+  },
+);
 
 test("uses the configured embedding model and preserves response indexes", async () => {
   const findings = [

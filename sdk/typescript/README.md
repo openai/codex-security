@@ -33,6 +33,16 @@ Supported runtimes:
   findings. Python 3.10 also needs `tomli`. The findings server (`serve`) uses
   Node’s built-in SQLite and does not require Python.
 
+Reading compressed Codex session logs (`.jsonl.zst`) requires Node.js 22.15.0+
+within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14, compressed sessions
+are unavailable when reading saved activity or attaching scan logs to feedback, and
+scans whose original session is compressed cannot resume. Plain `.jsonl` logs
+work on all supported runtimes.
+
+`LocalPluginBootstrapError` identifies local plugin setup failures and extends
+`PluginBootstrapError`, so existing catches keep working. Knowledge-base
+preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
+
 ## Authentication
 
 Sign in with ChatGPT:
