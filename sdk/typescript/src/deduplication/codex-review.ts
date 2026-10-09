@@ -397,6 +397,7 @@ export class CodexReviewRunner {
                     "*SECRET*",
                     "*TOKEN*",
                     ...Object.keys(source?.environment ?? {}),
+                    ...(source?.credentialNames ?? []),
                   ]),
                 ],
               },

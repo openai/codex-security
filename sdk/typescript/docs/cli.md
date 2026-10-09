@@ -595,12 +595,14 @@ codex-security dedupe --scan SCAN_ID --findings-url http://localhost:3000 --sour
 
 The SDK option is `deduplicateScan(scanId, { sourceMcp: "sourcegraph" })`;
 add `findingsUrl` to use a findings service. The selected server must be
-configured, authenticated, enabled, and available. Dedupe uses finding-cited
+configured in host Codex settings, authenticated, enabled, and available. A
+repository-local definition or override of the selected server is rejected
+before connecting. Dedupe uses finding-cited
 revisions when supplied, with the local checkout's origin and revision as
 repository context. Omitting the option preserves existing source access.
 
 Codex handles MCP transport and tool approval. HTTP environment credentials stay
-outside model shell access. Static headers and stdio environment settings retain
+outside model shell access and cannot override the review’s Codex settings. Static headers and stdio environment settings retain
 native precedence: explicit `env` values override inherited `env_vars` only in
 the MCP child. Local stdio paths are resolved from the caller's directory;
 executor-owned paths retain native handling.
@@ -612,7 +614,8 @@ credential home before using it. Local HTTP servers need no local executor.
 
 Resume checkpoints include the selected connection, referenced environment
 values, executor configuration, and caller directory when an executor inherits
-it. Changed source settings cause saved reviews to be checked again. Native
+it. Changed source settings cause saved reviews to be checked again. Completed
+results and pending writes can resume without reconnecting to the source. Native
 resource reads retain Codex behavior and the server's repository permissions.
 
 ### Environment variables

@@ -389,7 +389,11 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
       deduplicateScanInternal(document.scanId, options, dependencies),
     ).rejects.toThrow();
     expect(
-      await deduplicateScanInternal(document.scanId, options, dependencies),
+      await deduplicateScanInternal(
+        document.scanId,
+        { ...options, sourceMcp: "no-longer-configured" },
+        dependencies,
+      ),
     ).toEqual(result);
     expect(bodies).toHaveLength(
       failure === "before-post"

@@ -423,6 +423,12 @@ for (const {
           ...(sourceMcp
             ? {
                 sourcegraph: {
+                  tools: {
+                    inherited_read: {
+                      approval_mode: "approve",
+                      output_token_limit: 432,
+                    },
+                  },
                   ...(sourceMcp === "http"
                     ? {
                         url: "https://source.example.com/.api/mcp",
@@ -469,24 +475,6 @@ for (const {
           : {}),
       });
       await writeFile(join(modelHome, "config.toml"), configuration);
-      if (sourceMcp) {
-        await mkdir(join(checkout, ".codex"));
-        await writeFile(
-          join(checkout, ".codex", "config.toml"),
-          stringify({
-            mcp_servers: {
-              sourcegraph: {
-                tools: {
-                  inherited_read: {
-                    approval_mode: "approve",
-                    output_token_limit: 432,
-                  },
-                },
-              },
-            },
-          }),
-        );
-      }
       await mkdir(join(modelHome, "state", "codex-home"), { recursive: true });
       const [homeName, keyName, ghName] = environmentNames;
       const runner = new CodexReviewRunner(
@@ -770,7 +758,7 @@ for (const {
           ...(sourceMcp === "http"
             ? {
                 http_headers: { Authorization: "token synthetic-static-auth" },
-                env_http_headers: { Authorization: "SOURCE_AUTH" },
+                env_http_headers: { Authorization: expect.any(String) },
               }
             : {
                 env: {

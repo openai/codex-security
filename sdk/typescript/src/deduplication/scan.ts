@@ -179,15 +179,6 @@ async function deduplicateResolvedScan(
     throw new CodexSecurityError(
       "Custom embeddings are only supported for local deduplication.",
     );
-  const sourceMcp =
-    options.sourceMcp === undefined
-      ? undefined
-      : await resolveSourceMcp(
-          options.sourceMcp,
-          environment,
-          options.signal,
-          repositoryPath,
-        );
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     selectedDirectory,
     {
@@ -297,6 +288,15 @@ async function deduplicateResolvedScan(
       await client.storeDedupeGroups(saved.pendingWrite.groups);
       return saved.result as DeduplicateScanResult;
     }
+    const sourceMcp =
+      options.sourceMcp === undefined
+        ? undefined
+        : await resolveSourceMcp(
+            options.sourceMcp,
+            environment,
+            options.signal,
+            repositoryPath,
+          );
     const reviewEnvironment = dependencies.reviewer
       ? environment
       : await (dependencies.resolveReviewEnvironment ?? comparisonEnvironment)(

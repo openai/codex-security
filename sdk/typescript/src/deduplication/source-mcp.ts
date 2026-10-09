@@ -3,9 +3,10 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, parse, resolve } from "node:path";
+import { isAbsolute, join, parse, resolve, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { parse as parseToml } from "smol-toml";
@@ -36,6 +37,7 @@ export interface SourceMcp {
   configPath: string;
   server: JsonObject;
   environment: Record<string, string>;
+  credentialNames: string[];
   executor?: JsonObject;
   executorLaunchDirectory?: string;
   executorEnvironment?: Record<string, string>;
@@ -120,7 +122,12 @@ async function readSourceConfig(
           id?: number;
           method?: string;
           error?: { message: string };
-          result?: { config?: JsonObject; status?: string; error?: string };
+          result?: {
+            config?: JsonObject;
+            layers?: JsonObject[];
+            status?: string;
+            error?: string;
+          };
         };
         if (message.method !== undefined || message.id === undefined) continue;
         if (message.error) throw new ConfigurationError(message.error.message);
@@ -129,12 +136,34 @@ async function readSourceConfig(
           send({
             id: 2,
             method: "config/read",
-            params: { cwd: resolve(repository) },
+            params: { cwd: resolve(repository), includeLayers: true },
           });
         } else if (message.id === 2) {
           if (!message.result?.config)
             throw new ConfigurationError(
               "Codex did not return source MCP configuration.",
+            );
+          const layers = message.result.layers;
+          if (!layers)
+            throw new ConfigurationError(
+              "Codex did not return source MCP configuration layers.",
+            );
+          if (
+            layers.some(
+              (layer) =>
+                (layer["name"] as JsonObject | undefined)?.["type"] ===
+                  "project" &&
+                layer["disabledReason"] === undefined &&
+                Object.hasOwn(
+                  ((layer["config"] as JsonObject | undefined)?.[
+                    "mcp_servers"
+                  ] ?? {}) as JsonObject,
+                  name,
+                ),
+            )
+          )
+            throw new ConfigurationError(
+              `Source MCP server ${JSON.stringify(name)} has repository-local configuration. Configure it in your Codex home instead.`,
             );
           resolvedConfig = message.result.config;
           const servers = resolvedConfig["mcp_servers"] as
@@ -355,23 +384,34 @@ export async function resolveSourceMcp(
     );
   }
   const credentials: Record<string, string> = {};
-  const capture = (key: string): void => {
+  const credentialNames = new Set<string>();
+  const environmentName = (name: string) =>
+    process.platform === "win32" ? name.toUpperCase() : name;
+  const capture = (key: string): string => {
+    // Native reads HTTP credentials from its own process environment. Give each
+    // reference a stable private name so it cannot override Codex runtime settings.
+    const alias = `CODEX_SECURITY_MCP_CREDENTIAL_${createHash("sha256").update(environmentName(key)).digest("hex")}`;
     const value = environmentEntry(environment, key);
-    if (value !== undefined) credentials[key] = value;
+    if (value !== undefined) credentials[alias] = value;
+    credentialNames.add(key);
+    if (process.platform === "win32")
+      for (const inherited of Object.keys(environment))
+        if (environmentName(inherited) === environmentName(key))
+          credentialNames.add(inherited);
+    return alias;
   };
-  for (const variable of Object.values(
-    (server["env_http_headers"] as JsonObject | undefined) ?? {},
-  )) {
-    if (typeof variable === "string") capture(variable);
-  }
+  if (server["env_http_headers"] !== undefined)
+    server["env_http_headers"] = Object.fromEntries(
+      Object.entries(server["env_http_headers"] as JsonObject).map(
+        ([header, variable]) => [header, capture(variable as string)],
+      ),
+    );
   if (typeof server["bearer_token_env_var"] === "string")
-    capture(server["bearer_token_env_var"]);
+    server["bearer_token_env_var"] = capture(server["bearer_token_env_var"]);
   // Resolve stdio inheritance from the caller before the isolated review launches.
   // Explicit server values retain native precedence and never become host values.
   const inherited: JsonObject = {};
   const explicit = (server["env"] ?? {}) as JsonObject;
-  const environmentName = (name: string) =>
-    process.platform === "win32" ? name.toUpperCase() : name;
   const explicitNames = new Set(Object.keys(explicit).map(environmentName));
   const executorEnvironment: Record<string, string> = {};
   const executorEnvironmentNames = new Set(
@@ -412,21 +452,12 @@ export async function resolveSourceMcp(
   }
   // An empty array clears the native list; omitting it would restore inheritance.
   if (server["env_vars"] !== undefined) server["env_vars"] = remaining;
-  // Node passes one spelling per Windows environment variable. Exclude every
-  // inherited spelling as well so an alias cannot expose an MCP credential.
-  if (process.platform === "win32") {
-    for (const [key, value] of Object.entries(credentials)) {
-      for (const inherited of Object.keys(environment)) {
-        if (inherited.toUpperCase() === key.toUpperCase())
-          credentials[inherited] = value;
-      }
-    }
-  }
   return {
     name,
     configPath: join(configuredCodexHome(environment), "config.toml"),
     server,
     environment: credentials,
+    credentialNames: [...credentialNames],
     ...(executor === undefined ? {} : { executor }),
     ...(executorLaunchDirectory === undefined
       ? {}
@@ -456,9 +487,10 @@ export async function sourceMcpInstructions(
     if (!url.host) throw new Error("Missing source host");
     identity = `${url.host}${url.pathname}`.replace(/\.git\/$|\.git$|\/$/u, "");
   } catch {
-    const ssh = remote.includes("://")
-      ? null
-      : /^(?:[^@]+@)?([^:]+):(.+)$/u.exec(remote);
+    const ssh =
+      remote.includes("://") || isAbsolute(remote) || win32.isAbsolute(remote)
+        ? null
+        : /^(?:[^@]+@)?([^:]+):(.+)$/u.exec(remote);
     if (!ssh)
       throw new ConfigurationError(
         "Source MCP requires an origin remote identifying the repository on the source server.",

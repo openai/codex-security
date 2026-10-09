@@ -155,7 +155,11 @@ test("completed workflows preserve refusal outcomes without caching a false verd
       .dedupe,
   ).toEqual({ status: "completed", result });
   expect(
-    await deduplicateScanInternal(document.scanId, options, dependencies),
+    await deduplicateScanInternal(
+      document.scanId,
+      { ...options, sourceMcp: "no-longer-configured" },
+      dependencies,
+    ),
   ).toEqual(result);
   expect(reviews).toBe(3);
 });
