@@ -1195,18 +1195,32 @@ test.each(["C:\\repos\\project", "C:/repos/project"])(
   },
 );
 
-test.each(["local-source", "source-executor"] as const)(
-  "checkpoints follow native PATH selection for %s and preserve effective overrides",
+test.each([
+  "local-source",
+  "source-executor",
+  "executor-source",
+  "local-home",
+  ...(process.platform === "win32" ? [] : ["local-script", "executor-script"]),
+])(
+  "checkpoints follow native launch selection for %s and preserve effective overrides",
   async (kind) => {
     const home = await temporaryDirectory();
     const repository = await sourceCheckout();
     const captured = join(home, "selected-source.txt");
+    const isExecutor = [
+      "source-executor",
+      "executor-source",
+      "executor-script",
+    ].includes(kind);
+    const selectsExecutor =
+      kind === "source-executor" || kind === "executor-script";
+    const homeSetting = process.platform === "win32" ? "USERPROFILE" : "HOME";
     const sourceScript = join(home, "source.mjs");
     const executorScript = join(home, "executor.mjs");
     const stopScript = join(home, "stop.mjs");
     const record = `import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-writeFileSync(process.argv[2], readFileSync(join(dirname(process.execPath), "selection.txt")));`;
+writeFileSync(process.argv[2], readFileSync(join(${kind === "local-home" ? `process.env.${homeSetting}` : "dirname(process.execPath)"}, "selection.txt")));`;
     await writeFile(sourceScript, `${record}\nprocess.exit(1);`);
     await writeFile(
       executorScript,
@@ -1214,6 +1228,12 @@ writeFileSync(process.argv[2], readFileSync(join(dirname(process.execPath), "sel
 process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { stdio: "inherit" }).status ?? 1);`,
     );
     await writeFile(stopScript, "process.exit(1);");
+    const shebangScript = join(home, "source-entry");
+    await writeFile(
+      shebangScript,
+      `#!/usr/bin/env source-fixture\n${await readFile(kind === "executor-script" ? executorScript : sourceScript, "utf8")}`,
+      { mode: 0o755 },
+    );
     const paths: string[] = [];
     for (const selected of ["first", "second"]) {
       const directory = join(home, selected);
@@ -1280,9 +1300,24 @@ process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { 
         const fixed = phase.startsWith("fixed-") || phase === "unrelated";
         const environment = {
           [process.platform === "win32" ? "Path" : "PATH"]:
-            paths[phase === "second" || phase === "fixed-second" ? 1 : 0],
+            paths[
+              kind !== "local-home" &&
+              (phase === "second" || phase === "fixed-second")
+                ? 1
+                : 0
+            ],
           ...(process.platform === "win32"
             ? { Pathext: process.env["PATHEXT"] }
+            : {}),
+          ...(kind === "local-home"
+            ? {
+                [homeSetting]: join(
+                  home,
+                  phase === "second" || phase === "fixed-second"
+                    ? "second"
+                    : "first",
+                ),
+              }
             : {}),
           SystemRoot: process.env["SystemRoot"],
           CODEX_HOME: home,
@@ -1291,21 +1326,38 @@ process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { 
           ...(phase === "unrelated" ? { UNRELATED_SETTING: "changed" } : {}),
         };
         const override = fixed
-          ? { [process.platform === "win32" ? "pAtH" : "PATH"]: paths[0]! }
+          ? {
+              [kind === "local-home"
+                ? homeSetting
+                : process.platform === "win32"
+                  ? "pAtH"
+                  : "PATH"]:
+                kind === "local-home" ? join(home, "first") : paths[0]!,
+            }
           : undefined;
-        if (kind !== "local-source")
+        if (isExecutor)
           await writeFile(
             join(home, "environments.toml"),
             stringify({
               environments: [
                 {
                   id: "source-executor",
-                  program: "source-fixture",
-                  args: [
-                    executorScript,
-                    captured,
-                    resolveCodexCommand(environment).command,
-                  ],
+                  program:
+                    kind === "executor-source"
+                      ? resolveCodexCommand(environment).command
+                      : kind === "executor-script"
+                        ? shebangScript
+                        : "source-fixture",
+                  args:
+                    kind === "executor-source"
+                      ? ["exec-server", "--listen", "stdio"]
+                      : [
+                          ...(kind === "executor-script"
+                            ? []
+                            : [executorScript]),
+                          captured,
+                          resolveCodexCommand(environment).command,
+                        ],
                   cwd: repository,
                   ...(override ? { env: override } : {}),
                 },
@@ -1326,19 +1378,20 @@ process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { 
             mcp_servers: {
               source: {
                 command:
-                  kind === "source-executor"
+                  selectsExecutor || kind === "local-home"
                     ? process.execPath
-                    : "source-fixture",
-                args:
-                  kind === "source-executor"
-                    ? [stopScript]
-                    : [sourceScript, captured],
-                ...(kind !== "local-source"
-                  ? { environment_id: "source-executor" }
-                  : {}),
-                ...(kind !== "source-executor" && override
-                  ? { env: override }
-                  : {}),
+                    : kind === "local-script"
+                      ? shebangScript
+                      : "source-fixture",
+                args: selectsExecutor
+                  ? [stopScript]
+                  : [
+                      ...(kind === "local-script" ? [] : [sourceScript]),
+                      captured,
+                    ],
+                cwd: repository,
+                ...(isExecutor ? { environment_id: "source-executor" } : {}),
+                ...(!isExecutor && override ? { env: override } : {}),
                 startup_timeout_sec: 2,
               },
             },
@@ -1414,5 +1467,174 @@ test.skipIf(process.platform !== "win32")(
     const original = await digest();
     environment.Pathext = ".COM;.EXE";
     expect(await digest()).not.toBe(original);
+  },
+);
+
+test.each(["local", "executor"])(
+  "canceling required %s MCP startup reaps its children without stopping another review",
+  async (kind) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    const sourceScript = join(home, "stalled-source.mjs");
+    await writeFile(
+      sourceScript,
+      `
+import { request } from "node:http";
+const ready = request(process.argv[2] + "/ready/" + process.env.SOURCE_REQUEST, { method: "POST" });
+ready.end(String(process.pid));
+setInterval(() => {}, 1000);
+`,
+    );
+    const ready = [
+      Promise.withResolvers<number>(),
+      Promise.withResolvers<number>(),
+    ];
+    let modelRequests = 0;
+    const endpoint = createServer((request, response) => {
+      if (request.url?.startsWith("/ready/")) {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          ready[Number(request.url!.slice("/ready/".length))]!.resolve(
+            Number(body),
+          );
+          response.end();
+        });
+      } else {
+        if (request.url?.includes("responses")) modelRequests++;
+        response
+          .writeHead(200, { "Content-Type": "application/json" })
+          .end('{"data":[]}');
+      }
+    });
+    await new Promise<void>((resolve) =>
+      endpoint.listen(0, "127.0.0.1", resolve),
+    );
+    const controllers = [new AbortController(), new AbortController()];
+    const children: ChildProcessWithoutNullStreams[] = [];
+    const sourcePids: number[] = [];
+    const results: Promise<unknown>[] = [];
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        return false;
+      }
+    };
+    try {
+      const url = `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`;
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: join(home, "state"),
+        OPENAI_API_KEY: "synthetic-review-key",
+      };
+      if (kind === "executor")
+        await writeFile(
+          join(home, "environments.toml"),
+          stringify({
+            environments: [
+              {
+                id: "source-executor",
+                program: resolveCodexCommand(environment).command,
+                args: ["exec-server", "--listen", "stdio"],
+                cwd: repository,
+              },
+            ],
+          }),
+        );
+      const source = await sourceForTest(
+        {
+          model_provider: "fixture",
+          model_providers: {
+            fixture: {
+              name: "Synthetic fixture",
+              wire_api: "responses",
+              base_url: `${url}/v1`,
+              request_max_retries: 0,
+            },
+          },
+          mcp_servers: {
+            source: {
+              command: process.execPath,
+              args: [sourceScript, url],
+              cwd: repository,
+              startup_timeout_sec: 60,
+              ...(kind === "executor"
+                ? { environment_id: "source-executor" }
+                : {}),
+            },
+          },
+        },
+        environment,
+        repository,
+      );
+      for (const [index, controller] of controllers.entries()) {
+        results.push(
+          new CodexReviewRunner(
+            environment,
+            (command, args, options) => {
+              const child = spawn(command, args, options);
+              children[index] = child;
+              return child;
+            },
+            controller.signal,
+            repository,
+            undefined,
+            undefined,
+            undefined,
+            {
+              ...source,
+              server: {
+                ...source.server,
+                env: { SOURCE_REQUEST: String(index) },
+              },
+            },
+          )
+            .run({
+              stage: "pair-review",
+              model: "gpt-5.6-sol",
+              effort: "low",
+              prompt: "Compare synthetic source findings.",
+              schema: { type: "object" },
+              validate: (value) => value,
+            })
+            .catch((error: unknown) => error),
+        );
+      }
+      sourcePids.push(
+        ...(await Promise.all(ready.map(({ promise }) => promise))),
+      );
+      const cancellation = new Error("synthetic source startup cancellation");
+      controllers[0]!.abort(cancellation);
+      expect(await results[0]).toBe(cancellation);
+      expect(alive(sourcePids[0]!)).toBe(false);
+      expect(
+        children[0]!.exitCode !== null || children[0]!.signalCode !== null,
+      ).toBe(true);
+      expect(alive(sourcePids[1]!)).toBe(true);
+      expect(alive(children[1]!.pid!)).toBe(true);
+      controllers[1]!.abort(cancellation);
+      expect(await results[1]).toBe(cancellation);
+      expect(alive(sourcePids[1]!)).toBe(false);
+      expect(
+        children[1]!.exitCode !== null || children[1]!.signalCode !== null,
+      ).toBe(true);
+      expect(modelRequests).toBe(0);
+    } finally {
+      for (const controller of controllers)
+        controller.abort(new Error("fixture cleanup"));
+      await Promise.all(results);
+      for (const pid of sourcePids)
+        if (alive(pid)) process.kill(pid, "SIGKILL");
+      endpoint.closeAllConnections();
+      await new Promise<void>((resolve) => endpoint.close(() => resolve()));
+    }
   },
 );

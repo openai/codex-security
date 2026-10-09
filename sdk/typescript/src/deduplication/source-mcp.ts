@@ -6,7 +6,7 @@ import {
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, parse, resolve, win32 } from "node:path";
+import { isAbsolute, join, parse, resolve, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { parse as parseToml } from "smol-toml";
@@ -41,7 +41,7 @@ export interface SourceMcp {
   executor?: JsonObject;
   executorLaunchDirectory?: string;
   executorEnvironment?: Record<string, string>;
-  executableEnvironment?: {
+  launchEnvironment?: {
     source?: JsonObject;
     executor?: JsonObject;
   };
@@ -282,12 +282,17 @@ async function sourceExecutor(
   return selected;
 }
 
-function executableEnvironment(
+function launchEnvironment(
   command: JsonValue | undefined,
   ...environments: (ProcessEnvironment | undefined)[]
 ): JsonObject | undefined {
-  if (typeof command !== "string" || basename(command) !== command) return;
-  const names = process.platform === "win32" ? ["PATH", "PATHEXT"] : ["PATH"];
+  if (typeof command !== "string") return;
+  // Absolute scripts can select an interpreter through PATH; source programs
+  // also read configuration from their inherited home.
+  const names =
+    process.platform === "win32"
+      ? ["PATH", "PATHEXT", "HOME", "USERPROFILE"]
+      : ["PATH", "HOME"];
   return Object.fromEntries(
     names.map((name) => [
       name,
@@ -473,17 +478,19 @@ export async function resolveSourceMcp(
   // An empty array clears the native list; omitting it would restore inheritance.
   if (server["env_vars"] !== undefined) server["env_vars"] = remaining;
   const executorVariables = executor?.["env"] as ProcessEnvironment | undefined;
-  const executorSelection = executableEnvironment(
+  const executorSelection = launchEnvironment(
     executor?.["program"],
     executorVariables,
     reviewEnvironment,
   );
-  // Remote source commands keep their native environment resolution.
+  // Locally launched executors pass their effective environment to source programs.
+  // Network executors retain native remote resolution.
   const sourceSelection =
-    environmentId === "local"
-      ? executableEnvironment(
+    environmentId === "local" || typeof executor?.["program"] === "string"
+      ? launchEnvironment(
           server["command"],
           server["env"] as ProcessEnvironment | undefined,
+          executorVariables,
           reviewEnvironment,
         )
       : undefined;
@@ -501,7 +508,7 @@ export async function resolveSourceMcp(
     ...(sourceSelection === undefined && executorSelection === undefined
       ? {}
       : {
-          executableEnvironment: {
+          launchEnvironment: {
             ...(sourceSelection === undefined
               ? {}
               : { source: sourceSelection }),

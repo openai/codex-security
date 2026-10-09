@@ -1,11 +1,12 @@
 import {
   spawn,
+  spawnSync,
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { z } from "incur";
@@ -707,6 +708,8 @@ export class CodexReviewRunner {
       } finally {
         lines.close();
         child.stdin.end();
+        if (source !== undefined && this.signal?.aborted)
+          stopSourceChildren(child);
         if (child.exitCode === null) child.kill();
         await closed;
       }
@@ -714,4 +717,53 @@ export class CodexReviewRunner {
       await rm(directory, { recursive: true, force: true });
     }
   }
+}
+
+// Native MCP children create their own process groups. Stop owned descendants
+// while the app-server is alive so it can reap them and finish canceled startup.
+function stopSourceChildren(child: ChildProcessWithoutNullStreams): void {
+  if (
+    child.pid === undefined ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  )
+    return;
+  if (process.platform === "win32") {
+    const result = spawnSync(
+      win32.join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+        "taskkill.exe",
+      ),
+      ["/PID", String(child.pid), "/T", "/F"],
+      { stdio: "ignore", windowsHide: true },
+    );
+    if (result.error) throw result.error;
+    return;
+  }
+  const result = spawnSync("ps", ["-A", "-o", "pid=", "-o", "ppid="], {
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0)
+    throw new Error(
+      result.stderr || "Could not inspect source review children.",
+    );
+  const children = new Map<number, number[]>();
+  for (const line of result.stdout.trim().split("\n")) {
+    const [pid, parent] = line.trim().split(/\s+/u).map(Number);
+    if (pid === undefined || parent === undefined) continue;
+    children.set(parent, [...(children.get(parent) ?? []), pid]);
+  }
+  const stop = (pid: number): void => {
+    for (const descendant of children.get(pid) ?? []) {
+      stop(descendant);
+      try {
+        process.kill(descendant, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+  };
+  stop(child.pid);
 }
