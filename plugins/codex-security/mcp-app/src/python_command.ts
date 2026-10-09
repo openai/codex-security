@@ -89,7 +89,7 @@ export async function isUsablePythonExecutable(
   }
 }
 
-/** Translate operating-system spawn failures without hiding Python process errors. */
+/** Add installation advice to missing-runtime errors without hiding their cause. */
 export function missingPythonHelperMessage(
   error: unknown,
   pythonCommand: string,
@@ -98,13 +98,13 @@ export function missingPythonHelperMessage(
     !error ||
     typeof error !== "object" ||
     !("code" in error) ||
-    typeof error.code !== "string" ||
+    error.code !== "ENOENT" ||
     !("path" in error) ||
     error.path !== pythonCommand
   ) {
     return undefined;
   }
-  return MISSING_PYTHON_HELPER_MESSAGE;
+  return `${error instanceof Error ? error.message : String(error)}\n${MISSING_PYTHON_HELPER_MESSAGE}`;
 }
 
 /** Run an existing Python helper with in-memory input and preserve its output. */

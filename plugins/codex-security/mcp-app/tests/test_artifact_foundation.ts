@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -408,6 +409,27 @@ async function testSafeJsonAndJsonl() {
     ),
     /row 1 does not match its artifact schema: candidate_id: required/,
   );
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    try {
+      await chmod(destination, 0o000);
+      for (const read of [
+        io.readArtifactText,
+        io.readArtifactTextWithMetadata,
+      ]) {
+        await assert.rejects(
+          read(context, components, "discovery_candidates"),
+          (error: Error & { cause?: NodeJS.ErrnoException }) => {
+            assert.equal(error.cause?.code, "EACCES");
+            assert.ok(error.message.includes("EACCES"));
+            assert.ok(error.message.includes(destination));
+            return true;
+          },
+        );
+      }
+    } finally {
+      await chmod(destination, 0o600);
+    }
+  }
 }
 
 async function testAtomicReplacement() {

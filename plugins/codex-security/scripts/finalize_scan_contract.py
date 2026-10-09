@@ -881,8 +881,13 @@ def _validate_remote(remote: str, context: str) -> None:
 def _validate_date_time(value: str, context: str) -> None:
     if not RFC3339_RE.fullmatch(value):
         raise ContractError(f"{context}: expected an RFC 3339 timestamp")
+    # Python 3.10 only parses 3 or 6 fractional digits. Validate the calendar and
+    # offset without a complete ASCII fraction, leaving the original text intact.
+    parser_value = re.sub(r"\.[0-9]+(?=[Zz+-])", "", value)
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value[-1] in "Zz" else value)
+        parsed = datetime.fromisoformat(
+            parser_value[:-1] + "+00:00" if parser_value[-1] in "Zz" else parser_value
+        )
     except ValueError as exc:
         raise ContractError(f"{context}: expected an RFC 3339 timestamp") from exc
     if parsed.tzinfo is None:

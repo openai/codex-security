@@ -4,6 +4,7 @@ import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type {
   DeepScanConfig,
   DeepScanRunState,
+  CodexWorkerDiagnostic,
   PersistedDeepScanWorker,
   DeepScanLogEvent,
 } from "../src/deep-scan/types.js";
@@ -1187,6 +1188,51 @@ async function testCancellationClearsRetryWait() {
   );
 }
 
+async function testGenericDiagnosticsPreserveMissingResultRetries() {
+  for (const code of [
+    undefined,
+    "file_change_failed",
+    "artifact_tool_failed",
+  ] as const) {
+    for (const genericFirst of [false, true]) {
+      const diagnostics: CodexWorkerDiagnostic[] = [
+        {
+          code: "worker_error",
+          message: "Synthetic stream reconnect notification.",
+        },
+      ];
+      if (code)
+        diagnostics.push({
+          code,
+          message: "Synthetic recognized worker failure.",
+        });
+      if (!genericFirst) diagnostics.reverse();
+      const { fixture, store } = await coordinatorFixture();
+      const executor = new FakeExecutor({
+        invalidDiscoveryAttempts: 1,
+        discoveryDiagnostics: diagnostics,
+      });
+      const terminal = await runCoordinator(fixture, store, executor, {
+        retryDelaysMs: [1],
+      });
+      assert.equal(terminal?.status, "succeeded", terminal?.error);
+      assert.deepEqual(executor.discoveryResumeThreadIds, [
+        undefined,
+        code === "file_change_failed"
+          ? undefined
+          : executor.discoveryThreadIds[0],
+      ]);
+      for (const diagnostic of diagnostics) {
+        assert.ok(
+          store.workerUpdates.some((update) =>
+            update.error?.includes(diagnostic.message),
+          ),
+        );
+      }
+    }
+  }
+}
+
 async function testMissingDiscoveryResultResumesExistingThread(
   withToolFailure = false,
 ) {
@@ -1199,7 +1245,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
             {
               code: "artifact_tool_failed" as const,
               message:
-                "Codex worker artifact tool record_codex_security_scan_draft failed.",
+                "--provider-error EACCES: permission denied, open /synthetic/result.json\nArtifact transport closed.",
             },
           ],
         }
@@ -1219,6 +1265,12 @@ async function testMissingDiscoveryResultResumesExistingThread(
     executor.discoveryThreadIds[0],
   ]);
   assert.equal(new Set(executor.discoveryThreadIds).size, 1);
+  if (withToolFailure) {
+    const message = executor.options.discoveryDiagnostics![0].message;
+    assert.ok(
+      store.workerUpdates.some((update) => update.error?.includes(message)),
+    );
+  }
   const continuation = executor.discoveryContinuationPrompts[1] ?? "";
   assert.match(continuation, /completed source analysis/);
   assert.match(
@@ -1380,7 +1432,7 @@ async function testInvalidReducerResultRetriesFromSnapshot(
 }
 
 async function testMissingReducerResultResumesExistingThread(
-  diagnosticMessage = "Codex worker artifact tool record_codex_security_deep_reduction failed.",
+  diagnosticMessage = "--provider-error EACCES: permission denied, open /synthetic/result.json\nArtifact transport closed.",
 ) {
   const { fixture, store } = await coordinatorFixture({
     stopAfterConsecutiveErrors: 2,
@@ -1465,6 +1517,10 @@ async function testMissingReducerResultRetainsSizeDiagnosticAfterOtherFailures()
   const sizeMessage =
     "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
   for (const earlierDiagnostic of [
+    {
+      code: "artifact_tool_failed",
+      message: "--provider-error EACCES: permission denied.",
+    },
     { code: "file_change_failed", message: "Codex worker file change failed." },
     {
       code: "sandbox_namespace_exhausted",
@@ -1489,9 +1545,16 @@ async function testMissingReducerResultRetainsSizeDiagnosticAfterOtherFailures()
     assert.ok(failure!.error!.includes(earlierDiagnostic.message));
     assert.ok(failure!.error!.includes(sizeMessage));
     assert.ok(failure!.error!.includes("result.json"));
-    const retryPrompt = await readFile(executor.dedupPromptPaths[1], "utf8");
-    assert.ok(retryPrompt.includes(earlierDiagnostic.message));
-    assert.ok(retryPrompt.includes(sizeMessage));
+    if (earlierDiagnostic.code === "artifact_tool_failed") {
+      assert.equal(
+        executor.dedupResumeThreadIds[1],
+        executor.dedupThreadIds[0],
+      );
+    } else {
+      const retryPrompt = await readFile(executor.dedupPromptPaths[1], "utf8");
+      assert.ok(retryPrompt.includes(earlierDiagnostic.message));
+      assert.ok(retryPrompt.includes(sizeMessage));
+    }
   }
 }
 
@@ -4133,6 +4196,7 @@ try {
   await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();
   await testDiscoveryPhasePersistenceFailureStopsDispatch();
   await testCancellationClearsRetryWait();
+  await testGenericDiagnosticsPreserveMissingResultRetries();
   await testMissingDiscoveryResultResumesExistingThread();
   await testMissingDiscoveryResultResumesExistingThread(true);
   await testInvalidArtifactsRetry();

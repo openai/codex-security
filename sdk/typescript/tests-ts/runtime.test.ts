@@ -5893,6 +5893,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "connection.row_factory = sqlite3.Row",
         "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
         "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+        "connection.execute('CREATE TABLE finding_workflows (scan_id TEXT, scan_dir TEXT NOT NULL, results_json TEXT NOT NULL)')",
         "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
         "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
         "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
@@ -5957,46 +5958,84 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await readdir(root)).toEqual(["scan"]);
   });
 
-  test("reports an unwritable SQLite state directory without a Python traceback", async () => {
-    const root = await temporaryDirectory();
-    const pluginRoot = join(root, "plugin");
-    const stateDirectory = join(root, "persistent-state");
-    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
-    await writeFile(
-      join(pluginRoot, "scripts", "workbench_db.py"),
-      [
-        "import sqlite3",
-        "def connect():",
-        "    raise sqlite3.OperationalError('unable to open database file')",
-        "connect()",
-      ].join("\n"),
+  for (const readonly of [false, true]) {
+    test
+      .skipIf(
+        readonly && (process.platform === "win32" || process.getuid?.() === 0),
+      )
+      .each(["list-scans", "database-info"])(
+      `preserves SQLite ${readonly ? "readonly" : "open"} diagnostics and recovery guidance for %s`,
+      async (command) => {
+        const root = await temporaryDirectory();
+        const stateDirectory = join(root, "state");
+        const databasePath = join(stateDirectory, "workbench.sqlite3");
+        await mkdir(stateDirectory);
+        if (readonly) await writeFile(databasePath, "", { mode: 0o400 });
+        else await mkdir(databasePath);
+        try {
+          let failure: unknown;
+          try {
+            await runWorkbench(
+              {
+                pluginRoot: PLUGIN_ROOT,
+                environment: {
+                  ...process.env,
+                  CODEX_SECURITY_STATE_DIR: stateDirectory,
+                },
+                failureMessage: "Could not read Codex Security scan history",
+              },
+              [command],
+            );
+          } catch (error) {
+            failure = error;
+          }
+
+          expect(failure).toBeInstanceOf(Error);
+          const message = (failure as Error).message;
+          expect(message).toContain(
+            "Could not read Codex Security scan history",
+          );
+          expect(message).toContain(
+            readonly
+              ? "attempt to write a readonly database"
+              : "unable to open database file",
+          );
+          expect(message).toContain(databasePath);
+          expect(message).toContain("SQLite journal files");
+          expect(message).toContain("CODEX_SECURITY_STATE_DIR");
+          if (command === "list-scans") {
+            expect(message).toContain("sqlite3.OperationalError");
+            expect(message).toContain("Traceback");
+          }
+          expect((failure as Error).cause).toBeInstanceOf(Error);
+        } finally {
+          if (readonly) await chmod(databasePath, 0o600);
+        }
+      },
     );
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
+  }
 
-    let failure: unknown;
-    try {
-      await runWorkbench(
-        {
-          python: python!,
-          pluginRoot,
-          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
-          failureMessage: "Could not save the Codex Security scan",
-        },
-        ["register-cli-scan"],
+  test.each(["plain-missing-target", "readonly database", "disk i/o error"])(
+    "preserves missing-target diagnostics containing %s",
+    async (name) => {
+      const root = await temporaryDirectory();
+      const target = join(root, name);
+      await expect(
+        runWorkbench(
+          {
+            pluginRoot: PLUGIN_ROOT,
+            environment: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            },
+          },
+          ["inspect-target", "--target-path", target],
+        ),
+      ).rejects.toThrow(
+        `Scan target is not a readable local directory: ${target}`,
       );
-    } catch (error) {
-      failure = error;
-    }
-
-    expect(failure).toBeInstanceOf(Error);
-    const message = (failure as Error).message;
-    expect(message).toContain("Could not save the Codex Security scan");
-    expect(message).toContain(join(stateDirectory, "workbench.sqlite3"));
-    expect(message).toContain("SQLite journal files are writable");
-    expect(message).toContain("CODEX_SECURITY_STATE_DIR");
-    expect(message).not.toContain("Traceback");
-  });
+    },
+  );
 
   testPosix("rejects private output directories owned by another user", () => {
     expect(() =>
@@ -6138,44 +6177,57 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await planOutputArchive(output)).not.toBeNull();
   });
 
-  test("archives prior output through the exported preparation helper", async () => {
-    const root = await temporaryDirectory();
-    const output = join(root, "scan");
-    await mkdir(output, { mode: 0o700 });
-    await writeFile(join(output, "previous.txt"), "previous scan\n");
-    const archived: string[] = [];
+  test.each(["success", "sync", "async", "pending"])(
+    "archives prior output with a %s observer",
+    async (mode) => {
+      const root = await temporaryDirectory();
+      const output = join(root, "scan");
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      const archived: string[] = [];
+      const outputPresentDuringNotification: boolean[] = [];
 
-    expect(
-      await prepareOutputDir(
-        output,
-        "repo",
-        undefined,
-        undefined,
-        true,
-        (path) => {
-          archived.push(path);
-        },
-      ),
-    ).toBe(output);
-    expect(archived).toHaveLength(1);
-    expect(await readFile(join(archived[0]!, "previous.txt"), "utf8")).toBe(
-      "previous scan\n",
-    );
-    expect(await readdir(output)).toEqual([]);
-    expect(
-      await prepareOutputDir(
-        output,
-        "repo",
-        undefined,
-        undefined,
-        true,
-        (path) => {
-          archived.push(path);
-        },
-      ),
-    ).toBe(output);
-    expect(archived).toHaveLength(1);
-  });
+      expect(
+        await prepareOutputDir(
+          output,
+          "repo",
+          undefined,
+          undefined,
+          true,
+          (path) => {
+            archived.push(path);
+            outputPresentDuringNotification.push(existsSync(output));
+            if (mode === "sync")
+              throw new Error("Synthetic archival observer failed");
+            if (mode === "async")
+              return Promise.reject(
+                new Error("Synthetic archival observer failed"),
+              );
+            if (mode === "pending") return new Promise<void>(() => {});
+          },
+        ),
+      ).toBe(output);
+      expect(archived).toHaveLength(1);
+      expect(outputPresentDuringNotification).toEqual([false]);
+      expect(await readFile(join(archived[0]!, "previous.txt"), "utf8")).toBe(
+        "previous scan\n",
+      );
+      expect(await readdir(output)).toEqual([]);
+      expect(
+        await prepareOutputDir(
+          output,
+          "repo",
+          undefined,
+          undefined,
+          true,
+          (path) => {
+            archived.push(path);
+          },
+        ),
+      ).toBe(output);
+      expect(archived).toHaveLength(1);
+    },
+  );
 
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();

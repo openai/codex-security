@@ -170,12 +170,12 @@ async function readReviewItems(
   return rows;
 }
 
-function helperError(error: unknown): string | undefined {
-  if (!error || typeof error !== "object" || !("stderr" in error))
-    return undefined;
-  const stderr = error.stderr;
-  if (typeof stderr === "string") return stderr.trim() || undefined;
-  if (Buffer.isBuffer(stderr))
-    return stderr.toString("utf8").trim() || undefined;
-  return undefined;
+function helperError(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = error.stderr;
+    if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
+    if (Buffer.isBuffer(stderr) && stderr.length)
+      return stderr.toString("utf8").trim();
+  }
+  return error instanceof Error ? error.message : String(error);
 }
