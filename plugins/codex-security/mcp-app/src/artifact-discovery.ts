@@ -101,21 +101,11 @@ export const workbenchListCodexSecurityCandidatesInputSchema =
     "workbenchListCandidatesInput",
   ) as z.ZodType<ListCodexSecurityCandidatesInput & { scanId: string }>;
 
-export interface RecordCodexSecurityDiscoveryCandidatesResult {
-  operation: "replace";
-  candidatesRecorded: number;
-}
-
-export interface ListCodexSecurityCandidatesResult {
-  rows: CompactDiscoveryCandidate[];
-  nextCursor?: string;
-}
-
 /** Normalize in memory and replace the bound canonical candidate ledger. */
 export async function recordCodexSecurityDiscoveryCandidates(
   input: DiscoveryCandidatesInput,
   context: ArtifactContext,
-): Promise<RecordCodexSecurityDiscoveryCandidatesResult> {
+) {
   const { candidates } = discoveryCandidatesInputSchema.parse(input);
   const inventoryComponents = [...discoveryComponents, "in_scope_files.txt"];
   const inventory = await artifactSourcePath(
@@ -151,7 +141,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
     destination,
     rows.map((row) => `${stableJson(row)}\n`).join(""),
   );
-  return { operation: "replace", candidatesRecorded: rows.length };
+  return { operation: "replace" as const, candidatesRecorded: rows.length };
 }
 
 async function diffCandidateSources(
@@ -237,7 +227,7 @@ except subprocess.CalledProcessError as error:
 export async function listCodexSecurityCandidates(
   input: ListCodexSecurityCandidatesInput,
   context: ArtifactContext,
-): Promise<ListCodexSecurityCandidatesResult> {
+) {
   const page = listCodexSecurityCandidatesInputSchema.parse(input);
   const rows = await readArtifactJsonl(
     context,
