@@ -2192,7 +2192,7 @@ describe("scan and patch workflow", () => {
 
   test.each(
     (["github", "gitlab"] as const).flatMap((provider) =>
-      (["fresh", "resume", "resume CRLF"] as const).map(
+      (["fresh", "resume", "resume CRLF", "resume embedded CR"] as const).map(
         (mode) => [provider, mode] as const,
       ),
     ),
@@ -2340,6 +2340,8 @@ describe("scan and patch workflow", () => {
       let savedBody = `Synthetic saved report\n\n\t/close\n\n${summary}`;
       if (mode === "resume CRLF")
         savedBody = savedBody.replaceAll("\n", "\r\n");
+      if (mode === "resume embedded CR")
+        savedBody = "Synthetic saved report\n\n>\r>>\n/label ~example";
       let publishedBody = "";
       const outcome = await runWorkflow(
         resumed
@@ -2393,7 +2395,8 @@ describe("scan and patch workflow", () => {
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(publishedBody).toBe(gitlab ? `>>>>>>\n${savedBody}` : savedBody);
+      const fence = mode === "resume embedded CR" ? ">>>>" : ">>>>>>";
+      expect(publishedBody).toBe(gitlab ? `${fence}\n${savedBody}` : savedBody);
       if (!resumed)
         expect(JSON.parse(outcome.stdout).patchRisk.report).toBe(summary);
     },
