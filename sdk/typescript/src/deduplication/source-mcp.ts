@@ -44,6 +44,7 @@ export interface SourceMcp {
   launchEnvironment?: {
     source?: JsonObject;
     executor?: JsonObject;
+    headersHelper?: JsonObject;
   };
 }
 
@@ -494,6 +495,17 @@ export async function resolveSourceMcp(
           reviewEnvironment,
         )
       : undefined;
+  // Native HTTP header helpers run on the local review host, independently
+  // of stdio server or executor environment overrides.
+  const headersHelperSelection =
+    environmentId === "local"
+      ? launchEnvironment(server["http_headers_helper"], reviewEnvironment)
+      : undefined;
+  if (headersHelperSelection !== undefined && process.platform === "win32") {
+    delete headersHelperSelection["HOME"];
+    headersHelperSelection["COMSPEC"] =
+      environmentEntry(reviewEnvironment, "COMSPEC") ?? null;
+  }
   return {
     name,
     configPath: join(configuredCodexHome(environment), "config.toml"),
@@ -505,7 +517,9 @@ export async function resolveSourceMcp(
       ? {}
       : { executorLaunchDirectory }),
     ...(Object.keys(executorEnvironment).length ? { executorEnvironment } : {}),
-    ...(sourceSelection === undefined && executorSelection === undefined
+    ...(sourceSelection === undefined &&
+    executorSelection === undefined &&
+    headersHelperSelection === undefined
       ? {}
       : {
           launchEnvironment: {
@@ -515,6 +529,9 @@ export async function resolveSourceMcp(
             ...(executorSelection === undefined
               ? {}
               : { executor: executorSelection }),
+            ...(headersHelperSelection === undefined
+              ? {}
+              : { headersHelper: headersHelperSelection }),
           },
         }),
   };

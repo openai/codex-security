@@ -1681,3 +1681,155 @@ setInterval(() => {}, 1000);
     }
   },
 );
+
+test("HTTP header-helper checkpoints follow native host lookup and explicit environment overrides", async () => {
+  const home = await temporaryDirectory();
+  const repository = await sourceCheckout();
+  const originalPath = process.env["PATH"];
+  const homeVariable = process.platform === "win32" ? "USERPROFILE" : "HOME";
+  const paths: string[] = [];
+  for (const selection of ["first", "second"]) {
+    const directory = join(home, selection);
+    await mkdir(directory);
+    await writeFile(join(directory, "selection.txt"), selection);
+    await writeFile(
+      join(
+        directory,
+        process.platform === "win32" ? "source-headers.cmd" : "source-headers",
+      ),
+      process.platform === "win32"
+        ? `@echo off\nset /p selected=<"%USERPROFILE%\\selection.txt"\necho {"Authorization":"synthetic-${selection}-%selected%"}\n`
+        : `#!/bin/sh\nselected=$(cat "$HOME/selection.txt")\nprintf '%s\\n' "{\\"Authorization\\":\\"synthetic-${selection}-$selected\\"}"\n`,
+      { mode: 0o755 },
+    );
+    paths.push(`${directory}${delimiter}${originalPath ?? ""}`);
+  }
+  const observations: (string | undefined)[] = [];
+  let modelRequests = 0;
+  const endpoint = createServer((request, response) => {
+    if (request.url === "/mcp") {
+      observations.push(request.headers.authorization);
+      response.writeHead(503).end("Synthetic unavailable source");
+    } else {
+      if (request.url?.includes("responses")) modelRequests++;
+      response
+        .writeHead(200, { "Content-Type": "application/json" })
+        .end('{"data":[]}');
+    }
+  });
+  await new Promise<void>((resolve) =>
+    endpoint.listen(0, "127.0.0.1", resolve),
+  );
+  try {
+    const url = `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`;
+    const environment = {
+      PATH: paths[0],
+      [homeVariable]: join(home, "first"),
+      SystemRoot: process.env["SystemRoot"],
+      COMSPEC: process.env["COMSPEC"],
+      PATHEXT: process.env["PATHEXT"],
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(home, "state"),
+      OPENAI_API_KEY: "synthetic-review-key",
+    };
+    const config = {
+      model_provider: "fixture",
+      model_providers: {
+        fixture: {
+          name: "Synthetic fixture",
+          wire_api: "responses",
+          base_url: `${url}/v1`,
+          request_max_retries: 0,
+        },
+      },
+      mcp_servers: {
+        source: {
+          url: `${url}/mcp`,
+          http_headers_helper: "source-headers",
+          startup_timeout_sec: 1,
+        },
+      },
+    };
+    const store = checkpointWorkbench("source-headers", { repository });
+    const workflow = new FindingWorkflow(
+      "source-headers",
+      environment,
+      store.run,
+    );
+    const snapshot = await workflow.sourceSnapshot(repository);
+    const review: CodexReview<{ authorization: string }> = {
+      stage: "pair-review",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      prompt: "Compare synthetic source findings.",
+      schema: { type: "object" },
+      validate: (value) => value as { authorization: string },
+    };
+    let calls = 0;
+    const digests: string[] = [];
+    for (const phase of [
+      "first",
+      "second",
+      "home",
+      "fixed-first",
+      "fixed-second",
+      "unrelated",
+    ]) {
+      const effective = {
+        ...environment,
+        PATH: paths[phase === "second" ? 1 : 0],
+        [homeVariable]: join(home, phase === "home" ? "second" : "first"),
+        ...(phase === "unrelated" ? { UNRELATED_SETTING: "changed" } : {}),
+      };
+      // A caller-supplied PATH wins over the wrapper process's ambient PATH.
+      process.env["PATH"] = paths[phase === "fixed-second" ? 1 : 0];
+      const source = await sourceForTest(config, effective, repository);
+      observations.length = 0;
+      await expect(
+        new CodexReviewRunner(
+          effective,
+          undefined,
+          AbortSignal.timeout(15_000),
+          repository,
+          undefined,
+          undefined,
+          undefined,
+          source,
+        ).run(review),
+      ).rejects.toThrow(/required.*source|source.*required/i);
+      const expected = `synthetic-${phase === "second" ? "second" : "first"}-${phase === "home" ? "second" : "first"}`;
+      const observed = observations.at(-1);
+      expect(observed).toBe(expected);
+      const digest = await reviewSettingsDigest(effective, undefined, {
+        mcp: source,
+        repository,
+      });
+      digests.push(digest);
+      const checkpoint = new CheckpointedReviewRunner(
+        workflow,
+        {
+          async run<T>(request: CodexReview<T>): Promise<T> {
+            calls++;
+            return request.validate({ authorization: observed });
+          },
+        },
+        snapshot,
+        { allRepositories: true },
+        digest,
+      );
+      expect(await checkpoint.run(review)).toEqual({ authorization: expected });
+    }
+    expect(digests[0]).not.toBe(digests[1]);
+    expect(digests[0]).not.toBe(digests[2]);
+    expect(digests[0]).toBe(digests[3]);
+    expect(digests[3]).toBe(digests[4]);
+    expect(digests[4]).toBe(digests[5]);
+    expect(calls).toBe(3);
+    expect(modelRequests).toBe(0);
+  } finally {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    endpoint.closeAllConnections();
+    await new Promise<void>((resolve) => endpoint.close(() => resolve()));
+  }
+});
