@@ -1454,9 +1454,14 @@ export class CodexSecurity {
       }
       const skillName = skillNameFor(normalized, mode);
       // Native no-turn resume retains saved permissions; exec refreshes them.
+      // Keep the parent turn when it may need the ChatGPT access advisory.
       const directDeepScan =
         mode === "deep" &&
         options.resumeScanId === undefined &&
+        (modelProvider === "amazon-bedrock" ||
+          authentication.method === "api_key" ||
+          (authentication.method === "stored_credentials" &&
+            authentication.credentialType === "api_key")) &&
         (await (
           this.#dependencies.supportsDirectDeepScan ?? supportsDirectDeepScan
         )(runtime.plugin.pluginRoot));
@@ -2206,6 +2211,17 @@ export class CodexSecurity {
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
       activeScan = null;
+      if (directDeepScan) {
+        result = new ScanResult({
+          ...result,
+          turnResult: {
+            ...result.turnResult,
+            finalResponse: (
+              await readScanFile(scanDir, "report.md", "report.md", signal)
+            ).toString("utf8"),
+          },
+        });
+      }
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         const targetWarnings = new Set([
