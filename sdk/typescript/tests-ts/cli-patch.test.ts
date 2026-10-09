@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import {
   mkdir,
+  readdir,
   readFile,
   rename,
   rm,
@@ -24,6 +25,7 @@ import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const CURRENT_REPOSITORY = resolve("/current/repository");
 const SAVED_REPOSITORY = resolve("/saved/repository");
@@ -2591,6 +2593,7 @@ describe("scan and patch workflow", () => {
         git("config", "user.name", "Synthetic User");
         git("config", "user.email", "synthetic@example.test");
         git("config", "commit.gpgsign", "false");
+        if (nested) git("config", "diff.relative", "true");
         await writeFile(
           join(repository, "src/finding-1.ts"),
           `${unchanged}unsafe\n`,
@@ -2704,6 +2707,67 @@ describe("scan and patch workflow", () => {
       }
     },
   );
+
+  test("excludes non-Git review baselines inside the target from patch files", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "excludes non-Git review baselines inside the target from patch files",
+      )
+    )
+      return;
+    const root = await temporaryDirectory("codex-security-review-temp-");
+    const repository = join(root, "repository");
+    const temporary = join(repository, "temp");
+    const previous = Object.fromEntries(
+      ["TMPDIR", "TMP", "TEMP"].map((key) => [key, process.env[key]]),
+    );
+    const result = resultWithFindings(["high"]);
+    const scopes: string[][] = [];
+    try {
+      await mkdir(temporary, { recursive: true });
+      await writeFile(join(repository, "app.ts"), "unsafe\n");
+      for (const key of Object.keys(previous)) process.env[key] = temporary;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan", "--review-minimality", "--json"],
+        {
+          currentDirectory: repository,
+          result,
+          onWorkbench: () => savedScan(result, "scan", repository),
+          onRepositoryCommand: () => {
+            throw new Error("fatal: not a git repository");
+          },
+          onCodex: async (args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            if (sandbox === "read-only") {
+              const lines = prompt.split("\n");
+              const index = lines.findIndex((line) =>
+                line.startsWith("Candidate changes since the pre-author"),
+              );
+              scopes.push(JSON.parse(lines[index + 1]!));
+              output!.stdout.write(
+                JSON.stringify({ status: "approved", findings: [] }),
+              );
+            } else {
+              await writeFile(join(repository, "app.ts"), "safe\n");
+              completePatches(args, output);
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(scopes).toEqual([["app.ts"]]);
+      expect(JSON.parse(outcome.stdout).patches[0].files).toEqual(["app.ts"]);
+      expect(await readdir(temporary)).toEqual([]);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   test.each(["git", "directory"])(
     "preserves the pre-author %s baseline for review and revision",

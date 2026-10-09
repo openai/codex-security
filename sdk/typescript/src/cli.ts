@@ -7106,8 +7106,8 @@ async function changedPatchFiles(
       "--literal-pathspecs",
       "diff",
       "--name-only",
-      // A reviewed patch must publish both the deletion and addition of a rename.
-      ...(capturedHead === undefined ? [] : ["--no-renames"]),
+      // Reviews need both sides of renames and repository-relative paths.
+      ...(capturedHead === undefined ? [] : ["--no-renames", "--no-relative"]),
       "-z",
       base,
       head,
@@ -7578,6 +7578,14 @@ async function parsePatchReviewSubject(
     ).replace(/\r?\n$/u, "");
     context.paths = context.paths.map((file) => posix.relative(prefix, file));
     context.baseline = { tree: context.base, head };
+  } else if ("directory" in context.baseline) {
+    const baselineDirectory = await realpath(context.baseline.directory);
+    const targetDirectory = await realpath(context.directory);
+    context.paths = context.paths.filter((file) =>
+      isOutsidePath(
+        relative(baselineDirectory, resolve(targetDirectory, file)),
+      ),
+    );
   }
   if (reported !== undefined) {
     if (context.paths.length === 0) return { status: "invalid" };
