@@ -641,9 +641,8 @@ test.each(["one scan", "different scans"] as const)(
       );
     } finally {
       await Promise.all(
-        [...new Set([...items.map((item) => item.root), ...scratchRoots])].map(
-          (directory) =>
-            promises.rm(directory, { recursive: true, force: true }),
+        items.map((item) =>
+          promises.rm(item.root, { recursive: true, force: true }),
         ),
       );
     }
