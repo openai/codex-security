@@ -481,18 +481,12 @@ try {
     ".bin",
     process.platform === "win32" ? "codex-security.cmd" : "codex-security",
   );
-  assert.equal(
-    (await stat(shim)).isFile(),
-    true,
-    "npm must create the published codex-security executable shim.",
-  );
-
   const launchEnvironment = {
     ...process.env,
     NODE_OPTIONS: "--preserve-symlinks-main --no-experimental-detect-module",
     NODE_USE_ENV_PROXY: undefined,
   };
-  function runInstalledCli(argument) {
+  function runInstalledCli(shim, argument) {
     const options = {
       cwd: consumer,
       capture: true,
@@ -509,8 +503,43 @@ try {
     return run(shim, [argument], options);
   }
 
-  const version = runInstalledCli("--version");
-  assert.equal(version.trim(), packageManifest.version);
+  for (const name of ["codex-security", "cs"]) {
+    const executable = join(
+      consumer,
+      "node_modules",
+      ".bin",
+      process.platform === "win32" ? `${name}.cmd` : name,
+    );
+    assert.equal(
+      (await stat(executable)).isFile(),
+      true,
+      `npm must create the published ${name} executable shim.`,
+    );
+
+    const version = runInstalledCli(executable, "--version");
+    assert.equal(version.trim(), packageManifest.version);
+
+    const help = runInstalledCli(executable, "--help");
+    assert.match(help, /Usage: codex-security\b/u);
+    assert.match(help, /\bpublish\b/u);
+    assert.match(help, /\bdedupe\b/u);
+    assert.match(help, /\bpolicy\b/u);
+  }
+
+  const scopedVersion = run(
+    npm.command,
+    [
+      ...npm.args,
+      "exec",
+      "--offline",
+      "--no",
+      "--",
+      packageManifest.name,
+      "--version",
+    ],
+    { cwd: consumer, capture: true },
+  );
+  assert.equal(scopedVersion.trim(), packageManifest.version);
 
   const preload = join(consumer, "unavailable-cwd.mjs");
   await writeFile(
@@ -547,11 +576,6 @@ try {
   assert.equal(failed.stdout, "");
   assert.equal(failed.stderr, "working directory is unavailable\n");
 
-  const help = runInstalledCli("--help");
-  assert.match(help, /Usage: codex-security\b/u);
-  assert.match(help, /\bpublish\b/u);
-  assert.match(help, /\bdedupe\b/u);
-  assert.match(help, /\bpolicy\b/u);
   const policyHelp = run(process.execPath, [launcher, "policy", "--help"], {
     cwd: consumer,
     capture: true,
