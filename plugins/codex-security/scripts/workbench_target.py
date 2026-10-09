@@ -22,6 +22,8 @@ from filesystem_identity import stored_filesystem_identity_matches
 from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
+SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
+
 
 def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision: str) -> str:
     digest = hashlib.sha256(
@@ -587,6 +589,8 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     paths: list[Path] = []
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         relative = Path(os.fsdecode(raw_path))
+        if not SOURCE_METADATA_DIRECTORIES.isdisjoint(relative.parts):
+            continue
         if scope_depth:
             if len(relative.parts) <= scope_depth:
                 continue
@@ -621,11 +625,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             if nested_paths is not None:
                 paths.extend(nested_paths)
                 continue
-        paths.extend(
-            nested_path
-            for nested_path in path.rglob("*")
-            if ".git" not in nested_path.relative_to(path).parts
-        )
+        paths.extend(source_directory_snapshot_paths(path))
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 
@@ -634,7 +634,7 @@ def source_directory_snapshot_paths(target: Path, excluded: tuple[Path, ...] = (
     pending = [target]
     while pending:
         for path in pending.pop().iterdir():
-            if path.name == ".git" or path in excluded:
+            if path.name in SOURCE_METADATA_DIRECTORIES or path in excluded:
                 continue
             paths.append(path)
             metadata = path.lstat()
@@ -659,7 +659,7 @@ def directory_content_digest(
         else git_directory_snapshot_paths(target)
     )
     if paths is None:
-        paths = sorted(target.rglob("*"))
+        paths = source_directory_snapshot_paths(target, excluded)
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:
@@ -701,7 +701,7 @@ def directory_content_digest(
 def directory_snapshot_regular_file_count(target: Path) -> int:
     paths = git_directory_snapshot_paths(target)
     if paths is None:
-        paths = sorted(target.rglob("*"))
+        paths = source_directory_snapshot_paths(target)
     count = 0
     for path in paths:
         try:

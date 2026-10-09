@@ -6949,17 +6949,26 @@ async function snapshotPatchState(
   try {
     await dependencies.runRepositoryCommand(
       "git",
-      ["rev-parse", "--show-toplevel"],
+      ["rev-parse", "--show-toplevel", "--verify", "--quiet", "HEAD"],
       repository,
       { environment: { LC_ALL: "C" } },
     );
   } catch (error) {
-    const message = errorMessage(error);
-    if (
-      !message.includes("not a git repository") &&
-      message !== "git is not available on a trusted PATH."
-    )
-      throw error;
+    if (isJsonObject(error) && error["code"] === 1) {
+      // An unborn symbolic HEAD has no commit; malformed refs still fail.
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["symbolic-ref", "--quiet", "HEAD"],
+        repository,
+      );
+    } else {
+      const message = errorMessage(error);
+      if (
+        !message.includes("not a git repository") &&
+        message !== "git is not available on a trusted PATH."
+      )
+        throw error;
+    }
     return snapshotPatchDirectory(repository);
   }
   return snapshotPatchTree(repository, dependencies);
@@ -6974,7 +6983,7 @@ async function snapshotPatchDirectory(
     for (const entry of await readdir(join(repository, directory), {
       withFileTypes: true,
     })) {
-      if (entry.name === ".git") continue;
+      if (entry.name === ".git" || entry.name === ".svn") continue;
       const path = directory ? `${directory}/${entry.name}` : entry.name;
       const absolute = join(repository, path);
       if (entry.isDirectory()) {

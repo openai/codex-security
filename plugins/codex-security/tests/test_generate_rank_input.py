@@ -358,15 +358,19 @@ def test_repo_input_preserves_every_requested_directory_file(tmp_path: Path, com
     (repo / "src" / "tests").mkdir(parents=True)
     (repo / "src" / "examples").mkdir()
     (repo / "src" / "fixtures").mkdir()
-    (repo / "src" / ".git").mkdir()
     (repo / "src" / "runtime.py").write_text("runtime = True", encoding="utf-8")
     (repo / "src" / "tests" / "handler.py").write_text("handler = True", encoding="utf-8")
     (repo / "src" / "examples" / "demo.py").write_text("demo = True", encoding="utf-8")
     (repo / "src" / "fixtures" / "payload.txt").write_text("payload", encoding="utf-8")
     (repo / "src" / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
-    (repo / "src" / ".git" / "config").write_text("private", encoding="utf-8")
+    for metadata in (".git", ".svn"):
+        (repo / "src" / metadata).mkdir()
+        (repo / "src" / metadata / "config").write_text("metadata", encoding="utf-8")
     scopes = tmp_path / "target-paths.json"
-    scopes.write_text(json.dumps(["src", "src/runtime.py", "src/.git/config"]), encoding="utf-8")
+    scopes.write_text(
+        json.dumps(["src", "src/runtime.py", "src/.git/config", "src/.svn/config"]),
+        encoding="utf-8",
+    )
     output = tmp_path / "scoped-source-input.jsonl"
 
     run_repo_cli(command, repo, output, "--scopes-file", str(scopes))
