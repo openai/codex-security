@@ -1,17 +1,29 @@
+import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import Ajv2020 from "ajv/dist/2020.js";
 import { z } from "incur";
 import { parse as parseToml } from "smol-toml";
-import { loadContract, sha256Text as sha256 } from "./contract.js";
-import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
-import type { Finding, ScanManifest } from "./models.js";
+import cloudSchema from "../schemas/cloud-import-v1.schema.json" with { type: "json" };
+import { loadContract, readScanFile } from "./contract.js";
 import {
-  CSV_TARGET_ID,
-  bindImportedFindings,
-  csvRowFinding,
-  parseFindingsCsv,
-} from "./findings-import.js";
+  requireCloudScanEligibility,
+  cloudRepositoryIdentity,
+} from "./cloud-scan-eligibility.js";
+import type {
+  CreateImportedScan,
+  ImportDestination,
+  ImportDestinations,
+  ImportedScanReceipt,
+  ImportArtifactDeclaration,
+} from "./cloud-import-models.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  errorMessage,
+} from "./errors.js";
+import type { Finding } from "./models.js";
 import {
   bundledPluginRoot,
   codexSecurityCredentialAllowsAmbientImport,
@@ -19,13 +31,11 @@ import {
   codexSecurityHasStoredFileCredentials,
   expandHome,
 } from "./runtime.js";
-import { VERSION } from "./version.js";
 
 const CLOUD_PUBLISH_URL =
-  "https://chatgpt.com/backend-api/aardvark/cli/findings";
+  "https://chatgpt.com/backend-api/aardvark/imported-scans/v1";
 const CHATGPT_LOGIN_REQUIRED =
   "Cloud publication requires a ChatGPT login already available to Codex Security. Run a scan or sign in with ChatGPT using Codex file credential storage, then retry.";
-
 const credentialsSchema = z.object({
   auth_mode: z.literal("chatgpt").optional(),
   OPENAI_API_KEY: z.null().optional(),
@@ -34,227 +44,385 @@ const credentialsSchema = z.object({
     account_id: z.string().trim().min(1),
   }),
 });
-
-const receiptSchema = z.object({
-  status: z.literal("accepted"),
-  finding_ids: z.array(z.string().min(1)),
-  finding_count: z.number().int().positive(),
+const ajv = new Ajv2020({ strict: false, validateFormats: false });
+const validateDestinations = ajv.compile<ImportDestinations>({
+  ...cloudSchema,
+  $ref: "#/$defs/ImportDestinations",
+});
+const validateReceipt = ajv.compile<ImportedScanReceipt>({
+  ...cloudSchema,
+  $ref: "#/$defs/ImportedScanReceipt",
+});
+type ImportContent = Omit<
+  CreateImportedScan,
+  "environment_id" | "repository_id" | "connector_id"
+>;
+const validateImportContent = ajv.compile<ImportContent>({
+  $defs: cloudSchema.$defs,
+  ...cloudSchema.$defs.CreateImportedScan,
+  required: cloudSchema.$defs.CreateImportedScan.required.filter(
+    (field) =>
+      !["environment_id", "repository_id", "connector_id"].includes(field),
+  ),
+});
+const validateCreate = ajv.compile<CreateImportedScan>({
+  ...cloudSchema,
+  $ref: "#/$defs/CreateImportedScan",
 });
 
 export interface CloudPublicationResult {
   scanId: string;
+  /** Native publication does not return canonical finding IDs in this response. */
   findingIds: string[];
+  /** Number of findings in the submitted local artifact, before Cloud processing. */
   findingCount: number;
+  /** Finalization/acceptance receipt; inspect stage statuses for processing completion. */
+  publication?: ImportedScanReceipt;
   dryRun?: true;
   findings?: Finding[];
 }
-
-interface CloudPublicationDependencies {
+export type CloudDestination = ImportDestination;
+export interface CloudPublicationDependencies {
   environment?: NodeJS.ProcessEnv;
   fetch?: (url: string, options: RequestInit) => Promise<Response>;
   signal?: AbortSignal;
   dryRun?: boolean;
+  cloudEnvironment?: string;
+  selectEnvironment?: (destinations: ImportDestination[]) => Promise<string>;
 }
 
-export async function publishScanToCloud(
-  scanDirectory: string,
-  dependencies: CloudPublicationDependencies & {
-    expectedScanId?: string;
-  } = {},
-): Promise<CloudPublicationResult> {
-  const { manifest, findings } = await loadContract(scanDirectory, {
-    pluginRoot: await bundledPluginRoot(),
-    signal: dependencies.signal,
-    expectedScanId: dependencies.expectedScanId,
-  });
-  if (findings.findings.length === 0) {
-    throw new CodexSecurityError(
-      "The completed scan has no findings to publish.",
-    );
-  }
-  return publishCloudPayload(manifest.scan, findings.findings, dependencies);
-}
-
-export async function publishFindingsCsvToCloud(
-  csvPath: string,
-  dependencies: CloudPublicationDependencies = {},
-): Promise<CloudPublicationResult> {
-  dependencies.signal?.throwIfAborted();
-  let source: string;
-  try {
-    source = await readFile(csvPath, "utf8");
-  } catch (error) {
-    throw new CodexSecurityError("Could not read findings CSV.", {
-      cause: error,
-    });
-  }
-  dependencies.signal?.throwIfAborted();
-  const rows = parseFindingsCsv(source);
-  const digest = sha256(source);
-  const scanId = `scan_csv_${sha256(
-    ["codex-security-csv-import/v1", VERSION, source].join("\0"),
-  ).slice(0, 24)}`;
-  const findings = bindImportedFindings(
-    rows.map(csvRowFinding),
-    "csv",
-    scanId,
-    CSV_TARGET_ID,
-  );
-  const timestamp = "1970-01-01T00:00:00.000Z";
-  const findingsDocument = JSON.stringify({
-    documentType: "codex-security.findings",
-    schemaVersion: "1.0",
-    scanId,
-    findings,
-  });
-  const coverageDocument = JSON.stringify({
-    documentType: "codex-security.coverage",
-    schemaVersion: "1.0",
-    scanId,
-    mode: "repository",
-    completeness: "unknown",
-    inventoryStrategy: "custom",
-    includePaths: ["."],
-    excludePaths: [],
-    surfaces: findings.map((finding) => ({
-      id: finding.occurrenceId,
-      label: finding.title,
-      disposition: "reported",
-      receiptRefs: [],
-    })),
-    explicitExclusions: [],
-    deferred: [],
-  });
-  const scan: ScanManifest["scan"] = {
-    id: scanId,
-    producer: { name: "codex-security-cli", version: VERSION },
-    status: "completed",
-    startedAt: timestamp,
-    completedAt: timestamp,
-    sealedAt: timestamp,
-    target: {
-      kind: "directory_snapshot",
-      targetId: CSV_TARGET_ID,
-      displayName: "findings.csv",
-      snapshotDigest: `codex-security-snapshot/v1:sha256:${digest}`,
-    },
-    scope: {
-      includePaths: ["."],
-      excludePaths: [],
-      summary: "Findings imported from a Codex Security CSV export.",
-    },
-    coverageRef: "coverage.json",
-    findingsRef: "findings.json",
-    artifacts: [
-      {
-        path: "findings.json",
-        sha256: sha256(findingsDocument),
-        mediaType: "application/json",
-      },
-      {
-        path: "coverage.json",
-        sha256: sha256(coverageDocument),
-        mediaType: "application/json",
-      },
-      {
-        path: "findings.csv",
-        sha256: digest,
-        mediaType: "text/csv",
-      },
-    ],
-  };
-  return publishCloudPayload(scan, findings, dependencies);
-}
-
-async function publishCloudPayload(
-  scan: ScanManifest["scan"],
-  findings: Finding[],
+async function cloudRequest(
+  path: string,
   dependencies: CloudPublicationDependencies,
-): Promise<CloudPublicationResult> {
+  method = "GET",
+  body?: BodyInit,
+  contentType = "application/json",
+  timeoutMs = 30_000,
+): Promise<unknown> {
   dependencies.signal?.throwIfAborted();
-  if (dependencies.dryRun) {
-    return {
-      scanId: scan.id,
-      findingIds: [],
-      findingCount: findings.length,
-      dryRun: true,
-      findings,
-    };
-  }
   const credentials = await readCloudCredentials(
     dependencies.environment ?? process.env,
   );
-  const publishUrl =
+  const base =
     dependencies.environment?.["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
     CLOUD_PUBLISH_URL;
-  const timeout = AbortSignal.timeout(30_000);
+  const timeout = AbortSignal.timeout(timeoutMs);
   const signal = dependencies.signal
     ? AbortSignal.any([dependencies.signal, timeout])
     : timeout;
   let response: Response;
+  let payload: unknown;
+  let failure = "Cloud publication was not confirmed.";
+  let recovery =
+    "Repeat the same publication to resume its immutable upload session.";
   try {
-    response = await (dependencies.fetch ?? globalThis.fetch)(publishUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${credentials.access_token}`,
-        "ChatGPT-Account-ID": credentials.account_id,
-        "Content-Type": "application/json",
-        Accept: "application/json",
+    response = await (dependencies.fetch ?? globalThis.fetch)(
+      `${base.replace(/\/$/u, "")}${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${credentials.access_token}`,
+          "ChatGPT-Account-ID": credentials.account_id,
+          "Content-Type": contentType,
+          Accept: "application/json",
+        },
+        ...(body === undefined ? {} : { body }),
+        redirect: "error",
+        signal,
       },
-      body: JSON.stringify({
-        schemaVersion: "1.0",
-        scan,
-        findings,
-      }),
-      redirect: "error",
-      signal,
-    });
-  } catch {
+    );
+    if (!response.ok) {
+      failure = `Cloud publication failed (HTTP ${response.status}).`;
+      recovery =
+        response.status === 401
+          ? "Sign in with ChatGPT again."
+          : response.status === 403
+            ? "Current access to the selected environment and repository is required."
+            : response.status === 404 || response.status === 410
+              ? "This deployment does not support native scan imports; no legacy publication was attempted."
+              : method === "POST" && path === "" && response.status < 500
+                ? "Resolve this rejection before retrying publication."
+                : "Repeat the same publication to resume after resolving the error.";
+    }
+    payload = response.ok ? await response.json() : await response.text();
+  } catch (cause) {
     dependencies.signal?.throwIfAborted();
-    // A lost response does not establish whether the server accepted the POST.
     throw new CodexSecurityError(
-      "Cloud publication was not confirmed. The request was not retried; check whether it was accepted before submitting again.",
+      `${failure} ${errorMessage(cause)} ${recovery}`,
+      { cause },
     );
   }
   if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    const detail =
-      response.status === 401
-        ? "Sign in with ChatGPT again before retrying."
-        : response.status === 403
-          ? "The signed-in account is not authorized to publish to Cloud."
-          : response.status === 404
-            ? "Cloud publication is not available for this account or deployment."
-            : "The request was not retried.";
+    dependencies.signal?.throwIfAborted();
     throw new CodexSecurityError(
-      `Cloud publication failed (HTTP ${response.status}). ${detail}`,
+      `${failure} ${payload}${payload ? " " : ""}${recovery}`,
     );
   }
-  const receipt = receiptSchema.safeParse(
-    await response.json().catch(() => {
-      dependencies.signal?.throwIfAborted();
-      return undefined;
-    }),
+  return payload;
+}
+
+export async function listCloudDestinations(
+  dependencies: CloudPublicationDependencies = {},
+  repositoryRemote?: string,
+): Promise<ImportDestination[]> {
+  const payload = await cloudRequest(
+    `/destinations${repositoryRemote === undefined ? "" : `?repository_remote=${encodeURIComponent(repositoryRemote)}`}`,
+    dependencies,
   );
-  // Cloud assigns opaque IDs in request order, so they cannot be compared to
-  // local finding IDs. The authenticated response must still preserve the
-  // submitted count and return one distinct observation for each finding.
-  if (
-    (response.status !== 200 && response.status !== 201) ||
-    !receipt.success ||
-    receipt.data.finding_count !== findings.length ||
-    receipt.data.finding_ids.length !== findings.length ||
-    new Set(receipt.data.finding_ids).size !== receipt.data.finding_ids.length
-  ) {
+  if (!validateDestinations(payload) || payload.protocol_version !== 1)
     throw new CodexSecurityError(
-      "Cloud publication returned an invalid acceptance receipt. Check whether the request was accepted before submitting again.",
+      "Cloud returned an incompatible destination discovery response.",
+    );
+  return payload.destinations;
+}
+
+export async function selectCloudDestination(
+  destinations: ImportDestination[],
+  dependencies: CloudPublicationDependencies,
+): Promise<ImportDestination> {
+  if (dependencies.cloudEnvironment !== undefined) {
+    const destination = destinations.find(
+      (item) => item.environment_id === dependencies.cloudEnvironment,
+    );
+    if (!destination)
+      throw new CodexSecurityError(
+        "The selected Cloud environment is not an authorized match for this repository.",
+      );
+    return destination;
+  }
+  if (destinations.length === 0)
+    throw new CodexSecurityError(
+      "No existing authorized Cloud environment matches this repository. No artifacts were uploaded.",
+    );
+  const environments = [
+    ...new Map(
+      destinations.map((item) => [item.environment_id, item]),
+    ).values(),
+  ];
+  if (environments.length === 1) return environments[0]!;
+  if (!dependencies.selectEnvironment)
+    throw new CodexSecurityError(
+      "Multiple Cloud environments match. Specify --cloud-environment ENV_ID or use an interactive terminal.",
+    );
+  const selected = await dependencies.selectEnvironment(environments);
+  const destination = destinations.find(
+    (item) => item.environment_id === selected,
+  );
+  if (!destination)
+    throw new CodexSecurityError(
+      "The selected Cloud environment is not an authorized destination.",
+    );
+  return destination;
+}
+
+export async function publishScanToCloud(
+  scanDirectory: string,
+  dependencies: CloudPublicationDependencies & { expectedScanId?: string } = {},
+): Promise<CloudPublicationResult> {
+  const contract = await loadContract(scanDirectory, {
+    pluginRoot: await bundledPluginRoot(),
+    signal: dependencies.signal,
+    expectedScanId: dependencies.expectedScanId,
+  });
+  const repository = requireCloudScanEligibility(contract);
+  const { scan } = contract.manifest;
+  const names: ImportArtifactDeclaration["name"][] = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+  ];
+  const report = await lstat(join(scanDirectory, "report.md")).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    },
+  );
+  if (report !== undefined) names.push("report.md");
+  const bytes = new Map<string, Buffer>();
+  const artifacts: ImportArtifactDeclaration[] = [];
+  for (const name of names) {
+    const contents = await readScanFile(
+      scanDirectory,
+      name,
+      "Cloud publication artifact",
+      dependencies.signal,
+    );
+    const digest = hash("sha256", contents);
+    const declared = scan.artifacts.find((item) => item.path === name);
+    if (declared && declared.sha256 !== digest)
+      throw new CodexSecurityError(
+        `Scan artifact changed after validation: ${name}.`,
+      );
+    if (
+      name === "scan-manifest.json" &&
+      JSON.stringify(
+        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contents)),
+      ) !== JSON.stringify(contract.manifest)
+    )
+      throw new CodexSecurityError("Scan manifest changed after validation.");
+    bytes.set(name, contents);
+    artifacts.push({ name, sha256: digest, size_bytes: contents.byteLength });
+  }
+  const content: ImportContent = {
+    protocol_version: 1,
+    source_scan_id: scan.id,
+    repository_remote: scan.target.remote!,
+    repository_path: ".",
+    target_kind: scan.target.kind as "git_revision" | "git_worktree",
+    coverage_mode: "full_repository",
+    base_commit: scan.target.revision!,
+    snapshot_digest:
+      scan.target.snapshotDigest?.replace(
+        /^codex-security-snapshot\/v1:sha256:/u,
+        "",
+      ) ?? null,
+    scan_started_at: scan.startedAt,
+    scan_completed_at: scan.completedAt,
+    artifacts,
+  };
+  if (!validateImportContent(content))
+    throw new CodexSecurityError(
+      `The scan does not satisfy the Cloud import contract: ${ajv.errorsText(validateImportContent.errors)}.`,
+    );
+  const totalBytes = artifacts.reduce(
+    (total, artifact) => total + artifact.size_bytes,
+    0,
+  );
+  const maxTotalBytes = 128 * 1024 * 1024;
+  if (totalBytes > maxTotalBytes)
+    throw new CodexSecurityError(
+      `Cloud publication artifacts total ${totalBytes} bytes; the import limit is ${maxTotalBytes} bytes (128 MiB).`,
+    );
+  if (dependencies.dryRun)
+    return {
+      scanId: scan.id,
+      findingIds: [],
+      findingCount: contract.findings.findings.length,
+      dryRun: true,
+      findings: contract.findings.findings,
+    };
+  const destinations = await listCloudDestinations(
+    dependencies,
+    scan.target.remote!,
+  );
+  const destination = await selectCloudDestination(
+    destinations.filter(
+      (item) => cloudRepositoryIdentity(item.repository_remote) === repository,
+    ),
+    dependencies,
+  );
+  const request: CreateImportedScan = {
+    ...content,
+    environment_id: destination.environment_id,
+    repository_id: destination.repository_id,
+    connector_id: destination.connector_id,
+  };
+  if (!validateCreate(request))
+    throw new CodexSecurityError(
+      `The scan does not satisfy the Cloud import contract: ${ajv.errorsText(validateCreate.errors)}.`,
+    );
+  let importedScanId: string | undefined;
+  const receipt = (payload: unknown): ImportedScanReceipt => {
+    if (
+      !validateReceipt(payload) ||
+      payload.protocol_version !== 1 ||
+      payload.source !== "cli" ||
+      payload.source_scan_id !== scan.id ||
+      payload.environment_id !== destination.environment_id ||
+      payload.repository_id !== destination.repository_id ||
+      (importedScanId !== undefined &&
+        payload.imported_scan_id !== importedScanId) ||
+      payload.artifacts.length !== artifacts.length ||
+      !artifacts.every((expected) =>
+        payload.artifacts.some(
+          (actual) =>
+            actual.name === expected.name &&
+            actual.sha256 === expected.sha256 &&
+            actual.size_bytes === expected.size_bytes,
+        ),
+      )
+    )
+      throw new CodexSecurityError(
+        "Cloud returned an incompatible scan import receipt. Repeat the same publication to check its status.",
+      );
+    importedScanId = payload.imported_scan_id;
+    return payload;
+  };
+  let publication = receipt(
+    await cloudRequest("", dependencies, "POST", JSON.stringify(request)),
+  );
+  if (publication.upload_status === "expired")
+    throw new CodexSecurityError(
+      "The abandoned Cloud upload session has expired.",
+    );
+  const repairRetention =
+    publication.upload_status === "finalizing" &&
+    publication.materialization_status === "failed" &&
+    publication.failure_code === "artifact_retention_failed";
+  if (publication.upload_status === "uploading" || repairRetention) {
+    for (const artifact of artifacts) {
+      if (
+        !repairRetention &&
+        publication.artifacts.some(
+          (item) =>
+            item.name === artifact.name &&
+            item.sha256 === artifact.sha256 &&
+            item.size_bytes === artifact.size_bytes &&
+            item.uploaded,
+        )
+      )
+        continue;
+      publication = receipt(
+        await cloudRequest(
+          `/${encodeURIComponent(publication.imported_scan_id)}/artifacts/${artifact.name}`,
+          dependencies,
+          "PUT",
+          new Uint8Array(bytes.get(artifact.name)!),
+          "application/octet-stream",
+          // Allow the server's 120-second ingress window plus response processing.
+          150_000,
+        ),
+      );
+    }
+    publication = receipt(
+      await cloudRequest(
+        `/${encodeURIComponent(publication.imported_scan_id)}/finalize`,
+        dependencies,
+        "POST",
+      ),
+    );
+  } else if (
+    publication.materialization_status === "failed" ||
+    publication.dedupe_status === "failed"
+  ) {
+    publication = receipt(
+      await cloudRequest(
+        `/${encodeURIComponent(publication.imported_scan_id)}/retry`,
+        dependencies,
+        "POST",
+      ),
     );
   }
+  if (!["accepted", "finalizing"].includes(publication.upload_status))
+    throw new CodexSecurityError(
+      "Cloud did not confirm finalization or acceptance. Repeat the same publication to resume.",
+    );
   return {
     scanId: scan.id,
-    findingIds: receipt.data.finding_ids,
-    findingCount: receipt.data.finding_count,
+    findingIds: [],
+    findingCount: contract.findings.findings.length,
+    publication,
   };
+}
+
+/** CSV lacks immutable repository provenance and is ineligible for native imports. */
+export async function publishFindingsCsvToCloud(
+  _csvPath: string,
+  _dependencies: CloudPublicationDependencies = {},
+): Promise<CloudPublicationResult> {
+  throw new CodexSecurityError(
+    "Cloud publication accepts full-repository SCM scans only; CSV imports are unsupported.",
+  );
 }
 
 async function readCloudCredentials(environment: NodeJS.ProcessEnv) {

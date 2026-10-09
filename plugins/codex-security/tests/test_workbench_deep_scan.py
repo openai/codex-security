@@ -25,6 +25,7 @@ from workbench_test_support import (
     finish_deep_scan,
     get_deep_scan,
     get_scan,
+    initialize_git_repository,
     mark_deep_coordinator_succeeded,
     resume_deep_scan,
     run_workbench,
@@ -1249,6 +1250,74 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
     )["deepScan"]
 
     assert deep_scan["config"]["workers"] == 7
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+@pytest.mark.parametrize(
+    "remote", ["https://github.com/example/original.git", r"git@example.test:C:\repos\project.git"]
+)
+def test_deep_scan_join_preserves_repository_provenance(
+    tmp_path: Path, dirty: bool, remote: str
+) -> None:
+    state_dir = tmp_path / "state"
+    codex_home = tmp_path / "codex-home"
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    if dirty:
+        (target / "README.md").write_text("tracked local changes\n")
+    expected_remote = None if "\\" in remote else remote
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=target, check=True)
+    first = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/example/replacement.git"],
+        cwd=target,
+        check=True,
+    )
+    second = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
+    assert second["startDisposition"] == "joined"
+    assert second["deepScan"]["scanId"] == first["deepScan"]["scanId"]
+    resumed = resume_deep_scan(
+        state_dir,
+        str(first["deepScan"]["scanId"]),
+        "thread-deep-scan",
+        environment=deep_environment(codex_home),
+    )
+    assert resumed["startDisposition"] == "joined"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_remote, target_repository_path, target_provenance_recorded FROM scans"
+        ).fetchall() == [(expected_remote, ".", 1)]
+
+    scan_id = str(first["deepScan"]["scanId"])
+    scan_dir = Path(str(first["deepScan"]["scanDir"]))
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        snapshot_digest = connection.execute(
+            "SELECT target_snapshot_digest FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0]
+    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        relative_path="README.md",
+        target_kind="git_worktree" if dirty else "git_revision",
+        target_revision=revision,
+        snapshot_digest=snapshot_digest,
+        coverage_mode="deep_repository",
+    )
+    for _ in range(2):
+        completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+        assert completed["progress"]["status"] == "complete"
+        manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+        saved_target = manifest["scan"]["target"]
+        if expected_remote is None:
+            assert "remote" not in saved_target
+        else:
+            assert saved_target["remote"] == expected_remote
+        assert saved_target["repositoryPath"] == "."
+        assert saved_target["revision"] == revision
+        if dirty:
+            assert saved_target["snapshotDigest"] == snapshot_digest
 
 
 def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) -> None:

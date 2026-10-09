@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import {
+  requireCloudScanEligibility,
+  cloudRepositoryIdentity,
+} from "./cloud-scan-eligibility.js";
 import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
@@ -107,8 +111,10 @@ import {
   type SavedScanDependencies,
 } from "./saved-scan.js";
 import {
-  publishFindingsCsvToCloud,
   publishScanToCloud,
+  listCloudDestinations,
+  selectCloudDestination,
+  type CloudDestination,
   type CloudPublicationResult,
 } from "./cloud-publish.js";
 import {
@@ -1119,8 +1125,8 @@ interface CliDependencies {
   classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
   suggestOwners?: typeof suggestOwnersInternal;
   recordsInput?: Readable;
-  publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
+  listCloudDestinations?: typeof listCloudDestinations;
   cloudFetch?: (url: string, options: RequestInit) => Promise<Response>;
   publishScanToCustom?: typeof publishScanToCustom;
   sendFeedback?: typeof sendFeedback;
@@ -2512,9 +2518,10 @@ export async function main(
     description: "Publish Codex Security findings.",
   }).command("scan", {
     description:
-      "Publish findings from a completed scan, or a CSV for internal publication.",
+      "Publish findings from a completed scan to Linear, Cloud, or a custom destination.",
     hint:
       "Examples:\n" +
+      "  codex-security publish scan --to cloud --scan SCAN_ID --cloud-environment ENV_ID\n" +
       "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
       "  codex-security publish scan --to custom --scan latest --findings-url http://localhost:3000",
     destructive: true,
@@ -2531,6 +2538,11 @@ export async function main(
         .default([])
         .describe(
           "Publish only this finding ID; repeat to select deduplicated findings (Linear only).",
+        ),
+      cloudEnvironment: optionValue("--cloud-environment")
+        .optional()
+        .describe(
+          "Existing authorized Cloud environment ID; required when selection is ambiguous without a terminal.",
         ),
       workflowId: optionValue("--workflow-id")
         .optional()
@@ -2549,7 +2561,7 @@ export async function main(
         .describe(
           "External completed scan directory; Linear and custom accept one scan.",
         ),
-      // Cloud remains an internal destination, omitted from public discovery.
+      // Each destination retains its own publication contract.
       to: z
         .string()
         .refine(
@@ -2557,10 +2569,12 @@ export async function main(
             value === "linear" || value === "cloud" || value === "custom",
           {
             message:
-              "Unsupported publication destination. Use --to linear or --to custom.",
+              "Unsupported publication destination. Use --to linear, --to cloud, or --to custom.",
           },
         )
-        .describe("Required publication destination: linear or custom."),
+        .describe(
+          "Required publication destination: linear, cloud, or custom.",
+        ),
       findingsUrl: optionValue("--findings-url")
         .url()
         .optional()
@@ -2574,7 +2588,7 @@ export async function main(
       csv: optionValue("--csv")
         .optional()
         .describe(
-          "Findings CSV for internal publication; not supported with linear or custom.",
+          "Legacy Findings CSV input; unsupported by native Cloud publication.",
         ),
       skipExisting: z
         .boolean()
@@ -2599,7 +2613,7 @@ export async function main(
         cloudRequestStarted &&
         controller.signal.aborted &&
         error === controller.signal.reason
-          ? "Any upload already in flight may have been accepted. Check Cloud before retrying."
+          ? "Cloud publication was not confirmed. Repeat the same publication to resume its immutable upload session."
           : errorMessage(error);
       let presentation: PublicationProgressPresenter | undefined;
       let firstSignalAt = 0;
@@ -2660,6 +2674,29 @@ export async function main(
       };
       try {
         const currentDirectory = dependencies.currentDirectory();
+        if (options.cloudEnvironment !== undefined && options.to !== "cloud") {
+          throw new CodexSecurityError(
+            "--cloud-environment is only supported with --to cloud.",
+          );
+        }
+        const prompt =
+          dependencies.publishPrompt ?? createTerminalPrompt(errorOutput);
+        const selectEnvironment = prompt.isInteractive()
+          ? async (destinations: CloudDestination[]) =>
+              prompt.select(
+                "Which Cloud environment would you like to publish to?",
+                destinations.map((item) => ({
+                  label: safePatchText(
+                    `${item.environment_name} · ${item.environment_id}`,
+                  ),
+                  value: item.environment_id,
+                })),
+                undefined,
+                controller.signal,
+              )
+          : undefined;
+        let cloudEnvironment = options.cloudEnvironment;
+        let selectedCloudDestinations: CloudDestination[] | undefined;
         if (options.findingId.length > 0 && options.to !== "linear") {
           throw new CodexSecurityError(
             "--finding-id is only supported with --to linear.",
@@ -2747,15 +2784,9 @@ export async function main(
         signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         observingSignals = true;
         if (csvPath !== undefined) {
-          const result = await (
-            dependencies.publishFindingsCsvToCloud ?? publishFindingsCsvToCloud
-          )(csvPath, {
-            environment: dependencies.environment,
-            dryRun: options.dryRun,
-            signal: controller.signal,
-            fetch: cloudFetch,
-          });
-          return { ...result };
+          throw new CodexSecurityError(
+            "Cloud publication accepts full-repository SCM scans only; CSV imports are unsupported.",
+          );
         }
         const scanDependencies: SavedScanDependencies = {
           currentDirectory: dependencies.currentDirectory,
@@ -2783,11 +2814,26 @@ export async function main(
         let publicationRepository =
           scanDir === undefined ? "scan" : basename(scanDir);
         if (scanDir === undefined) {
-          const prompt =
-            dependencies.publishPrompt ?? createTerminalPrompt(errorOutput);
           if (!prompt.isInteractive()) {
             throw new CodexSecurityError(
               `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
+            );
+          }
+          if (options.to === "cloud") {
+            const destinations = await (
+              dependencies.listCloudDestinations ?? listCloudDestinations
+            )({
+              environment: dependencies.environment,
+              signal: controller.signal,
+              fetch: cloudFetch,
+            });
+            const selected = await selectCloudDestination(destinations, {
+              cloudEnvironment,
+              selectEnvironment,
+            });
+            cloudEnvironment = selected.environment_id;
+            selectedCloudDestinations = destinations.filter(
+              (item) => item.environment_id === cloudEnvironment,
             );
           }
           const saved = await scanDependencies.runWorkbench([
@@ -2801,21 +2847,43 @@ export async function main(
               "Could not read completed Codex Security scans.",
             );
           }
-          const scans = (
-            await Promise.all(
-              listedScans.map(async (scan) => {
-                if (!isJsonObject(scan)) return undefined;
-                const directory = scan["scanDir"];
-                if (!isNonEmptyString(directory)) {
-                  return undefined;
-                }
-                const metadata = await lstat(
+          const scans: JsonObject[] = [];
+          // Check one artifact-backed contract at a time: saved history can
+          // contain many large findings documents.
+          for (const scan of listedScans) {
+            controller.signal.throwIfAborted();
+            if (!isJsonObject(scan)) continue;
+            const directory = scan["scanDir"];
+            if (!isNonEmptyString(directory)) continue;
+            const metadata = await lstat(
+              resolveCliPath(currentDirectory, directory),
+            ).catch(() => undefined);
+            if (metadata?.isDirectory() !== true) continue;
+            if (selectedCloudDestinations !== undefined) {
+              try {
+                const contract = await loadContract(
                   resolveCliPath(currentDirectory, directory),
-                ).catch(() => undefined);
-                return metadata?.isDirectory() === true ? scan : undefined;
-              }),
-            )
-          ).filter((scan): scan is JsonObject => scan !== undefined);
+                  {
+                    pluginRoot: await bundledPluginRoot(),
+                    signal: controller.signal,
+                  },
+                );
+                const repository = requireCloudScanEligibility(contract);
+                if (
+                  !selectedCloudDestinations.some(
+                    (destination) =>
+                      repository ===
+                      cloudRepositoryIdentity(destination.repository_remote),
+                  )
+                )
+                  continue;
+              } catch {
+                controller.signal.throwIfAborted();
+                continue;
+              }
+            }
+            scans.push(scan);
+          }
           const now = dependencies.now();
           const emphasizeRepository =
             errorOutput.isTTY === true &&
@@ -2891,7 +2959,9 @@ export async function main(
           });
           if (rows.length === 0) {
             throw new CodexSecurityError(
-              "No completed Codex Security scans are available to publish.",
+              options.to === "cloud" && listedScans.length > 0
+                ? "No completed scans are eligible for the selected Cloud environment. Choose a matching environment or run a new full-repository SCM scan."
+                : "No completed Codex Security scans are available to publish.",
             );
           }
           const repositoryWidth = Math.max(
@@ -2993,8 +3063,7 @@ export async function main(
                 ({ scanId, scanDir }) => scanId ?? scanDir,
               ),
             };
-            // Keep each scan's provenance and acceptance receipt separate. Never
-            // retry a failed POST: a lost response may still have been accepted.
+            // Each scan has its own idempotent publication and processing receipt.
             for (const { scanDir: directory, scanId } of selectedScans) {
               if (controller.signal.aborted) {
                 finishCancellation();
@@ -3009,6 +3078,8 @@ export async function main(
                   environment: dependencies.environment,
                   dryRun: options.dryRun,
                   signal: controller.signal,
+                  cloudEnvironment,
+                  selectEnvironment,
                   fetch: cloudFetch,
                   ...(scanId === undefined ? {} : { expectedScanId: scanId }),
                 });
@@ -3035,6 +3106,8 @@ export async function main(
             environment: dependencies.environment,
             dryRun: options.dryRun,
             signal: controller.signal,
+            cloudEnvironment,
+            selectEnvironment,
             fetch: cloudFetch,
             ...(selectedScans[0]?.scanId === undefined
               ? {}

@@ -27,6 +27,35 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        ("https://github.com/example/project.git", "https://github.com/example/project.git"),
+        ("git@github.com:example/project.git", "ssh://github.com/example/project.git"),
+        (
+            "https://fixture-user:fixture-password@github.com/example/project.git",
+            "https://github.com/example/project.git",
+        ),
+        ("../another-local-checkout", None),
+        (r"C:\repos\project", None),
+        ("C:/repos/project", None),
+        (r"C:relative\project", None),
+        (r"git@example.test:C:\repos\project.git", None),
+        ("https://example.test/team/repo\x7f.git", None),
+    ],
+)
+def test_repository_provenance_records_identity_without_clone_credentials(
+    tmp_path: Path, remote: str, expected: str | None
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=target, check=True)
+    assert WORKBENCH_TARGET["git_repository_provenance"](target) == (expected, ".")
+    subdirectory = target / "nested"
+    subdirectory.mkdir()
+    assert WORKBENCH_TARGET["git_repository_provenance"](subdirectory) == (expected, "nested")
+
+
 def add_submodule_gitlink(repository: Path, revision: str, scope: str) -> None:
     subprocess.run(
         [
@@ -558,6 +587,38 @@ def test_git_discovery_preserves_symlink_parent_traversal(
     assert trusted_git_executable(repository) == str(expected)
 
 
+@pytest.mark.parametrize("multiple_urls", [False, True])
+def test_repository_provenance_uses_first_configured_origin_before_transport_rewrites(
+    tmp_path: Path, multiple_urls: bool
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    canonical = "https://github.com/example/first.git"
+    subprocess.run(["git", "remote", "add", "origin", canonical], cwd=target, check=True)
+    if multiple_urls:
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://github.com/example/second.git",
+            ],
+            cwd=target,
+            check=True,
+        )
+    subprocess.run(
+        ["git", "config", "url.git@github-work:.insteadOf", "https://github.com/"],
+        cwd=target,
+        check=True,
+    )
+    expanded = subprocess.check_output(
+        ["git", "remote", "get-url", "origin"], cwd=target, text=True
+    )
+    assert expanded.strip() == "git@github-work:example/first.git"
+    assert WORKBENCH_TARGET["git_repository_provenance"](target) == (canonical, ".")
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -576,11 +637,14 @@ def test_git_context_retains_scoped_directory_spelling(tmp_path: Path, name: str
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](scoped)
     assert repository.samefile(target)
     assert pathspec == scoped.name
+    assert WORKBENCH_TARGET["git_repository_provenance"](scoped) == (None, pathspec)
 
 
 def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
+    remote = "https://github.com/example/project.git"
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=target, check=True)
     alias = tmp_path / "TARGET"
     if not alias.exists():
         pytest.skip("filesystem does not support case aliases")
@@ -588,11 +652,16 @@ def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias)
     assert repository.samefile(target)
     assert pathspec == "."
+    assert WORKBENCH_TARGET["git_repository_provenance"](alias) == (remote, ".")
     scoped = target / "component"
     scoped.mkdir()
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias / "COMPONENT")
     assert repository.samefile(target)
     assert (repository / pathspec).samefile(scoped)
+    assert WORKBENCH_TARGET["git_repository_provenance"](alias / "COMPONENT") == (
+        remote,
+        pathspec,
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not preserve trailing path whitespace")

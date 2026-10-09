@@ -19,6 +19,10 @@ export interface ScanManifest {
       targetId: string;
       displayName: string;
       remote?: string;
+      /**
+       * Scan target path relative to the SCM repository root, captured at scan start; a full repository target is a dot.
+       */
+      repositoryPath?: string;
       revision?: string;
       baseRevision?: string;
       headRevision?: string;

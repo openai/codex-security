@@ -370,6 +370,11 @@ function immutableSourceUrl(
     return undefined;
   }
 
+  const prefix = target.repositoryPath;
+  if (prefix !== undefined && prefix !== "." && !isSafeRepositoryPath(prefix)) {
+    return undefined;
+  }
+
   let remote: URL;
   try {
     remote = new URL(target.remote);
@@ -386,7 +391,11 @@ function immutableSourceUrl(
   const repository = remote.pathname
     .replace(/\.git\/?$/, "")
     .replace(/\/$/, "");
-  const path = location.path.split("/").map(encodeURIComponent).join("/");
+  const repositoryPath =
+    prefix === undefined || prefix === "."
+      ? location.path
+      : `${prefix}/${location.path}`;
+  const path = repositoryPath.split("/").map(encodeURIComponent).join("/");
   remote.pathname = `${repository}/blob/${target.revision}/${path}`;
   remote.hash = `L${location.startLine}${
     location.endLine === undefined || location.endLine === location.startLine

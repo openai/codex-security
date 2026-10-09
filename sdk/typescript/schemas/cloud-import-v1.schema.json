@@ -1,0 +1,458 @@
+{
+  "$defs": {
+    "CreateImportedScan": {
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "const": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "environment_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "repository_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Repository Id",
+          "type": "string"
+        },
+        "connector_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Connector Id"
+        },
+        "source_scan_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source Scan Id",
+          "type": "string"
+        },
+        "repository_remote": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Repository Remote",
+          "type": "string"
+        },
+        "repository_path": {
+          "const": ".",
+          "title": "Repository Path",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": ["git_revision", "git_worktree"],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "coverage_mode": {
+          "const": "full_repository",
+          "title": "Coverage Mode",
+          "type": "string"
+        },
+        "base_commit": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Base Commit",
+          "type": "string"
+        },
+        "snapshot_digest": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Snapshot Digest"
+        },
+        "scan_started_at": {
+          "format": "date-time",
+          "title": "Scan Started At",
+          "type": "string"
+        },
+        "scan_completed_at": {
+          "format": "date-time",
+          "title": "Scan Completed At",
+          "type": "string"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ImportArtifactDeclaration"
+          },
+          "maxItems": 4,
+          "minItems": 3,
+          "title": "Artifacts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "environment_id",
+        "repository_id",
+        "connector_id",
+        "source_scan_id",
+        "repository_remote",
+        "repository_path",
+        "target_kind",
+        "coverage_mode",
+        "base_commit",
+        "scan_started_at",
+        "scan_completed_at",
+        "artifacts"
+      ],
+      "title": "CreateImportedScan",
+      "type": "object"
+    },
+    "ImportArtifactDeclaration": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "findings.json",
+            "scan-manifest.json",
+            "coverage.json",
+            "report.md"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "maximum": 67108864,
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": ["name", "sha256", "size_bytes"],
+      "title": "ImportArtifactDeclaration",
+      "type": "object"
+    },
+    "ImportDestination": {
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "environment_name": {
+          "title": "Environment Name",
+          "type": "string"
+        },
+        "repository_id": {
+          "title": "Repository Id",
+          "type": "string"
+        },
+        "repository_full_name": {
+          "title": "Repository Full Name",
+          "type": "string"
+        },
+        "repository_remote": {
+          "title": "Repository Remote",
+          "type": "string"
+        },
+        "connector_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Connector Id"
+        }
+      },
+      "required": [
+        "environment_id",
+        "environment_name",
+        "repository_id",
+        "repository_full_name",
+        "repository_remote",
+        "connector_id"
+      ],
+      "title": "ImportDestination",
+      "type": "object"
+    },
+    "ImportDestinations": {
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "destinations": {
+          "items": {
+            "$ref": "#/$defs/ImportDestination"
+          },
+          "title": "Destinations",
+          "type": "array"
+        }
+      },
+      "required": ["destinations"],
+      "title": "ImportDestinations",
+      "type": "object"
+    },
+    "ImportedArtifactStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "findings.json",
+            "scan-manifest.json",
+            "coverage.json",
+            "report.md"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "maximum": 67108864,
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "uploaded": {
+          "title": "Uploaded",
+          "type": "boolean"
+        },
+        "download_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Download Url"
+        }
+      },
+      "required": ["name", "sha256", "size_bytes", "uploaded"],
+      "title": "ImportedArtifactStatus",
+      "type": "object"
+    },
+    "ImportedScanReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "imported_scan_id": {
+          "title": "Imported Scan Id",
+          "type": "string"
+        },
+        "source": {
+          "const": "cli",
+          "default": "cli",
+          "title": "Source",
+          "type": "string"
+        },
+        "source_scan_id": {
+          "title": "Source Scan Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "repository_id": {
+          "title": "Repository Id",
+          "type": "string"
+        },
+        "repository_full_name": {
+          "title": "Repository Full Name",
+          "type": "string"
+        },
+        "base_commit": {
+          "title": "Base Commit",
+          "type": "string"
+        },
+        "snapshot_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Snapshot Digest"
+        },
+        "target_kind": {
+          "enum": ["git_revision", "git_worktree"],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "connector_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Connector Id"
+        },
+        "repository_remote": {
+          "title": "Repository Remote",
+          "type": "string"
+        },
+        "upload_status": {
+          "enum": ["uploading", "finalizing", "accepted", "expired"],
+          "title": "Upload Status",
+          "type": "string"
+        },
+        "materialization_status": {
+          "enum": ["pending", "processing", "completed", "failed"],
+          "title": "Materialization Status",
+          "type": "string"
+        },
+        "dedupe_status": {
+          "enum": ["pending", "processing", "completed", "failed"],
+          "title": "Dedupe Status",
+          "type": "string"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ImportedArtifactStatus"
+          },
+          "title": "Artifacts",
+          "type": "array"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "scan_started_at": {
+          "format": "date-time",
+          "title": "Scan Started At",
+          "type": "string"
+        },
+        "scan_completed_at": {
+          "format": "date-time",
+          "title": "Scan Completed At",
+          "type": "string"
+        },
+        "finalization_started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finalization Started At"
+        },
+        "finalized_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Finalized At"
+        },
+        "materialization_completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Materialization Completed At"
+        },
+        "finding_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Finding Count"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Code"
+        },
+        "status_url": {
+          "title": "Status Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "imported_scan_id",
+        "source_scan_id",
+        "environment_id",
+        "repository_id",
+        "repository_full_name",
+        "base_commit",
+        "snapshot_digest",
+        "target_kind",
+        "connector_id",
+        "repository_remote",
+        "upload_status",
+        "materialization_status",
+        "dedupe_status",
+        "artifacts",
+        "created_at",
+        "scan_started_at",
+        "scan_completed_at",
+        "finalized_at",
+        "materialization_completed_at",
+        "finding_count",
+        "failure_code",
+        "status_url"
+      ],
+      "title": "ImportedScanReceipt",
+      "type": "object"
+    }
+  },
+  "title": "CloudImportProtocolV1"
+}

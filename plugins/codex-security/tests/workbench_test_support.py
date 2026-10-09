@@ -742,6 +742,22 @@ def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Pat
     return manifest
 
 
+def saved_scan_repository_provenance(state_dir: Path, scan_id: str) -> dict[str, str]:
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        remote, repository_path, recorded = connection.execute(
+            "SELECT target_remote, target_repository_path, target_provenance_recorded "
+            "FROM scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+    if not recorded:
+        return {}
+    return {
+        field: value
+        for field, value in (("remote", remote), ("repositoryPath", repository_path))
+        if value is not None
+    }
+
+
 def write_completed_contract(
     scan_dir: Path,
     scan_id: str,
@@ -755,6 +771,7 @@ def write_completed_contract(
     diff_base_revision: str | None = None,
     diff_head_revision: str | None = None,
     snapshot_digest: str | None = None,
+    target_provenance: dict[str, str] | None = None,
     coverage_mode: str = "repository",
     inventory_strategy: str = "repository",
 ) -> None:
@@ -770,6 +787,7 @@ def write_completed_contract(
             else f"codex-security-snapshot/v1:sha256:{'a' * 64}"
         ),
     }
+    target_contract.update(target_provenance or {})
     if target_revision is not None:
         target_contract["revision"] = target_revision
     if diff_base_revision is not None:

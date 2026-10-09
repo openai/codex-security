@@ -474,7 +474,8 @@ on source and Git history. Suggestions do not assign tickets. See
 
 ### Publish findings to Cloud
 
-`publish scan --to cloud` uploads selected findings to Codex Security Cloud.
+`publish scan --to cloud` uploads completed full-repository SCM scan artifacts
+to an existing authorized Codex Security Cloud environment.
 It requires ChatGPT credentials; inference API keys and AWS credentials do not
 grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-cloud)
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)

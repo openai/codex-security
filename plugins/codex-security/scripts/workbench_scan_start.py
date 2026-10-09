@@ -22,6 +22,7 @@ from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
+    git_repository_provenance,
     git_revision,
     worktree_content_digest,
 )
@@ -240,6 +241,7 @@ def insert_running_scan(
                 dir=target_root,
             )
         ).resolve()
+    remote, repository_path = git_repository_provenance(target)
     connection.execute(
         """
         INSERT INTO scans (
@@ -247,9 +249,10 @@ def insert_running_scan(
             target_device, target_inode, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
-            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
+            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at,
+            target_remote, target_repository_path, target_provenance_recorded
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', 'preflight', ?, ?, ?, ?)
+            'running', 'preflight', ?, ?, ?, ?, ?, ?, 1)
         """,
         (
             scan_id,
@@ -270,6 +273,8 @@ def insert_running_scan(
             timestamp,
             timestamp,
             timestamp,
+            remote,
+            repository_path,
         ),
     )
     connection.execute(

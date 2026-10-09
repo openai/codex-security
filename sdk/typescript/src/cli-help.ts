@@ -49,7 +49,7 @@ const SCAN_GROUPS: readonly Group[] = [
 
 const PUBLISH_GROUPS: readonly Group[] = [
   ["Input", ["scan", "scan-dir", "csv", "finding-id", "workflow-id"]],
-  ["Destination", ["to", "findings-url"]],
+  ["Destination", ["to", "findings-url", "cloud-environment"]],
   [
     "Linear",
     [

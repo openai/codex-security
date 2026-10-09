@@ -21,6 +21,7 @@ from workbench_test_support import (
     mark_deep_coordinator_succeeded,
     resume_deep_scan,
     run_workbench,
+    saved_scan_repository_provenance,
     scan_command,
     set_triage,
     stable_target_id,
@@ -246,6 +247,7 @@ def create_cli_scan(
         target_kind="git_revision" if target_revision is not None else "directory_snapshot",
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
+        target_provenance=saved_scan_repository_provenance(state_dir, launched["scanId"]),
     )
     if not finding or extra_anchors:
         findings_path = scan_dir / "findings.json"
@@ -462,6 +464,7 @@ def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) ->
         relative_path="README.md",
         target_kind="git_revision",
         target_revision=revision,
+        target_provenance=saved_scan_repository_provenance(state_dir, launched["scanId"]),
     )
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
 

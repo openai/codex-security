@@ -914,7 +914,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (48,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -3263,6 +3263,77 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
     )
     assert manifest["scan"]["target"]["revision"] == revision
     assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+@pytest.mark.parametrize(
+    "original",
+    ["https://github.com/example/original.git", r"git@example.test:C:\repos\project.git"],
+)
+def test_completion_preserves_original_repository_after_origin_changes(
+    tmp_path: Path, dirty: bool, original: str
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    subprocess.run(["git", "remote", "add", "origin", original], cwd=target, check=True)
+    if dirty:
+        (target / "README.md").write_text("tracked local changes\n")
+    saved = create_saved_git_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir, "--workspace-id", str(saved["id"]), "--scan-root", str(tmp_path / "scans")
+    )
+    scan_id = str(started["results"]["scanId"])
+    scan_dir = Path(str(started["results"]["scanDir"]))
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/example/replacement.git"],
+        cwd=target,
+        check=True,
+    )
+    snapshot_digest = started["results"]["contract"]["target"].get("requiredSnapshotDigest")
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        target_kind="git_worktree" if dirty else "git_revision",
+        target_revision=revision,
+        snapshot_digest=snapshot_digest,
+    )
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    assert completed["scan"]["progress"]["status"] == "complete"
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    if "\\" in original:
+        assert "remote" not in manifest["scan"]["target"]
+    else:
+        assert manifest["scan"]["target"]["remote"] == original
+    assert manifest["scan"]["target"]["repositoryPath"] == "."
+    assert manifest["scan"]["target"]["revision"] == revision
+    if dirty:
+        assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
+
+
+def test_completion_discards_remote_not_captured_at_start(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    saved = create_saved_git_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir, "--workspace-id", str(saved["id"]), "--scan-root", str(tmp_path / "scans")
+    )
+    scan_id = str(started["results"]["scanId"])
+    scan_dir = Path(str(started["results"]["scanDir"]))
+    write_completed_contract(
+        scan_dir, scan_id, target, target_kind="git_revision", target_revision=revision
+    )
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["target"]["remote"] = "https://github.com/example/invented.git"
+    manifest["scan"]["target"]["repositoryPath"] = "invented"
+    manifest_path.write_text(json.dumps(manifest))
+    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = json.loads(manifest_path.read_text())
+    assert "remote" not in completed["scan"]["target"]
+    assert completed["scan"]["target"]["repositoryPath"] == "."
 
 
 def test_workbench_generates_reports_during_completion(tmp_path: Path) -> None:

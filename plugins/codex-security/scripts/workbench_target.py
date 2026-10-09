@@ -14,12 +14,14 @@ import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO
+from urllib.parse import urlsplit, urlunsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
+from finalize_scan_contract import ContractError, _validate_remote
 from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
@@ -859,6 +861,79 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
 
 def git_revision(target: Path) -> str:
     return git_output(target, "rev-parse", "HEAD") or "unversioned"
+
+
+def saved_repository_provenance(scan: sqlite3.Row) -> dict[str, str] | None:
+    """Distinguish legacy scans from authoritative, possibly absent SCM identity."""
+    if "target_provenance_recorded" not in scan.keys() or not scan["target_provenance_recorded"]:
+        return None
+    return {
+        field: scan[column]
+        for column, field in (
+            ("target_remote", "remote"),
+            ("target_repository_path", "repositoryPath"),
+        )
+        if scan[column] is not None
+    }
+
+
+def verify_repository_provenance(scan: sqlite3.Row, target: dict[str, Any]) -> None:
+    provenance = saved_repository_provenance(scan)
+    if provenance is not None:
+        for field in ("remote", "repositoryPath"):
+            if target.get(field) != provenance.get(field):
+                raise SystemExit(
+                    f"scan-manifest.json target {field} must match saved scan provenance."
+                )
+    elif target.get("repositoryPath") is not None:
+        raise SystemExit(
+            "scan-manifest.json target repositoryPath must match saved scan provenance."
+        )
+
+
+def git_repository_provenance(target: Path) -> tuple[str | None, str | None]:
+    """Capture repository identity at scan start, without persisting remote credentials."""
+    root = git_output(target, "rev-parse", "--show-toplevel")
+    if root is None:
+        return None, None
+    _, repository_path = git_worktree_context(target)
+    origins = git_output(target, "config", "--null", "--get-all", "remote.origin.url")
+    remote = origins.split("\0", 1)[0] if origins is not None else None
+    if remote is None:
+        return None, repository_path
+    if PureWindowsPath(remote).drive:
+        return None, repository_path
+    if "://" not in remote:
+        authority, separator, path = remote.partition(":")
+        if not separator:
+            return None, repository_path
+        remote = f"ssh://{authority}/{path}"
+    try:
+        parsed = urlsplit(remote)
+        port = parsed.port
+    except ValueError:
+        return None, repository_path
+    if (
+        parsed.scheme not in {"https", "ssh"}
+        or parsed.hostname is None
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.strip("/")
+    ):
+        return None, repository_path
+    host = parsed.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None:
+        host = f"{host}:{port}"
+    # This is an SCM locator, not an authenticated clone URL. User info never
+    # belongs in a retained scan artifact that can later be published.
+    canonical_remote = urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    try:
+        _validate_remote(canonical_remote, "scan.target.remote")
+    except ContractError:
+        return None, repository_path
+    return canonical_remote, repository_path
 
 
 def git_target_metadata(target: Path) -> dict[str, Any]:
