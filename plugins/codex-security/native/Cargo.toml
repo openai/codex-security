@@ -17,7 +17,7 @@ napi-derive = "=3.6.10"
 libc = "=0.2.189"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_System_Threading", "Win32_System_JobObjects"] }
 
 [build-dependencies]
 napi-build = "=2.6.0"

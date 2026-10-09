@@ -1,7 +1,7 @@
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::{
-    ffi::{CStr, OsString},
+    ffi::{CStr, OsStr, OsString},
     fs::{self, File},
     io::{self, Read, Write},
     mem::{offset_of, size_of, MaybeUninit},
@@ -106,6 +106,316 @@ pub struct DirectoryEntry {
 pub struct DirectoryEntriesResult {
     pub error: u32,
     pub value: Vec<DirectoryEntry>,
+}
+
+#[napi(object)]
+pub struct WindowsEnvironmentValue {
+    pub name: Buffer,
+    pub value: Buffer,
+}
+
+#[napi(object)]
+pub struct WindowsProcessResult {
+    pub error: u32,
+    pub message: Option<String>,
+    pub status: i32,
+}
+
+fn windows_command_line(executable: &OsStr, arguments: &[OsString]) -> Vec<u16> {
+    let mut line = vec![b'"' as u16];
+    line.extend(executable.encode_wide());
+    line.push(b'"' as u16);
+    for argument in arguments {
+        line.push(b' ' as u16);
+        let quote = argument.is_empty()
+            || argument
+                .as_encoded_bytes()
+                .iter()
+                .any(|byte| matches!(byte, b' ' | b'\t'));
+        if quote {
+            line.push(b'"' as u16);
+        }
+        let mut slashes = 0;
+        for unit in argument.encode_wide() {
+            if unit == b'\\' as u16 {
+                slashes += 1;
+                continue;
+            }
+            line.extend(std::iter::repeat_n(
+                b'\\' as u16,
+                if unit == b'"' as u16 {
+                    slashes * 2 + 1
+                } else {
+                    slashes
+                },
+            ));
+            line.push(unit);
+            slashes = 0;
+        }
+        line.extend(std::iter::repeat_n(
+            b'\\' as u16,
+            if quote { slashes * 2 } else { slashes },
+        ));
+        if quote {
+            line.push(b'"' as u16);
+        }
+    }
+    line.push(0);
+    line
+}
+
+fn windows_application_path(executable: &OsStr) -> io::Result<Vec<u16>> {
+    use windows_sys::Win32::Foundation::MAX_PATH;
+
+    let namespaced = |path: &OsStr| {
+        let bytes = path.as_encoded_bytes();
+        bytes.starts_with(br"\\?\") || bytes.starts_with(br"\\.\") || bytes.starts_with(br"\??\")
+    };
+    let terminated = |path: &OsStr| path.encode_wide().chain([0]).collect::<Vec<_>>();
+    if namespaced(executable) {
+        return Ok(terminated(executable));
+    }
+    // Resolve lexically, without canonicalizing the selected file or changing argv.
+    let absolute = std::path::absolute(executable)?;
+    if namespaced(absolute.as_os_str()) {
+        return Ok(terminated(absolute.as_os_str()));
+    }
+    let units = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
+    if units.len() < MAX_PATH as usize {
+        return Ok(terminated(executable));
+    }
+    // CreateProcessW needs a namespace for an ordinary long application path.
+    let (prefix, tail) = if units.starts_with(&[b'\\' as u16; 2]) {
+        (r"\\?\UNC\", &units[2..])
+    } else {
+        (r"\\?\", units.as_slice())
+    };
+    Ok(prefix
+        .encode_utf16()
+        .chain(tail.iter().copied())
+        .chain([0])
+        .collect())
+}
+
+fn run_exact_com_process(executable: &OsStr, arguments: &[OsString]) -> io::Result<i32> {
+    use windows_sys::Win32::{
+        Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, WAIT_OBJECT_0},
+        System::Threading::{
+            CreateProcessW, GetExitCodeProcess, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
+            INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
+        },
+    };
+
+    fn duplicate(handle: HANDLE) -> io::Result<Option<OwnedHandle>> {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Ok(None);
+        }
+        let process = unsafe { GetCurrentProcess() };
+        let mut inherited = null_mut();
+        if unsafe {
+            DuplicateHandle(
+                process,
+                handle,
+                process,
+                &mut inherited,
+                0,
+                1,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(unsafe { OwnedHandle::from_raw_handle(inherited) }))
+    }
+
+    let application = windows_application_path(executable)?;
+    let handles = [
+        duplicate(io::stdin().as_raw_handle())?,
+        duplicate(io::stdout().as_raw_handle())?,
+        duplicate(io::stderr().as_raw_handle())?,
+    ];
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = size_of::<STARTUPINFOW>() as u32;
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = handles[0]
+        .as_ref()
+        .map_or(null_mut(), AsRawHandle::as_raw_handle);
+    startup.hStdOutput = handles[1]
+        .as_ref()
+        .map_or(null_mut(), AsRawHandle::as_raw_handle);
+    startup.hStdError = handles[2]
+        .as_ref()
+        .map_or(null_mut(), AsRawHandle::as_raw_handle);
+    let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut command_line = windows_command_line(executable, arguments);
+    if unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            CREATE_UNICODE_ENVIRONMENT,
+            null(),
+            null(),
+            &startup,
+            &mut process,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let child = unsafe { OwnedHandle::from_raw_handle(process.hProcess) };
+    drop(unsafe { OwnedHandle::from_raw_handle(process.hThread) });
+    drop(handles);
+    if unsafe { WaitForSingleObject(child.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut exit_code = 0;
+    if unsafe { GetExitCodeProcess(child.as_raw_handle(), &mut exit_code) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(exit_code as i32)
+}
+
+/// Run only inside the Node subprocess shim: blocking here keeps pipe ownership in that process.
+#[napi]
+pub fn run_windows_process(
+    executable: Buffer,
+    arguments: Vec<Buffer>,
+    cwd: Option<Buffer>,
+    environment: Option<Vec<WindowsEnvironmentValue>>,
+) -> napi::Result<WindowsProcessResult> {
+    use std::process::{Command, Stdio};
+
+    let executable = os_string(executable)?;
+    let arguments = arguments
+        .into_iter()
+        .map(os_string)
+        .collect::<napi::Result<Vec<_>>>()?;
+    let cwd = cwd.map(os_string).transpose()?;
+    let environment = environment
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| Ok((os_string(entry.name)?, os_string(entry.value)?)))
+        .collect::<napi::Result<Vec<_>>>()?;
+    fn run(
+        mut executable: OsString,
+        arguments: Vec<OsString>,
+        cwd: Option<OsString>,
+        environment: Vec<(OsString, OsString)>,
+    ) -> io::Result<i32> {
+        use std::path::Path;
+        use windows_sys::Win32::System::Environment::{
+            NeedCurrentDirectoryForExePathW, SetEnvironmentVariableW,
+        };
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        // Restore target settings inside the one-command shim after Node startup.
+        // Lookup must use the exact environment, including Rust's parent-PATH fallback.
+        for (name, value) in environment {
+            let name = name.encode_wide().chain([0]).collect::<Vec<_>>();
+            let value = value.encode_wide().chain([0]).collect::<Vec<_>>();
+            if unsafe { SetEnvironmentVariableW(name.as_ptr(), value.as_ptr()) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        // The private shim runs one command. Resolve relative executables and PATH
+        // entries from the target directory without changing the caller's cwd.
+        if let Some(directory) = cwd {
+            std::env::set_current_dir(directory)?;
+        }
+        // Rust searches PATH but omits Node's current-directory lookup for bare names.
+        if Path::new(&executable).file_name() == Some(executable.as_os_str())
+            && unsafe { NeedCurrentDirectoryForExePathW([0_u16].as_ptr()) } != 0
+        {
+            let bytes = executable.as_encoded_bytes();
+            let has_extension = bytes
+                .iter()
+                .position(|&byte| byte == b'.')
+                .is_some_and(|index| index + 1 < bytes.len());
+            let mut candidates = Vec::new();
+            if has_extension {
+                candidates.push(executable.clone());
+            }
+            for extension in ["com", "exe"] {
+                let mut candidate = executable.clone();
+                if bytes.last() != Some(&b'.') {
+                    candidate.push(".");
+                }
+                candidate.push(extension);
+                candidates.push(candidate);
+            }
+            if let Some(candidate) = candidates
+                .into_iter()
+                .find(|path| Path::new(path).is_file())
+            {
+                executable = std::env::current_dir()?.join(candidate).into_os_string();
+            }
+        }
+        let raw_job = unsafe { CreateJobObjectW(null(), null()) };
+        if raw_job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { AssignProcessToJobObject(job.as_raw_handle(), GetCurrentProcess()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // This function runs once in the private shim. Keep its job handle until
+        // process exit, so descendants inherit membership before they can run.
+        // Closing the handle on return would terminate the shim before reporting status.
+        std::mem::forget(job);
+        // Rust otherwise prefers a sibling .com.exe over an explicitly selected .com.
+        let path = Path::new(&executable);
+        let bytes = executable.as_encoded_bytes();
+        if path.file_name() != Some(executable.as_os_str())
+            && bytes[bytes.len().saturating_sub(4)..].eq_ignore_ascii_case(b".com")
+        {
+            return run_exact_com_process(&executable, &arguments);
+        }
+        let mut command = Command::new(executable);
+        // Explicit PATH is searched before the shim's executable and system directories.
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
+        command.args(arguments);
+        Ok(command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?
+            .code()
+            .unwrap_or(1))
+    }
+    match run(executable, arguments, cwd, environment) {
+        Ok(status) => Ok(WindowsProcessResult {
+            error: 0,
+            message: None,
+            status,
+        }),
+        Err(error) => Ok(WindowsProcessResult {
+            error: error.raw_os_error().unwrap_or(1) as u32,
+            message: Some(error.to_string()),
+            status: 127,
+        }),
+    }
 }
 
 #[napi]
