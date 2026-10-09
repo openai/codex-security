@@ -147,6 +147,48 @@ describe("Codex authentication process boundary", () => {
     expect(observeSucceeded).toHaveBeenCalled();
   });
 
+  test.each([
+    ["Open https://[2001:db8::1].", "https://[2001:db8::1]"],
+    [
+      "Open [https://auth.example.test/device]",
+      "https://auth.example.test/device",
+    ],
+    ["Open [https://[2001:db8::2]]", "https://[2001:db8::2]"],
+    [
+      "Open [https://auth.example.test/device.]",
+      "https://auth.example.test/device",
+    ],
+    ["Open [https://[2001:db8::3].]", "https://[2001:db8::3]"],
+    [
+      "Open [https://[2001:db8::4]/device?challenge=ABCD.]",
+      "https://[2001:db8::4]/device?challenge=ABCD",
+    ],
+    ["Open [https://[2001:db8::5]:8443]", "https://[2001:db8::5]:8443"],
+    ["Open [https://[::1]]", null],
+    ["Open [https://[::ffff:127.0.0.1]]", null],
+    ["Open http://[2001:db8::1]", null],
+  ] as const)(
+    "distinguishes IPv6 host brackets from surrounding punctuation: %s",
+    async (output, expected) => {
+      const root = await temporaryDirectory("codex-security-auth-ipv6-");
+      const script = join(root, "login.mjs");
+      await writeFile(
+        script,
+        `process.stderr.write(${JSON.stringify(`${output}\nUser code: ABCD-EFGH\n`)}, () => process.exit(0));\n`,
+      );
+      const handle = new CodexLoginHandle(
+        nodeCommand(),
+        [script, "login", "--device-auth"],
+        process.env,
+        () => {},
+      );
+
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+      expect(handle.verificationUrl).toBe(expected);
+      expect(handle.userCode).toBe("ABCD-EFGH");
+    },
+  );
+
   test.each(["User code: RIGHT-CODE", "Code: RIGHT-CODE", "RIGHT-CODE"])(
     "ignores URL parameters when reading device instructions: %s",
     async (instruction) => {
