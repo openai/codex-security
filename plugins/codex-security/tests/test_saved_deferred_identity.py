@@ -696,7 +696,7 @@ def test_parent_rejection_keeps_a_newer_selected_reopened_candidate(
     assert all(path.read_bytes() == content for path, content in originals.items())
 
 
-@pytest.mark.parametrize("kind", ["candidate", "generic"])
+@pytest.mark.parametrize("kind", ["candidate", "generic", "id_only_candidate", "id_only_finding"])
 @pytest.mark.parametrize("closed", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
 def test_projected_parent_pending_tracks_selected_completion(
@@ -708,16 +708,18 @@ def test_projected_parent_pending_tracks_selected_completion(
     task = {"id": identity, "reason": "Validate the selected caller.", "paths": ["api.py"]}
     if kind == "candidate":
         task["candidateId"] = identity
+    elif kind.startswith("id_only_"):
+        task[kind.removeprefix("id_only_")] = {"title": "Caller validation."}
     pending_surface = {
         "id": "api",
         "label": "API",
         "disposition": "needs_follow_up",
         "receiptRefs": [],
     }
-    if kind == "candidate":
+    if kind != "generic":
         pending_surface["candidateId"] = identity
     initial = saved_draft(scan_id, deferred=[task], surfaces=[pending_surface], complete=True)
-    if kind == "candidate":
+    if kind != "generic":
         terminal = saved_draft(
             scan_id, surfaces=[{**pending_surface, "disposition": "rejected"}], complete=True
         )
@@ -750,6 +752,10 @@ def test_projected_parent_pending_tracks_selected_completion(
     }
     if kind == "candidate":
         surface["candidateId"] = "projected-candidate"
+    if kind.startswith("id_only_"):
+        projected["id"] = f"{worker_id}-attempt-1-deferred-1"
+        surface["id"] = f"{worker_id}-attempt-1-surface-1"
+        surface["provenance"]["candidateId"] = identity
     independent = {"id": identity, "reason": "Independent parent review."}
     parent = saved_draft(
         scan_id, deferred=[projected, independent], surfaces=[surface], complete=True
@@ -782,7 +788,7 @@ def test_projected_parent_pending_tracks_selected_completion(
         pending = [row for row in saved["deferred"] if row.get("reason") == task["reason"]]
         assert bool(pending) is not closed
         assert independent in saved["deferred"]
-        if kind == "candidate":
+        if kind != "generic":
             assert (
                 any(row.get("disposition") == "needs_follow_up" for row in saved["surfaces"])
                 is not closed

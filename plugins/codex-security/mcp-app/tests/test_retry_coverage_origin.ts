@@ -1763,7 +1763,13 @@ for (const interrupted of [false, true]) {
   }
 }
 
-for (const headState of ["readable", "unreadable", "missing", "unsafe"]) {
+for (const headState of [
+  "readable",
+  "unreadable",
+  "missing",
+  "unsafe",
+  "unreadable-checkpoint",
+]) {
   test(`accepted retry retains readable coverage with current head ${headState}`, async (t) => {
     const f = await fixture();
     try {
@@ -1828,6 +1834,28 @@ for (const headState of ["readable", "unreadable", "missing", "unsafe"]) {
           return open(...args);
         });
       }
+      if (headState === "unreadable-checkpoint") {
+        const checkpoint = path.join(
+          f.output,
+          "checkpoints",
+          JSON.parse(headBefore.toString()).checkpoint,
+        );
+        const read = fs.readFile;
+        t.mock.method(
+          fs,
+          "readFile",
+          async (...args: Parameters<typeof read>) => {
+            if (args[0] === checkpoint)
+              throw Object.assign(
+                new Error("Synthetic current-checkpoint read failure."),
+                {
+                  code: "EIO",
+                },
+              );
+            return read(...args);
+          },
+        );
+      }
       if (headState === "unsafe") {
         await assert.rejects(
           readDeepReductionSources(f.context),
@@ -1866,7 +1894,7 @@ for (const headState of ["readable", "unreadable", "missing", "unsafe"]) {
         ),
         checkpointBytes,
       );
-      if (headState === "unreadable") {
+      if (headState === "unreadable" || headState === "unreadable-checkpoint") {
         await assert.rejects(
           recordCodexSecurityWorkerScanDraft(worker, current),
           /cannot be read/,

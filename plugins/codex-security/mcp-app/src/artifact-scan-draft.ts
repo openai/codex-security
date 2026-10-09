@@ -1189,7 +1189,9 @@ async function readCheckpointHead(
       skipInvalid &&
       error instanceof Error &&
       (error.message === `${label}: the requested artifact is unavailable.` ||
-        error.message === `${label}: the requested artifact cannot be read.`)
+        error.message.startsWith(
+          `${label}: the requested artifact cannot be read:`,
+        ))
     )
       return undefined;
     throw error;
@@ -1276,7 +1278,9 @@ async function readSavedCheckpoints(
         skipInvalid &&
         error instanceof Error &&
         (error.message === `${label}: the requested artifact is unavailable.` ||
-          error.message === `${label}: the requested artifact cannot be read.`)
+          error.message.startsWith(
+            `${label}: the requested artifact cannot be read:`,
+          ))
       )
         return undefined;
       throw error;

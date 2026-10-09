@@ -704,6 +704,10 @@ def _saved_coverage_id(item: dict[str, Any]) -> str:
     return item.get("candidateId") or f"saved-{_digest(item)[:16]}"
 
 
+def _has_candidate_fields(row: dict[str, Any]) -> bool:
+    return any(key in row for key in ("candidateId", "candidate", "finding"))
+
+
 def _deferred_candidate_id(
     row: dict[str, Any],
     owner: str | None,
@@ -712,9 +716,7 @@ def _deferred_candidate_id(
     identity = row.get("candidateId") or row.get("id")
     if not isinstance(identity, str):
         return None
-    if (owner, identity) in ambiguous_deferred and not any(
-        key in row for key in ("candidateId", "candidate", "finding")
-    ):
+    if (owner, identity) in ambiguous_deferred and not _has_candidate_fields(row):
         return None
     return identity
 
@@ -780,9 +782,7 @@ def _generic_surface_updates(
             by_source = dict(matches)
             if any(row != by_source[saved_path] for saved_path, row in matches):
                 continue
-            if any(
-                "candidateId" in row or "candidate" in row or "finding" in row for _, row in matches
-            ):
+            if any(_has_candidate_fields(row) for _, row in matches):
                 continue
             if any(
                 row is not surface
@@ -799,7 +799,7 @@ def _generic_surface_updates(
                     or (
                         isinstance(row.get("id"), str)
                         and (owner, row["id"]) in ambiguous_deferred
-                        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                        and not _has_candidate_fields(row)
                     )
                 )
                 and linked(row, identity)
@@ -1599,9 +1599,7 @@ def merge_saved_results(
             for row in rows:
                 if not isinstance(row, dict) or "id" in row:
                     continue
-                if field == "deferred" and any(
-                    key in row for key in ("candidateId", "candidate", "finding")
-                ):
+                if field == "deferred" and _has_candidate_fields(row):
                     continue
                 content = {"receiptRefs": [], **row} if field == "surfaces" else row
                 identity = next(
@@ -1747,7 +1745,13 @@ def merge_saved_results(
         for field in ("surfaces", "explicitExclusions", "deferred"):
             items = draft["coverage"].get(field, [])
             for index, item in enumerate(items if isinstance(items, list) else [], 1):
-                if not isinstance(item, dict) or not isinstance(item.get("candidateId"), str):
+                if not isinstance(item, dict):
+                    continue
+                candidate_id = item.get(
+                    "candidateId",
+                    item.get("id") if field == "deferred" and _has_candidate_fields(item) else None,
+                )
+                if not isinstance(candidate_id, str):
                     continue
                 retained = retained_coverage_record(field, item, worker, relative)
                 if retained is None and draft.get("complete") is not False:
@@ -1759,7 +1763,7 @@ def merge_saved_results(
                     key = (
                         source_owner,
                         provenance["attempt"],
-                        provenance.get("candidateId", item["candidateId"]),
+                        provenance.get("candidateId", candidate_id),
                     )
                     accepted_projected_records.setdefault(key, []).append(retained)
 
@@ -1769,15 +1773,19 @@ def merge_saved_results(
         candidate_id = item.get("candidateId")
         provenance = item.get("provenance")
         if owner is None and isinstance(provenance, dict):
+            identity_field = "candidateId" if candidate_id is not None else "id"
             source_owner = provenance.get("workerId")
             source_candidate = provenance.get("candidateId", candidate_id)
+            if source_candidate is None and _has_candidate_fields(item):
+                source_candidate = provenance.get("sourceId")
             if (
                 isinstance(source_owner, str)
                 and source_owner in workers_by_id
                 and isinstance(provenance.get("attempt"), int)
                 and isinstance(source_candidate, str)
+                and isinstance(item.get(identity_field), str)
                 and any(
-                    item.get("candidateId") == accepted.get("candidateId")
+                    item.get(identity_field) == accepted.get(identity_field)
                     and (
                         accepted.get("candidateId") != source_candidate
                         or item.get("disposition") == accepted.get("disposition")
@@ -1801,15 +1809,14 @@ def merge_saved_results(
         candidate_aliases = {
             identity
             for row in deferred_rows[relative]
-            if isinstance(row, dict)
-            and any(key in row for key in ("candidateId", "candidate", "finding"))
+            if isinstance(row, dict) and _has_candidate_fields(row)
             for identity in (row.get("id"), row.get("candidateId"))
             if isinstance(identity, str)
         }
         for row in deferred_rows[relative]:
             if not isinstance(row, dict) or not isinstance(identity := row.get("id"), str):
                 continue
-            if any(key in row for key in ("candidateId", "candidate", "finding")):
+            if _has_candidate_fields(row):
                 continue
             if identity in candidate_aliases or (identity in by_id and row != by_id[identity]):
                 ambiguous_deferred.add((owner, identity))
@@ -1893,7 +1900,7 @@ def merge_saved_results(
                 isinstance(row, dict)
                 and isinstance(identity := row.get("id"), str)
                 and (owner, identity) in ambiguous_deferred
-                and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                and not _has_candidate_fields(row)
                 and not any(
                     saved_owner == owner and saved_row == row
                     for saved_owner, saved_row, _ in reopened_rows
@@ -2232,7 +2239,7 @@ def merge_saved_results(
         for owner, row, _ in reopened_rows
         if isinstance(row.get("id"), str)
         and (owner, row["id"]) in ambiguous_deferred
-        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+        and not _has_candidate_fields(row)
         for identity in [
             row["id"],
             *(row.get("surfaceIds", []) if isinstance(row.get("surfaceIds", []), list) else []),
@@ -2256,7 +2263,7 @@ def merge_saved_results(
                 and isinstance(surface.get("id"), str)
                 and (owner, surface["id"]) in ambiguous_surface_ids
                 and surface.get("disposition") == "needs_follow_up"
-                and not any(key in surface for key in ("candidateId", "candidate", "finding"))
+                and not _has_candidate_fields(surface)
                 and isinstance(coverage.get("surfaces"), list)
             ):
                 worker = workers_by_id.get(owner)
@@ -2544,10 +2551,7 @@ def merge_saved_results(
                     and field != "deferred"
                     and relative != accepted_reducer
                     and relative not in frozen_parent_projections
-                    and not (
-                        isinstance(item, dict)
-                        and any(key in item for key in ("candidateId", "candidate", "finding"))
-                    )
+                    and not (isinstance(item, dict) and _has_candidate_fields(item))
                 ):
                     continue
                 # A selected outcome must retain its evidence even if its result write failed.
