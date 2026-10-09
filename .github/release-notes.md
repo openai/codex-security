@@ -156,6 +156,7 @@
 - reuse scan contract readers and projection helpers ([#1480](https://github.com/openai/codex-security/pull/1480))
 - derive value options from command schemas ([#1477](https://github.com/openai/codex-security/pull/1477))
 - add cs alias and clarify onboarding ([#1415](https://github.com/openai/codex-security/pull/1415))
+- enforce devcontainer cooldown before merge ([#1517](https://github.com/openai/codex-security/pull/1517))
 
 <!-- release-section: highlights:end -->
 
