@@ -1,3 +1,4 @@
+import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -54,6 +55,7 @@ import {
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
+  LocalPluginBootstrapError,
   PluginPythonUnavailableError,
   type ProtectedScanPathKind,
   SandboxUnavailableError,
@@ -174,7 +176,8 @@ export interface PluginPythonOptions {
   environment?: ProcessEnvironment;
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
-  protectedRoot?: string;
+  protectedRoot?: string | readonly string[];
+  currentDirectory?: string;
   signal?: AbortSignal;
 }
 
@@ -183,7 +186,8 @@ export interface WorkbenchCommandOptions {
   pluginRoot: string;
   environment: ProcessEnvironment;
   stateDirectory?: string;
-  protectedRoot?: string;
+  protectedRoot?: string | readonly string[];
+  currentDirectory?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1609,11 +1613,13 @@ export async function runWorkbench(
     ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
-        ? await resolveTrustedExecutable(
-            "node",
-            options.environment,
-            options.protectedRoot ?? process.cwd(),
-          )
+        ? await resolveTrustedExecutable("node", options.environment, [
+            process.cwd(),
+            options.currentDirectory ?? process.cwd(),
+            ...(typeof options.protectedRoot === "string"
+              ? [options.protectedRoot]
+              : (options.protectedRoot ?? [])),
+          ])
         : undefined;
     if (node === null) {
       throw new Error("Node.js is not available on a trusted PATH.");
@@ -1623,6 +1629,7 @@ export async function runWorkbench(
       : (options.python ??= await resolvePluginPython({
           environment: options.environment,
           protectedRoot: options.protectedRoot,
+          currentDirectory: options.currentDirectory,
           signal: options.signal,
         }));
     const stateDirectory = native
@@ -1720,6 +1727,17 @@ export async function runWorkbench(
         const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
         const archiveDir = await planOutputArchive(scanDir);
         if (archiveDir !== null) {
+          const stateDirectory = codexSecurityStateDirectory(
+            options.environment,
+          );
+          for (let path = stateDirectory; ; path = dirname(path)) {
+            if (isWithin(scanDir, await canonicalConfigPath(path))) {
+              throw new Error(
+                "The scan artifact directory cannot contain the active workbench database.",
+              );
+            }
+            if (dirname(path) === path) break;
+          }
           const savedScans = await savedScanIdentities(scanDir);
           signal?.throwIfAborted();
           await rename(scanDir, archiveDir);
@@ -2556,26 +2574,32 @@ export async function resolvePluginPath(
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (pluginPath === undefined) {
-    return await bundledPluginRoot();
-  }
+  try {
+    if (pluginPath === undefined) {
+      return await bundledPluginRoot();
+    }
 
-  const path = resolve(expandHome(pluginPath));
-  const metadata = await lstat(path).catch(() => null);
-  if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
-    return await extractPluginZip(
-      path,
-      join(workspace, "extracted-plugin"),
-      signal,
+    const path = resolve(expandHome(pluginPath));
+    const metadata = await lstat(path).catch(() => null);
+    if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
+      return await extractPluginZip(
+        path,
+        join(workspace, "extracted-plugin"),
+        signal,
+      );
+    }
+    if (metadata?.isDirectory()) {
+      throwIfSignalAborted(signal);
+      return await validatePluginRoot(path);
+    }
+    throw new PluginBootstrapError(
+      `Plugin path must be a directory or ZIP: ${path}`,
     );
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError)
+      throw error;
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  if (metadata?.isDirectory()) {
-    throwIfSignalAborted(signal);
-    return await validatePluginRoot(path);
-  }
-  throw new PluginBootstrapError(
-    `Plugin path must be a directory or ZIP: ${path}`,
-  );
 }
 
 export async function createMarketplace(
@@ -2583,20 +2607,26 @@ export async function createMarketplace(
   pluginRoot: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  throwIfSignalAborted(signal);
-  const root = await realpath(pluginRoot);
-  const marketplace = join(codexHome, "sdk-marketplace");
-  const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
-  await copyPluginTree(root, pluginDestination, signal);
-  const projection = await legacyPluginProjection(pluginDestination, signal);
-  for (const [path, file] of projection?.files ?? []) {
-    const destination = join(pluginDestination, path);
-    await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, file.contents, { mode: file.mode, signal });
-    if (file.mode !== undefined) await chmod(destination, file.mode);
+  try {
+    throwIfSignalAborted(signal);
+    const root = await realpath(pluginRoot);
+    const marketplace = join(codexHome, "sdk-marketplace");
+    const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
+    await copyPluginTree(root, pluginDestination, signal);
+    const projection = await legacyPluginProjection(pluginDestination, signal);
+    for (const [path, file] of projection?.files ?? []) {
+      const destination = join(pluginDestination, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, file.contents, { mode: file.mode, signal });
+      if (file.mode !== undefined) await chmod(destination, file.mode);
+    }
+    await writeMarketplaceManifest(marketplace, signal);
+    return marketplace;
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError)
+      throw error;
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  await writeMarketplaceManifest(marketplace, signal);
-  return marketplace;
 }
 
 async function writeMarketplaceManifest(
@@ -2808,7 +2838,14 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const projection = await legacyPluginProjection(root, options.signal);
+  const projection = await legacyPluginProjection(root, options.signal).catch(
+    (error: unknown) => {
+      if (options.signal?.aborted) throw error;
+      throw new LocalPluginBootstrapError(errorMessage(error), {
+        cause: error,
+      });
+    },
+  );
   const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
   const command =
@@ -2820,7 +2857,7 @@ export async function bootstrapPlugin(
   const run = options.runCodex ?? runPluginCommand;
   const existing = await lstat(marketplace).catch(nullIfMissingFileError);
   if (existing !== null && !existing.isDirectory()) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
     );
   }
@@ -3073,18 +3110,21 @@ export async function pluginMetadata(
     }
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
-    throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
-      cause: error,
-    });
+    throw new LocalPluginBootstrapError(
+      `Invalid Codex plugin directory: ${root}`,
+      {
+        cause: error,
+      },
+    );
   }
   if (!isRecord(manifest) || manifest["name"] !== PLUGIN_NAME) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have name 'codex-security'.",
     );
   }
   const version = manifest["version"];
   if (typeof version !== "string" || version.trim().length === 0) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have a non-empty version.",
     );
   }
@@ -3095,13 +3135,29 @@ export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
   const environment = options.environment ?? process.env;
-  const protectedRoot = options.protectedRoot ?? process.cwd();
+  const requestedRoots = options.protectedRoot ?? process.cwd();
+  const protectedRoot =
+    typeof requestedRoots === "string" ? [requestedRoots] : [...requestedRoots];
+  const callerDirectories = [
+    process.cwd(),
+    options.currentDirectory ?? process.cwd(),
+  ];
+  // Preserve target and enclosing-checkout protection for every interpreter.
+  for (const directory of new Set([...callerDirectories, ...protectedRoot])) {
+    for (const checkout of await gitProtectionRoots(directory, options.signal))
+      if (!protectedRoot.includes(checkout)) protectedRoot.push(checkout);
+  }
+  // Named interpreters are ambient PATH discovery, even when PYTHON names one.
+  // Explicit trusted paths and managed runtimes retain their existing precedence.
+  const discoveryRoots = [...protectedRoot, ...callerDirectories];
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,
       "configured plugin Python",
       environment,
-      protectedRoot,
+      isPythonPathCandidate(options.configuredPath)
+        ? protectedRoot
+        : discoveryRoots,
       options.signal,
     );
   }
@@ -3111,7 +3167,7 @@ export async function resolvePluginPython(
       inherited,
       "PYTHON",
       environment,
-      protectedRoot,
+      isPythonPathCandidate(inherited) ? protectedRoot : discoveryRoots,
       options.signal,
     );
   }
@@ -3153,7 +3209,7 @@ export async function resolvePluginPython(
     const resolved = await usablePython(
       candidate,
       environment,
-      protectedRoot,
+      discoveryRoots,
       options.signal,
     );
     if (resolved !== null) return resolved;
@@ -3455,7 +3511,7 @@ async function requirePython(
   candidate: string,
   source: string,
   environment: ProcessEnvironment,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
   signal?: AbortSignal,
 ): Promise<string> {
   const resolved = await usablePython(
@@ -3474,7 +3530,7 @@ async function requirePython(
 async function usablePython(
   candidate: string,
   environment: ProcessEnvironment = process.env,
-  protectedRoot: string = process.cwd(),
+  protectedRoot: string | readonly string[] = process.cwd(),
   signal?: AbortSignal,
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
@@ -3511,11 +3567,7 @@ async function usablePython(
 }
 
 export function isPythonPathCandidate(candidate: string): boolean {
-  return (
-    candidate.includes("/") ||
-    candidate.includes("\\") ||
-    candidate.startsWith(".")
-  );
+  return candidate.includes("/") || candidate.includes("\\");
 }
 
 async function hasPluginManifest(root: string): Promise<boolean> {

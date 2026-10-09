@@ -97,6 +97,7 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
       log(`Target commit: ${target.scannedSha}.${target.diffBase ? ` Diff: ${target.diffBase}..${target.diffHead}.` : ''}`);
       if (inputs.paths.length) log(`Paths: ${inputs.paths.join(', ')}.`);
       log(`Model: ${inputs.model}; estimated cost stop threshold: ${inputs.maxCost === undefined ? 'unset' : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
+      if (inputs.cyberAccessProgram) log(`Requested Cyber access program: ${inputs.cyberAccessProgram}.`);
       const scanLabel = inputs.dryRun ? 'CLI configuration validation' : 'Security scan';
       const scanStarted = performance.now();
       core.info(`Starting ${scanLabel.toLowerCase()}. CLI diagnostics: ${inputs.verbose ? 'streaming' : 'disabled (verbose: false)'}.`);
