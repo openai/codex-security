@@ -182,6 +182,9 @@
 - retain underlying artifact and process failures ([#1504](https://github.com/openai/codex-security/pull/1504))
 - preserve finding queries and timestamp order (#1505) ([c0c7f12](https://github.com/openai/codex-security/commit/c0c7f1223440093d8a874aca226a5f5fb06d3e86))
 - preserve archived workflows and saved scan replay (#1506) ([45b3efb](https://github.com/openai/codex-security/commit/45b3efb04d70d033097705ec443f365f02a61c1e))
+- pass payloads in memory and preserve failures ([#1507](https://github.com/openai/codex-security/pull/1507))
+- preserve cancellation and child diagnostics (#1508) ([6f64587](https://github.com/openai/codex-security/commit/6f6458729e747130c768f446720fd9b009ee3aac))
+- preserve filename bytes and Unicode owner evidence (#1509) ([ec4b5b5](https://github.com/openai/codex-security/commit/ec4b5b5efb104420c07c76cf8d0e106195ca0bec))
 
 <!-- release-section: highlights:end -->
 
