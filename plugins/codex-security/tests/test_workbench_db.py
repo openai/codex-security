@@ -45,6 +45,7 @@ from workbench_test_support import (
     update_progress,
     workspace_command,
     write_completed_contract,
+    write_remediation_patch,
 )
 
 HEAD_CHANGED_WARNING = (
@@ -77,6 +78,7 @@ EXPECTED_TABLES = {
     "finding_dedupe_group_members",
     "finding_dedupe_groups",
     "finding_embeddings",
+    "local_finding_embeddings",
     "finding_locations",
     "finding_occurrences",
     "finding_publications",
@@ -912,7 +914,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (43,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -1037,15 +1039,7 @@ def test_completed_finding_triage_and_remediation_persist(
     )
     assert "pending remediation operation" in str(pending_close["stderr"])
     patch_path = scan_dir / "remediation.patch"
-    patch_path.write_text(
-        "diff --git a/source.txt b/source.txt\n"
-        "--- a/source.txt\n"
-        "+++ b/source.txt\n"
-        "@@ -1 +1 @@\n"
-        "-vulnerable\n"
-        "+fixed\n",
-        newline="\n",
-    )
+    write_remediation_patch(patch_path, newline="\n")
     generated = set_remediation(
         state_dir,
         occurrence_id,
@@ -1514,9 +1508,7 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
     ).strip()
     nested_repository = target / "untracked-repository"
     initialize_git_repository(nested_repository)
-    workspace_id = str(uuid.uuid4())
-    create_workspace(state_dir, workspace_id, "--target-path", str(target))
-    save_workspace(state_dir, workspace_id, str(target), ".", "standard")
+    workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     started = start_delivered_scan(
         state_dir,
         "--workspace-id",
