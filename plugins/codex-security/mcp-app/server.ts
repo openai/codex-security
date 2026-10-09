@@ -24,14 +24,11 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
-import { createScanArtifactContext } from "./src/artifact-context.js";
-import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
   AsyncLock,
-  startOrJoinDeepScanCoordinator,
 } from "./src/deep-scan/registry.js";
-import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
+import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveDeepWorkerParentSandbox,
@@ -1054,64 +1051,18 @@ export function createCodexSecurityServer(): McpServer {
           }
           const immediate = deepScanTerminalResult(begun);
           if (immediate) return { begun, immediate };
-          const started = await startOrJoinDeepScanCoordinator({
+          const started = await startDeepScanEngine({
             run: begun,
             registry: deepScanCoordinators,
-            options: {
-              store: deepScanStore,
-              executor: new CodexSdkWorkerExecutor({
-                ...modelSettings,
-                parentSandbox,
-                artifactContext: {
-                  pluginRoot: PLUGIN_ROOT,
-                  repoRoot: begun.targetPath,
-                  scanId: begun.scanId,
-                  scope: begun.scope,
-                  pythonCommand: await resolvePythonCommand(),
-                },
-              }),
-              pluginRoot: PLUGIN_ROOT,
-              log: logDeepScanEvent,
-              handoffClaimToken,
-              threadId,
-              onComplete: async (draft, signal) => {
-                const context = await createScanArtifactContext(
-                  begun.scanId,
-                  runWorkbench,
-                  {
-                    requireRunning: true,
-                    requireClaim: true,
-                    handoffClaimToken,
-                    pluginRoot: PLUGIN_ROOT,
-                  },
-                );
-                await recordCodexSecurityScanDraftViaWorkbench(
-                  context,
-                  {
-                    ...draft,
-                    ...(handoffClaimToken === undefined
-                      ? {}
-                      : { handoffClaimToken }),
-                  },
-                  runWorkbench,
-                  signal,
-                );
-              },
-              onStopped: async (run) => {
-                await runWorkbench([
-                  "preserve-scan-results",
-                  "--scan-id",
-                  run.scanId,
-                  "--thread-id",
-                  threadId,
-                  ...optionalArg("--claim-token", handoffClaimToken),
-                  ...optionalArg(
-                    "--coordinator-generation",
-                    run.coordinatorGeneration?.toString(),
-                  ),
-                ]);
-              },
-            },
+            store: deepScanStore,
+            runWorkbench,
+            ...modelSettings,
+            parentSandbox,
+            pythonCommand: await resolvePythonCommand(),
+            pluginRoot: PLUGIN_ROOT,
+            log: logDeepScanEvent,
+            handoffClaimToken,
+            threadId,
           });
           return { begun, ...started };
         })
@@ -2237,7 +2188,7 @@ function logDeepScanEvent(event: {
   );
 }
 
-async function runWorkbench(
+export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
 ): Promise<JsonObject> {
