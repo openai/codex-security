@@ -326,7 +326,12 @@ export class DeepScanCoordinator {
         this.publicationAbortController.signal,
       );
       if (this.canceled || this.externallyFailed) return;
-      const completed = await this.finishWithReplay(schedulerResult);
+      const completed = await this.options.store.finish({
+        scanId: this.state.scanId,
+        reason: schedulerResult.reason,
+        manifestPath: join(this.state.scanDir, "scan-manifest.json"),
+        omittedWorkerIds: schedulerResult.omittedWorkerIds,
+      });
       if (this.canceled || this.externallyFailed) return;
       this.state = completed;
       this.log({
@@ -745,6 +750,8 @@ export class DeepScanCoordinator {
       let firstFailure: unknown | undefined;
       for (const result of results) {
         if (result.status === "rejected") {
+          if (confirmedOwnershipChange(result.reason, this.state.scanId))
+            throw result.reason;
           firstFailure ??= result.reason;
           continue;
         }
@@ -1088,43 +1095,6 @@ export class DeepScanCoordinator {
       count,
       completed: count,
     });
-  }
-
-  /**
-   * A workbench process can commit SQLite and still lose its stdout response.
-   * Replay the exact idempotent finish once before treating the run as failed;
-   * otherwise we could overwrite a successful terminal state after durable success.
-   */
-  private async finishWithReplay(
-    result: SchedulerResult,
-  ): Promise<DeepScanRunState> {
-    const input = {
-      scanId: this.state.scanId,
-      reason: result.reason,
-      manifestPath: join(this.state.scanDir, "scan-manifest.json"),
-      omittedWorkerIds: result.omittedWorkerIds,
-    };
-    try {
-      return await this.options.store.finish(input);
-    } catch (firstError) {
-      if (confirmedOwnershipChange(firstError, this.state.scanId))
-        throw firstError;
-      this.log({
-        event: "coordinator_finish_replay",
-        scanId: this.state.scanId,
-        reason: errorKind(firstError),
-      });
-      try {
-        return await this.options.store.finish(input);
-      } catch (replayError) {
-        if (confirmedOwnershipChange(replayError, this.state.scanId))
-          throw replayError;
-        throw new Error(
-          `Deep Scan terminal persistence replay failed: ${errorMessage(replayError)}`,
-          { cause: firstError },
-        );
-      }
-    }
   }
 }
 

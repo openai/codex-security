@@ -217,11 +217,7 @@ export class DeepScanWorkerRunner {
     };
     let persisted: PersistedDeepScanWorker;
     try {
-      persisted = await this.replayStoreMutation(
-        "discovery_acceptance_replay",
-        workerId,
-        async () => await this.options.store.updateWorker(acceptance),
-      );
+      persisted = await this.options.store.updateWorker(acceptance);
     } catch (error) {
       if (confirmedOwnershipChange(error, run.scanId)) throw error;
       if (!this.options.signal.aborted) throw error;
@@ -362,11 +358,7 @@ export class DeepScanWorkerRunner {
       newFindings: reducerValidation.newFindings,
       resultManifestPath: resultPath,
     };
-    const committed = await this.replayStoreMutation(
-      "dedup_commit_replay",
-      reducerId,
-      async () => await this.options.store.commitDedup(commit),
-    );
+    const committed = await this.options.store.commitDedup(commit);
     this.options.log({
       event: "dedup_committed",
       scanId: run.scanId,
@@ -612,36 +604,6 @@ export class DeepScanWorkerRunner {
         ? { error: "coordinator_shutdown: mcp_transport_closed" }
         : {}),
     });
-  }
-
-  /** Replay idempotent SQLite commits when their process response is ambiguous. */
-  private async replayStoreMutation<T>(
-    event: string,
-    workerId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    try {
-      return await operation();
-    } catch (firstError) {
-      if (confirmedOwnershipChange(firstError, this.options.run.scanId))
-        throw firstError;
-      this.options.log({
-        event,
-        scanId: this.options.run.scanId,
-        workerId,
-        reason: errorNameWithCode(asError(firstError)),
-      });
-      try {
-        return await operation();
-      } catch (replayError) {
-        if (confirmedOwnershipChange(replayError, this.options.run.scanId))
-          throw replayError;
-        throw new Error(
-          `Deep Scan persistence replay failed: ${asError(replayError).message}`,
-          { cause: firstError },
-        );
-      }
-    }
   }
 
   private async cancelAttempt(
