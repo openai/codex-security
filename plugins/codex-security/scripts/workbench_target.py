@@ -820,7 +820,7 @@ def git_repository_provenance(target: Path) -> tuple[str | None, str | None]:
     root = git_output(target, "rev-parse", "--show-toplevel")
     if root is None:
         return None, None
-    repository_path = target.resolve().relative_to(Path(root).resolve()).as_posix()
+    _, repository_path = git_worktree_context(target)
     origins = git_output(target, "config", "--null", "--get-all", "remote.origin.url")
     remote = origins.split("\0", 1)[0] if origins is not None else None
     if remote is None:

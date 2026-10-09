@@ -635,11 +635,14 @@ def test_git_context_retains_scoped_directory_spelling(tmp_path: Path, name: str
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](scoped)
     assert repository.samefile(target)
     assert pathspec == scoped.name
+    assert WORKBENCH_TARGET["git_repository_provenance"](scoped) == (None, pathspec)
 
 
 def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
+    remote = "https://github.com/example/project.git"
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=target, check=True)
     alias = tmp_path / "TARGET"
     if not alias.exists():
         pytest.skip("filesystem does not support case aliases")
@@ -647,11 +650,16 @@ def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias)
     assert repository.samefile(target)
     assert pathspec == "."
+    assert WORKBENCH_TARGET["git_repository_provenance"](alias) == (remote, ".")
     scoped = target / "component"
     scoped.mkdir()
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias / "COMPONENT")
     assert repository.samefile(target)
     assert (repository / pathspec).samefile(scoped)
+    assert WORKBENCH_TARGET["git_repository_provenance"](alias / "COMPONENT") == (
+        remote,
+        pathspec,
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not preserve trailing path whitespace")
