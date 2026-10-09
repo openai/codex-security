@@ -2314,7 +2314,7 @@ async function executeWorkbench(
     : 30_000;
   const execution = execFileAsync(
     pythonCommand,
-    ["-c", WORKBENCH_PYTHON, workbenchScriptPath()],
+    ["-I", "-X", "utf8", "-B", "-c", WORKBENCH_PYTHON, workbenchScriptPath()],
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,

@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { PassThrough } from "node:stream";
@@ -93,6 +95,39 @@ try {
 }
 
 const { executeWorkbench } = await loadWorkbenchProcess();
+await test("workbench ignores configured Python startup hooks and preserves its environment", async () => {
+  const root = await temporaryDirectory("workbench-python-startup-");
+  const hooks = path.join(root, "startup-hooks");
+  const marker = path.join(root, "startup-ran");
+  const python = process.env.PYTHON?.trim() || "python3";
+  const originalPythonPath = process.env.PYTHONPATH;
+  try {
+    await mkdir(hooks);
+    await writeFile(
+      path.join(hooks, "sitecustomize.py"),
+      `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("startup hook ran")\n`,
+    );
+    await promisify(execFile)(python, ["-c", "pass"], {
+      env: { ...process.env, PYTHONPATH: hooks },
+    });
+    assert.equal(await readFile(marker, "utf8"), "startup hook ran");
+    await rm(marker);
+
+    process.env.PYTHONPATH = hooks;
+    const result = await executeWorkbench(
+      python,
+      ["list-scans", "--limit", "1"],
+      path.join(root, "state"),
+    );
+    assert.deepEqual(result.scans, []);
+    await assert.rejects(stat(marker), { code: "ENOENT" });
+    assert.equal(process.env.PYTHONPATH, hooks);
+  } finally {
+    if (originalPythonPath === undefined) delete process.env.PYTHONPATH;
+    else process.env.PYTHONPATH = originalPythonPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 const root = await temporaryDirectory("workbench-framing-", true);
 try {
   const target = path.join(root, "target");
