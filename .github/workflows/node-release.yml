@@ -231,6 +231,8 @@ jobs:
           (cd "$consumer" && node --input-type=module --eval 'const sdk = await import("@openai/codex-security"); if (typeof sdk.CodexSecurity !== "function") process.exit(1);')
           "$consumer/node_modules/.bin/codex-security" --version
           "$consumer/node_modules/.bin/codex-security" --help
+          "$consumer/node_modules/.bin/cs" --version
+          "$consumer/node_modules/.bin/cs" --help
 
       - name: Upload verified package
         id: upload
