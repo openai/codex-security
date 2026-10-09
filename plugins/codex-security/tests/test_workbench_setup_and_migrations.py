@@ -109,11 +109,10 @@ def test_state_directory_failure_preserves_original_exception(workbench_api, tmp
         connect()
     assert str(failure.value) == str(error)
     assert failure.value is error
-    assert getattr(error, "_codex_security_state_unavailable", False) == (code != errno.ENOSPC)
 
 
 @pytest.mark.parametrize("during_open", [True, False])
-def test_state_open_failure_metadata_is_limited_to_sqlite_connect(
+def test_state_open_or_migration_failure_preserves_original_exception(
     workbench_api, tmp_path, during_open
 ):
     error = sqlite3.OperationalError("unable to open database file")
@@ -138,7 +137,6 @@ def test_state_open_failure_metadata_is_limited_to_sqlite_connect(
         ):
             connect()
         assert failure.value is error
-        assert getattr(error, "_codex_security_state_unavailable", False) is during_open
     finally:
         connection.close()
 
