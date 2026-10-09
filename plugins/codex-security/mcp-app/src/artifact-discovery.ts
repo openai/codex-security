@@ -162,14 +162,7 @@ async function diffCandidateSources(
   const nativePath = (value: string) =>
     process.platform === "win32" ? value.replaceAll("\\", "/") : value;
   const paths = decodeUtf8(await readFile(inventory))
-    .split("\n")
-    .flatMap((row, index, lines) =>
-      row.endsWith("\r") && index < lines.length - 1
-        ? process.platform === "win32"
-          ? [row.slice(0, -1)]
-          : [row, row.slice(0, -1)]
-        : [row],
-    )
+    .split(/\r?\n/u)
     .filter(Boolean)
     .map(nativePath);
   const locations = candidates.flatMap((candidate, index) => {

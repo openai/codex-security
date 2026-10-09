@@ -225,16 +225,13 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
     )
     try:
         create_private_directory(path.parent)
-    except OSError as exc:
-        if exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
-            exc._codex_security_state_unavailable = True
+    except OSError:
+        print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
             connection = sqlite3.connect(path, timeout=5)
-        except sqlite3.OperationalError as exc:
-            if str(exc) == "unable to open database file":
-                exc._codex_security_state_unavailable = True
+        except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
         try:
