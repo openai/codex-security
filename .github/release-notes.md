@@ -185,6 +185,9 @@
 - pass payloads in memory and preserve failures ([#1507](https://github.com/openai/codex-security/pull/1507))
 - preserve cancellation and child diagnostics (#1508) ([6f64587](https://github.com/openai/codex-security/commit/6f6458729e747130c768f446720fd9b009ee3aac))
 - preserve filename bytes and Unicode owner evidence (#1509) ([ec4b5b5](https://github.com/openai/codex-security/commit/ec4b5b5efb104420c07c76cf8d0e106195ca0bec))
+- validate artifact requests at tool boundaries ([#1489](https://github.com/openai/codex-security/pull/1489))
+- align Action publication with CLI releases ([#1418](https://github.com/openai/codex-security/pull/1418))
+- keep expected answers hidden and preserve each case’s settings ([#1261](https://github.com/openai/codex-security/pull/1261))
 
 <!-- release-section: highlights:end -->
 

@@ -278,6 +278,10 @@ jobs:
         working-directory: sdk/typescript
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
+      - name: Check Action against the release candidate
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        uses: ./.github/actions/check-action-candidate
+
   mcp:
     name: MCP app tests
     needs: [validate-title, package]
@@ -418,9 +422,14 @@ jobs:
           path: reports/python.xml
           if-no-files-found: warn
           retention-days: 14
-      - name: Build SDK and type-check eval tooling
+      - name: Set up Node.js for triage evals
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: pnpm --dir sdk/typescript run build:evals
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+      - name: Set up triage eval dependencies and host runtime
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: pnpm --dir evals/triage-finding run setup
       - name: Test deterministic triage eval contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         working-directory: evals/triage-finding

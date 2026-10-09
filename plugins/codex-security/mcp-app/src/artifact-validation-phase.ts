@@ -42,13 +42,6 @@ interface CandidateValidationUpdates {
   validations: CandidateValidationUpdate[];
 }
 
-/** The nested validation record used by compact Deep candidate validation. */
-const candidateValidationUpdatesSchema = loadArtifactZodSchema(
-  documents,
-  validationSchema.$id,
-  "updatesPayload",
-) as z.ZodType<CandidateValidationUpdates>;
-
 /** Public workbench input; the bound context, never the caller, selects the artifact. */
 export const candidateValidationsInputSchema = loadArtifactZodSchema(
   documents,
@@ -78,7 +71,8 @@ export async function recordCodexSecurityCandidateValidations(
     );
   }
 
-  const { validations } = candidateValidationUpdatesSchema.parse(input);
+  // The MCP registry validates this request before invoking the writer.
+  const { validations } = input;
   const rows = await readArtifactJsonl(
     context,
     candidateLedgerComponents,

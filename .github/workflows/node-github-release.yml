@@ -29,6 +29,11 @@ jobs:
     permissions:
       actions: read
       contents: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+      integrity: ${{ steps.artifact.outputs.integrity }}
+      has-action: ${{ steps.action.outputs.present }}
 
     steps:
       - name: Checkout release automation
@@ -356,6 +361,16 @@ jobs:
                 "$verified_run_id"
 
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+          printf 'integrity=%s\n' "$(jq -r '."dist.integrity" // .dist.integrity' <<< "$metadata")" >> "$GITHUB_OUTPUT"
+
+      - name: Detect Action release source
+        id: action
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          if git cat-file -e "$RELEASE_SHA:action.yml" 2>/dev/null; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Resolve published release history
         id: history
@@ -443,3 +458,251 @@ jobs:
               process.exit(error.status);
             }
           ' "$release_workspace"
+
+  installed:
+    name: verify published installation
+    needs: release
+    uses: ./.github/workflows/published-install-smoke.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+      # Use current checks when recovering releases that predate exact-version smoke.
+      ref: ${{ github.sha }}
+
+  action-verify:
+    name: verify matching Action
+    needs: [release, installed]
+    if: needs.release.outputs.has-action == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      runtime-lock-artifact: ${{ steps.runtime-lock.outputs.artifact-id }}
+    env:
+      RELEASE_VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_SHA: ${{ needs.release.outputs.sha }}
+      CLI_INTEGRITY: ${{ needs.release.outputs.integrity }}
+
+    steps:
+      - &action-checkout-automation
+        name: Checkout release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: automation
+          persist-credentials: false
+
+      - &action-checkout-source
+        name: Checkout verified CLI source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          path: release-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - &action-setup-node
+        name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Set up Socket Firewall
+        uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+          firewall-version: "1.15.0"
+
+      - name: Set up the Ubuntu sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+
+      - &action-reuse-distribution
+        name: Reuse an existing immutable Action distribution
+        id: distribution
+        working-directory: release-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          action_tag="action-v$RELEASE_VERSION"
+          if git show-ref --verify --quiet "refs/tags/$action_tag"; then
+            action_sha="$(git rev-parse "$action_tag^{commit}")"
+            if [[ "$(git rev-parse "$action_sha^")" != "$RELEASE_SHA" ]]; then
+              echo 'The existing Action tag must derive from the exact CLI source.' >&2
+              exit 1
+            fi
+            changed_source="$(git diff --name-only "$RELEASE_SHA" "$action_sha" -- . \
+              ':!github-action/package.json' ':!github-action/package-lock.json' \
+              ':!github-action/runtime/package.json' ':!github-action/runtime/package-lock.json' \
+              ':!github-action/dist/index.cjs' ':!github-action/dist/post.cjs')"
+            if [[ -n "$changed_source" ]]; then
+              echo 'The existing Action tag contains changes outside release packaging.' >&2
+              exit 1
+            fi
+            git checkout --detach "$action_sha"
+            node "$GITHUB_WORKSPACE/automation/github-action/scripts/release.mjs" verify \
+              "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" \
+              "$GITHUB_WORKSPACE/release-source/github-action"
+            echo 'existing=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve the verified CLI runtime lock
+        if: steps.distribution.outputs.existing != 'true'
+        run: |
+          node automation/github-action/scripts/release.mjs prepare \
+            "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" \
+            "$GITHUB_WORKSPACE/release-source/github-action"
+
+      - name: Install Action and CLI dependencies
+        working-directory: release-source/github-action
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          runtime_cache="$(mktemp -d "$RUNNER_TEMP/action-runtime-firewall-cache.XXXXXX")"
+          trap 'rm -rf "$runtime_cache"' EXIT
+          sfw npm ci --prefix runtime --ignore-scripts --include=optional --no-audit --no-fund \
+            --registry=https://registry.npmjs.org/ --cache="$runtime_cache"
+
+      - name: Build Action distribution
+        if: steps.distribution.outputs.existing != 'true'
+        working-directory: release-source/github-action
+        run: npm run build
+
+      - name: Validate the packaged Action
+        working-directory: release-source/github-action
+        run: |
+          npm run validate
+          npm run test:cli
+          node scripts/linux-smoke.mjs
+          npm audit --audit-level=high
+          npm audit --prefix runtime --omit=dev --audit-level=high
+          npm run check-dist
+
+      - name: Save verified CLI runtime lock
+        id: runtime-lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: action-runtime-lock
+          path: release-source/github-action/runtime/package-lock.json
+          if-no-files-found: error
+          retention-days: 7
+
+  action:
+    name: publish matching Action
+    needs: [release, action-verify]
+    if: needs.release.outputs.has-action == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_SHA: ${{ needs.release.outputs.sha }}
+      CLI_INTEGRITY: ${{ needs.release.outputs.integrity }}
+
+    steps:
+      - *action-checkout-automation
+      - *action-checkout-source
+      - *action-setup-node
+      - *action-reuse-distribution
+
+      - name: Download verified CLI runtime lock
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.action-verify.outputs.runtime-lock-artifact }}
+          path: ${{ runner.temp }}/action-runtime-lock
+          merge-multiple: true
+
+      - name: Stage verified CLI runtime lock
+        run: |
+          node automation/github-action/scripts/release.mjs stage \
+            "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" \
+            "$RUNNER_TEMP/action-runtime-lock/package-lock.json" \
+            "$GITHUB_WORKSPACE/release-source/github-action"
+
+      # Rebuild from reviewed source in a fresh job; never run the CLI here.
+      - name: Install Action build dependencies
+        working-directory: release-source/github-action
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build Action distribution
+        if: steps.distribution.outputs.existing != 'true'
+        working-directory: release-source/github-action
+        run: npm run build
+
+      - name: Check Action distribution before publication
+        working-directory: release-source/github-action
+        run: npm run check-dist
+
+      - name: Commit and verify release metadata
+        working-directory: release-source
+        env:
+          EXISTING: ${{ steps.distribution.outputs.existing }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXISTING" != true ]]; then
+            git add github-action/package.json github-action/package-lock.json \
+              github-action/runtime/package.json github-action/runtime/package-lock.json \
+              github-action/dist/index.cjs github-action/dist/post.cjs
+            git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              -c commit.gpgsign=false commit --allow-empty -m "chore(release): package Action $RELEASE_VERSION"
+          fi
+          node "$GITHUB_WORKSPACE/automation/github-action/scripts/release.mjs" metadata \
+            "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" "$(git rev-parse HEAD)" \
+            "$GITHUB_WORKSPACE/release-source/github-action"
+
+      - name: Publish immutable Action tag and metadata
+        working-directory: release-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXISTING: ${{ steps.distribution.outputs.existing }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXISTING" != true ]]; then
+            git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+              push origin "HEAD:refs/tags/action-v$RELEASE_VERSION"
+          fi
+          cp github-action/build/release-manifest.json "$RUNNER_TEMP/action-release-manifest.json"
+          cp github-action/build/sbom.cdx.json "$RUNNER_TEMP/action-sbom.cdx.json"
+          existing_assets="$(gh release view "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          comparison="$(mktemp -d)"
+          trap 'rm -rf "$comparison"' EXIT
+          for asset in action-release-manifest.json action-sbom.cdx.json; do
+            if grep -Fxq "$asset" <<< "$existing_assets"; then
+              gh release download "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" \
+                --pattern "$asset" --dir "$comparison"
+              if ! cmp "$RUNNER_TEMP/$asset" "$comparison/$asset"; then
+                echo "Published Action metadata differs: $asset" >&2
+                exit 1
+              fi
+            else
+              gh release upload "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/$asset"
+            fi
+          done
+          {
+            printf '### Codex Security %s\n\n' "$RELEASE_VERSION"
+            printf 'CLI source: `%s`\n\n' "$RELEASE_SHA"
+            printf 'Action: `uses: %s@%s` (`action-v%s`)\n' "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)" "$RELEASE_VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  complete:
+    name: release status
+    if: always()
+    needs: [release, installed, action]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require completed release channels
+        env:
+          RELEASE_RESULT: ${{ needs.release.result }}
+          INSTALL_RESULT: ${{ needs.installed.result }}
+          ACTION_RESULT: ${{ needs.action.result }}
+          HAS_ACTION: ${{ needs.release.outputs.has-action }}
+        run: |
+          test "$RELEASE_RESULT" = success
+          test "$INSTALL_RESULT" = success
+          if [[ "$HAS_ACTION" == true ]]; then
+            test "$ACTION_RESULT" = success
+          fi
