@@ -39,7 +39,7 @@ describe("CLI scan validation preflight", () => {
     ["other head", true],
     ["local changes", true],
   ] as const)(
-    "rejects committed diffs with %s before scanning (workflow: %s)",
+    "rejects committed diffs with %s before scanning (workflow: %p)",
     async (checkout, workflow) => {
       const root = await temporaryDirectory("scan-validation-preflight-");
       try {

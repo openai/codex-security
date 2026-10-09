@@ -81,13 +81,10 @@ export async function getCodexSecurityDeepReducerInputs(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
-        result.findings = result.findings.map((finding, index) => ({
-          ...finding,
-          provenance: {
-            ...(finding.provenance as Record<string, unknown>),
-            sourceFindingIds: [`${worker.id}:${index}`],
-          },
-        }));
+        for (const [index, finding] of result.findings.entries()) {
+          const provenance = finding.provenance as Record<string, unknown>;
+          provenance.sourceFindingIds = [`${worker.id}:${index}`];
+        }
         const { coverage: _coverage, ...reduction } = result;
         return { workerId: worker.id, result: reduction };
       }),
