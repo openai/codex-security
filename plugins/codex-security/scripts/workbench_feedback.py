@@ -16,11 +16,10 @@ from workbench_constants import (
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
 )
-from workbench_validation import bounded_output_text, register_timestamp_collation
+from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
-    register_timestamp_collation(connection)
     rows = connection.execute(
         """
         WITH ranked_decisions AS (
@@ -35,9 +34,8 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 ROW_NUMBER() OVER (
                     PARTITION BY findings.id
                     ORDER BY
-                        COALESCE(triage.updated_at, source_scans.completed_at)
-                            COLLATE codex_security_timestamp DESC,
-                        source_scans.completed_at COLLATE codex_security_timestamp DESC,
+                        julianday(upper(COALESCE(triage.updated_at, source_scans.completed_at))) DESC,
+                        julianday(upper(source_scans.completed_at)) DESC,
                         source_scans.id DESC, occurrences.id DESC
                 ) AS decision_rank
             FROM finding_occurrences AS occurrences
@@ -63,8 +61,8 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             AND close_reason = 'false_positive'
             AND note IS NOT NULL
             AND trim(note) != ''
-        ORDER BY updated_at COLLATE codex_security_timestamp DESC,
-            source_completed_at COLLATE codex_security_timestamp DESC,
+        ORDER BY julianday(upper(updated_at)) DESC,
+            julianday(upper(source_completed_at)) DESC,
             source_scan_id DESC, finding_id DESC
         LIMIT 50
         """,

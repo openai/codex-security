@@ -1611,18 +1611,13 @@ else:
 print(json.dumps(result, allow_nan=False, sort_keys=True))
 `;
 
-const workbenchComparisonSupport = new Map<
-  string,
-  { stdin: boolean; related: boolean }
->();
-
 export async function runWorkbench(
   options: Omit<WorkbenchCommandOptions, "python"> & { python?: string },
   args: readonly string[],
   input?: string,
 ): Promise<JsonObject> {
   const script = join(options.pluginRoot, "scripts", "workbench_db.py");
-  let signal = options.signal;
+  const signal = options.signal;
   const run = async (
     arguments_: readonly string[],
     input?: string,
@@ -1723,136 +1718,14 @@ export async function runWorkbench(
     return result.stdout;
   };
   let stdout: string;
-  const savedScanIdentities = async (scanDir: string): Promise<string> => {
-    const result: unknown = JSON.parse(
-      await run(["list-scans", "--scan-root", scanDir]),
-    );
-    if (!isRecord(result) || !Array.isArray(result["scans"])) {
-      throw new Error(
-        "The workbench returned an invalid scan history response.",
-      );
-    }
-    return JSON.stringify(
-      result["scans"]
-        .map((scan: unknown) => {
-          if (
-            !isRecord(scan) ||
-            typeof scan["scanId"] !== "string" ||
-            typeof scan["scanDir"] !== "string"
-          ) {
-            throw new Error(
-              "The workbench returned an invalid scan history entry.",
-            );
-          }
-          return JSON.stringify([scan["scanId"], scan["scanDir"]]);
-        })
-        .sort(),
-    );
-  };
-  let legacyArchive:
-    { scanDir: string; archiveDir: string; savedScans: string } | undefined;
   try {
-    const arguments_ = [...args];
-    let archiveHandshake = false;
-    if (
-      arguments_[0] === "register-cli-scan" &&
-      arguments_.includes("--archive-existing") &&
-      !arguments_.includes("--archived-scan-dir")
-    ) {
-      const help = (await run(["register-cli-scan", "--help"])).replace(
-        /\s+/gu,
-        " ",
-      );
-      if (help.includes("Supports cancellable archival preparation.")) {
-        archiveHandshake = signal !== undefined;
-      } else if (
-        help.includes("Archive output in the registration transaction.")
-      ) {
-        // Earlier transactional helpers cannot acknowledge the safe cancellation
-        // boundary. Keep their move and database commit together.
-        signal?.throwIfAborted();
-        signal = undefined;
-      } else {
-        const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
-        const archiveDir = await planOutputArchive(scanDir);
-        if (archiveDir !== null) {
-          const stateDirectory = codexSecurityStateDirectory(
-            options.environment,
-          );
-          for (let path = stateDirectory; ; path = dirname(path)) {
-            if (isWithin(scanDir, await canonicalConfigPath(path))) {
-              throw new Error(
-                "The scan artifact directory cannot contain the active workbench database.",
-              );
-            }
-            if (dirname(path) === path) break;
-          }
-          const savedScans = await savedScanIdentities(scanDir);
-          signal?.throwIfAborted();
-          await rename(scanDir, archiveDir);
-          legacyArchive = { scanDir, archiveDir, savedScans };
-          await mkdir(scanDir, { mode: 0o700 });
-          if ((process.umask() & 0o700) !== 0) await chmod(scanDir, 0o700);
-          arguments_.push("--archived-scan-dir", archiveDir);
-        }
-      }
-    }
-    const matchesStdinIndex = arguments_.indexOf("--matches-json-stdin");
-    if (
-      arguments_[0] === "save-scan-comparison" &&
-      matchesStdinIndex !== -1 &&
-      input !== undefined
-    ) {
-      const key = JSON.stringify([options.python, script]);
-      let support = workbenchComparisonSupport.get(key);
-      if (support === undefined) {
-        const help = await run(["save-scan-comparison", "--help"]);
-        options.signal?.throwIfAborted();
-        support = {
-          stdin: help.includes("--matches-json-stdin"),
-          related: help
-            .replace(/\s+/gu, " ")
-            .includes("Comparison payload supports related findings."),
-        };
-        workbenchComparisonSupport.set(key, support);
-      }
-      const comparison: unknown = JSON.parse(input);
-      if (isRecord(comparison) && "related" in comparison && !support.related) {
-        delete comparison["related"];
-        input = JSON.stringify(comparison);
-      }
-      if (!support.stdin) {
-        arguments_.splice(matchesStdinIndex, 1, "--matches-json", input);
-        input = undefined;
-      }
-    }
-    stdout = await run(arguments_, input, archiveHandshake);
+    const archiveHandshake =
+      signal !== undefined &&
+      args[0] === "register-cli-scan" &&
+      args.includes("--archive-existing") &&
+      !args.includes("--archived-scan-dir");
+    stdout = await run(args, input, archiveHandshake);
   } catch (error) {
-    if (legacyArchive !== undefined) {
-      // Cancellation can stop legacy registration; recovery must still settle.
-      signal = undefined;
-      try {
-        // A helper can commit registration and lose its response. Restore only
-        // when saved identities prove that registration did not change them.
-        if (
-          (await savedScanIdentities(legacyArchive.scanDir)) ===
-          legacyArchive.savedScans
-        ) {
-          await rmdir(legacyArchive.scanDir).catch(
-            (error: NodeJS.ErrnoException) => {
-              if (error.code !== "ENOENT") throw error;
-            },
-          );
-          await rename(legacyArchive.archiveDir, legacyArchive.scanDir);
-        }
-      } catch (restoreError) {
-        throw new AggregateError(
-          [error, restoreError],
-          `Scan registration failed: ${processErrorDetail(error)}. Previous output remains at ${legacyArchive.archiveDir}; restoration could not be verified or completed: ${processErrorDetail(restoreError)}`,
-          { cause: error },
-        );
-      }
-    }
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
     const failure =
@@ -1873,8 +1746,6 @@ export async function runWorkbench(
       "The Codex Security workbench returned an invalid response.",
     );
   }
-  if (legacyArchive !== undefined)
-    result["archivedScanDir"] = legacyArchive.archiveDir;
   return result as JsonObject;
 }
 
