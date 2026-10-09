@@ -31,7 +31,8 @@
     "./schemas/project-config.schema.json": "./schemas/project-config.schema.json"
   },
   "bin": {
-    "codex-security": "./bin/codex-security.mjs"
+    "codex-security": "./bin/codex-security.mjs",
+    "cs": "./bin/codex-security.mjs"
   },
   "files": [
     "bin",
@@ -77,11 +78,11 @@
     "@inquirer/prompts": "8.7.2",
     "@linear/sdk": "97.0.0",
     "@octokit/core": "7.0.8",
-    "@openai/codex": "0.162.0-alpha.18",
-    "@openai/codex-sdk": "0.162.0-alpha.18",
+    "@openai/codex": "0.162.0",
+    "@openai/codex-sdk": "0.162.0",
     "ajv": "8.20.0",
     "fflate": "0.8.3",
-    "incur": "0.5.1",
+    "incur": "0.7.0",
     "ink": "7.1.1",
     "js-tiktoken": "1.0.21",
     "papaparse": "5.7.0",
@@ -89,6 +90,7 @@
     "react": "19.3.0",
     "semver": "7.8.5",
     "smol-toml": "1.9.0",
+    "string-width": "8.2.2",
     "yaml": "2.9.1",
     "yauzl": "3.4.0",
     "zod": "4.6.5"
@@ -108,7 +110,7 @@
     "fast-check": "4.10.2",
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "16.0.0",
-    "katex": "0.18.9",
+    "katex": "0.19.0",
     "minimatch": "10.2.6",
     "postcss": "8.5.28",
     "prettier": "3.9.9",

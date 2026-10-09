@@ -1,7 +1,6 @@
 import { findingEntry } from "./value.js";
 import { z } from "incur";
 import { CodexSecurityError } from "./errors.js";
-import { validateJsonNumbers } from "./json-numbers.js";
 import { workflowDigest } from "./finding-workflow.js";
 import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
 import type { Finding, SeverityLevel } from "./models.js";
@@ -78,34 +77,30 @@ const textSchema = z
   .string()
   .min(1)
   .refine((value) => value.trim().length > 0);
-const decisionSchema = z
-  .object({
-    findingId: textSchema,
-    decision: z.enum(["assessed", "excluded"]),
-    level: levelSchema.nullable(),
-    rubricLabel: textSchema.nullable(),
-    rationale: textSchema,
-    confidence: z.enum(["high", "medium", "low"]).nullable(),
-    reviewTrigger: textSchema.nullable(),
-  })
-  .strict();
+const decisionSchema = z.strictObject({
+  findingId: textSchema,
+  decision: z.enum(["assessed", "excluded"]),
+  level: levelSchema.nullable(),
+  rubricLabel: textSchema.nullable(),
+  rationale: textSchema,
+  confidence: z.enum(["high", "medium", "low"]).nullable(),
+  reviewTrigger: textSchema.nullable(),
+});
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 /** @internal */
-export const severityClassificationSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    assessedAt: z.string().datetime(),
-    rubricSha256: digestSchema.nullable(),
-    knowledgeBaseSha256: digestSchema.nullable(),
-    assessments: z.array(
-      decisionSchema.extend({
-        occurrenceId: textSchema.nullable(),
-        inputSha256: digestSchema,
-        source: z.enum(["existing-severity", "rubric"]),
-      }),
-    ),
-  })
-  .strict() satisfies z.ZodType<SeverityClassification>;
+export const severityClassificationSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  assessedAt: z.string().datetime(),
+  rubricSha256: digestSchema.nullable(),
+  knowledgeBaseSha256: digestSchema.nullable(),
+  assessments: z.array(
+    decisionSchema.extend({
+      occurrenceId: textSchema.nullable(),
+      inputSha256: digestSchema,
+      source: z.enum(["existing-severity", "rubric"]),
+    }),
+  ),
+}) satisfies z.ZodType<SeverityClassification>;
 
 /** Classify each supplied report independently, without scanning or writing findings. */
 export async function classifySeverity(
@@ -123,7 +118,6 @@ export async function classifySeverityInternal(
   checkpoint?: SeverityClassificationCheckpoint,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
-  validateJsonNumbers(findings, "Severity classification input");
   const ids = new Set<string>();
   for (const finding of findings) {
     if (!finding.findingId?.trim() || ids.has(finding.findingId)) {
@@ -195,6 +189,7 @@ export async function classifySeverityInternal(
         options,
         {
           surface,
+          command: "classify-severity",
           threadSource: CODEX_SECURITY_THREAD_SOURCES.severityClassification,
         },
       );
@@ -247,7 +242,6 @@ export function validateSeverityClassification(
   result: SeverityClassification,
   findings: readonly SeverityClassificationFinding[],
 ): SeverityClassification {
-  validateJsonNumbers(findings, "Severity classification input");
   const byId = new Map(findings.map(findingEntry));
   for (const assessment of result.assessments) {
     const finding = byId.get(assessment.findingId);

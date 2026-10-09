@@ -222,10 +222,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           } else if (event.type === "error") {
             // Codex exec currently emits retry-in-progress notifications as error events.
             lastStreamError = event.message;
-            appendUniqueDiagnostic(diagnostics, {
-              code: "artifact_tool_failed",
-              message: event.message,
-            });
+            appendStreamDiagnostic(diagnostics, event.message);
           }
         }
         if (!turnCompleted) {
@@ -368,10 +365,7 @@ function appendItemDiagnostic(
 ): void {
   if (!isRecord(item) || typeof item.type !== "string") return;
   if (item.type === "error" && typeof item.message === "string") {
-    appendUniqueDiagnostic(diagnostics, {
-      code: "artifact_tool_failed",
-      message: item.message,
-    });
+    appendStreamDiagnostic(diagnostics, item.message);
     return;
   }
   if (item.status !== "failed") return;
@@ -379,7 +373,7 @@ function appendItemDiagnostic(
     item.type === "mcp_tool_call" &&
     isRecord(item.error) &&
     typeof item.error.message === "string" &&
-    item.error.message.length > 0
+    isCodeModeFrameError(item.error.message)
   ) {
     appendUniqueDiagnostic(diagnostics, {
       code: "artifact_tool_failed",
@@ -437,6 +431,26 @@ function appendItemDiagnostic(
   }
 }
 
+function isCodeModeFrameError(message: string): boolean {
+  return (
+    /^code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length [0-9]+ exceeds [0-9]+ bytes$/u.exec(
+      message,
+    )?.[0] === message
+  );
+}
+
+function appendStreamDiagnostic(
+  diagnostics: CodexWorkerDiagnostic[],
+  message: string,
+): void {
+  appendUniqueDiagnostic(diagnostics, {
+    code: isCodeModeFrameError(message)
+      ? "artifact_tool_failed"
+      : "worker_error",
+    message,
+  });
+}
+
 function isSandboxNamespaceExhaustion(output: string): boolean {
   return /bwrap:\s*Creating new namespace failed:.*(?:ENOSPC|max_[a-z_]*_namespaces exceeded|Resource temporarily unavailable)/is.test(
     output,
@@ -478,11 +492,18 @@ async function workerRuntimeSettings(
       ? profiles[config.profile]
       : undefined;
   const selected = { ...config, ...(isRecord(profile) ? profile : {}) };
+  for (const key of ["analytics", "responses_api_metadata"]) {
+    if (isRecord(config[key]) && isRecord(profile) && isRecord(profile[key])) {
+      selected[key] = { ...config[key], ...profile[key] };
+    }
+  }
   const inherited = Object.fromEntries(
-    ["model_reasoning_summary", "service_tier"].map((key) => [
-      key,
-      selected[key],
-    ]),
+    [
+      "model_reasoning_summary",
+      "service_tier",
+      "analytics",
+      "responses_api_metadata",
+    ].map((key) => [key, selected[key]]),
   );
   const settings: CodexSdkWorkerRuntimeSettings = { config: inherited };
   const workerConfigPath = environmentVariable(

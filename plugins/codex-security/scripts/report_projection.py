@@ -5,14 +5,8 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from collections import Counter
-from pathlib import Path
 from typing import Any
-
-# Match the contract helper when loaded under Python safe-path isolation.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench.json_numbers import is_json_integer, normalize_json_integer
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -95,7 +89,7 @@ def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
     )
 
 
-def _uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
+def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
     if coverage.get("mode") == "deep_repository":
         return True
     if coverage.get("mode") != "scoped_path":
@@ -400,9 +394,8 @@ def _code_evidence_location(item: dict[str, Any]) -> str:
     end = item.get("endLine", start)
     if not isinstance(path, str) or not path:
         return ""
-    if not is_json_integer(start):
+    if not isinstance(start, int):
         return path
-    start, end = normalize_json_integer(start), normalize_json_integer(end)
     return f"{path}:{start}" if end == start else f"{path}:{start}-{end}"
 
 
@@ -441,8 +434,8 @@ def _level_mix(findings: list[dict[str, Any]], field: str, order: dict[str, int]
 def _locations(finding: dict[str, Any]) -> str:
     rendered = []
     for location in finding["locations"]:
-        start = normalize_json_integer(location["startLine"])
-        end = normalize_json_integer(location.get("endLine", start))
+        start = location["startLine"]
+        end = location.get("endLine", start)
         suffix = f":{start}" if end == start else f":{start}-{end}"
         rendered.append(f"{location['path']}{suffix}")
     return ", ".join(rendered)
@@ -773,7 +766,7 @@ def build_report_markdown(
             "reportable findings have duplicate writeup reportPath values: "
             + ", ".join(duplicate_writeup_paths)
         )
-    deep_presentation = _uses_deep_presentation(coverage, findings)
+    deep_presentation = uses_deep_presentation(coverage, findings)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
