@@ -410,19 +410,10 @@ export async function publishScanInternal(
       eventLogNotice = `Could not preserve Linear connector-event evidence: ${errorMessage(error)}.`;
     }
   };
-  let handoffEvidence: PublicationHandoffEvidence[];
-  try {
-    handoffEvidence = await collectPublicationHandoffEvidence(
-      handoff.file,
-      prepared,
-    );
-  } catch (error) {
-    await preserveConnectorEvents();
-    if (eventLogNotice === undefined) throw error;
-    throw new CodexSecurityError(`${errorMessage(error)} ${eventLogNotice}`, {
-      cause: error,
-    });
-  }
+  const handoffEvidence = await collectPublicationHandoffEvidence(
+    handoff.file,
+    prepared,
+  );
   const evidence = [...events, ...handoffEvidence];
   const handoffResults = reconcilePublicationEvidence(
     prepared,
