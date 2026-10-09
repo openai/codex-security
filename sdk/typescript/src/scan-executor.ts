@@ -93,16 +93,6 @@ export interface ScanExecutor {
   ): Promise<ScanExecutionResult>;
 }
 
-/** Public SDK injection; no local inference or cross-invocation attempt store. */
-export interface HostedScanExecution {
-  executor: ScanExecutor;
-  revision: string;
-  identity: ScanExecutionRequest["identity"];
-  stateDirectory: string;
-  model: string;
-  reasoningEffort: "low" | "medium" | "high" | "xhigh";
-}
-
 /** Carries the exact execution outcome even when finalization cannot complete. */
 export class ScanExecutionError extends CodexSecurityError {
   constructor(

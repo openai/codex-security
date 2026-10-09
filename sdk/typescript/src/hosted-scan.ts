@@ -101,11 +101,7 @@ export function normalizeHostedPaths(
 }
 
 /** Validate every path at the frozen commit before registering a scan/executing. */
-export async function prepareHostedScan(
-  value: HostedScanInput,
-  signal?: AbortSignal,
-) {
-  const input = HostedScanInputSchema.parse(value);
+async function prepareHostedScan(input: HostedScanInput, signal?: AbortSignal) {
   const scope = { paths: normalizeHostedPaths(input.scope?.paths) };
   const repository = await normalizeRepository(input.repository);
   if ((await repositoryRevision(repository, signal)) !== input.revision)
@@ -152,9 +148,7 @@ export async function prepareHostedScan(
   };
 }
 
-export function hostedScanEnvironment(
-  stateDirectory: string,
-): Record<string, string> {
+function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
   const environment: Record<string, string> = {
     PATH: process.env["PATH"] ?? "",
     CODEX_SECURITY_STATE_DIR: resolve(stateDirectory),
@@ -171,19 +165,52 @@ export function hostedScanEnvironment(
   return environment;
 }
 
-/** One invocation, with only scan-domain state. Cloud decides retry/reconciliation. */
+export interface HostedScanOptions {
+  executor: ScanExecutor;
+  signal?: AbortSignal;
+  onEvent?: (event: ScanExecutionEvent) => void;
+}
+
+/** One invocation, with only scan-domain state. The host decides retry/reconciliation. */
 export async function runHostedScan(
-  input: HostedScanInput,
-  options: {
-    executor: ScanExecutor;
-    signal?: AbortSignal;
-    onEvent?: (event: ScanExecutionEvent) => void;
-  },
+  value: HostedScanInput,
+  options: HostedScanOptions,
 ) {
+  const input = HostedScanInputSchema.parse(value);
   const context = await prepareHostedScan(input, options.signal);
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;
-  const client = new CodexSecurity();
+  const onEvent = (event: ScanExecutionEvent): void => {
+    void Promise.resolve()
+      .then(() => options.onEvent?.(event))
+      .catch(() => {});
+  };
+  const client = new CodexSecurity(
+    {
+      codexOverrides: {
+        model: input.model,
+        model_reasoning_effort: input.reasoningEffort,
+      },
+    },
+    {
+      environment: hostedScanEnvironment(input.stateDirectory),
+      hostedScan: {
+        context,
+        executor: {
+          async run(value, runOptions) {
+            request = value;
+            execution = await options.executor.run(value, runOptions);
+            return execution;
+          },
+        },
+        onEvent,
+      },
+      createCodex() {
+        throw new Error("Local inference is unavailable in hosted mode.");
+      },
+    },
+    { surface: "sdk" },
+  );
   let outputDirectory = resolve(input.outputDirectory);
   const base = () => ({
     version: 2 as const,
@@ -207,7 +234,9 @@ export async function runHostedScan(
   try {
     const result = await client.run(context.repository, {
       target:
-        context.scope.paths[0] === "." ? "repository" : context.scope.paths,
+        context.scope.paths[0] === "."
+          ? "repository"
+          : context.scope.paths.map((path) => `./${path}`),
       mode: "standard",
       outputDir: outputDirectory,
       signal: options.signal,
@@ -215,22 +244,20 @@ export async function runHostedScan(
         outputDirectory = path;
       },
       onProgress(progress) {
-        options.onEvent?.({ type: "progress", progress });
+        onEvent({ type: "progress", progress });
       },
       onActivity(activity) {
-        options.onEvent?.({ type: "activity", activity });
-      },
-      hosted: {
-        ...input,
-        executor: {
-          async run(value, runOptions) {
-            request = value;
-            execution = await options.executor.run(value, runOptions);
-            return execution;
-          },
-        },
+        onEvent({ type: "activity", activity });
       },
     });
+    if (
+      result.manifest.scan.target.revision !== context.revision ||
+      (await repositoryRevision(context.repository, options.signal)) !==
+        context.revision
+    )
+      throw new Error(
+        "Checkout changed from the frozen revision during execution.",
+      );
     if (
       !isDeepStrictEqual(
         [...result.manifest.scan.scope.includePaths].sort(comparePaths),
@@ -287,3 +314,5 @@ export async function runHostedScan(
     await client.close();
   }
 }
+
+export type HostedScanResult = Awaited<ReturnType<typeof runHostedScan>>;

@@ -9,10 +9,12 @@ export {
   HostedScanInputSchema,
   HostedScanPreparationError,
 } from "./hosted-scan.js";
-export type { HostedScanInput } from "./hosted-scan.js";
-export { ScanExecutionError } from "./scan-executor.js";
 export type {
-  HostedScanExecution,
+  HostedScanInput,
+  HostedScanOptions,
+  HostedScanResult,
+} from "./hosted-scan.js";
+export type {
   ScanExecutor,
   ScanExecutionRequest,
   ScanExecutionResult,

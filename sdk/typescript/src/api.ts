@@ -1,15 +1,12 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
-import { prepareHostedScan, hostedScanEnvironment } from "./hosted-scan.js";
 import {
   ScanExecutionError,
   ScanExecutionResultSchema,
-  type HostedScanExecution,
   type ScanExecutor,
   type ScanExecutionEvent,
   type ScanExecutionRequest,
-  type ScanExecutionResult,
 } from "./scan-executor.js";
 import {
   chmod,
@@ -306,8 +303,6 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
-  /** Run Standard scanning through a host-owned executor; never use local inference. */
-  hosted?: HostedScanExecution;
   /** @internal Reuse the knowledge inputs bound to a bulk campaign manifest. */
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
@@ -562,120 +557,16 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
+    // Reject the removed experimental option rather than starting local inference.
+    if ("hosted" in options)
+      throw new CodexSecurityError(
+        "Use runHostedScan with an executor for hosted execution.",
+      );
     return await this.#trackOperation(() =>
-      options.hosted !== undefined
-        ? this.#runHosted(repository, options, options.hosted)
-        : options.workflowId === undefined
-          ? this.#run(repository, { ...options })
-          : this.#runWorkflow(repository, { ...options }, options.workflowId),
+      options.workflowId === undefined
+        ? this.#run(repository, { ...options })
+        : this.#runWorkflow(repository, { ...options }, options.workflowId),
     );
-  }
-
-  async #runHosted(
-    repository: string,
-    options: ScanOptions,
-    hosted: HostedScanExecution,
-  ): Promise<ScanResult> {
-    if (
-      (options.mode !== undefined && options.mode !== "standard") ||
-      (options.target !== undefined &&
-        options.target !== "repository" &&
-        !Array.isArray(options.target)) ||
-      options.workflowId !== undefined ||
-      options.resumeScanId !== undefined ||
-      options.mock ||
-      options.validationPrompt !== undefined ||
-      options.validationPromptFile !== undefined ||
-      options.postScanPrompt !== undefined ||
-      options.postScanPromptFile !== undefined
-    )
-      throw new CodexSecurityError(
-        "Hosted execution supports one Standard scan of a repository or explicit paths, without local workflow, mock, resume, custom validation, or post-scan execution.",
-      );
-    if (!options.outputDir)
-      throw new CodexSecurityError(
-        "Hosted execution requires an explicit output directory.",
-      );
-    const signal = AbortSignal.any([
-      this.#abortController.signal,
-      ...(options.signal ? [options.signal] : []),
-    ]);
-    const context = await prepareHostedScan(
-      {
-        version: 2,
-        repository,
-        revision: hosted.revision,
-        ...(Array.isArray(options.target)
-          ? { scope: { paths: options.target } }
-          : {}),
-        outputDirectory: options.outputDir,
-        stateDirectory: hosted.stateDirectory,
-        model: hosted.model,
-        reasoningEffort: hosted.reasoningEffort,
-        identity: hosted.identity,
-      },
-      signal,
-    );
-    let execution: ScanExecutionResult | undefined;
-    const client = new CodexSecurity(
-      {
-        ...this.config,
-        codexOverrides: {
-          ...resolveCodexProfile(this.config.codexOverrides ?? {}),
-          model: hosted.model,
-          model_reasoning_effort: hosted.reasoningEffort,
-        },
-      },
-      {
-        ...this.#dependencies,
-        environment: hostedScanEnvironment(hosted.stateDirectory),
-        hostedScan: {
-          context,
-          executor: {
-            async run(request, runOptions) {
-              execution = await hosted.executor.run(request, runOptions);
-              return execution;
-            },
-          },
-          onEvent(event) {
-            if (event.type === "progress")
-              notifyObserver(options, "onProgress")(event.progress);
-            else notifyObserver(options, "onActivity")(event.activity);
-          },
-        },
-        createCodex() {
-          throw new Error("Local inference is unavailable in hosted mode.");
-        },
-      },
-      { surface: this.#surface },
-    );
-    try {
-      const result = await client.run(context.repository, {
-        ...options,
-        hosted: undefined,
-        target:
-          context.scope.paths[0] === "."
-            ? "repository"
-            : context.scope.paths.map((path) => `./${path}`),
-        mode: "standard",
-        signal,
-      });
-      if (
-        result.manifest.scan.target.revision !== hosted.revision ||
-        (await repositoryRevision(context.repository, signal)) !==
-          hosted.revision
-      )
-        throw new CodexSecurityError(
-          "Checkout changed from the frozen revision during execution.",
-        );
-      return result;
-    } catch (error) {
-      if (error instanceof ScanExecutionError || execution === undefined)
-        throw error;
-      throw new ScanExecutionError(execution, errorMessage(error));
-    } finally {
-      await client.close();
-    }
   }
 
   async #runWorkflow(

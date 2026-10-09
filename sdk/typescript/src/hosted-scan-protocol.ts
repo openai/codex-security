@@ -1,7 +1,7 @@
 import type { Readable } from "node:stream";
 import { runHostProtocol } from "./host-protocol.js";
 import {
-  HostedScanInputSchema,
+  type HostedScanInput,
   HostedScanPreparationError,
   runHostedScan,
 } from "./hosted-scan.js";
@@ -27,7 +27,7 @@ export async function runHostedScanProtocol(
           ? { reason: error.reason }
           : undefined,
       run: async (params, execute, signal, onEvent) =>
-        await runHostedScan(HostedScanInputSchema.parse(params), {
+        await runHostedScan(params as HostedScanInput, {
           signal,
           onEvent,
           executor: {
