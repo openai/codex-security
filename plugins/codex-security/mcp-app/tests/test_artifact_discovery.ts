@@ -7,6 +7,7 @@ import type {
 } from "../src/artifact-discovery.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import {
   mkdir,
   readFile,
@@ -16,6 +17,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { syncBuiltinESMExports } from "node:module";
+import { mock } from "node:test";
 import { importSource } from "./import-module.ts";
 
 const {
@@ -111,6 +114,7 @@ try {
   const scan = await createContext("scan", "scan");
   await verifyInputSchema();
   await verifyNormalizationAndPagination(scan);
+  await verifyNormalizationRunsOffThread(scan);
   await verifyReaderPreservesSharedPhaseRecords(scan);
   await verifyNormalizerFailuresPreserveOutput(scan);
   await verifyDiffInventoryAllowsDeletedFiles();
@@ -339,6 +343,29 @@ async function verifyNormalizerFailuresPreserveOutput(
     recordCodexSecurityDiscoveryCandidates(
       {
         candidates: [
+          rawCandidate(),
+          rawCandidate({
+            locations: [
+              { path: "src/missing.ts", start_line: 1, role: "sink" },
+            ],
+          }),
+        ],
+      },
+      context,
+    ),
+    (error) =>
+      error instanceof Error &&
+      /candidate input row 2:.*(?:ENOENT|Windows filesystem error 2)/u.test(
+        error.message,
+      ) &&
+      error.message.includes("missing.ts"),
+  );
+  assert.equal(await readFile(destination, "utf8"), original);
+
+  await assert.rejects(
+    recordCodexSecurityDiscoveryCandidates(
+      {
+        candidates: [
           rawCandidate({
             locations: [{ path: "src/routes.ts", start_line: 9, role: "sink" }],
           }),
@@ -403,6 +430,49 @@ async function verifyNormalizerFailuresPreserveOutput(
     ),
     { operation: "replace", candidatesRecorded: 1 },
   );
+}
+
+async function verifyNormalizationRunsOffThread(context: ArtifactContext) {
+  // POSIX normalization uses these synchronous APIs; workers have their own
+  // built-in modules, so reads there remain available while this thread refuses.
+  if (process.platform === "win32") return;
+  const assertOutsideScan = (file: fs.PathOrFileDescriptor) => {
+    const value = Buffer.isBuffer(file) ? file.toString("utf8") : String(file);
+    assert.equal(value.startsWith(context.repoRoot), false, value);
+    assert.equal(value.startsWith(context.root), false, value);
+  };
+  const read = fs.readFileSync;
+  const realpath = fs.realpathSync.native;
+  const readMock = mock.method(
+    fs,
+    "readFileSync",
+    (...args: Parameters<typeof read>) => {
+      assertOutsideScan(args[0]);
+      return read(...args);
+    },
+  );
+  const realpathMock = mock.method(
+    fs.realpathSync,
+    "native",
+    (...args: Parameters<typeof realpath>) => {
+      assertOutsideScan(args[0]);
+      return realpath(...args);
+    },
+  );
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(
+      await recordCodexSecurityDiscoveryCandidates(
+        { candidates: [rawCandidate()] },
+        context,
+      ),
+      { operation: "replace", candidatesRecorded: 1 },
+    );
+  } finally {
+    readMock.mock.restore();
+    realpathMock.mock.restore();
+    syncBuiltinESMExports();
+  }
 }
 
 async function verifyDiffInventoryAllowsDeletedFiles() {

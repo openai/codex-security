@@ -1,12 +1,15 @@
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { decodeUtf8 } from "./helpers/utf8.js";
 import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
 import {
-  createCandidateNormalizer,
   stableJson,
   candidateRelativePath,
+  type CandidateNormalizationInput,
   type CandidateSource,
+  type normalizeCandidateBatch,
 } from "./helpers/normalize-candidates.js";
 import type * as z from "zod/v4";
 import discoveryCandidateDefinitions from "../../schemas/definitions/discovery-candidate.schema.json";
@@ -118,25 +121,30 @@ export async function recordCodexSecurityDiscoveryCandidates(
     [...discoveryComponents, "candidate_ledger.jsonl"],
     discoveryLabel,
   );
-  const normalizer = createCandidateNormalizer(
-    context.repoRoot,
-    inventory,
-    context.mode === "diff",
-    context.mode === "diff"
-      ? await diffCandidateSources(context, inventory, candidates)
-      : undefined,
-  );
-  for (const [index, candidate] of candidates.entries()) {
-    try {
-      normalizer.add(candidate);
-    } catch (error) {
-      throw new Error(
-        `${discoveryLabel}: candidate input row ${index + 1}: ${(error as Error).message}`,
-        { cause: error },
+  const workerData: CandidateNormalizationInput = {
+    repoRoot: context.repoRoot,
+    scopePath: inventory,
+    allowMissing: context.mode === "diff",
+    sources:
+      context.mode === "diff"
+        ? await diffCandidateSources(context, inventory, candidates)
+        : undefined,
+    candidates,
+  };
+  // Inventory traversal and source reads must not block other MCP requests.
+  const rows = await new Promise<ReturnType<typeof normalizeCandidateBatch>>(
+    (resolve, reject) => {
+      const worker = new Worker(
+        createRequire(import.meta.url).resolve("./helpers.mjs"),
+        { workerData },
       );
-    }
-  }
-  const rows = normalizer.finish();
+      worker.once("message", resolve);
+      worker.once("error", reject);
+      worker.once("exit", (code) =>
+        reject(new Error(`Candidate normalizer exited with code ${code}.`)),
+      );
+    },
+  );
   await replaceArtifactText(
     destination,
     rows.map((row) => `${stableJson(row)}\n`).join(""),
