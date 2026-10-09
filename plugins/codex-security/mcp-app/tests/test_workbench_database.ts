@@ -335,7 +335,7 @@ test("legacy execution profiles retain values while allowing independent model s
     database.exec(
       "UPDATE scans SET execution_model = 'synthetic-model', reasoning_effort = 'future-effort'",
     );
-    applyMigrations(database);
+    applyMigrations(database, []);
     const row = database
       .prepare(
         "SELECT model, reasoning_effort, legacy_execution_model, legacy_reasoning_effort FROM scans",
@@ -351,6 +351,7 @@ test("legacy execution profiles retain values while allowing independent model s
       },
     );
     database.exec("UPDATE scans SET model = NULL, reasoning_effort = 'high'");
+    applyMigrations(database);
     assertMigrationNames(database, version);
   }
 });
