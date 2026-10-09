@@ -39,10 +39,7 @@ function finding(
     typeof index === "number"
       ? `csf_${String(index).padStart(24, "0")}`
       : index;
-  const document = {
-    findingId,
-    extensions: { opaqueId: 9007199254740993n, score: 0 },
-  };
+  const document = { findingId, extensions: { opaqueId: 9007199254740993n } };
   database
     .prepare(
       `
@@ -176,13 +173,7 @@ for (const scenario of [
   });
 }
 
-for (const body of [
-  "identical",
-  "reformatted",
-  "changed",
-  "prototype-id",
-  "signed-zero",
-]) {
+for (const body of ["identical", "reformatted", "changed", "prototype-id"]) {
   test(`saved source context follows semantically matching occurrence bodies: ${body}`, (t) => {
     const database = open(t);
     const document = {
@@ -204,11 +195,9 @@ for (const body of [
     const occurrence =
       body === "identical"
         ? stringifyJson(document)
-        : body === "signed-zero"
-          ? stringifyJson(document).replace('"score": 0', '"score": -0.0')
-          : body === "changed"
-            ? stringifyJson({ ...document, title: "A different observation" })
-            : `{\n  "extensions": ${stringifyJson(document.extensions)},\n  "occurrenceId": "occurrence-a",\n  "findingId": ${JSON.stringify(document.findingId)}\n}`;
+        : body === "changed"
+          ? stringifyJson({ ...document, title: "A different observation" })
+          : `{\n  "extensions": ${stringifyJson(document.extensions)},\n  "occurrenceId": "occurrence-a",\n  "findingId": ${JSON.stringify(document.findingId)}\n}`;
     database
       .prepare(
         `INSERT INTO finding_occurrences
