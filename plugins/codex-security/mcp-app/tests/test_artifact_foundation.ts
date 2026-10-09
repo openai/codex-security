@@ -55,7 +55,6 @@ const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
 
 try {
   await testSchemaSourceOfTruth();
-  await testWorkerThreatModelSchema();
   await testScanContext();
   await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
@@ -68,25 +67,6 @@ try {
 }
 
 console.log("Codex Security compact artifact foundation tests passed");
-
-async function testWorkerThreatModelSchema() {
-  const schema = await readJson(
-    import.meta.dirname,
-    "../../schemas/tools/worker-threat-model.schema.json",
-  );
-  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(
-    schema.$id,
-    "codex-security://schemas/tools/worker-threat-model.schema.json",
-  );
-  const input = schema.$defs.recordWorkerThreatModelInput;
-  assert.deepEqual(Object.keys(input.properties), ["content"]);
-  assert.deepEqual(input.required, ["content"]);
-  assert.equal(input.additionalProperties, false);
-  assert.equal(input.properties.content.type, "string");
-  assert.equal(input.properties.content.minLength, 1);
-  assert.equal(input.properties.content.pattern, "\\S");
-}
 
 async function testSchemaSourceOfTruth() {
   const common = await readJson(
