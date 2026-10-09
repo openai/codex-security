@@ -5930,7 +5930,13 @@ export async function main(
             exitCode: 2,
             error: parsed.error.issues.map((issue) => issue.message).join(" "),
           };
-        return runScanCommand(input.repository, parsed.data, false, signal);
+        const { exitCode, data, error, coverageError } = await runScanCommand(
+          input.repository,
+          parsed.data,
+          false,
+          signal,
+        );
+        return { exitCode, data, error: error ?? coverageError };
       },
     });
   }
