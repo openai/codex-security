@@ -53,7 +53,10 @@ export class DeepScanProgressTracker {
         if (
           abortController.signal.aborted ||
           progress === null ||
-          sameProgress(progress, this.#lastProgress)
+          (progress.completed === this.#lastProgress?.completed &&
+            progress.active === this.#lastProgress?.active &&
+            progress.maximum === this.#lastProgress?.maximum &&
+            progress.consolidating === this.#lastProgress?.consolidating)
         ) {
           return;
         }
@@ -105,18 +108,5 @@ export function deepScanProgressFromWorkbench(
   }
   throw new Error(
     "Codex Security workbench returned invalid Deep Scan progress.",
-  );
-}
-
-function sameProgress(
-  left: DeepScanProgress,
-  right: DeepScanProgress | null,
-): boolean {
-  return (
-    right !== null &&
-    left.completed === right.completed &&
-    left.active === right.active &&
-    left.maximum === right.maximum &&
-    left.consolidating === right.consolidating
   );
 }

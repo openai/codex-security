@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { mkdir, rm } from "node:fs/promises";
@@ -92,7 +93,7 @@ try {
 }
 
 const { executeWorkbench } = await loadWorkbenchProcess();
-const root = await temporaryDirectory("workbench-framing-");
+const root = await temporaryDirectory("workbench-framing-", true);
 try {
   const target = path.join(root, "target");
   await mkdir(target);
@@ -141,20 +142,28 @@ try {
     ["read-artifact", ...artifactArgs],
   );
   assert.deepEqual(Buffer.from(saved.content, "base64"), binary);
-  if (process.platform !== "win32") {
-    const replacementTarget = path.join(root, "target-\ufffd");
-    await mkdir(replacementTarget);
-    await mkdir(
-      Buffer.concat([
-        Buffer.from(path.join(root, "target-")),
-        Buffer.from([0xff]),
-      ]),
+  const replacementTarget = path.join(root, "target-\ufffd");
+  await mkdir(replacementTarget);
+  for (const rawBytePath of [false, true]) {
+    await test(
+      `workbench path framing with ${rawBytePath ? "a raw-byte collision" : "a Unicode target"}`,
+      { skip: rawBytePath && ["win32", "darwin"].includes(process.platform) },
+      async () => {
+        if (rawBytePath) {
+          await mkdir(
+            Buffer.concat([
+              Buffer.from(path.join(root, "target-")),
+              Buffer.from([0xff]),
+            ]),
+          );
+        }
+        const inspected = await executeWorkbench(
+          process.env.PYTHON?.trim() || "python3",
+          ["inspect-target", "--target-path", path.join(root, "target-\udcff")],
+        );
+        assert.equal(inspected.targetPath, replacementTarget);
+      },
     );
-    const inspected = await executeWorkbench(
-      process.env.PYTHON?.trim() || "python3",
-      ["inspect-target", "--target-path", path.join(root, "target-\udcff")],
-    );
-    assert.equal(inspected.targetPath, replacementTarget);
   }
 } finally {
   await rm(root, { recursive: true, force: true });

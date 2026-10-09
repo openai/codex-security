@@ -12,9 +12,13 @@ import {
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
-import { prepareKnowledgeBase } from "../src/knowledge-base.js";
+import { ConfigurationError } from "../src/errors.js";
+import {
+  prepareKnowledgeBase,
+  readKnowledgeBaseSnapshot,
+} from "../src/knowledge-base.js";
 import { expandHome } from "../src/runtime.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -497,6 +501,90 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Authentication\nReview sessions\n");
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
+  });
+
+  test.each([
+    ["preparation", prepareKnowledgeBase],
+    ["snapshot extraction", readKnowledgeBaseSnapshot],
+  ] as const)(
+    "preserves the local origin and cause of document parser failures during %s",
+    async (_name, prepare) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "network-security.pdf");
+      await writeFile(source, pdf("Network design"));
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      const cause = new Error("Synthetic parser failure.");
+      const parser = spyOn(pdfjs, "getDocument").mockImplementation(() => {
+        throw cause;
+      });
+
+      try {
+        const prepared = prepare([source]);
+        await expect(prepared).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(prepared).rejects.toMatchObject({
+          message: `Cannot extract text from knowledge base PDF: ${source}`,
+          cause: { cause },
+        });
+      } finally {
+        parser.mockRestore();
+      }
+    },
+  );
+
+  test("cancels PDF extraction when the scan is aborted", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "large.pdf");
+    await writeFile(source, pdf("Cancellable content"));
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation.");
+    let pagesRead = 0;
+    const destroy = mock(async () => {});
+    const parser = spyOn(pdfjs, "getDocument").mockImplementation(
+      () =>
+        ({
+          promise: Promise.resolve({
+            numPages: 3,
+            getPage: async () => {
+              pagesRead += 1;
+              return {
+                getTextContent: async () => {
+                  controller.abort(reason);
+                  return { items: [{ str: "page" }] };
+                },
+              };
+            },
+          }),
+          destroy,
+        }) as never,
+    );
+
+    try {
+      const prepared = prepareKnowledgeBase([source], controller.signal);
+      await expect(prepared).rejects.toBe(reason);
+      expect(pagesRead).toBe(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      parser.mockRestore();
+    }
+  });
+
+  test("preserves the local origin and cause when snapshot staging fails", async () => {
+    const root = await temporaryDirectory();
+    const parent = join(root, "not-a-directory");
+    await writeFile(parent, "synthetic occupied path");
+    const prepared = prepareKnowledgeBase(
+      {
+        sources: [],
+        protectedRoots: [],
+        documents: { "0.txt": "Synthetic knowledge" },
+      },
+      undefined,
+      parent,
+    );
+    await expect(prepared).rejects.toBeInstanceOf(ConfigurationError);
+    await expect(prepared).rejects.toMatchObject({ cause: expect.any(Error) });
+    expect(await readFile(parent, "utf8")).toBe("synthetic occupied path");
   });
 
   test.each([

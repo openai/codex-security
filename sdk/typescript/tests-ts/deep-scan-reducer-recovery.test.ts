@@ -191,9 +191,16 @@ test("preserves owned worker tool failure diagnostics", async () => {
     server: "unrelated_server",
     tool: "record_codex_security_deep_reduction",
     result: { isError: true },
-    error: null,
+    error: { message: "Synthetic unrelated transport failure" },
   });
   expect(unrelatedDiagnostics).toEqual([]);
+  appendDiagnostic(unrelatedDiagnostics, {
+    type: "file_change",
+    status: "failed",
+  });
+  expect(unrelatedDiagnostics).toEqual([
+    { code: "file_change_failed", message: "Codex worker file change failed." },
+  ]);
 });
 
 test("resumes only when the exact Standard worker or reducer result is missing", async () => {

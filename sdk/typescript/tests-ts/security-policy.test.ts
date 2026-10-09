@@ -33,11 +33,28 @@ import {
   addPolicySubmodule,
   createPolicyTestFixtures,
   policyGit,
+  policyGitDirectory,
   stageResult,
 } from "./support/security-policy.js";
 
 const { fixture, cleanup } = createPolicyTestFixtures();
 afterEach(cleanup);
+
+function createPolicyWorktree(repository: string, root: string, name: string) {
+  policyGit(repository, "init", "--quiet");
+  policyGit(repository, "commit", "--allow-empty", "--quiet", "-m", "initial");
+  const linked = join(root, name);
+  policyGit(
+    repository,
+    "worktree",
+    "add",
+    "--quiet",
+    "--detach",
+    linked,
+    "HEAD",
+  );
+  return linked;
+}
 
 describe("security policy generation", () => {
   test("stores policy drafts separately from scans and rejects linked state children", async () => {
@@ -349,30 +366,8 @@ describe("security policy generation", () => {
 
   test("excludes copied linked-worktree metadata", async () => {
     const f = await fixture();
-    policyGit(f.repository, "init", "--quiet");
-    policyGit(
-      f.repository,
-      "commit",
-      "--allow-empty",
-      "--quiet",
-      "-m",
-      "initial",
-    );
-    const linked = join(f.root, "linked");
-    policyGit(
-      f.repository,
-      "worktree",
-      "add",
-      "--quiet",
-      "--detach",
-      linked,
-      "HEAD",
-    );
-    const original = execFileSync(
-      "git",
-      ["-C", linked, "rev-parse", "--absolute-git-dir"],
-      { encoding: "utf8" },
-    ).trim();
+    const linked = createPolicyWorktree(f.repository, f.root, "linked");
+    const original = policyGitDirectory(linked);
     const archived = join(f.repository, "archived-admin");
     const common = join(f.repository, "shared-data");
     await cp(join(f.repository, ".git"), common, { recursive: true });
@@ -585,24 +580,10 @@ describe("security policy generation", () => {
 
   test("keeps linked worktrees and submodules as their own policy roots", async () => {
     const f = await fixture();
-    policyGit(f.repository, "init", "--quiet");
-    policyGit(
+    const linked = createPolicyWorktree(
       f.repository,
-      "commit",
-      "--allow-empty",
-      "--quiet",
-      "-m",
-      "initial",
-    );
-    const linked = join(f.root, "linked-worktree");
-    policyGit(
-      f.repository,
-      "worktree",
-      "add",
-      "--quiet",
-      "--detach",
-      linked,
-      "HEAD",
+      f.root,
+      "linked-worktree",
     );
     await mkdir(join(linked, "component"));
     expect(
@@ -612,11 +593,7 @@ describe("security policy generation", () => {
       scope: "component",
       targetPath: join(linked, "component", "SECURITY.md"),
     });
-    const linkedMetadata = execFileSync(
-      "git",
-      ["-C", linked, "rev-parse", "--absolute-git-dir"],
-      { encoding: "utf8" },
-    ).trim();
+    const linkedMetadata = policyGitDirectory(linked);
     const backlink = join(linkedMetadata, "gitdir");
     const originalBacklink = await readFile(backlink);
     await writeFile(
