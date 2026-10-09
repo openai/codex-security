@@ -1,7 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ValidateFunction } from "ajv";
-import { parseJsonNumbers } from "../json-numbers.js";
-import { ContractValidationError } from "../errors.js";
 import {
   FINDINGS_ERROR_STATUS,
   type FindingsErrorResponse,
@@ -143,18 +141,11 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   try {
-    return parseJsonNumbers(
-      new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-        Buffer.concat(chunks),
-      ),
-      "Request body",
-    );
-  } catch (error) {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
     throw new FindingsError(
       "invalid_request",
-      error instanceof ContractValidationError
-        ? error.message
-        : "Request body must be valid JSON.",
+      "Request body must be valid JSON.",
     );
   }
 }
