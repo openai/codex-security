@@ -1,6 +1,8 @@
 import { runNodePython } from "./support/python-probe.js";
-import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { pythonExecutable } from "./support/python.js";
+import { nodeCommand } from "./support/shell.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { git } from "./git-fixture.js";
 import { spawnSync } from "node:child_process";
 import {
@@ -64,14 +66,11 @@ test("diff previews stay inside the selected repository", () => {
   rmSync(nested, { recursive: true });
   symlinkSync(externalFixture, nested, "junction");
 
-  const python = pythonExecutable();
-  expect(python).not.toBeNull();
   const output = join(root, "rank-input.jsonl");
   const result = spawnSync(
-    python!,
+    nodeCommand().command,
     [
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -134,21 +133,23 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
   );
   const legacyHead = git(repository, "rev-parse", "HEAD");
 
-  const python = pythonExecutable();
-  expect(python).not.toBeNull();
   const output = join(root, "rank-input.jsonl");
-  const rank = runNodePython(python!, [
-    join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-    "make-diff-rank-input",
-    "--repo",
-    repository,
-    "--base",
-    base,
-    "--head",
-    head,
-    "--out",
-    output,
-  ]);
+  const rank = spawnSync(
+    nodeCommand().command,
+    [
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      base,
+      "--head",
+      head,
+      "--out",
+      output,
+    ],
+    { encoding: "utf8" },
+  );
   const probeSource = [
     "import json, pathlib, sys",
     "sys.path.insert(0, sys.argv[1])",
@@ -160,6 +161,8 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
     "diff = db.require_diff_target(repo, 'commit', None, sys.argv[3], None)",
     "print(json.dumps({'root': str(root), 'pathspec': pathspec, 'subject': metadata['commitSubject'], 'diff': diff}))",
   ].join("\n");
+  const python = pythonExecutable();
+  expect(python).not.toBeNull();
   const probe = runNodePython(python!, [
     "-c",
     probeSource,
@@ -219,9 +222,7 @@ testPosix(
     writeFileSync(ripgrep, "#!/bin/sh\nexit 0\n");
     chmodSync(ripgrep, 0o700);
 
-    const python = pythonExecutable();
     const hostGit = Bun.which("git");
-    expect(python).not.toBeNull();
     expect(hostGit).not.toBeNull();
     const trustedGit = join(
       realpathSync(dirname(hostGit!)),
@@ -229,10 +230,11 @@ testPosix(
     );
     const output = join(root, "output");
     const run = (script: string, args: string[], binding = trustedGit) =>
-      runNodePython(
-        python!,
+      spawnSync(
+        nodeCommand().command,
         [
-          join(PLUGIN_ROOT, "scripts", script),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          ...(script === "generate-in-scope-files" ? [script] : []),
           ...args,
           "--repo",
           repository,
@@ -240,6 +242,7 @@ testPosix(
           output,
         ],
         {
+          encoding: "utf8",
           env: {
             ...process.env,
             PATH: `${externalBin}:${process.env["PATH"] ?? ""}`,
@@ -255,16 +258,16 @@ testPosix(
       "--head",
       head,
     ];
-    const unavailable = run("generate_rank_input.py", rankArguments, "");
+    const unavailable = run("rank-input", rankArguments, "");
     expect(unavailable.status).not.toBe(0);
-    const rejected = run("generate_rank_input.py", rankArguments, shim);
+    const rejected = run("rank-input", rankArguments, shim);
     expect(rejected.status).not.toBe(0);
     expect(rejected.stderr).toContain("outside the protected repository");
-    const rank = run("generate_rank_input.py", rankArguments);
+    const rank = run("rank-input", rankArguments);
     expect(rank.status, rank.stderr).toBe(0);
 
     for (const diff of [true, false]) {
-      const inventory = run("generate_in_scope_files.py", [
+      const inventory = run("generate-in-scope-files", [
         "--scope",
         ".",
         ...(diff ? ["--diff-base", base, "--diff-head", head] : []),
@@ -277,3 +280,54 @@ testPosix(
     expect(existsSync(marker)).toBe(false);
   },
 );
+
+for (const mode of ["revisions", "local-patch"] as const)
+  test.skipIf(process.platform !== "win32")(
+    `documented Windows ${mode} ranking command preserves literal paths and refs`,
+    async () => {
+      const root = temporaryRoots.create("codex-security-diff-docs-");
+      const repository = join(root, "repository %USERNAME% !EXPAND! 雪's");
+      const discovery = join(root, "discovery %USERNAME% !EXPAND! 雪's");
+      mkdirSync(repository);
+      mkdirSync(discovery);
+      git(repository, "init", "-q");
+      const source = join(repository, "source.py");
+      writeFileSync(source, "before\n");
+      git(repository, "add", ".");
+      git(repository, "commit", "-qm", "Fixture base");
+      const base = "fixture-%USERNAME%-!EXPAND!-é's";
+      git(repository, "branch", base);
+      writeFileSync(source, "after\n");
+      if (mode === "revisions") {
+        git(repository, "add", ".");
+        git(repository, "commit", "-qm", "Fixture head");
+      }
+      const launcher = windowsHelperFixture(root, {
+        CODEX_SECURITY_GIT: Bun.which("git")!,
+      });
+      for (const powershell of launcher.powershells) {
+        const result = await launcher.run(
+          powershell,
+          "skills/security-scan/references/scan-artifacts-and-ledger.md",
+          {
+            "<plugin_dir>": launcher.plugin,
+            "<repo_root>": repository,
+            "<discovery_dir>": discovery,
+            "<base>": base,
+            "<head>": "HEAD",
+          },
+          undefined,
+          root,
+          undefined,
+          mode === "revisions" ? 1 : 2,
+        );
+        expect(result.status, result.diagnostics).toBe(0);
+        expect(result.stdout, result.diagnostics).not.toContain(
+          "expanded-plugin-used",
+        );
+        expect(
+          JSON.parse(readFileSync(join(discovery, "rank_input.jsonl"), "utf8")),
+        ).toMatchObject({ path: "source.py", preview: "after" });
+      }
+    },
+  );

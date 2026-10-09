@@ -20,7 +20,7 @@ from typing import Any, BinaryIO
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
+from source_binary import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 
@@ -302,6 +302,69 @@ def git_command(
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
+def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+    """Return changed regular files from the selected side of each change."""
+    result = git_command(
+        repo,
+        "diff",
+        "--ignore-submodules=all",
+        "--raw",
+        "-z",
+        "--diff-filter=ACMRDT",
+        *diff_args,
+        text=False,
+    )
+    result.check_returncode()
+    fields = result.stdout.split(b"\0")
+    if fields and not fields[-1]:
+        fields.pop()
+
+    changed: list[tuple[Path, str]] = []
+    index = 0
+    while index < len(fields):
+        metadata = fields[index].split()
+        status = chr(metadata[-1][0])
+        index += 1
+        if status in {"C", "R"}:
+            index += 1
+        path = repo / os.fsdecode(fields[index])
+        index += 1
+        selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
+        if selected_mode.startswith(b"100"):
+            changed.append((path, status))
+    return changed
+
+
+def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
+    if mode == "revisions":
+        return run_git_changed_paths(repo, [f"{base}..{head}"])
+    if mode == "local-patch":
+        unstaged = run_git_changed_paths(repo, [base])
+        staged = run_git_changed_paths(repo, ["--cached", base])
+        untracked = git_command(
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            text=False,
+        )
+        untracked.check_returncode()
+        combined = dict(staged)
+        combined.update(unstaged)
+        combined.update(
+            (repo / os.fsdecode(relative), "A")
+            for relative in untracked.stdout.split(b"\0")
+            if relative and not relative.endswith(b"/")
+        )
+        return sorted(
+            (path, status)
+            for path, status in combined.items()
+            if status == "D" or (not path.is_symlink() and path.is_file())
+        )
+    raise SystemExit(f"Unknown diff mode: {mode}")
+
+
 def candidate_source_lines(
     target: Path,
     diff_target: dict[str, str],
@@ -310,8 +373,6 @@ def candidate_source_lines(
     case_insensitive: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Resolve candidate sources in the same selected view as the diff inventory."""
-    from generate_rank_input import git_changed_paths
-
     base, head = diff_target["baseRevision"], diff_target["headRevision"]
     local = diff_target["kind"] == "working_tree"
     changed = {

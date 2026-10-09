@@ -24,6 +24,7 @@ import {
 } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { rootCertificates } from "node:tls";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
 
@@ -1354,6 +1355,11 @@ async function testWorkerRuntimeSettings() {
     "PYTHON",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
+    "HOME",
+    "NODE_OPTIONS",
+    "NODE_DEBUG",
+    "NODE_EXTRA_CA_CERTS",
+    "CODEX_MCP_NODE_PATH",
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
@@ -1397,6 +1403,11 @@ async function testWorkerRuntimeSettings() {
       );
       process.env.PYTHON = python;
       const gitEnvironment = {
+        NODE_OPTIONS: "--no-warnings",
+        NODE_DEBUG: "synthetic-ambient-debug",
+        NODE_EXTRA_CA_CERTS: path.join(fixture.root, "ambient-ca.pem"),
+        CODEX_MCP_NODE_PATH: path.join(fixture.root, "inherited node"),
+        HOME: path.join(fixture.root, "inherited home"),
         PATH: [
           path.join(fixture.root, "selected tools"),
           "../selected tools",
@@ -1406,6 +1417,31 @@ async function testWorkerRuntimeSettings() {
         GIT_SSH_COMMAND: "synthetic-ssh --fixture",
         GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
       };
+      const expectedGitEnvironment = (
+        nodePath: string,
+        environment?: {
+          HOME: string;
+          PATH: string;
+          NODE_OPTIONS: string;
+          NODE_DEBUG: string;
+          NODE_EXTRA_CA_CERTS: string;
+          CODEX_MCP_NODE_PATH: string;
+        },
+      ) => ({
+        ...gitEnvironment,
+        CODEX_MCP_NODE_PATH: nodePath,
+        ...(environment === undefined
+          ? {}
+          : {
+              HOME: environment.HOME,
+              PATH: environment.PATH,
+              NODE_OPTIONS: environment.NODE_OPTIONS,
+              NODE_DEBUG: environment.NODE_DEBUG,
+              NODE_EXTRA_CA_CERTS: environment.NODE_EXTRA_CA_CERTS,
+              CODEX_MCP_NODE_PATH: environment.CODEX_MCP_NODE_PATH,
+            }),
+      });
+      await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
       Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active [scan] config.toml");
       const codexHome = path.join(
@@ -1587,6 +1623,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               index === 0
                 ? undefined
                 : {
+                    HOME: path.join(fixture.root, `scan home ${index}`),
+                    PATH: path.join(fixture.root, `scan tools ${index}`),
+                    NODE_OPTIONS: `--stack-trace-limit=${20 + index}`,
+                    NODE_DEBUG: `synthetic-scan-debug-${index}`,
+                    NODE_EXTRA_CA_CERTS: path.join(
+                      fixture.root,
+                      `scan-ca-${index}.pem`,
+                    ),
+                    CODEX_MCP_NODE_PATH: path.join(
+                      fixture.root,
+                      `scan node ${index}`,
+                    ),
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                     CODEX_SQLITE_HOME: path.join(
@@ -1663,6 +1711,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
             ),
             writeFile(entry.path, stringifyToml(entry.configuration)),
+            ...(entry.environment === undefined
+              ? []
+              : [
+                  writeFile(
+                    entry.environment.NODE_EXTRA_CA_CERTS,
+                    rootCertificates[0]!,
+                  ),
+                ]),
             writeFile(
               entry.deepPath,
               stringifyToml({
@@ -1825,6 +1881,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
+            const selectedProvider = workerConfigurations[index];
             const workerLaunch = workerLaunches.find(({ args }) =>
               model === undefined
                 ? !args.includes("--model")
@@ -1898,7 +1955,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.providerKey, providerKeys[index]);
-            assert.equal(invocation.mcpNodePath, nodePaths[index]);
+            assert.equal(
+              invocation.mcpNodePath,
+              selectedProvider.environment?.CODEX_MCP_NODE_PATH ??
+                nodePaths[index],
+            );
             assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
             assert.equal(invocation.providerHeader, providerHeaders[index]);
 
@@ -1964,7 +2025,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.configPath,
               workerConfigurations[index].path,
             );
-            const selectedProvider = workerConfigurations[index];
             if (selectedProvider.provider === undefined) {
               assert.equal(
                 invocation.argv.some(
@@ -2012,8 +2072,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
               false,
             );
-            assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
-            for (const [name, value] of Object.entries(gitEnvironment)) {
+            assert.deepEqual(
+              invocation.gitEnvironment,
+              expectedGitEnvironment(
+                nodePaths[index],
+                selectedProvider.environment,
+              ),
+            );
+            for (const [name, value] of Object.entries({
+              ...gitEnvironment,
+              CODEX_MCP_NODE_PATH: nodePaths.at(-1),
+            })) {
               assert.equal(process.env[name], value);
             }
             assert.equal(invocation.python, python);
@@ -2070,13 +2139,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             args.includes("app-server"),
           )) {
             const preflight = await readJson(launch.markerPath);
-            assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
             const selectedProvider = workerConfigurations.find(
               (entry) => preflight.configPath === entry.path,
             );
             assert.ok(
               selectedProvider,
               "worker preflight must use the same scan environment",
+            );
+            assert.deepEqual(
+              preflight.gitEnvironment,
+              expectedGitEnvironment(
+                nodePaths[workerConfigurations.indexOf(selectedProvider)],
+                selectedProvider.environment,
+              ),
             );
             assert.equal(
               preflight.providerKey,
@@ -3287,7 +3362,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -3338,7 +3413,7 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }

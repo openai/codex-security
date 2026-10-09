@@ -507,8 +507,9 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
       );
     }
     const inventoryPath = path.join(fixtureRoot, "in_scope_files.txt");
-    execFileSync(process.env.PYTHON?.trim() || "python3", [
-      path.join(pluginRoot, "scripts", "generate_in_scope_files.py"),
+    execFileSync(process.execPath, [
+      path.join(pluginRoot, "mcp", "helpers.mjs"),
+      "generate-in-scope-files",
       "--repo",
       canonicalTarget,
       `--scope=${scope}`,

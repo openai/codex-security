@@ -103,7 +103,7 @@ export function readFile(path: string | number, label?: string): Buffer {
   }
 }
 
-function* readChunks(path: string, label?: string): Iterable<Buffer> {
+export function* readChunks(path: string, label?: string): Iterable<Buffer> {
   if (process.platform === "win32") {
     yield readFile(path, label);
     return;
@@ -154,12 +154,24 @@ export function mkdir(path: string): void {
   else mkdirSync(encodePosixPath(path), { recursive: true });
 }
 
-export function writeFile(path: string, chunks: Iterable<Buffer>): void {
+export function writeFile(
+  path: string,
+  chunks: Iterable<Buffer>,
+  exclusive = false,
+): void {
   if (process.platform === "win32") {
-    windowsFileSystem(windowsBinding()).writeFile(widePath(path), chunks);
+    windowsFileSystem(windowsBinding()).writeFile(
+      widePath(path),
+      chunks,
+      exclusive,
+    );
     return;
   }
-  const descriptor = openSync(encodePosixPath(path), "w");
+  const descriptor = openSync(
+    encodePosixPath(path),
+    exclusive ? "wx" : "w",
+    exclusive ? 0o600 : undefined,
+  );
   try {
     for (const chunk of chunks) writeFileSync(descriptor, chunk);
   } finally {
