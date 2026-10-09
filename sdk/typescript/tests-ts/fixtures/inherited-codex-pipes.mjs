@@ -25,7 +25,11 @@ if (role === "holder") {
   const holder = spawn(
     process.execPath,
     [fileURLToPath(import.meta.url), mode, release, "holder"],
-    { stdio: ["ignore", 1, 2, "ipc"] },
+    {
+      // The holder must outlive the direct child on Windows.
+      detached: process.platform === "win32",
+      stdio: ["ignore", 1, 2, "ipc"],
+    },
   );
   await new Promise((resolve) => holder.once("message", resolve));
   process.on("SIGTERM", () => {
