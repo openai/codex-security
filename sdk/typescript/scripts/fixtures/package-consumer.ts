@@ -18,10 +18,13 @@ import {
   publishScan,
   runComponentScans,
   resolveProjectConfig,
+  suggestOwners,
   type ComponentScanOptions,
   type DeduplicateScanResult,
   type CustomPublicationResult,
   type Finding,
+  type OwnerCandidate,
+  type OwnerFinding,
   type ProjectConfigInput,
   type SeverityClassification,
   type ScanSeverityClassification,
@@ -41,6 +44,14 @@ import {
   OpenAiFindingEmbedder,
   SqliteFindingsStore,
 } from "@openai/codex-security/server";
+
+export async function ownerSuggestions(
+  repository: string,
+  findings: OwnerFinding[],
+): Promise<OwnerCandidate[][]> {
+  const report = await suggestOwners(repository, findings);
+  return report.results.map(({ suggestions }) => suggestions);
+}
 
 export async function classify(
   findings: Finding[],

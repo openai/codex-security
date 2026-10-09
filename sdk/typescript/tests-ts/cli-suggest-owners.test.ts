@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { afterEach, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import type { FindingsDocument } from "../src/models.js";
-import type { OwnerSuggestions } from "../src/suggest-owners.js";
+import type {
+  OwnerCandidate,
+  OwnerSuggestions,
+} from "../src/suggest-owners.js";
 import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -101,6 +104,7 @@ test("uses the current repository by default and emits a partial report with exi
           owner: null,
           reason: "Model unavailable.",
           evidence: [],
+          suggestions: [],
           limitations: [],
         },
       ],
@@ -170,9 +174,37 @@ test("reports owner lookup errors without changing the diagnostic or leaving lis
   expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
 });
 
-test("emits a primary CODEOWNERS identity using the existing command and report fields", async () => {
+test("emits ranked declarations and Git contributors using the existing command", async () => {
   const { directory, document } = await input();
   const deps = dependencies({ currentDirectory: directory });
+  const primary: OwnerCandidate = {
+    owner: { kind: "group", provider: "github", handle: "example/maintainers" },
+    reason: "Declared owner of an affected file in CODEOWNERS.",
+    evidence: [
+      {
+        id: "e1",
+        kind: "codeowners",
+        path: ".github/CODEOWNERS",
+        commit: report.revision,
+        startLine: 1,
+        endLine: 1,
+        rule: "* @example/maintainers",
+        matchedPath: "handler.ts",
+      },
+    ],
+  };
+  const contributor: OwnerCandidate = {
+    owner: { name: "Alex Example", email: "alex@example.test" },
+    reason: "Maintains the affected handler.",
+    evidence: [
+      {
+        id: "e2",
+        kind: "history",
+        path: "handler.ts",
+        commit: report.revision,
+      },
+    ],
+  };
   const declared: OwnerSuggestions = {
     ...report,
     results: [
@@ -180,25 +212,11 @@ test("emits a primary CODEOWNERS identity using the existing command and report 
         findingId: document.findings[0]!.findingId,
         occurrenceId: null,
         status: "identified",
-        owner: {
-          kind: "group",
-          provider: "github",
-          handle: "example/maintainers",
-        },
-        reason: "Declared owner of an affected file in CODEOWNERS.",
-        evidence: [
-          {
-            id: "e1",
-            kind: "codeowners",
-            path: ".github/CODEOWNERS",
-            commit: report.revision,
-            startLine: 1,
-            endLine: 1,
-            rule: "* @example/maintainers",
-            matchedPath: "handler.ts",
-          },
+        ...primary,
+        suggestions: [primary, contributor],
+        limitations: [
+          "Git contributors are not verified members of the declared CODEOWNERS teams.",
         ],
-        limitations: [],
       },
     ],
   };
