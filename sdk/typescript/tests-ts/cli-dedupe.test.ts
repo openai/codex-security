@@ -212,6 +212,7 @@ test.each([false, true])(
         signal: expect.any(AbortSignal),
       });
       expect(dependencies?.runWorkbench).toBe(deps.runWorkbench);
+      expect(dependencies?.surface).toBe("cli");
       return result;
     };
     expect(
@@ -305,9 +306,10 @@ test("dedupe requires a scan selector and reports SDK failures", async () => {
 
 test("dedupe defaults to local storage without a findings URL", async () => {
   const deps = dependencies();
-  deps.deduplicateScan = async (scanId, options) => {
+  deps.deduplicateScan = async (scanId, options, dependencies) => {
     expect(scanId).toBe("latest");
     expect(options.findingsUrl).toBeUndefined();
+    expect(dependencies?.surface).toBe("cli");
     return {
       scanId,
       uniqueFindingIds: [],

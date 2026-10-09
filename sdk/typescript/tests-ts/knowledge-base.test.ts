@@ -12,7 +12,7 @@ import {
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { ConfigurationError } from "../src/errors.js";
 import {
@@ -520,6 +520,44 @@ describe("scan knowledge bases", () => {
       }
     },
   );
+
+  test("cancels PDF extraction when the scan is aborted", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "large.pdf");
+    await writeFile(source, pdf("Cancellable content"));
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation.");
+    let pagesRead = 0;
+    const destroy = mock(async () => {});
+    const parser = spyOn(pdfjs, "getDocument").mockImplementation(
+      () =>
+        ({
+          promise: Promise.resolve({
+            numPages: 3,
+            getPage: async () => {
+              pagesRead += 1;
+              return {
+                getTextContent: async () => {
+                  controller.abort(reason);
+                  return { items: [{ str: "page" }] };
+                },
+              };
+            },
+          }),
+          destroy,
+        }) as never,
+    );
+
+    try {
+      const prepared = prepareKnowledgeBase([source], controller.signal);
+      await expect(prepared).rejects.toBe(reason);
+      expect(pagesRead).toBe(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      parser.mockRestore();
+    }
+  });
 
   test("preserves the local origin and cause when snapshot staging fails", async () => {
     const root = await temporaryDirectory();

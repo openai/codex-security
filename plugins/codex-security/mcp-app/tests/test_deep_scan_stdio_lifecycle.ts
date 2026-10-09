@@ -22,7 +22,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
-import * as streams from "./support/streams.ts";
+import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -997,11 +997,16 @@ model_reasoning_summary = "none"
 }
 
 function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
-  return streams.startServer(serverPath, env, {
-    cwd: pluginRoot,
-    component: "codex_security_deep_scan",
-    timeoutMessage: (id) => `Timed out waiting for JSON-RPC response ${id}.`,
-  });
+  return startRpcServer(
+    {
+      command: process.execPath,
+      args: [serverPath, "--stdio"],
+      cwd: pluginRoot,
+      env: env,
+      stderr: "pipe",
+    },
+    { component: "codex_security_deep_scan", timeoutMs: 15_000 },
+  );
 }
 
 function toolCall(

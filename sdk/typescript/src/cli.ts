@@ -104,6 +104,7 @@ import {
   resolveCompletedScan,
   resolveWorkflowScan,
   type SavedScan,
+  type SavedScanDependencies,
 } from "./saved-scan.js";
 import {
   publishFindingsCsvToCloud,
@@ -199,6 +200,7 @@ import {
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
+  pluginMetadata,
   runWorkbench,
   sameFile,
   setCodexSecurityCredentialLogout,
@@ -215,6 +217,7 @@ import {
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
@@ -358,72 +361,6 @@ const PROJECT_CONFIG_OPTION = optionValue("--config")
     "Load a trusted YAML/JSON file (default: CODEX_SECURITY_PROJECT_CONFIG, otherwise no file).",
   );
 const EXPORT_DEFAULT_OUTPUTS = ARTIFACT_EXPORT_FILENAMES;
-const VALUE_OPTIONS = new Set([
-  "--config",
-  "-c",
-  "--port",
-  "--workflow-id",
-  "--concurrency",
-  "--auth",
-  "--safety-identifier",
-  "--cyber-access-program",
-  "--path",
-  "--component",
-  "--components-file",
-  "--knowledge-base",
-  "--rubric",
-  "--finding-id",
-  "--scan-prompt-file",
-  "--validation-prompt-file",
-  "--post-scan-prompt-file",
-  "--diff",
-  "--head",
-  "--base",
-  "--mode",
-  "--model",
-  "--effort",
-  "--provider",
-  "--output-dir",
-  "--plugin-path",
-  "--python",
-  "--codex",
-  "--linear-issue",
-  "--linear-project",
-  "--linear-filter",
-  "--github-alert",
-  "--github-ref",
-  "--github-state",
-  "--fail-on-severity",
-  "--patch-severity",
-  "--resume-pr",
-  "--scan",
-  "--scan-dir",
-  "--severity",
-  "--max-cost",
-  "--workers",
-  "--subagents",
-  "--stop-after-no-new",
-  "--max-discovery-runs",
-  "--max-time-hours",
-  "--max-attempts",
-  "--export-format",
-  "--artifact",
-  "--csv",
-  "--output",
-  "--source-root",
-  "--format",
-  "--filter-output",
-  "--token-limit",
-  "--token-offset",
-  "--scan-root",
-  "--reason",
-  "--to",
-  "--findings-url",
-  "--linear-team",
-  "--linear-api-key",
-  "--project",
-  "--linear-assignee",
-]);
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
@@ -686,11 +623,7 @@ class PublicationProgressPresenter {
     try {
       dashboard.start();
       this.#dashboard = dashboard;
-    } catch {
-      try {
-        dashboard.stop();
-      } catch {}
-    }
+    } catch {}
   }
 
   public stop(): void {
@@ -854,11 +787,7 @@ class FindingProgressPresenter {
         dashboard.start();
         this.#dashboard = dashboard;
         return;
-      } catch {
-        try {
-          dashboard.stop();
-        } catch {}
-      }
+      } catch {}
     }
 
     this.#write(
@@ -1030,12 +959,28 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
+  coverageError?: string;
 }
+
+const incompleteScanEnvelopeSchema = z
+  .looseObject({
+    ok: z.literal(false),
+    error: z.object({
+      code: z.literal("SCAN_FAILED"),
+      message: z.string(),
+    }),
+    data: z.unknown().optional(),
+    meta: z.record(z.string(), z.unknown()),
+  })
+  .describe(
+    "Incomplete full-output JSON or JSONL with available scan results.",
+  );
 
 function scanOutputSchema(...codes: [string, ...string[]]) {
   return z
     .union([
       z.record(z.string(), z.unknown()),
+      incompleteScanEnvelopeSchema,
       z.object({
         status: z.literal("failed"),
         code: z.literal(codes),
@@ -1044,8 +989,6 @@ function scanOutputSchema(...codes: [string, ...string[]]) {
     ])
     .optional();
 }
-
-type ExportArguments = ArtifactExportArguments;
 
 type MatchingPlan = JsonObject & {
   repository: string;
@@ -1196,9 +1139,9 @@ interface CliDependencies {
   terminatePublishers?(): void;
   forceExit(signal: SignalName): void;
   exportFindings(
-    arguments_: ExportArguments,
+    arguments_: ArtifactExportArguments,
     output?: Writable,
-  ): Promise<Uint8Array | undefined>;
+  ): Promise<string | Uint8Array | undefined>;
   runCodex(
     args: readonly string[],
     output?: SkillCommandOutput,
@@ -1785,36 +1728,7 @@ export async function main(
     if (output === process.stdout) process.exit(exitCode);
     return exitCode;
   }
-  argv = normalizeScanImportArguments(defaultListCommand(argv));
-  const policyFullOutput =
-    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const positionals: string[] = [];
-  const argumentError = validateCliArguments(argv, positionals);
-  if (argumentError !== undefined && !policyFullOutput) {
-    errorOutput.write(`codex-security: ${argumentError}\n`);
-    return 2;
-  }
-  const updateController = new AbortController();
-  const pendingUpdate =
-    errorOutput.isTTY === true &&
-    argv.length > 0 &&
-    argv[0] !== "completions" &&
-    !argv.some((argument) =>
-      [
-        "--help",
-        "-h",
-        "--version",
-        "--llms",
-        "--llms-full",
-        "--schema",
-        "--dry-run",
-      ].includes(argument),
-    ) &&
-    updateNoticeEnabled(dependencies.environment)
-      ? dependencies
-          .checkForUpdate(updateController.signal)
-          .catch(() => undefined)
-      : undefined;
   let exitCode = 0;
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
@@ -1825,6 +1739,17 @@ export async function main(
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
   let scanStructuredError = false;
+  let incompleteScanOutput:
+    { format: "json" | "jsonl"; message: string } | undefined;
+  const recordIncompleteScanOutput = (outcome: ScanOutcome, format: string) => {
+    if (
+      outcome.coverageError !== undefined &&
+      (format === "json" || format === "jsonl") &&
+      argv.includes("--full-output")
+    ) {
+      incompleteScanOutput = { format, message: outcome.coverageError };
+    }
+  };
   let filteredScanFailure:
     { format: string; data: Record<string, unknown> } | undefined;
   let renderedScanFailure: string | undefined;
@@ -1839,7 +1764,10 @@ export async function main(
     code = "SCAN_FAILED",
   ): Record<string, unknown> | undefined => {
     exitCode = outcome.exitCode;
-    if (outcome.error === undefined) return outcome.data;
+    if (outcome.error === undefined) {
+      recordIncompleteScanOutput(outcome, format);
+      return outcome.data;
+    }
     if (format === "json" || format === "jsonl") {
       const message = errorMessage(outcome.error);
       if (!argv.includes("--full-output")) {
@@ -2255,6 +2183,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
+      hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -2320,6 +2249,7 @@ export async function main(
     })
     .command("rerun", {
       description: "Rerun a saved scan with its original configuration.",
+      hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -2797,10 +2727,8 @@ export async function main(
                 dependencies.environment,
               )
             : undefined;
-        if (options.to !== "linear") {
-          signalHandlers(dependencies, "add", onInterrupt, onTerminate);
-          observingSignals = true;
-        }
+        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
+        observingSignals = true;
         if (csvPath !== undefined) {
           const result = await (
             dependencies.publishFindingsCsvToCloud ?? publishFindingsCsvToCloud
@@ -2812,18 +2740,26 @@ export async function main(
           });
           return { ...result };
         }
+        const scanDependencies: SavedScanDependencies = {
+          currentDirectory: dependencies.currentDirectory,
+          runWorkbench: (args, input) =>
+            dependencies.runWorkbench(args, input, controller.signal),
+        };
         const selectedScans: { scanDir: string; scanId?: string }[] =
           directories.map((scanDir) => ({ scanDir }));
         for (const requestedId of new Set(options.scan)) {
           controller.signal.throwIfAborted();
-          const scan = await resolveCompletedScan(requestedId, dependencies);
+          const scan = await resolveCompletedScan(
+            requestedId,
+            scanDependencies,
+          );
           if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
             selectedScans.push(scan);
           }
         }
         if (options.workflowId !== undefined && selectedScans.length === 0) {
           selectedScans.push(
-            await resolveWorkflowScan(options.workflowId, dependencies),
+            await resolveWorkflowScan(options.workflowId, scanDependencies),
           );
         }
         let scanDir = selectedScans[0]?.scanDir;
@@ -2837,7 +2773,7 @@ export async function main(
               `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
             );
           }
-          const saved = await dependencies.runWorkbench([
+          const saved = await scanDependencies.runWorkbench([
             "list-scans",
             "--status",
             "complete",
@@ -2918,7 +2854,10 @@ export async function main(
               .replaceAll(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
               .replace(/\s+/gu, " ")
               .slice(-6)}`;
-            repositories.set(directory, repository);
+            repositories.set(
+              resolveCliPath(currentDirectory, directory),
+              repository,
+            );
             scansById.set(scanId, {
               scanId,
               scanDir: resolveCliPath(currentDirectory, directory),
@@ -2929,7 +2868,7 @@ export async function main(
                 findings,
                 age: publicationScanAge(timestamp, now),
                 scanId: shortScanId,
-                value: options.to === "cloud" ? scanId : directory,
+                value: scanId,
               },
             ];
           });
@@ -2993,12 +2932,16 @@ export async function main(
             );
             scanDir = selectedScans[0]!.scanDir;
           } else {
-            scanDir = await prompt.select(
+            controller.signal.throwIfAborted();
+            const selectedId = await prompt.select(
               "Which completed scan would you like to publish?",
               choices,
               { header },
+              controller.signal,
             );
-            selectedScans.push({ scanDir });
+            controller.signal.throwIfAborted();
+            selectedScans.push(scansById.get(selectedId)!);
+            scanDir = selectedScans[0]!.scanDir;
           }
           publicationRepository =
             repositories.get(scanDir) ?? basename(scanDir);
@@ -3107,8 +3050,6 @@ export async function main(
           publicationRepository,
         );
         presentation = progress;
-        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
-        observingSignals = true;
         if (!options.dryRun) {
           progress.start();
         }
@@ -3138,7 +3079,6 @@ export async function main(
         } finally {
           progress.stop();
         }
-        controller.signal.throwIfAborted();
         if (result.failed.length > 0) exitCode = 2;
         if ("warnings" in result && Array.isArray(result.warnings)) {
           for (const warning of result.warnings) {
@@ -3282,6 +3222,20 @@ export async function main(
       }
     },
   });
+  const infoOutput = z.object({
+    sdkVersion: z.string(),
+    bundledPluginVersion: z.string(),
+    scanMcp: z.literal(false),
+    cancellationNote: z.string(),
+    cliVersion: z.string(),
+    codexVersion: z.string(),
+    codexSdkVersion: z.string(),
+    model: z.string(),
+    reasoningEffort: z.string(),
+    nextStep: z.string(),
+    configuration: z.record(z.string(), z.unknown()),
+  });
+
   const cli = Cli.create("codex-security", {
     aliases: ["cs"],
     description: "Find, review, and fix security issues in your code.",
@@ -3330,23 +3284,14 @@ export async function main(
           .boolean()
           .default(false)
           .describe("Check inputs without generating a policy."),
-        auth: z
-          .enum(["auto", "chatgpt", "api-key"])
-          .default("auto")
-          .describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-          ),
+        auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         provider: PROVIDER_OPTION.describe(
           "Inference provider for policy generation.",
         ),
-        maxCost: z
-          .number()
-          .positive()
-          .optional()
-          .describe(
-            "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
-          ),
+        maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
+        ),
         ...RUNTIME_OPTION_SCHEMAS,
       }),
       examples: [
@@ -3483,7 +3428,8 @@ export async function main(
         "Import existing findings without security analysis:\n" +
         "  codex-security scan import --csv findings.csv\n" +
         "  codex-security scan import --json findings.json\n" +
-        "Use ./import to scan a repository named import.",
+        "Use ./import to scan a repository named import.\n" +
+        "Incomplete JSON/JSONL --full-output returns ok: false and keeps scan results under data.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
@@ -3704,6 +3650,7 @@ export async function main(
           errorOutput.write(`${message}\n`);
           outcome = { exitCode: 2, error: message };
         }
+
         if (
           outcome.error === undefined &&
           !options.dryRun &&
@@ -4106,6 +4053,7 @@ export async function main(
               {
                 environment: dependencies.environment,
                 currentDirectory: dependencies.currentDirectory,
+                surface: "cli",
                 ...(defaultWorkbench
                   ? {}
                   : { runWorkbench: dependencies.runWorkbench }),
@@ -4207,13 +4155,9 @@ export async function main(
             .describe("Run FILE after each scan, including failures."),
           ...modelOptions("Model for planning and component scans.").shape,
           provider: PROVIDER_OPTION,
-          maxCost: z
-            .number()
-            .positive()
-            .optional()
-            .describe(
-              "Stop each component scan if estimated USD cost exceeds AMOUNT.",
-            ),
+          maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+            "Stop each component scan if estimated USD cost exceeds AMOUNT.",
+          ),
           showCost: SHOW_COST_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
         })
@@ -4310,13 +4254,10 @@ export async function main(
             try {
               candidate.start();
               dashboard = candidate;
-            } catch {
-              try {
-                candidate.stop();
-              } catch {}
-            }
+            } catch {}
           }
           const result = await runComponentScans({
+            surface: "cli",
             repository,
             outputDir: settings.outputDir,
             ...(options.auto ? { auto: true } : { components }),
@@ -4464,13 +4405,9 @@ export async function main(
           .positive()
           .default(1)
           .describe("Maximum scan attempts per repository."),
-        maxCost: z
-          .number()
-          .positive()
-          .optional()
-          .describe(
-            "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
-          ),
+        maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
+        ),
         pluginPath: z
           .string()
           .min(1)
@@ -4810,28 +4747,46 @@ export async function main(
                 ),
             );
           }
-          exitCode = await runExport(
-            {
-              scanDir: resolveCliPath(currentDirectory, scanDir),
-              artifact: options.artifact,
-              format,
-              output:
-                options.output === "-"
-                  ? "-"
-                  : resolveCliPath(
-                      currentDirectory,
-                      options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
-                    ),
-              sourceRoot:
-                options.sourceRoot === undefined
-                  ? undefined
-                  : resolveCliPath(currentDirectory, options.sourceRoot),
-              pythonPath: options.python,
-            },
-            output,
-            errorOutput,
-            dependencies,
-          );
+          const arguments_: ArtifactExportArguments = {
+            scanDir: resolveCliPath(currentDirectory, scanDir),
+            artifact: options.artifact,
+            format,
+            output:
+              options.output === "-"
+                ? "-"
+                : resolveCliPath(
+                    currentDirectory,
+                    options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
+                  ),
+            sourceRoot:
+              options.sourceRoot === undefined
+                ? undefined
+                : resolveCliPath(currentDirectory, options.sourceRoot),
+            pythonPath: options.python,
+          };
+          try {
+            const prepared = await resolveArtifactExportOutput(
+              arguments_,
+              dependencies.currentDirectory(),
+            );
+            const contents = await dependencies.exportFindings(
+              prepared,
+              output,
+            );
+            if (arguments_.output === "-") {
+              if (contents !== undefined) {
+                await writeCliOutput(output, Buffer.from(contents));
+              }
+            } else {
+              errorOutput.write(
+                `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
+              );
+            }
+            exitCode = 0;
+          } catch (error) {
+            errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+            exitCode = 2;
+          }
         } catch (error) {
           if (exitCode !== 2) {
             errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
@@ -5733,19 +5688,7 @@ export async function main(
           openWorldHint: false,
         },
       },
-      output: z.object({
-        sdkVersion: z.string(),
-        bundledPluginVersion: z.string(),
-        scanMcp: z.literal(false),
-        cancellationNote: z.string(),
-        cliVersion: z.string(),
-        codexVersion: z.string(),
-        codexSdkVersion: z.string(),
-        model: z.string(),
-        reasoningEffort: z.string(),
-        nextStep: z.string(),
-        configuration: z.record(z.string(), z.unknown()),
-      }),
+      output: infoOutput,
       async run({ options }) {
         const directory = dependencies.currentDirectory();
         const project = await selectedProjectConfig(
@@ -5784,6 +5727,262 @@ export async function main(
         };
       },
     });
+
+  const commands = Cli.toCommands.get(cli)!;
+  const valueOptions = cliValueOptions(commands);
+  function isScanImportCommand(argv: readonly string[]): boolean {
+    const commandIndex = cliCommandIndex(argv);
+    return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
+  }
+
+  function normalizeScanImportArguments(
+    argv: readonly string[],
+  ): readonly string[] {
+    if (!isScanImportCommand(argv)) return argv;
+    const normalized: string[] = [];
+    const subcommandIndex = cliCommandIndex(argv) + 1;
+    for (let index = 0; index < argv.length; index += 1) {
+      const argument = argv[index]!;
+      const next = argv[index + 1];
+      // Incur reserves bare --json for output, but parses --json=FILE normally.
+      if (
+        index > subcommandIndex &&
+        argument === "--json" &&
+        next !== undefined &&
+        !next.startsWith("--") &&
+        next !== "-h"
+      ) {
+        normalized.push(`--json=${next}`);
+        index += 1;
+      } else {
+        normalized.push(argument);
+      }
+    }
+    return normalized;
+  }
+
+  function cliCommandIndex(argv: readonly string[]): number {
+    return argv.findIndex((value, index) => {
+      if (value.startsWith("-")) return false;
+      return index === 0 || !valueOptions.has(argv[index - 1]!);
+    });
+  }
+
+  function defaultListCommand(argv: readonly string[]): readonly string[] {
+    const commandIndex = cliCommandIndex(argv);
+    if (
+      commandIndex < 0 ||
+      !["scans", "findings"].includes(argv[commandIndex]!) ||
+      argv.includes("--help") ||
+      argv.includes("-h")
+    ) {
+      return argv;
+    }
+    const following = argv[commandIndex + 1];
+    if (following !== undefined && !following.startsWith("-")) return argv;
+    return [
+      ...argv.slice(0, commandIndex + 1),
+      "list",
+      ...argv.slice(commandIndex + 1),
+    ];
+  }
+
+  function validateCliArguments(
+    argv: readonly string[],
+    positionals: string[],
+  ): string | undefined {
+    if (argv.includes("--help") || argv.includes("-h")) return undefined;
+    const commandIndex = cliCommandIndex(argv);
+    const command = argv[commandIndex];
+    if (command === undefined || !commands.has(command)) return undefined;
+    const structuredOutput = argv.some(
+      (value, index) =>
+        value === "--json" ||
+        ((value === "--format" ||
+          value === "--format=json" ||
+          value === "--format=jsonl") &&
+          (value.endsWith("=json") ||
+            value.endsWith("=jsonl") ||
+            argv[index + 1] === "json" ||
+            argv[index + 1] === "jsonl")),
+    );
+    if (
+      structuredOutput &&
+      ["validate", "login", "logout", "serve"].includes(command) &&
+      !argv.includes("--schema")
+    ) {
+      return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
+    }
+    if (
+      command === "export" &&
+      structuredOutput &&
+      argv.some(
+        (value, index) =>
+          value === "--output=-" ||
+          (value === "--output" && argv[index + 1] === "-"),
+      ) &&
+      argv.some(
+        (value, index) =>
+          value === "--export-format=csv" ||
+          (value === "--export-format" && argv[index + 1] === "csv"),
+      )
+    ) {
+      return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
+    }
+    if (
+      command === "export" &&
+      structuredOutput &&
+      argv.some(
+        (value, index) =>
+          value === "--output=-" ||
+          (value === "--output" && argv[index + 1] === "-"),
+      ) &&
+      argv.some(
+        (value, index) =>
+          value === "--artifact=threat-model" ||
+          (value === "--artifact" && argv[index + 1] === "threat-model") ||
+          value === "--export-format=md" ||
+          (value === "--export-format" && argv[index + 1] === "md"),
+      )
+    ) {
+      return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
+    }
+    if (command === "scan" && !argv.includes("--schema")) {
+      if (
+        argv.some(
+          (value) =>
+            value === "--filter-output" || value.startsWith("--filter-output="),
+        )
+      ) {
+        return "--filter-output is not supported for scan results.";
+      }
+      if (
+        argv.some(
+          (value, index) =>
+            value === "--format=md" ||
+            (value === "--format" && argv[index + 1] === "md"),
+        )
+      ) {
+        return "Markdown output is not supported for scan results.";
+      }
+    }
+    const scanImport = isScanImportCommand(argv);
+    const nestedCommand =
+      scanImport ||
+      command === "scans" ||
+      command === "findings" ||
+      command === "publish" ||
+      command === "import";
+    const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
+    if (command === "info") {
+      for (let index = 0; index < argv.length; index += 1) {
+        const argument = argv[index]!;
+        if (
+          argument !== "--filter-output" &&
+          !argument.startsWith("--filter-output=")
+        ) {
+          continue;
+        }
+        const selector = argument.includes("=")
+          ? argument.slice(argument.indexOf("=") + 1)
+          : argv[index + 1];
+        if (
+          selector !== undefined &&
+          !selector
+            .split(",")
+            .every((field) => Object.hasOwn(infoOutput.shape, field))
+        ) {
+          return "--filter-output must select an info metadata field.";
+        }
+      }
+    }
+    for (
+      let index = commandIndex + (nestedCommand ? 2 : 1);
+      index < argv.length;
+      index += 1
+    ) {
+      const value = argv[index]!;
+      if (!value.startsWith("-")) {
+        positionals.push(value);
+        continue;
+      }
+      const equals = value.indexOf("=");
+      const option = equals < 0 ? value : value.slice(0, equals);
+      const canonicalOption = option.replace(
+        /[A-Z]/g,
+        (letter) => `-${letter.toLowerCase()}`,
+      );
+      if (
+        equals >= 0 ||
+        (!valueOptions.has(canonicalOption) &&
+          !(scanImport && option === "--json"))
+      )
+        continue;
+      const next = argv[index + 1];
+      if (next === undefined || next.startsWith("--") || next === "-h") {
+        return `Missing value for flag: ${option}`;
+      }
+      index += 1;
+    }
+    if (
+      subcommand === "match" &&
+      !argv.some((value) =>
+        ["--schema", "--llms", "--llms-full"].includes(value),
+      )
+    ) {
+      if (argv.includes("--all") && positionals.length > 0) {
+        return "scans match --all does not accept scan identifiers.";
+      }
+      if (!argv.includes("--all") && positionals.length !== 2) {
+        return "scans match requires two scan identifiers or --all.";
+      }
+    }
+    if (
+      command !== "validate" &&
+      command !== "verify-fix" &&
+      command !== "patch" &&
+      positionals.length >
+        (scanImport ||
+        command === "logout" ||
+        command === "info" ||
+        command === "serve"
+          ? 0
+          : subcommand === "compare" || subcommand === "match"
+            ? 2
+            : 1)
+    ) {
+      return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
+    }
+  }
+  argv = normalizeScanImportArguments(defaultListCommand(argv));
+  const policyFullOutput =
+    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
+  const argumentError = validateCliArguments(argv, positionals);
+  if (argumentError !== undefined && !policyFullOutput) {
+    errorOutput.write(`codex-security: ${argumentError}\n`);
+    return 2;
+  }
+  const updateController = new AbortController();
+  const pendingUpdate =
+    errorOutput.isTTY === true &&
+    argv.length > 0 &&
+    argv[0] !== "completions" &&
+    !argv.some((argument) =>
+      [
+        "--help",
+        "-h",
+        "--version",
+        "--llms",
+        "--llms-full",
+        "--schema",
+        "--dry-run",
+      ].includes(argument),
+    ) &&
+    updateNoticeEnabled(dependencies.environment)
+      ? dependencies
+          .checkForUpdate(updateController.signal)
+          .catch(() => undefined)
+      : undefined;
 
   // Incur cannot mount a command with both a handler and subcommands.
   // Select the nested import route while preserving scan [repository].
@@ -5925,7 +6124,7 @@ export async function main(
       });
     renderedScanFailure = failureOutput.text();
   }
-  const frameworkOutput = frameworkCapture.text();
+  let frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
     if (policyFullOutput || patchStructuredError || scanStructuredError) {
@@ -5953,6 +6152,24 @@ export async function main(
             streamedLogs,
             frameworkOutput ? JSON.parse(frameworkOutput).cta : undefined,
           );
+    if (incompleteScanOutput !== undefined) {
+      const envelope: JsonValue = JSON.parse(frameworkOutput);
+      // Token-count output is a number, not a full-output envelope.
+      if (isJsonObject(envelope) && envelope["ok"] === true) {
+        frameworkOutput = `${JSON.stringify(
+          {
+            ...envelope,
+            ok: false,
+            error: {
+              code: "SCAN_FAILED",
+              message: incompleteScanOutput.message,
+            },
+          },
+          null,
+          incompleteScanOutput.format === "json" ? 2 : undefined,
+        )}\n`;
+      }
+    }
     await writeCliOutput(
       output,
       logOutput ??
@@ -6004,63 +6221,6 @@ async function runScanImport(
   } finally {
     removeSignals();
   }
-}
-
-function isScanImportCommand(argv: readonly string[]): boolean {
-  const commandIndex = cliCommandIndex(argv);
-  return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
-}
-
-function normalizeScanImportArguments(
-  argv: readonly string[],
-): readonly string[] {
-  if (!isScanImportCommand(argv)) return argv;
-  const normalized: string[] = [];
-  const subcommandIndex = cliCommandIndex(argv) + 1;
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]!;
-    const next = argv[index + 1];
-    // Incur reserves bare --json for output, but parses --json=FILE normally.
-    if (
-      index > subcommandIndex &&
-      argument === "--json" &&
-      next !== undefined &&
-      !next.startsWith("--") &&
-      next !== "-h"
-    ) {
-      normalized.push(`--json=${next}`);
-      index += 1;
-    } else {
-      normalized.push(argument);
-    }
-  }
-  return normalized;
-}
-
-function cliCommandIndex(argv: readonly string[]): number {
-  return argv.findIndex((value, index) => {
-    if (value.startsWith("-")) return false;
-    return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
-  });
-}
-
-function defaultListCommand(argv: readonly string[]): readonly string[] {
-  const commandIndex = cliCommandIndex(argv);
-  if (
-    commandIndex < 0 ||
-    !["scans", "findings"].includes(argv[commandIndex]!) ||
-    argv.includes("--help") ||
-    argv.includes("-h")
-  ) {
-    return argv;
-  }
-  const following = argv[commandIndex + 1];
-  if (following !== undefined && !following.startsWith("-")) return argv;
-  return [
-    ...argv.slice(0, commandIndex + 1),
-    "list",
-    ...argv.slice(commandIndex + 1),
-  ];
 }
 
 async function prepareScanArgumentsFromRecipe(
@@ -6277,209 +6437,33 @@ async function prepareScanArgumentsFromRecipe(
   };
 }
 
-function validateCliArguments(
-  argv: readonly string[],
-  positionals: string[],
-): string | undefined {
-  if (argv.includes("--help") || argv.includes("-h")) return undefined;
-  const commandIndex = cliCommandIndex(argv);
-  const command = argv[commandIndex];
-  if (
-    command === undefined ||
-    ![
-      "scan",
-      "policy",
-      "install-hook",
-      "bulk-scan",
-      "scan-components",
-      "scans",
-      "findings",
-      "export",
-      "publish",
-      "import",
-      "validate",
-      "verify-fix",
-      "suggest-owners",
-      "classify-severity",
-      "dedupe",
-      "patch",
-      "login",
-      "logout",
-      "serve",
-      "feedback",
-      "info",
-      "init",
-    ].includes(command)
-  ) {
-    return undefined;
-  }
-  const structuredOutput = argv.some(
-    (value, index) =>
-      value === "--json" ||
-      ((value === "--format" ||
-        value === "--format=json" ||
-        value === "--format=jsonl") &&
-        (value.endsWith("=json") ||
-          value.endsWith("=jsonl") ||
-          argv[index + 1] === "json" ||
-          argv[index + 1] === "jsonl")),
-  );
-  if (
-    structuredOutput &&
-    ["validate", "login", "logout", "serve"].includes(command) &&
-    !argv.includes("--schema")
-  ) {
-    return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
-  }
-  if (
-    command === "export" &&
-    structuredOutput &&
-    argv.some(
-      (value, index) =>
-        value === "--output=-" ||
-        (value === "--output" && argv[index + 1] === "-"),
-    ) &&
-    argv.some(
-      (value, index) =>
-        value === "--export-format=csv" ||
-        (value === "--export-format" && argv[index + 1] === "csv"),
-    )
-  ) {
-    return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-  }
-  if (
-    command === "export" &&
-    structuredOutput &&
-    argv.some(
-      (value, index) =>
-        value === "--output=-" ||
-        (value === "--output" && argv[index + 1] === "-"),
-    ) &&
-    argv.some(
-      (value, index) =>
-        value === "--artifact=threat-model" ||
-        (value === "--artifact" && argv[index + 1] === "threat-model") ||
-        value === "--export-format=md" ||
-        (value === "--export-format" && argv[index + 1] === "md"),
-    )
-  ) {
-    return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
-  }
-  if (command === "scan" && !argv.includes("--schema")) {
-    if (
-      argv.some(
-        (value) =>
-          value === "--filter-output" || value.startsWith("--filter-output="),
-      )
-    ) {
-      return "--filter-output is not supported for scan results.";
-    }
-    if (
-      argv.some(
-        (value, index) =>
-          value === "--format=md" ||
-          (value === "--format" && argv[index + 1] === "md"),
-      )
-    ) {
-      return "Markdown output is not supported for scan results.";
-    }
-  }
-  const scanImport = isScanImportCommand(argv);
-  const nestedCommand =
-    scanImport ||
-    command === "scans" ||
-    command === "findings" ||
-    command === "publish" ||
-    command === "import";
-  const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
-  if (command === "info") {
-    const metadataFields = new Set([
-      "sdkVersion",
-      "bundledPluginVersion",
-      "scanMcp",
-      "cancellationNote",
-      "cliVersion",
-      "codexVersion",
-      "codexSdkVersion",
-      "model",
-      "reasoningEffort",
-      "nextStep",
-      "configuration",
-    ]);
-    for (let index = 0; index < argv.length; index += 1) {
-      const argument = argv[index]!;
-      if (
-        argument !== "--filter-output" &&
-        !argument.startsWith("--filter-output=")
-      ) {
-        continue;
-      }
-      const selector = argument.includes("=")
-        ? argument.slice(argument.indexOf("=") + 1)
-        : argv[index + 1];
-      if (
-        selector !== undefined &&
-        !selector.split(",").every((field) => metadataFields.has(field))
-      ) {
-        return "--filter-output must select an info metadata field.";
+function cliValueOptions(
+  commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
+): Set<string> {
+  const options = new Set([
+    "--format",
+    "--filter-output",
+    "--token-limit",
+    "--token-offset",
+  ]);
+  for (const command of commands.values()) {
+    if ("_group" in command) {
+      for (const option of cliValueOptions(command.commands))
+        options.add(option);
+    } else if ("options" in command && command.options) {
+      for (const [name, schema] of Object.entries(
+        z.toJSONSchema(command.options, { io: "input" }).properties ?? {},
+      )) {
+        if (typeof schema === "object" && schema.type === "boolean") continue;
+        options.add(
+          `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`,
+        );
+        const alias = command.alias?.[name];
+        if (alias !== undefined) options.add(`-${alias}`);
       }
     }
   }
-  for (
-    let index = commandIndex + (nestedCommand ? 2 : 1);
-    index < argv.length;
-    index += 1
-  ) {
-    const value = argv[index]!;
-    if (!value.startsWith("-")) {
-      positionals.push(value);
-      continue;
-    }
-    const equals = value.indexOf("=");
-    const option = equals < 0 ? value : value.slice(0, equals);
-    const canonicalOption = option.replace(
-      /[A-Z]/g,
-      (letter) => `-${letter.toLowerCase()}`,
-    );
-    if (
-      equals >= 0 ||
-      (!VALUE_OPTIONS.has(canonicalOption) &&
-        !(scanImport && option === "--json"))
-    )
-      continue;
-    const next = argv[index + 1];
-    if (next === undefined || next.startsWith("--") || next === "-h") {
-      return `Missing value for flag: ${option}`;
-    }
-    index += 1;
-  }
-  if (
-    subcommand === "match" &&
-    !argv.some((value) => ["--schema", "--llms", "--llms-full"].includes(value))
-  ) {
-    if (argv.includes("--all") && positionals.length > 0) {
-      return "scans match --all does not accept scan identifiers.";
-    }
-    if (!argv.includes("--all") && positionals.length !== 2) {
-      return "scans match requires two scan identifiers or --all.";
-    }
-  }
-  if (
-    command !== "validate" &&
-    command !== "verify-fix" &&
-    command !== "patch" &&
-    positionals.length >
-      (scanImport ||
-      command === "logout" ||
-      command === "info" ||
-      command === "serve"
-        ? 0
-        : subcommand === "compare" || subcommand === "match"
-          ? 2
-          : 1)
-  ) {
-    return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
-  }
+  return options;
 }
 
 async function matchAllScans(
@@ -7543,6 +7527,10 @@ async function runSkill(
     contents.push(contentsOrLiteral);
   }
   const plugin = await bundledPluginRoot();
+  const pluginVersion = await pluginMetadata(plugin).then(
+    (metadata) => metadata.version,
+    () => undefined,
+  );
   const verify = skill === "verify-fix";
   const assess = skill === "assess-patch-risk";
   const inputLabel = skill === "validation" || verify ? "Findings" : "Issues";
@@ -7644,8 +7632,22 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
-      "--config",
-      'responses_api_metadata.codex_security_surface="cli"',
+      ...Object.entries(
+        codexSecurityRequestMetadata(
+          "cli",
+          assess
+            ? "assess-patch-risk"
+            : verify
+              ? "verify-fix"
+              : patch
+                ? "patch"
+                : "validate",
+          pluginVersion,
+        ),
+      ).flatMap(([key, value]) => [
+        "--config",
+        `responses_api_metadata.${key}=${JSON.stringify(value)}`,
+      ]),
       ...(options.safetyIdentifier === undefined
         ? []
         : [
@@ -8029,34 +8031,6 @@ function incurErrorMessage(output: string): string {
   if (message === undefined) return output.trim();
   const parsed = parseJson(() => message);
   return typeof parsed === "string" ? parsed : message;
-}
-
-async function runExport(
-  arguments_: ExportArguments,
-  output: Writable,
-  errorOutput: Writable,
-  dependencies: CliDependencies,
-): Promise<number> {
-  try {
-    const prepared = await resolveArtifactExportOutput(
-      arguments_,
-      dependencies.currentDirectory(),
-    );
-    const contents = await dependencies.exportFindings(prepared, output);
-    if (arguments_.output === "-") {
-      if (contents !== undefined) {
-        await writeCliOutput(output, Buffer.from(contents));
-      }
-    } else {
-      errorOutput.write(
-        `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
-      );
-    }
-    return 0;
-  } catch (error) {
-    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-    return 2;
-  }
 }
 
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
@@ -8871,7 +8845,15 @@ async function executeScan(
     showCost,
     deepScanStop,
   );
-  const completedScan = (exitCode: number): ScanOutcome => {
+  const coverageError = incomplete
+    ? threshold === undefined
+      ? `Scan coverage is ${result.coverage.completeness}; results may be incomplete.`
+      : `Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.`
+    : undefined;
+  const completedScan = (
+    exitCode: number,
+    error = coverageError,
+  ): ScanOutcome => {
     diagnostic("scan.completed", {
       coverage: result.coverage.completeness,
       findings: findings.length,
@@ -8884,20 +8866,20 @@ async function executeScan(
       exit_code: exitCode,
     });
     progress?.stopTimer();
-    return { exitCode, data: scanData };
+    return {
+      exitCode,
+      data: scanData,
+      ...(error === undefined ? {} : { coverageError: error }),
+    };
   };
   if (targetWarnings.length > 0) {
-    errorOutput.write(
-      "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
-    );
-    return completedScan(2);
+    const message =
+      "Scan target changed during execution; results do not represent the current checkout.";
+    errorOutput.write(`codex-security: ${message}\n`);
+    return completedScan(2, incomplete ? message : undefined);
   }
-  if (incomplete) {
-    errorOutput.write(
-      threshold === undefined
-        ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
-        : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
-    );
+  if (coverageError !== undefined) {
+    errorOutput.write(`codex-security: ${coverageError}\n`);
     return completedScan(2);
   }
 
