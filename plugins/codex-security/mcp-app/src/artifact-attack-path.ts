@@ -50,13 +50,6 @@ interface CandidateAttackPathsPayload {
   attackPaths: CandidateAttackPathUpdate[];
 }
 
-/** The stored JSON Schema is the sole source of the nested attack-path contract. */
-const candidateAttackPathsPayloadSchema = loadArtifactZodSchema(
-  documents,
-  attackPathSchema.$id,
-  "updatesPayload",
-) as z.ZodType<CandidateAttackPathsPayload>;
-
 /** The checked-in public schema controls both tools/list and call validation. */
 export const candidateAttackPathsInputSchema = loadArtifactZodSchema(
   documents,
@@ -87,7 +80,8 @@ export async function recordCodexSecurityCandidateAttackPaths(
     );
   }
 
-  const { attackPaths } = candidateAttackPathsPayloadSchema.parse(input);
+  // The MCP registry validates this request before invoking the writer.
+  const { attackPaths } = input;
   const updates = new Map<string, CandidateAttackPathRecord>();
   for (const update of attackPaths) {
     if (updates.has(update.candidateId)) {

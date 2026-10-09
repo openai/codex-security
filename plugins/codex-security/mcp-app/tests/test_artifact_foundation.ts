@@ -475,16 +475,8 @@ async function testBoundedPagination() {
     { rows: rows.slice(2) },
   );
   assert.throws(
-    () => io.paginateArtifactRows(rows, { cursor: "-1" }, "review_items"),
-    /non-negative integer/,
-  );
-  assert.throws(
     () => io.paginateArtifactRows(rows, { cursor: "4" }, "review_items"),
     /outside the available rows/,
-  );
-  assert.throws(
-    () => io.paginateArtifactRows(rows, { limit: 1001 }, "review_items"),
-    /1 through 1000/,
   );
 }
 

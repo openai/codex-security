@@ -1,3 +1,4 @@
+import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
@@ -6,8 +7,6 @@ import {
   chmodSync,
   constants,
   createWriteStream,
-  existsSync,
-  readdirSync,
   type BigIntStats,
   type Stats,
 } from "node:fs";
@@ -2695,37 +2694,7 @@ export function resolveCodexCommand(
     };
   }
 
-  const platform = process.platform === "android" ? "linux" : process.platform;
-  const packageName = `@openai/codex-${platform}-${process.arch}`;
-  let packageJson: string;
-  try {
-    const require = createRequire(import.meta.url);
-    const codexPackageJson = require.resolve("@openai/codex/package.json");
-    packageJson = createRequire(codexPackageJson).resolve(
-      `${packageName}/package.json`,
-    );
-  } catch (error) {
-    throw new PluginBootstrapError(
-      `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
-      { cause: error },
-    );
-  }
-  const vendor = join(dirname(packageJson), "vendor");
-  const target = readdirSync(vendor, { withFileTypes: true }).find((entry) =>
-    entry.isDirectory(),
-  );
-  const command = join(
-    vendor,
-    target?.name ?? "",
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  );
-  if (target === undefined || !existsSync(command)) {
-    throw new PluginBootstrapError(
-      `The ${packageName} package does not contain the Codex executable. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
-    );
-  }
-  return { command };
+  return { command: resolveBundledCodexExecutable() };
 }
 
 export function executablePathForSpawn(command: string): string {

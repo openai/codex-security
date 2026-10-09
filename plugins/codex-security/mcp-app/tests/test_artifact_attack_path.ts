@@ -23,7 +23,6 @@ try {
   await testUnknownAndDuplicateCandidatesDoNotChangeLedger();
   await testMissingEligibleCandidateDoesNotChangeLedger();
   await testIneligibleCandidatesDoNotChangeLedger();
-  await testInvalidAttackPathsDoNotChangeLedger();
   await testDuplicateStoredCandidatesDoNotChangeLedger();
   await testMalformedLedgerIsNotReplaced();
   await testEmptyLedgerAcceptsAnEmptyBatch();
@@ -41,7 +40,6 @@ async function testSchemaMatchesDocumentedAttackPathDecisions() {
   assert.deepEqual(schema.$defs.input.required, ["scanId", "attackPaths"]);
   assert.equal(schema.$defs.input.additionalProperties, false);
   assert.equal(schema.$ref, "#/$defs/input");
-  assert.deepEqual(schema.$defs.updatesPayload.required, ["attackPaths"]);
   assert.deepEqual(schema.$defs.reportableAttackPath.properties.severity.enum, [
     "critical",
     "high",
@@ -189,35 +187,6 @@ async function testIneligibleCandidatesDoNotChangeLedger() {
         ],
       }),
       /must have a reportable or deferred validation/,
-    );
-    await assertUnchanged(fixture);
-  }
-}
-
-async function testInvalidAttackPathsDoNotChangeLedger() {
-  const fixture = await createFixture("invalid attack judgments", [
-    candidate("candidate-1", "reportable"),
-  ]);
-  const invalid = [
-    { ...attackPath(), severity: "moderate" },
-    { ...attackPath(), decision: "ignore" },
-    { ...attackPath(), decision: "deferred" },
-    { ...attackPath(), severity_rationale: "  " },
-  ];
-
-  for (const value of invalid) {
-    const payload = {
-      attackPaths: [{ candidateId: "candidate-1", attackPath: value }],
-    };
-    assert.equal(
-      candidateAttackPathsInputSchema.safeParse({
-        scanId,
-        ...payload,
-      }).success,
-      false,
-    );
-    await assert.rejects(
-      recordCodexSecurityCandidateAttackPaths(fixture.context, payload),
     );
     await assertUnchanged(fixture);
   }

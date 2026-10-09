@@ -81,13 +81,13 @@ const sourceType = "cve";
 assertPasses(
   "vulnerable scanbench cases map to confirmed/positive",
   outputFor({
-    inputId: "GHSA-example-000-vulnerable",
+    inputId: "input-001",
     verdict: "confirmed",
   }).replace('"evidence": []', '"evidence": ["Inline ``` fence in source."]'),
   {
     vars: {
-      case_id: "ghsa-example-vulnerable",
-      expected_ids: "GHSA-example-000-vulnerable",
+      case_id: "case-001",
+      expected_ids: "input-001",
       expected_source_types: sourceType,
       expected_verdicts: "confirmed",
       expected_binary_label: "positive",
@@ -98,13 +98,13 @@ assertPasses(
 assertPasses(
   "fixed scanbench cases map to not_actionable/negative",
   outputFor({
-    inputId: "GHSA-example-000-fixed",
+    inputId: "input-002",
     verdict: "not_actionable",
   }),
   {
     vars: {
-      case_id: "ghsa-example-fixed",
-      expected_ids: "GHSA-example-000-fixed",
+      case_id: "case-002",
+      expected_ids: "input-002",
       expected_source_types: sourceType,
       expected_verdicts: "not_actionable",
       expected_binary_label: "negative",
@@ -115,16 +115,16 @@ assertPasses(
 assertFails(
   "fixed scanbench cases cannot be labeled confirmed",
   outputFor({
-    inputId: "GHSA-example-000-fixed",
+    inputId: "input-002",
     verdict: "confirmed",
   }),
   {
     vars: {
-      case_id: "ghsa-example-fixed",
-      expected_ids: "GHSA-example-000-fixed",
+      case_id: "case-002",
+      expected_ids: "input-002",
       expected_source_types: sourceType,
       expected_verdicts: "confirmed",
-      expected_binary_label: "positive",
+      expected_binary_label: "negative",
     },
   },
   /fixed.*not_actionable|negative/,

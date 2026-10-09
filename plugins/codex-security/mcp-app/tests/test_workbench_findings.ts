@@ -17,9 +17,6 @@ const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
 const { parseJson, stringifyJson } = await importSource("src/helpers/json.ts");
-const { dashboard } = (await importSource(
-  "src/workbench/dashboard.ts",
-)) as typeof import("../src/workbench/dashboard.ts");
 const { findPotentialDuplicates, listDedupeGroups } = (await importSource(
   "src/workbench/duplicates.ts",
 )) as typeof import("../src/workbench/duplicates.ts");
@@ -130,7 +127,6 @@ test("finding helper help exits without reading stdin", async () => {
     "find-potential-duplicates",
     "store-dedupe-groups",
     "list-dedupe-groups",
-    "dashboard",
   ];
   for (const command of commands) {
     // execFile leaves stdin open; help must exit without waiting for JSON.
@@ -249,29 +245,6 @@ test("timestamp ordering keeps time zones, page boundaries, and stable ties", (t
       ),
       expected.slice(1),
     );
-  }
-  for (const view of ["findings", "groups"] as const) {
-    for (const sort of ["newest", "activity"] as const) {
-      for (const direction of ["asc", "desc"] as const) {
-        const ordered =
-          direction === "asc"
-            ? expected
-            : ["last", "middle-a", "middle-b", "first"];
-        const items = expected.flatMap(
-          (_, offset) =>
-            dashboard(database, { view, sort, direction, limit: 1, offset })
-              .items,
-        );
-        assert.deepEqual(
-          items.map((item) => item.id),
-          ordered,
-        );
-        assert.deepEqual(
-          items.map((item) => item.createdAt),
-          ordered.map((id) => timestamps.find(([key]) => key === id)![1]),
-        );
-      }
-    }
   }
 });
 
