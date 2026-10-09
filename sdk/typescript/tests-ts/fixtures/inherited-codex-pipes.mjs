@@ -32,6 +32,7 @@ if (role === "holder") {
     if (mode === "active") process.send("ignored-term");
     else process.exit(0);
   });
+  process.send({ holderPid: holder.pid });
   process.send("ready");
   if (mode === "abandoned" || mode === "late") process.exit(0);
   setInterval(() => {}, 1000);

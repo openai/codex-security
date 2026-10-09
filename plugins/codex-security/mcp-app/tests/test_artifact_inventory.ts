@@ -1,7 +1,14 @@
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
-import { mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importSource } from "./import-module.ts";
@@ -27,7 +34,7 @@ try {
   await testEmptyInventoryIsValid();
   await testUnsafeInventoryRowsAreRejected();
   await testSymlinkedInventoryIsRejected();
-  await testMissingInventoryIsReported();
+  await testInventoryReadErrorsAreReported();
   await testWorkersCannotPrepareInventory();
   await testBoundScopeFailurePreservesPreviousInventory();
   await testPythonLaunchErrors();
@@ -408,13 +415,38 @@ async function testSymlinkedInventoryIsRejected() {
   );
 }
 
-async function testMissingInventoryIsReported() {
+async function testInventoryReadErrorsAreReported() {
   const fixture = await createFixture("missing inventory");
 
   await assert.rejects(
     inventory.listCodexSecurityReviewItems(fixture.scan),
     /review_items.*(?:unavailable|missing|read)/i,
   );
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    await writeInventory(fixture.scanInventory, "./src/a.ts\n");
+    try {
+      await chmod(fixture.scanInventory, 0o000);
+      await assert.rejects(
+        inventory.listCodexSecurityReviewItems(fixture.scan),
+        (error: Error & { cause?: NodeJS.ErrnoException }) => {
+          assert.equal(error.cause?.code, "EACCES");
+          assert.equal(
+            error.message,
+            `review_items: the requested artifact cannot be read: ${error.cause.message}`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      await chmod(fixture.scanInventory, 0o600);
+    }
+    assert.deepEqual(
+      await inventory.listCodexSecurityReviewItems(fixture.scan),
+      {
+        items: [{ path: "./src/a.ts" }],
+      },
+    );
+  }
 }
 
 async function testWorkersCannotPrepareInventory() {

@@ -753,7 +753,7 @@ connection.close()
     ).rejects.toThrow(/not a regular file/u);
   });
 
-  test.skipIf(process.platform === "win32")(
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "preserves actual filesystem permission errors before opening publication history",
     async () => {
       const fixture = await publicationFixture({ createDatabase: false });

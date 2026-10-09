@@ -156,22 +156,28 @@ export class ScanDashboard {
   #inputKeys: {
     keys: string[];
     continued: boolean;
-    replay: boolean;
+    replay: boolean | string;
+    text: string;
   } | null = null;
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const batch = {
       keys: [] as string[],
       continued: false,
-      replay: false,
+      replay: false as boolean | string,
+      text: "",
     };
-    this.#inputKeys = batch;
-    try {
-      this.#keyInput?.write(chunk);
-    } finally {
-      this.#inputKeys = null;
-    }
-    if (batch.replay) this.#onInput(chunk);
-    else this.#handleKeys(batch.keys);
+    let current = chunk;
+    do {
+      batch.replay = false;
+      this.#inputKeys = batch;
+      try {
+        this.#keyInput?.write(current);
+      } finally {
+        this.#inputKeys = null;
+      }
+      if (typeof batch.replay === "string") current = batch.replay;
+    } while (batch.replay);
+    this.#handleKeys(batch.keys);
   };
 
   #setKeyInput(input: PassThrough | null): void {
@@ -191,7 +197,10 @@ export class ScanDashboard {
     let pending = 0;
     input.setEncoding("utf8");
     input.on("data", (text: string) => {
-      if (this.#inputKeys !== null) this.#inputKeys.continued = pending > 0;
+      if (this.#inputKeys !== null) {
+        this.#inputKeys.continued = pending > 0;
+        this.#inputKeys.text = text;
+      }
       pending += text.length;
     });
     emitKeypressEvents(input);
@@ -202,16 +211,35 @@ export class ScanDashboard {
         key: { sequence: string; meta?: boolean; code?: string },
       ) => {
         pending -= key.sequence.length;
+        const escapes =
+          key.code === undefined
+            ? undefined
+            : key.sequence.match(/^\u001B+(?=\u001B)/u)?.[0];
         const keys =
-          (key.meta && key.code === undefined) ||
-          key.sequence.includes("\u0003")
-            ? Array.from(key.sequence)
-            : [key.sequence];
+          escapes !== undefined
+            ? [...escapes, key.sequence.slice(escapes.length)]
+            : (key.meta && key.code === undefined) ||
+                key.sequence.includes("\u0003")
+              ? Array.from(key.sequence)
+              : [key.sequence];
         const batch = this.#inputKeys;
         const continued = batch?.continued === true;
         if (batch !== null) batch.continued = false;
         if (batch === null) this.#handleKeys(keys);
         else if (
+          this.#budget === null &&
+          keys.length > 1 &&
+          keys.every((key) => key === "\u001B")
+        ) {
+          // Readline can consume a following key's Escape as a repeated Escape.
+          // Keep that introducer with the remaining decoded text for replay.
+          const remaining =
+            key.sequence + (pending ? batch.text.slice(-pending) : "");
+          const prefix = remaining.match(/^\u001B+/u)![0];
+          for (const escape of prefix.slice(0, -1)) batch.keys.push(escape);
+          this.#setKeyInput(new PassThrough());
+          batch.replay = remaining.slice(prefix.length - 1);
+        } else if (
           this.#budget !== null &&
           batch.keys.length === 0 &&
           keys.length > 1 &&
