@@ -15,7 +15,7 @@ const {
   getCodexSecurityDeepReducerInputs,
   recordCodexSecurityDeepReduction,
 } = await importSource(
-  new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-deep-reducer.ts"),
 );
 
 const validReduction = reduction([]);

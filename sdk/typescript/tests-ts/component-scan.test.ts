@@ -1411,6 +1411,7 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
       {
         ...dependencies({ currentDirectory: paths.root, environment }),
         planComponents: async (_repository, options) => {
+          expect(options?.surface).toBe("cli");
           expect(options?.auth).toBe(auth);
           expect(options?.cyberAccessProgram).toBe("daybreak_blue");
           expect(options?.environment).toEqual(expectedEnvironment);
