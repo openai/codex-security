@@ -1,5 +1,5 @@
 import { createCliTest } from "./support/cli-run.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
@@ -39,12 +39,7 @@ test.each(["standard", "deep"])(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-launch-key",
     };
-    const command = (args: readonly string[], input?: string) =>
-      runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
-        args,
-        input,
-      );
+    const command = workbenchCommand(python, () => environment);
     const { stderr, runCli } = createCliTest(main);
 
     const code = await runCli(

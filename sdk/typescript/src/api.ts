@@ -180,6 +180,7 @@ import {
   type ScanWorkerStatus,
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
@@ -371,12 +372,10 @@ const VALIDATION_DISPOSITIONS = [
   "deferred",
 ] as const;
 
-const validationResponseSchema = z
-  .object({
-    disposition: z.enum(VALIDATION_DISPOSITIONS),
-    report: z.string().trim().min(1),
-  })
-  .strict();
+const validationResponseSchema = z.strictObject({
+  disposition: z.enum(VALIDATION_DISPOSITIONS),
+  report: z.string().trim().min(1),
+});
 
 export interface ValidationResult {
   disposition: (typeof VALIDATION_DISPOSITIONS)[number];
@@ -963,6 +962,7 @@ export class CodexSecurity {
       };
       const { codex } = await this.#createSessionCodex(
         session,
+        "validate",
         {
           CODEX_SECURITY_REPOSITORY: inputs.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1293,6 +1293,7 @@ export class CodexSecurity {
       ].filter((path, index, roots) => roots.indexOf(path) === index);
       const { codex } = await this.#createSessionCodex(
         session,
+        "policy",
         {
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1679,6 +1680,16 @@ export class CodexSecurity {
         );
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
+        responses_api_metadata: {
+          ...(isRecord(workerRuntimeConfig["responses_api_metadata"])
+            ? workerRuntimeConfig["responses_api_metadata"]
+            : {}),
+          ...codexSecurityRequestMetadata(
+            this.#surface,
+            "scan",
+            runtime.plugin.version,
+          ),
+        },
         ...(workerEnvironment === undefined
           ? {}
           : { environment: workerEnvironment }),
@@ -1770,10 +1781,21 @@ export class CodexSecurity {
           "onProgress",
         )({ ...progress, filesTotal: scopeFileCount });
       };
+      const reportedInaccessibleSessionLogs = new Set<string>();
       const reportTrackingError = (error: unknown): void => {
         if (options.maxCostUsd !== undefined) {
           costAbortController.abort(error);
           return;
+        }
+        if (
+          isRecord(error) &&
+          (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+          error["syscall"] === "open" &&
+          typeof error["path"] === "string"
+        ) {
+          const path = error["path"];
+          if (reportedInaccessibleSessionLogs.has(path)) return;
+          reportedInaccessibleSessionLogs.add(path);
         }
         notifyObserver(
           options,
@@ -1934,9 +1956,7 @@ export class CodexSecurity {
               JSON.stringify({
                 recipe,
                 userContext: options.scanPrompt,
-                ...(options.workflowId === undefined
-                  ? {}
-                  : { workflowId: options.workflowId }),
+                workflowId: options.workflowId,
               }),
             );
       const scanId = registration["scanId"];
@@ -2200,6 +2220,7 @@ export class CodexSecurity {
       };
       const { codex, environment } = await this.#createSessionCodex(
         session,
+        "scan",
         runtimePaths,
         options.auth,
         git,
@@ -2972,6 +2993,7 @@ export class CodexSecurity {
 
   async #createSessionCodex(
     session: PreparedSession,
+    command: string,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
@@ -3075,7 +3097,11 @@ export class CodexSecurity {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         responses_api_metadata: {
           ...configuredResponsesMetadata,
-          codex_security_surface: this.#surface,
+          ...codexSecurityRequestMetadata(
+            this.#surface,
+            command,
+            runtime.plugin.version,
+          ),
         },
       },
     });
@@ -3547,9 +3573,7 @@ export class CodexSecurity {
             mock: true,
           },
           userContext: options.scanPrompt,
-          ...(options.workflowId === undefined
-            ? {}
-            : { workflowId: options.workflowId }),
+          workflowId: options.workflowId,
         }),
       );
       const scanId = registration["scanId"];
@@ -5195,6 +5219,8 @@ function selectedWorkerRuntimeConfig(
   return {
     ...Object.fromEntries(
       [
+        "analytics",
+        "responses_api_metadata",
         "openai_base_url",
         "features",
         "model_auto_compact_token_limit",
