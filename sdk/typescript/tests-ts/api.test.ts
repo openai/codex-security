@@ -2513,7 +2513,18 @@ describe("CodexSecurity orchestration", () => {
         expect(
           await readFile(join(root, "registration-input.json"), "utf8"),
         ).toBe(submitted!);
-        const closed = once(socket, "close", { signal: deadline });
+        const closed = once(socket, "close", { signal: deadline }).catch(
+          (error: NodeJS.ErrnoException) => {
+            // Terminating the paused helper resets this fixture socket on Windows.
+            // Once archival starts, the helper must instead finish normally.
+            if (
+              error.code !== "ECONNRESET" ||
+              boundary === "commit" ||
+              boundary === "rollback"
+            )
+              throw error;
+          },
+        );
         if (cancel === "close") closing = client.close();
         else controller.abort();
         if (boundary === "commit" || boundary === "rollback") {
