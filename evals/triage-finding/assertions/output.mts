@@ -74,43 +74,18 @@ export function extractTriageResult(
     const parsed = JSON.parse(text) as TriageResult;
     if (parsed && parsed.schema_version === "triage-finding/v0") return parsed;
   } catch {
-    // The result may be surrounded by prose or Markdown fences.
+    // The result may be inside a multiline Markdown fence.
   }
-  const fencedBlocks: [number, string][] = [];
-  const openingFence = /```(?:json)?\s*/gi;
-  // Complete JSON strings may contain backticks, but never literal line breaks.
-  const tokens = /"|```/g;
-  const quoted = /"(?:\\.|[^"\\\r\n])*(")?/y;
-  // Escaped quotes within an unterminated string cannot start complete strings.
-  let unterminatedUntil = 0;
-  let opening;
-  while ((opening = openingFence.exec(text))) {
-    const start = openingFence.lastIndex;
-    tokens.lastIndex = start;
-    let token;
-    while ((token = tokens.exec(text)) && token[0] !== "```") {
-      if (token.index < unterminatedUntil) continue;
-      quoted.lastIndex = token.index;
-      const string = quoted.exec(text)!;
-      if (string[1]) tokens.lastIndex = quoted.lastIndex;
-      else unterminatedUntil = quoted.lastIndex;
+  const candidates: string[] = [];
+  let fenceStart = -1;
+  for (const match of text.matchAll(/^[\t ]*```([^\r\n]*)\r?$/gm)) {
+    if (fenceStart < 0) {
+      fenceStart = match.index + match[0].length;
+    } else if (/^[\t ]*$/.test(match[1])) {
+      candidates.push(text.slice(fenceStart, match.index));
+      fenceStart = -1;
     }
-    if (!token) break;
-    fencedBlocks.push([opening.index, text.slice(start, token.index).trim()]);
-    openingFence.lastIndex = tokens.lastIndex;
   }
-  // Preserve legacy inline framing when malformed quoted text hides a later fence.
-  for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
-    fencedBlocks.push([match.index, match[1].trim()]);
-  }
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  const candidates =
-    fencedBlocks.length > 0
-      ? fencedBlocks
-          .sort((left, right) => left[0] - right[0])
-          .map(([, body]) => body)
-      : [text.slice(start, end + 1)];
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as TriageResult;
