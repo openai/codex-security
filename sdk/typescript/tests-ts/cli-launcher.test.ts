@@ -42,12 +42,18 @@ describe("CLI launcher", () => {
       const preload = join(root, "unavailable-cwd.mjs");
       await writeFile(
         preload,
-        `Object.defineProperty(process, "cwd", { value() { throw new Error(${JSON.stringify(`working directory is unavailable: ${SYNTHETIC_CREDENTIALS}`)}); } });\n`,
+        'Object.defineProperty(process, "cwd", { value() { throw new Error(process.env.TEST_DIAGNOSTIC); } });\n',
       );
       const { status, stdout, stderr } = await runCommand(
         process.execPath,
         ["--preload", preload, join(packageRoot, "src", "cli.ts"), "scan"],
-        { timeout: 30_000 },
+        {
+          env: {
+            ...process.env,
+            TEST_DIAGNOSTIC: `working directory is unavailable: ${SYNTHETIC_CREDENTIALS}`,
+          },
+          timeout: 30_000,
+        },
       );
 
       expect(status, stderr).toBe(2);
@@ -80,11 +86,15 @@ describe("CLI launcher", () => {
             scenario === "success"
               ? "export const main = () => 7;\n"
               : scenario === "main"
-                ? `export const main = async () => { throw ${JSON.stringify(detail)}; };\n`
-                : `throw new Error(${JSON.stringify(detail)});\n`,
+                ? "export const main = async () => { throw process.env.TEST_DIAGNOSTIC; };\n"
+                : "throw new Error(process.env.TEST_DIAGNOSTIC);\n",
           );
         const child = await runCommand("node", [launcher], {
-          env: { ...process.env, NODE_NO_WARNINGS: "1" },
+          env: {
+            ...process.env,
+            NODE_NO_WARNINGS: "1",
+            TEST_DIAGNOSTIC: detail,
+          },
           timeout: 30_000,
         });
 
