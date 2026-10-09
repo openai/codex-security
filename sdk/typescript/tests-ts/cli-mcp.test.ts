@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { build } from "esbuild";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -332,7 +332,7 @@ describe("CLI MCP scans", () => {
             workers: 2,
             maxCostUsd: 5,
             onBudgetApproaching: undefined,
-            outputDir: "/synthetic/results",
+            outputDir: resolve("/synthetic/results"),
           }),
         }),
       ]);
