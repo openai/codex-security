@@ -377,7 +377,7 @@ test("stages the verified runtime lock without copying verification workspace so
 });
 
 test.each([0, 42])(
-  "gates runtime verification through Socket with an empty cache (exit %s)",
+  "gates runtime verification through Socket with an empty cache (exit %j)",
   (firewallExit) => {
     const verification = workflow.jobs["action-verify"]!;
     const install = step(
