@@ -389,7 +389,10 @@ export class ScanCostTracker {
   }
 }
 
-export async function* sessionFiles(directory: string): AsyncGenerator<string> {
+export async function* sessionFiles(
+  directory: string,
+  compressed = false,
+): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -400,8 +403,12 @@ export async function* sessionFiles(directory: string): AsyncGenerator<string> {
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      yield* sessionFiles(path);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      yield* sessionFiles(path, compressed);
+    } else if (
+      entry.isFile() &&
+      (entry.name.endsWith(".jsonl") ||
+        (compressed && entry.name.endsWith(".jsonl.zst")))
+    ) {
       yield path;
     }
   }
