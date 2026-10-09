@@ -268,6 +268,9 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
     expect(result.manifest.scan.scope.runtimeStatus).toBe("imported");
     expect(result.coverage.completeness).toBe("unknown");
+    expect(result.coverage.surfaces).toMatchObject([
+      { disposition: "reported" },
+    ]);
     expect(result.turnResult["imported"]).toBe(true);
     expect(result.threadId).toBe("");
     expect(await readFile(result.reportPath, "utf8")).toContain(
@@ -285,10 +288,10 @@ test.each(["csv", "json"] as const)(
       import: { format, sourceRef, findingCount: 2 },
     });
     expect(
-      result.manifest.scan.artifacts.some(
+      result.manifest.scan.artifacts.filter(
         (artifact) => artifact.path === sourceRef,
       ),
-    ).toBe(true);
+    ).toHaveLength(1);
     expect(await readFile(join(result.scanDir, sourceRef), "utf8")).toBe(
       context.source,
     );
@@ -315,6 +318,70 @@ test.each(["csv", "json"] as const)(
     expect(imported.format).toBe(format);
     expect(imported.sourcePath).not.toBe(context.options.sourcePath);
     expect(await readFile(imported.sourcePath, "utf8")).toBe(context.source);
+  },
+);
+
+test.each(["csv", "json"] as const)(
+  "empty %s imports preserve source integrity without claiming an analyzed surface",
+  async (format) => {
+    const context = await fixture(format);
+    const source =
+      format === "csv"
+        ? `${csvColumns.join(",")}\n`
+        : JSON.stringify({ findings: [] });
+    await writeFile(context.options.sourcePath, source);
+    const result = completed(
+      await importScan(context.options, context.dependencies),
+    );
+    expect(result.manifest.scan.status).toBe("completed");
+    expect(result.findings.findings).toEqual([]);
+    expect(result.coverage).toMatchObject({
+      completeness: "unknown",
+      surfaces: [],
+    });
+    const sourceRef = `artifacts/import/source.${format}`;
+    expect(result.manifest.scan["extensions"]).toMatchObject({
+      import: { format, sourceRef, findingCount: 0 },
+    });
+    expect(
+      result.manifest.scan.artifacts.filter(
+        (artifact) => artifact.path === sourceRef,
+      ),
+    ).toHaveLength(1);
+    const retainedSource = join(result.scanDir, sourceRef);
+    expect(await readFile(retainedSource, "utf8")).toBe(source);
+    expect((await storedScans(context))[0]).toMatchObject({
+      status: "complete",
+      occurrence_count: 0,
+    });
+    const manifestPath = join(result.scanDir, "scan-manifest.json");
+    const manifestText = await readFile(manifestPath, "utf8");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        ...result.manifest,
+        scan: {
+          ...result.manifest.scan,
+          artifacts: result.manifest.scan.artifacts.filter(
+            (artifact) => artifact.path !== sourceRef,
+          ),
+        },
+      }),
+    );
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("Import source is missing from sealed artifacts");
+    await writeFile(manifestPath, manifestText);
+    await writeFile(retainedSource, `${source}\n`);
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("sealed artifact changed");
+    await writeFile(retainedSource, source);
+    await loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT });
+    await rm(retainedSource);
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("expected a file inside the scan directory");
   },
 );
 

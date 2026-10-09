@@ -2557,9 +2557,23 @@ def _artifact_record(
     }
 
 
-def _coverage_receipt_refs(coverage: dict[str, Any]) -> list[str]:
-    refs = {ref for surface in coverage["surfaces"] for ref in surface.get("receiptRefs", [])}
-    return sorted(refs)
+def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any]) -> dict[str, str]:
+    refs = {
+        ref: "coverage receipt"
+        for surface in coverage["surfaces"]
+        for ref in surface.get("receiptRefs", [])
+    }
+    extensions = scan.get("extensions")
+    imported = extensions.get("import") if isinstance(extensions, dict) else None
+    if isinstance(imported, dict) and "sourceRef" in imported:
+        context = "manifest.scan.extensions.import"
+        ref = _require_portable_relative_path(
+            _require_str(imported, "sourceRef", context), f"{context}.sourceRef"
+        )
+        if not ref.startswith("artifacts/"):
+            raise ContractError(f"{context}.sourceRef: expected a file under artifacts/")
+        refs.setdefault(ref, "import source")
+    return {ref: refs[ref] for ref in sorted(refs)}
 
 
 def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str, Any]) -> None:
@@ -2567,9 +2581,9 @@ def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str,
         _require_portable_relative_path(artifact["path"], "sealed artifact path")
         for artifact in scan["artifacts"]
     }
-    for ref in _coverage_receipt_refs(coverage):
+    for ref, context in _supplementary_artifact_refs(scan, coverage).items():
         if ref not in artifact_paths:
-            raise ContractError(f"coverage receipt is missing from sealed artifacts: {ref}")
+            raise ContractError(f"{context} is missing from sealed artifacts: {ref}")
 
 
 def _validate_existing_seal(
@@ -2993,7 +3007,7 @@ def _prepare_scan_finalization(
             _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
             *[
                 _artifact_record(scan_dir, ref, "application/octet-stream")
-                for ref in _coverage_receipt_refs(coverage)
+                for ref in _supplementary_artifact_refs(scan, coverage)
             ],
         ]
         _validate_manifest(manifest)
