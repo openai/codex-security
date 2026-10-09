@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
 import { parseJson } from "../helpers/json";
 import { transaction } from "./transaction";
@@ -29,13 +30,23 @@ export function findPotentialDuplicates(
   database: DatabaseSync,
   findingId: string,
   repositoryId?: string,
+  expectedCacheKeys?: Record<string, string>,
 ) {
   return transaction(database, "BEGIN", () => {
     requireSqliteText([findingId, repositoryId]);
+    if (
+      expectedCacheKeys !== undefined &&
+      !embeddingsMatch(database, expectedCacheKeys)
+    )
+      return { error: "finding_changed" as const };
+    const table =
+      expectedCacheKeys === undefined
+        ? "finding_embeddings"
+        : "local_finding_embeddings";
     const source =
       repositoryId === undefined
-        ? "finding_embeddings AS embeddings"
-        : "finding_repositories AS repositories JOIN finding_embeddings AS embeddings ON embeddings.finding_id = repositories.finding_id";
+        ? `${table} AS embeddings`
+        : `finding_repositories AS repositories JOIN ${table} AS embeddings ON embeddings.finding_id = repositories.finding_id`;
     const predicate =
       repositoryId === undefined ? "" : "repositories.repository_id = ? AND ";
     const scope = repositoryId === undefined ? [] : [repositoryId];
@@ -50,7 +61,7 @@ export function findPotentialDuplicates(
     const rows = database.prepare(
       `SELECT json_quote(embeddings.finding_id) AS finding_id_json, embeddings.vector_json FROM ${source}
        JOIN findings ON findings.id = embeddings.finding_id
-       WHERE ${predicate}embeddings.model = (SELECT model FROM finding_embeddings WHERE finding_id = ?)
+       WHERE ${predicate}embeddings.model = (SELECT model FROM ${table} WHERE finding_id = ?)
        AND embeddings.finding_id != ?
        ORDER BY findings.created_at, findings.id`,
     );
@@ -58,6 +69,12 @@ export function findPotentialDuplicates(
     try {
       const vector = normalizedVector(JSON.parse(anchor.vector_json as string));
       for (const row of rows.iterate(...scope, findingId, findingId)) {
+        const id: string = JSON.parse(row.finding_id_json as string);
+        if (
+          expectedCacheKeys !== undefined &&
+          !Object.hasOwn(expectedCacheKeys, id)
+        )
+          continue;
         const candidate: number[] = JSON.parse(row.vector_json as string);
         if (candidate.length !== vector.length) continue;
         const other = normalizedVector(candidate);
@@ -67,7 +84,7 @@ export function findPotentialDuplicates(
         );
         if (similarity >= 0.55)
           ranked.push({
-            id: JSON.parse(row.finding_id_json as string),
+            id,
             similarity,
           });
       }
@@ -79,14 +96,62 @@ export function findPotentialDuplicates(
     // Stable sorting keeps insertion-time / finding-ID order for ties.
     ranked.sort((a, b) => b.similarity - a.similarity);
     const selected = [findingId, ...ranked.slice(0, 50).map(({ id }) => id)];
-    const [finding, ...potentialDuplicates] = database
+    const documents = database
       .prepare(
         `SELECT findings.details_json FROM json_each(?) AS selected
          JOIN findings ON findings.id = selected.value ORDER BY selected.key`,
       )
       .all(JSON.stringify(selected))
       .map((row) => parseJson(row.details_json as string));
-    return { finding, potentialDuplicates };
+    const [finding, ...potentialDuplicates] = documents;
+    if (expectedCacheKeys === undefined)
+      return { finding, potentialDuplicates };
+    const repositoryIds: Record<string, string[]> = Object.fromEntries(
+      selected.map((id) => [id, []]),
+    );
+    const sourceSnapshots = new Map<string, unknown>();
+    const findingDocuments = new Map(
+      selected.map((id, index) => [id, documents[index]]),
+    );
+    for (const row of database
+      .prepare(
+        `SELECT json_quote(repositories.finding_id) AS finding_id_json,
+                json_quote(repositories.repository_id) AS repository_id_json,
+                CASE WHEN scans.id IS NOT NULL THEN json_object(
+                  'repositoryId', scans.target_id,
+                  'revision', scans.target_revision,
+                  'snapshotDigest', CASE WHEN scans.diff_target_kind = 'working_tree'
+                    THEN scans.diff_content_digest ELSE scans.target_snapshot_digest END
+                ) END AS source_json,
+                occurrence.details_json AS occurrence_json
+         FROM finding_repositories AS repositories
+         JOIN findings ON findings.id = repositories.finding_id
+         LEFT JOIN finding_occurrences AS occurrence
+           ON occurrence.id = json_extract(findings.details_json, '$.occurrenceId')
+           AND occurrence.finding_id = findings.id
+         LEFT JOIN scans ON scans.id = occurrence.scan_id
+         WHERE repositories.finding_id IN (SELECT value FROM json_each(?))
+         ORDER BY repositories.finding_id, repositories.repository_id`,
+      )
+      .all(JSON.stringify(selected))) {
+      const id: string = JSON.parse(row.finding_id_json as string);
+      repositoryIds[id]!.push(JSON.parse(row.repository_id_json as string));
+      if (
+        typeof row.source_json === "string" &&
+        typeof row.occurrence_json === "string" &&
+        isDeepStrictEqual(
+          parseJson(row.occurrence_json),
+          findingDocuments.get(id),
+        )
+      )
+        sourceSnapshots.set(id, JSON.parse(row.source_json));
+    }
+    return {
+      finding,
+      potentialDuplicates,
+      repositoryIds,
+      sourceSnapshots: Object.fromEntries(sourceSnapshots),
+    };
   });
 }
 
@@ -94,9 +159,17 @@ export function storeDedupeGroups(
   database: DatabaseSync,
   groups: readonly (readonly string[])[],
   timestamp: string,
-) {
+  expectedCacheKeys?: Record<string, string>,
+):
+  | { groups: DedupeGroup[] }
+  | { error: "finding_changed" | "finding_conflict" } {
   try {
     return transaction(database, "BEGIN IMMEDIATE", () => {
+      if (
+        expectedCacheKeys !== undefined &&
+        !embeddingsMatch(database, expectedCacheKeys)
+      )
+        return { error: "finding_changed" as const };
       const insertGroup = database.prepare(
         "INSERT INTO finding_dedupe_groups (id, created_at) VALUES (?, ?) ON CONFLICT(id) DO NOTHING",
       );
@@ -140,6 +213,24 @@ export function storeDedupeGroups(
       return { error: "finding_conflict" as const };
     throw error;
   }
+}
+
+function embeddingsMatch(
+  database: DatabaseSync,
+  expected: Record<string, string>,
+): boolean {
+  return (
+    database
+      .prepare(
+        `
+    SELECT 1 FROM json_each(?) AS expected
+    LEFT JOIN local_finding_embeddings AS embeddings ON embeddings.finding_id = expected.key
+    WHERE embeddings.finding_id IS NULL OR embeddings.cache_key IS NOT expected.value
+    LIMIT 1
+  `,
+      )
+      .get(JSON.stringify(expected)) === undefined
+  );
 }
 
 export function listDedupeGroups(database: DatabaseSync, findingId: string) {
