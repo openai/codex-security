@@ -993,6 +993,18 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     : ["coverage.json", "scan-manifest.json"]) {
     test(`${layout}: recover explicit work after ${destination} publication fails`, async (t) => {
       const f = await fixture(t, layout);
+      const originalRename = fsPromises.rename;
+      let publicationTime = 0;
+      // Keep successive publications distinct on coarse filesystem clocks.
+      t.mock.method(
+        fsPromises,
+        "rename",
+        async (...args: Parameters<typeof originalRename>) => {
+          await originalRename(...args);
+          publicationTime += 1;
+          await utimes(args[1], publicationTime, publicationTime);
+        },
+      );
       const pending = { id: "review", ...generic };
       const closing = f.draft({ resolvedDeferred: [close(pending.id)] }, true);
       const fail = (input: ScanDraftInput) =>

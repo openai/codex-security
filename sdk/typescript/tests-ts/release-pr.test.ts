@@ -172,6 +172,16 @@ function apiError(status: number) {
 }
 
 class Fixture {
+  static async withInitialPull() {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    const pull = fixture.github.pulls.find(
+      (candidate) => candidate.number === first.pull,
+    )!;
+    return { fixture, first, pull };
+  }
+
   readonly directory = directories.create("release pr test ");
   readonly repo = createGitRepository(this.directory);
   readonly github = new FakeGitHub(this);
@@ -1072,9 +1082,7 @@ describe("rolling release reconciliation", () => {
   });
 
   test("incorporates main-only changes without another proposal review or repeated commits", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
+    const { fixture, first } = await Fixture.withInitialPull();
     fixture.merge("test: add coverage", {
       "sdk/typescript/tests-ts/example.test.ts": "// Additional coverage.\n",
     });
@@ -1106,9 +1114,7 @@ describe("rolling release reconciliation", () => {
   });
 
   test("posts new suggestions for human-owned notes without repeating an unchanged proposal review", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
+    const { fixture, first } = await Fixture.withInitialPull();
     fixture.commit(
       first.plan.branch,
       {
@@ -1155,9 +1161,7 @@ describe("rolling release reconciliation", () => {
   });
 
   test("recovers review on a manual rerun after GitHub exposes the updated head", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
+    const { fixture, first } = await Fixture.withInitialPull();
     fixture.merge("fix: later fix");
     const request = fixture.github.request.bind(fixture.github);
     let headLagged = true;
@@ -1196,9 +1200,7 @@ describe("rolling release reconciliation", () => {
   });
 
   test("retries a concurrent human commit without dropping its notes or history", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
+    const { fixture, first } = await Fixture.withInitialPull();
     fixture.merge("fix: later fix");
     let humanSha = "";
     fixture.github.beforeRefWrite = () => {
@@ -1243,12 +1245,7 @@ describe("rolling release reconciliation", () => {
   test.each(["closed", "retargeted"])(
     "does not request review after a PR is %s during its final checks",
     async (change) => {
-      const fixture = new Fixture();
-      fixture.merge("feat: initial feature");
-      const first = await fixture.run();
-      const pull = fixture.github.pulls.find(
-        (candidate) => candidate.number === first.pull,
-      )!;
+      const { fixture, pull } = await Fixture.withInitialPull();
       const commentCount = fixture.github.comments.get(pull.number)!.length;
       fixture.merge("fix: another fix");
       const request = fixture.github.request.bind(fixture.github);
@@ -1275,12 +1272,7 @@ describe("rolling release reconciliation", () => {
   );
 
   test("waits for a new change after a release is squash-merged before opening the next ready PR", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
-    const pull = fixture.github.pulls.find(
-      (candidate) => candidate.number === first.pull,
-    )!;
+    const { fixture, first, pull } = await Fixture.withInitialPull();
     fixture.merge("fix: another change before release");
     const updated = await fixture.run();
     expect(updated.headSha).not.toBe(first.headSha);
@@ -1354,9 +1346,7 @@ describe("rolling release reconciliation", () => {
   });
 
   test("preserves a deleted notes file on the remote branch", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
+    const { fixture, first } = await Fixture.withInitialPull();
     fixture.commit(
       first.plan.branch,
       { [notesPath]: null },
@@ -1372,9 +1362,7 @@ describe("rolling release reconciliation", () => {
     { "sdk/typescript/src/example.ts": "Human implementation changes.\n" },
     { [packagePath]: packageText("0.1.24", { example: "1.0.0" }) },
   ])("pauses instead of losing unrelated human edits (%#)", async (files) => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
+    const { fixture, first } = await Fixture.withInitialPull();
     const humanSha = fixture.commit(
       first.plan.branch,
       files,
@@ -1438,9 +1426,7 @@ describe("rolling release reconciliation", () => {
   });
 
   test("uses the merge commit as the boundary for a release merged without squashing", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
+    const { fixture, first } = await Fixture.withInitialPull();
     const releaseTree = fixture
       .git("rev-parse", `${first.headSha}^{tree}`)
       .trim();
@@ -1476,12 +1462,7 @@ describe("release proposal pauses", () => {
   test.each(["open", "closed"] as const)(
     "keeps a retargeted %s proposal paused across workflow runs",
     async (state) => {
-      const fixture = new Fixture();
-      fixture.merge("feat: initial feature");
-      const first = await fixture.run();
-      const pull = fixture.github.pulls.find(
-        (candidate) => candidate.number === first.pull,
-      )!;
+      const { fixture, first, pull } = await Fixture.withInitialPull();
       pull.base.ref = "maintenance";
       pull.state = state;
       fixture.merge("fix: later fix");
@@ -1548,12 +1529,7 @@ describe("release proposal pauses", () => {
   test.each([false, true])(
     "updates an existing proposal with draft=%p",
     async (draft) => {
-      const fixture = new Fixture();
-      fixture.merge("feat: initial feature");
-      const first = await fixture.run();
-      const pull = fixture.github.pulls.find(
-        (candidate) => candidate.number === first.pull,
-      )!;
+      const { fixture, first, pull } = await Fixture.withInitialPull();
       pull.draft = draft;
       pull.body += "\nMaintainer review notes.\n";
       const reviewedBody = pull.body;
@@ -1571,12 +1547,7 @@ describe("release proposal pauses", () => {
   );
 
   test("does not advance a proposal closed during preparation", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
-    const pull = fixture.github.pulls.find(
-      (candidate) => candidate.number === first.pull,
-    )!;
+    const { fixture, first, pull } = await Fixture.withInitialPull();
     fixture.merge("fix: later fix");
     fixture.github.afterCommit = () => {
       pull.state = "closed";
