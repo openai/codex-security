@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -60,13 +61,11 @@ describe("findings import formats", () => {
       ).toEqual(
         rows.map(({ findingId, occurrenceId }) => [findingId, occurrenceId]),
       );
-      expect(
-        new Set(
-          bindImportedFindings(parsed, format, "scan", "target").map(
-            (row) => row.occurrenceId,
-          ),
-        ).size,
-      ).toBe(2);
+      const bound = bindImportedFindings(parsed, format, "scan", "target");
+      expect(new Set(bound.map((row) => row.occurrenceId)).size).toBe(2);
+      if (format === "csv") {
+        expect(new Set(bound.map((row) => row.findingId)).size).toBe(2);
+      }
     }
     await expect(
       parseImportedFindings(
@@ -85,6 +84,9 @@ describe("findings import formats", () => {
       "'--no-verify' skips hooks",
       "''=literal",
       "'Literal",
+      "'=1+1",
+      "''-x",
+      "''literal",
       "ordinary λ",
       "=formula",
       "\u0085=formula",
@@ -261,4 +263,3 @@ describe("findings import formats", () => {
     ).rejects.toThrow("duplicate occurrenceId");
   });
 });
-import { execFileSync } from "node:child_process";
