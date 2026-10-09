@@ -40,6 +40,191 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
+test.each([
+  "local-inherited",
+  "local-env-vars",
+  "local-explicit",
+  "local-lowercase-reference",
+  "local-empty-reference",
+  "executor-inherited",
+  "executor-explicit",
+  "executor-local-reference",
+])(
+  "native source CA paths preserve %s context and precedence",
+  async (mode) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    const captured = join(home, "ca-environment.json");
+    const script = join(home, "ca-source.mjs");
+    await writeFile(
+      script,
+      `import { writeFileSync } from "node:fs";
+writeFileSync(process.argv[2], JSON.stringify({ ca: process.env[process.argv[3]], cwd: process.cwd() }));
+process.exit(1);`,
+    );
+    const variable =
+      mode === "local-lowercase-reference"
+        ? "node_extra_ca_certs"
+        : process.platform === "win32"
+          ? "Node_Extra_Ca_Certs"
+          : "NODE_EXTRA_CA_CERTS";
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(home, "state"),
+      OPENAI_API_KEY: "synthetic-review-key",
+      [variable]: "certs/first.pem",
+    };
+    const executor = mode.startsWith("executor-");
+    const executorDirectory = join(home, "executor");
+    await mkdir(executorDirectory);
+    const executorScript = join(home, "ca-executor.mjs");
+    const executorCaptured = join(home, "ca-executor.json");
+    await writeFile(
+      executorScript,
+      `import { writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+writeFileSync(process.argv[2], JSON.stringify({ ca: process.env.NODE_EXTRA_CA_CERTS, cwd: process.cwd() }));
+process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { stdio: "inherit" }).status ?? 1);`,
+    );
+    if (executor)
+      await writeFile(
+        join(home, "environments.toml"),
+        stringify({
+          environments: [
+            {
+              id: "source-executor",
+              program: process.execPath,
+              args: [
+                executorScript,
+                executorCaptured,
+                resolveCodexCommand(environment).command,
+              ],
+              cwd: executorDirectory,
+              ...(mode === "executor-inherited"
+                ? {}
+                : { env: { NODE_EXTRA_CA_CERTS: "executor-ca.pem" } }),
+            },
+          ],
+        }),
+      );
+    const configuration = {
+      mcp_servers: {
+        source: {
+          command: process.execPath,
+          args: [script, captured, variable],
+          cwd: repository,
+          ...(executor ? { environment_id: "source-executor" } : {}),
+          ...([
+            "local-env-vars",
+            "executor-local-reference",
+            "local-lowercase-reference",
+            "local-empty-reference",
+          ].includes(mode)
+            ? { env_vars: [variable] }
+            : executor
+              ? {
+                  env_vars: [{ name: "NODE_EXTRA_CA_CERTS", source: "remote" }],
+                }
+              : {}),
+          ...(mode === "local-explicit"
+            ? { env: { NODE_EXTRA_CA_CERTS: "source-ca.pem" } }
+            : {}),
+        },
+      },
+    };
+    const store = checkpointWorkbench("source-ca", { repository });
+    const workflow = new FindingWorkflow("source-ca", environment, store.run);
+    const snapshot = await workflow.sourceSnapshot(repository);
+    let calls = 0;
+    const review: CodexReview<{ ca: string | null }> = {
+      stage: "pair-review",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      prompt: "Read synthetic source.",
+      schema: { type: "object" },
+      validate: (value) => value as { ca: string | null },
+    };
+    const phases =
+      mode === "local-empty-reference"
+        ? ["", undefined]
+        : ["local-inherited", "local-lowercase-reference"].includes(mode)
+          ? ["certs/first.pem", "certs/second.pem"]
+          : ["certs/first.pem"];
+    for (const inherited of phases) {
+      if (inherited === undefined) delete environment[variable];
+      else environment[variable] = inherited;
+      const source = await sourceForTest(
+        configuration,
+        environment,
+        repository,
+      );
+      expect(environment[variable]).toBe(inherited);
+      if (executor) expect(source.caEnvironment).toBeUndefined();
+      await expect(
+        new CodexReviewRunner(
+          environment,
+          undefined,
+          undefined,
+          repository,
+          undefined,
+          undefined,
+          undefined,
+          source,
+        ).run(review),
+      ).rejects.toThrow(/required.*source/i);
+      const actual = JSON.parse(await readFile(captured, "utf8")) as {
+        ca?: string;
+        cwd: string;
+      };
+      let expected = inherited;
+      if (mode === "local-explicit") expected = "source-ca.pem";
+      else if (mode === "executor-explicit") expected = "executor-ca.pem";
+      else if (
+        !executor &&
+        inherited &&
+        !(mode === "local-lowercase-reference" && process.platform !== "win32")
+      )
+        expected =
+          process.platform === "win32"
+            ? resolve(inherited)
+            : `${process.cwd()}/${inherited}`;
+      expect(actual.ca).toBe(expected);
+      expect(await realpath(actual.cwd)).toBe(await realpath(repository));
+      if (executor) {
+        const launched = JSON.parse(
+          await readFile(executorCaptured, "utf8"),
+        ) as { ca: string; cwd: string };
+        expect(launched.ca).toBe(
+          mode === "executor-inherited" ? inherited! : "executor-ca.pem",
+        );
+        expect(await realpath(launched.cwd)).toBe(
+          await realpath(executorDirectory),
+        );
+      }
+      const checkpoint = new CheckpointedReviewRunner(
+        workflow,
+        {
+          async run<T>(request: CodexReview<T>): Promise<T> {
+            calls++;
+            return request.validate({ ca: actual.ca ?? null });
+          },
+        },
+        snapshot,
+        { allRepositories: true },
+        await reviewSettingsDigest(environment, undefined, {
+          mcp: source,
+          repository,
+        }),
+      );
+      expect(await checkpoint.run(review)).toEqual({ ca: actual.ca ?? null });
+      expect(await checkpoint.run(review)).toEqual({ ca: actual.ca ?? null });
+    }
+    expect(calls).toBe(phases.length);
+  },
+);
+
 async function sourceForTest(
   config: JsonObject,
   environment: NodeJS.ProcessEnv,
@@ -95,6 +280,7 @@ for (const transport of [
   "http-no-local",
   "http-no-local-credentials",
   "stdio",
+  "stdio-missing-prototype",
   "stdio-relative",
   "stdio-absolute",
   "stdio-credentials",
@@ -157,6 +343,9 @@ for (const transport of [
         OBJECT_SOURCE: "synthetic-object",
         IMPLICIT_SOURCE: "synthetic-implicit",
         OVERRIDDEN_SOURCE: "synthetic-ambient",
+        ...(transport === "stdio-missing-prototype"
+          ? {}
+          : { ["__proto__"]: "synthetic-prototype-value" }),
       };
       const inheritedSource: JsonValue[] = [
         "OPTIONAL_SOURCE",
@@ -164,6 +353,7 @@ for (const transport of [
         "CODEX_SQLITE_HOME",
         "INHERITED_SOURCE",
         "OVERRIDDEN_SOURCE",
+        "__proto__",
         { name: "OBJECT_SOURCE", source: "local" },
         { name: "IMPLICIT_SOURCE" },
       ];
@@ -337,6 +527,9 @@ for (const transport of [
           OBJECT_SOURCE: "synthetic-object",
           IMPLICIT_SOURCE: "synthetic-implicit",
           OVERRIDDEN_SOURCE: "synthetic-explicit",
+          ...(transport === "stdio-missing-prototype"
+            ? {}
+            : { ["__proto__"]: "synthetic-prototype-value" }),
         });
       }
     } finally {

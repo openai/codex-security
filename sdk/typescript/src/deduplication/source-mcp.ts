@@ -37,6 +37,7 @@ export interface SourceMcp {
   configPath: string;
   server: JsonObject;
   environment: Record<string, string>;
+  caEnvironment?: Record<string, string>;
   credentialNames: string[];
   executor?: JsonObject;
   executorLaunchDirectory?: string;
@@ -53,6 +54,46 @@ type StartCodex = (
   args: readonly string[],
   options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
 ) => ChildProcessWithoutNullStreams;
+
+// Native local MCP processes and header helpers inherit these CA bundle paths.
+const CUSTOM_CA_ENV_KEYS = [
+  "CODEX_CA_CERTIFICATE",
+  "SSL_CERT_FILE",
+  "REQUESTS_CA_BUNDLE",
+  "CURL_CA_BUNDLE",
+  "NODE_EXTRA_CA_CERTS",
+  "GIT_SSL_CAINFO",
+  "CARGO_HTTP_CAINFO",
+  "PIP_CERT",
+  "BUNDLE_SSL_CA_CERT",
+  "npm_config_cafile",
+  "NPM_CONFIG_CAFILE",
+];
+
+function localCaEnvironment(
+  environment: ProcessEnvironment,
+): Record<string, string> {
+  const names = new Set(
+    CUSTOM_CA_ENV_KEYS.map((name) =>
+      process.platform === "win32" ? name.toUpperCase() : name,
+    ),
+  );
+  const inherited: Record<string, string> = {};
+  for (const [name, value] of Object.entries(environment)) {
+    if (
+      !value ||
+      !names.has(process.platform === "win32" ? name.toUpperCase() : name)
+    )
+      continue;
+    // Keep relative path components intact on Unix, including symlink/.. paths.
+    inherited[name] = isAbsolute(value)
+      ? value
+      : process.platform === "win32"
+        ? resolve(value)
+        : `${process.cwd()}/${value}`;
+  }
+  return inherited;
+}
 
 async function readSourceConfig(
   environment: ProcessEnvironment,
@@ -316,6 +357,7 @@ export async function resolveSourceMcp(
       "sourceMcp must name a configured Codex MCP server.",
     );
   }
+  environment = Object.assign(Object.create(null), environment);
   const config = await readSourceConfig(
     environment,
     repository,
@@ -343,11 +385,12 @@ export async function resolveSourceMcp(
   }
   const environmentId = selected["environment_id"] as string;
   const executor = await sourceExecutor(environment, environmentId, signal);
-  const reviewEnvironment = await comparisonEnvironment(
-    environment,
-    undefined,
-    signal,
+  const reviewEnvironment: ProcessEnvironment = Object.assign(
+    Object.create(null),
+    await comparisonEnvironment(environment, undefined, signal),
   );
+  const caEnvironment =
+    environmentId === "local" ? localCaEnvironment(reviewEnvironment) : {};
   if (
     configuredCodexHome(reviewEnvironment) !== configuredCodexHome(environment)
   ) {
@@ -444,7 +487,7 @@ export async function resolveSourceMcp(
   }
   // Resolve stdio inheritance from the caller before the isolated review launches.
   // Explicit server values retain native precedence and never become host values.
-  const inherited: JsonObject = {};
+  const inherited: JsonObject = Object.create(null);
   const explicit = (server["env"] ?? {}) as JsonObject;
   const explicitNames = new Set(Object.keys(explicit).map(environmentName));
   const executorEnvironment: Record<string, string> = Object.create(null);
@@ -481,6 +524,20 @@ export async function resolveSourceMcp(
       continue;
     }
     const name = entry["name"] as string;
+    if (
+      environmentId === "local" &&
+      CUSTOM_CA_ENV_KEYS.some((key) => key.toUpperCase() === name.toUpperCase())
+    ) {
+      // Let native CA inheritance run before explicit server.env overrides.
+      remaining.push(variable);
+      const value = environmentEntry(environment, name);
+      if (
+        value !== undefined &&
+        environmentEntry(caEnvironment, name) === undefined
+      )
+        caEnvironment[name] = value;
+      continue;
+    }
     const value = environmentEntry(environment, name);
     if (value !== undefined && !explicitNames.has(environmentName(name)))
       inherited[name] = value;
@@ -534,6 +591,7 @@ export async function resolveSourceMcp(
     configPath: join(configuredCodexHome(environment), "config.toml"),
     server,
     environment: credentials,
+    ...(Object.keys(caEnvironment).length ? { caEnvironment } : {}),
     credentialNames: [...credentialNames].sort(),
     ...(executor === undefined ? {} : { executor }),
     ...(executorLaunchDirectory === undefined

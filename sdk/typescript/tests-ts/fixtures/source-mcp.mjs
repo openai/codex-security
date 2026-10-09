@@ -10,13 +10,17 @@ const names = [
   "OBJECT_SOURCE",
   "IMPLICIT_SOURCE",
   "OVERRIDDEN_SOURCE",
+  "__proto__",
 ];
 writeFileSync(
   process.argv[2],
   JSON.stringify({
     cwd: process.cwd(),
     environment: Object.fromEntries(
-      names.map((name) => [name, process.env[name]]),
+      names.map((name) => [
+        name,
+        Object.hasOwn(process.env, name) ? process.env[name] : undefined,
+      ]),
     ),
   }),
 );

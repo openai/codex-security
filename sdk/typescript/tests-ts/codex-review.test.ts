@@ -924,7 +924,7 @@ for (const {
       );
       expect(existsSync(join(modelHome, "auth.json"))).toBe(false);
       expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
-      if (scenario === "source-cancel-output") expect(child!.exitCode).toBe(0);
+      if (sourceMcp) expect(child!.exitCode).toBe(0);
       expect(existsSync(directory!)).toBe(false);
       expect(existsSync(checkout)).toBe(true);
     } finally {

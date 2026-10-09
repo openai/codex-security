@@ -339,6 +339,7 @@ export class CodexReviewRunner {
           cwd: source?.executorLaunchDirectory ?? directory,
           env: {
             ...environment,
+            ...source?.caEnvironment,
             ...source?.environment,
           },
           stdio: ["pipe", "pipe", "pipe"],
@@ -741,11 +742,10 @@ export class CodexReviewRunner {
         );
       } finally {
         lines.close();
-        const canceledSource = source !== undefined && this.signal?.aborted;
         child.stdin.end();
         let force = false;
         try {
-          if (canceledSource) {
+          if (source !== undefined) {
             child.stdout.resume();
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {
