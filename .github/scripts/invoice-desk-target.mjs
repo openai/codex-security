@@ -62,6 +62,8 @@ export async function resolveScanTargets(
 }
 
 if (isMain(import.meta.url)) {
+  const api = (args, options = {}) =>
+    execFileSync("gh", ["api", ...args], { encoding: "utf8", ...options });
   const repository = process.env.GITHUB_REPOSITORY;
   const targets = await resolveScanTargets(
     {
@@ -77,36 +79,24 @@ if (isMain(import.meta.url)) {
               sha: process.env.SOURCE_SHA,
             },
     },
-    (number) =>
-      JSON.parse(
-        execFileSync("gh", ["api", `repos/${repository}/pulls/${number}`], {
-          encoding: "utf8",
-        }),
-      ),
+    (number) => JSON.parse(api([`repos/${repository}/pulls/${number}`])),
     (sha) =>
       JSON.parse(
-        execFileSync(
-          "gh",
-          [
-            "api",
-            "--paginate",
-            "--slurp",
-            `repos/${repository}/commits/${sha}/pulls?per_page=100`,
-          ],
-          { encoding: "utf8" },
-        ),
+        api([
+          "--paginate",
+          "--slurp",
+          `repos/${repository}/commits/${sha}/pulls?per_page=100`,
+        ]),
       ).flat(),
     (sha) =>
       JSON.parse(
-        execFileSync(
-          "gh",
+        api(
           [
-            "api",
             "--paginate",
             "--slurp",
             `repos/${repository}/actions/workflows/invoice-desk-scan.yml/runs?event=workflow_dispatch&branch=main&head_sha=${sha}&per_page=100`,
           ],
-          { encoding: "utf8", maxBuffer: Infinity },
+          { maxBuffer: Infinity },
         ),
       ).flatMap((page) => page.workflow_runs.map((run) => run.display_title)),
   );

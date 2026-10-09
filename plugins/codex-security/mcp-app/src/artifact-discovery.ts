@@ -95,16 +95,6 @@ export const workbenchListCodexSecurityCandidatesInputSchema =
     "workbenchListCandidatesInput",
   ) as z.ZodType<ListCodexSecurityCandidatesInput & { scanId: string }>;
 
-export interface RecordCodexSecurityDiscoveryCandidatesResult {
-  operation: "replace";
-  candidatesRecorded: number;
-}
-
-export interface ListCodexSecurityCandidatesResult {
-  rows: CompactDiscoveryCandidate[];
-  nextCursor?: string;
-}
-
 /**
  * Invoke the shared discovery normalizer. Only its canonical output persists;
  * raw candidate input is kept in a private temporary directory and always removed.
@@ -112,7 +102,7 @@ export interface ListCodexSecurityCandidatesResult {
 export async function recordCodexSecurityDiscoveryCandidates(
   input: DiscoveryCandidatesInput,
   context: ArtifactContext,
-): Promise<RecordCodexSecurityDiscoveryCandidatesResult> {
+) {
   const { candidates } = discoveryCandidatesInputSchema.parse(input);
   const pluginRoot = context.pluginRoot?.trim();
   if (!pluginRoot) {
@@ -200,7 +190,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
       candidateSchemaV1,
     );
     return {
-      operation: "replace",
+      operation: "replace" as const,
       candidatesRecorded: normalized.length,
     };
   } finally {
@@ -214,7 +204,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
 export async function listCodexSecurityCandidates(
   input: ListCodexSecurityCandidatesInput,
   context: ArtifactContext,
-): Promise<ListCodexSecurityCandidatesResult> {
+) {
   const page = listCodexSecurityCandidatesInputSchema.parse(input);
   const rows = await readArtifactJsonl(
     context,
