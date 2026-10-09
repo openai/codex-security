@@ -17,6 +17,12 @@ import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
+import { TestClient, mockWorkbench } from "./support/api-client.js";
+import {
+  completedEvents,
+  scanRuntimeDependencies,
+} from "./support/api-events.js";
+import { copyCompletedScan } from "./plugin-root.js";
 
 const CURRENT_REPOSITORY = resolve("/current/repository");
 const SAVED_REPOSITORY = resolve("/saved/repository");
@@ -146,6 +152,103 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  test.each([true, false])(
+    "uses completion validation after an early HEAD drift warning (restored: %s)",
+    async (restored) => {
+      const root = await temporaryDirectory("scan-head-warning-");
+      const repository = join(root, "repository");
+      const codexHome = join(root, "home");
+      const scanDir = join(root, "scan");
+      for (const directory of [repository, codexHome, scanDir])
+        await mkdir(directory, { mode: 0o700 });
+      let revision = "deadbeef";
+      const warned = Promise.withResolvers<void>();
+      const completionWarning =
+        "Repository HEAD changed while the scan was running; results were saved for the original revision.";
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        repositoryRevision: async () => revision,
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "prepare-scan-completion")
+            return {
+              targetWarnings:
+                revision === "deadbeef" ? [] : [completionWarning],
+            };
+          if (args[0] === "complete-scan")
+            return {
+              scan: {
+                warnings: revision === "deadbeef" ? [] : [completionWarning],
+              },
+            };
+          return mockWorkbench(args, input);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              revision = "changed";
+              await warned.promise;
+              if (restored) revision = "deadbeef";
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      });
+      const result = resultWithFindings(["high"]);
+      let patchCalls = 0;
+      const earlyDetails: unknown[] = [];
+      try {
+        const outcome = await runWorkflow(
+          ["scan", repository, "--patch", "--json"],
+          {
+            currentDirectory: repository,
+            result,
+            onCodex: (args, output) => {
+              patchCalls++;
+              completePatches(args, output);
+              return 0;
+            },
+          },
+          {
+            configure: (current) => {
+              current.createSecurity = () => ({
+                preflight: client.preflight.bind(client),
+                close: client.close.bind(client),
+                run: async (path, options) => {
+                  await client.run(path, {
+                    ...options,
+                    onWarning: (message, details) => {
+                      options?.onWarning?.(message, details);
+                      if (message.includes("results remain bound")) {
+                        earlyDetails.push(details);
+                        warned.resolve();
+                      }
+                    },
+                  });
+                  return result;
+                },
+              });
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(restored ? 0 : 2);
+        expect(patchCalls).toBe(restored ? 1 : 0);
+        expect(earlyDetails).toEqual([undefined]);
+        const payload = JSON.parse(outcome.stdout);
+        expect(payload.warnings).toEqual(
+          restored ? undefined : [completionWarning],
+        );
+        expect(outcome.stderr).toContain("Repository HEAD changed");
+        if (restored)
+          expect(payload.patches).toMatchObject([{ status: "verified" }]);
+      } finally {
+        await client.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.each([false, true])(
     "shows progress during baseline preparation and cleans up on failure: %p",
     async (failSnapshot) => {

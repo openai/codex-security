@@ -242,6 +242,7 @@ const allowedFiles = new Set([
     "server/sqlite-store",
     "server/storage",
     "server/validation",
+    "target-drift",
     "targets",
     "thread-source",
     "trusted-executable",
