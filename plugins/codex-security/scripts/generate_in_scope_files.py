@@ -134,9 +134,20 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     scope,
                     text=False,
                 )
-            except OSError:
-                tracked = None
-            if tracked is not None and tracked.returncode == 0:
+            except OSError as error:
+                raise InventoryError(f"could not run git ls-files: {error}") from error
+
+            # git_command reports a missing trusted Git executable as status 127
+            # with no output. Git is optional for this listing; a Git that ran
+            # and failed would leave the inventory silently incomplete.
+            git_missing = tracked.returncode == 127 and not tracked.stderr
+            if tracked.returncode != 0 and not git_missing:
+                detail = tracked.stderr.decode("utf-8", errors="replace").strip()
+                message = f"git ls-files exited with status {tracked.returncode}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise InventoryError(message)
+            if tracked.returncode == 0:
                 prefix = b"./" if scope == "." or scope.startswith("./") else b""
                 for path in tracked.stdout.split(b"\0"):
                     candidate = repository / os.fsdecode(path)
