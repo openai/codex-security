@@ -1872,7 +1872,9 @@ def test_invalid_discovery_error_threshold_fails_before_scan_creation(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
 
 
-@pytest.mark.parametrize("invalid_hours", ("0", "-0.5", "true", '"2"', "nan", "inf", "96.5"))
+@pytest.mark.parametrize(
+    "invalid_hours", ("0", "-0.5", "true", '"2"', "nan", "inf", "96.5", "9" * 400)
+)
 def test_invalid_discovery_time_limit_fails_before_scan_creation(
     tmp_path: Path, invalid_hours: str
 ) -> None:
