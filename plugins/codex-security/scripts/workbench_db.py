@@ -3071,7 +3071,7 @@ def scan_local_regular_file(scan_dir: Path, relative_path: str) -> bool:
 
 def read_finding_details(value: str) -> dict[str, Any]:
     try:
-        details = json.loads(value, parse_constant=reject_non_finite_json)
+        details = _loads_json(value)
     except (TypeError, ValueError):
         return {}
     return details if isinstance(details, dict) else {}
@@ -3497,7 +3497,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             result = finding_workflow(connection, json.load(sys.stdin), now())
         else:
             raise SystemExit(f"Unknown command: {args.command}")
-    print(json.dumps(result, allow_nan=False, sort_keys=True))
+    print(dumps_json(result, allow_nan=False, sort_keys=True))
 
 
 if __name__ == "__main__":

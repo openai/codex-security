@@ -385,3 +385,16 @@ def test_bounded_finding_details_filters_malformed_evidence_before_limiting() ->
     )
 
     assert bounded["code_evidence"] == [{"id": "valid", "code": "valid_source()"}]
+
+
+def test_exact_decimal_values_stay_within_the_existing_preview_budget() -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    from workbench.json_numbers import JsonFloat, dumps_json
+
+    finding = {"attackPath": {"observations": [JsonFloat("1.0000000000000001")] * 300}}
+    bounded = preview["bounded_finding_details"](finding)["attackPath"]
+    encoded = dumps_json(bounded, separators=(",", ":"))
+
+    assert bounded["observations"]
+    assert "1.0000000000000001" in encoded
+    assert len(encoded.encode()) <= preview["FINDING_ATTACK_PATH_PREVIEW_BYTES"]
