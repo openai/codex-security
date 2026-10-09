@@ -18,7 +18,6 @@ import {
   mkdir,
   readFile,
   realpath,
-  rm,
   symlink,
   utimes,
   writeFile,
@@ -45,25 +44,6 @@ const { bundledCodexSdkEnvironment } = await importModule({
       ),
     ),
   ],
-});
-const {
-  readKnowledgeBaseSnapshot,
-  prepareKnowledgeBase,
-  saveScanKnowledge,
-  restoreScanKnowledge,
-  scanInputIdentity,
-} = await importModule({
-  banner: {
-    js: `import { createRequire as snapshotCreateRequire } from "node:module"; const require = snapshotCreateRequire(${JSON.stringify(import.meta.url)});`,
-  },
-  stdin: {
-    contents: `export { readKnowledgeBaseSnapshot, prepareKnowledgeBase } from "./knowledge-base.ts";
-export { saveScanKnowledge, restoreScanKnowledge, scanInputIdentity } from "./scan-inputs.ts";`,
-    loader: "ts",
-    resolveDir: fileURLToPath(
-      new URL("../../../../sdk/typescript/src/", import.meta.url),
-    ),
-  },
 });
 
 const {
@@ -1578,7 +1558,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           return {
             knowledgePath: path.join(fixture.root, `knowledge-${index}`),
             knowledgeDocuments: {
-              "0-architecture.md.txt": `Synthetic architecture for scan ${index}.`,
+              "1-architecture.md.txt": `Synthetic architecture for scan ${index}.`,
             },
             path: entryPath,
             deepPath,
@@ -1666,35 +1646,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         },
       );
       await Promise.all(
-        workerConfigurations.map((entry, index) =>
+        workerConfigurations.map((entry) =>
           Promise.all([
-            (async () => {
-              await mkdir(entry.knowledgePath);
-              const source = path.join(entry.knowledgePath, "architecture.md");
-              await writeFile(
-                source,
-                entry.knowledgeDocuments["0-architecture.md.txt"],
-              );
-              const captured = await readKnowledgeBaseSnapshot([source]);
-              await saveScanKnowledge(entry.knowledgePath, captured);
-              if (index % 2 === 0) await rm(source);
-              else
-                await writeFile(
-                  source,
-                  "Changed architecture after the original scan.",
-                );
-              const restored = await restoreScanKnowledge(
-                entry.knowledgePath,
-                fixture.root,
-                scanInputIdentity(undefined, captured),
-              );
-              const staged = await prepareKnowledgeBase(
-                restored,
-                undefined,
-                fixture.root,
-              );
-              entry.knowledgePath = staged.path;
-            })(),
+            mkdir(entry.knowledgePath).then(() =>
+              Promise.all(
+                Object.entries(entry.knowledgeDocuments).map(([name, text]) =>
+                  writeFile(path.join(entry.knowledgePath, name), text),
+                ),
+              ),
+            ),
             writeFile(entry.path, stringifyToml(entry.configuration)),
             writeFile(
               entry.deepPath,
