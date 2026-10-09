@@ -13,6 +13,7 @@ import {
   isUsablePythonExecutable,
   missingPythonHelperMessage,
   resolvePythonCommand,
+  runPythonWithInput,
 } from "../src/python_command.ts";
 
 const windowsHome = "C:\\Users\\fixture";
@@ -160,9 +161,66 @@ try {
     await resolvePythonCommand({ configuredPython: "  /custom/python  " }),
     "/custom/python",
   );
+  const input = "λ😀\n".repeat(250_000);
+  assert.equal(
+    await runPythonWithInput(
+      await resolvePythonCommand(),
+      ["-e", "process.stdin.pipe(process.stdout)"],
+      Buffer.from(input),
+      "Fixture helper",
+    ),
+    input,
+  );
   delete process.env.CODEX_SECURITY_PYTHON_COMMAND;
   assert.equal(await resolvePythonCommand(), fileCandidate);
+  const diagnostic = "--provider-error EACCES: λ😀\npermission denied";
+  await assert.rejects(
+    runPythonWithInput(
+      process.execPath,
+      [
+        "-e",
+        `process.stdin.resume(); process.stdin.on('end', () => { const text = Buffer.from(${JSON.stringify(diagnostic)}); process.stderr.write(text.subarray(0, 26)); setTimeout(() => { process.stderr.write(text.subarray(26)); process.exitCode = 2; }, 1); });`,
+      ],
+      "",
+      "Fixture helper",
+    ),
+    (error: Error) => error.message === diagnostic,
+  );
+  await assert.rejects(
+    runPythonWithInput(
+      process.execPath,
+      [
+        "-e",
+        `process.stderr.write(${JSON.stringify(diagnostic)}); process.exit(1);`,
+      ],
+      input,
+      "Fixture helper",
+    ),
+    (error: Error) => error.message === diagnostic,
+  );
+  await assert.rejects(
+    runPythonWithInput(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      input,
+      "Fixture helper",
+    ),
+    (error: NodeJS.ErrnoException) => typeof error.code === "string",
+  );
+  await assert.rejects(
+    runPythonWithInput(
+      path.join(executableFixtureRoot, "missing"),
+      [],
+      "",
+      "Fixture helper",
+    ),
+    { code: "ENOENT" },
+  );
   if (process.platform !== "win32") {
+    await assert.rejects(
+      runPythonWithInput(fileCandidate, [], "", "Fixture helper"),
+      { code: "EACCES" },
+    );
     assert.equal(await isUsablePythonExecutable(fileCandidate, "linux"), false);
     await chmod(fileCandidate, 0o755);
     assert.equal(await isUsablePythonExecutable(fileCandidate, "linux"), true);
