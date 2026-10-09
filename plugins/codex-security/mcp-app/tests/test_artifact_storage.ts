@@ -380,6 +380,52 @@ try {
     ),
   );
 
+  const linkedScanRoot = path.join(fixture, "linked-scans");
+  await mkdir(linkedScanRoot);
+  await symlink(
+    repository,
+    path.join(linkedScanRoot, path.basename(repository)),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const unsafeCollection = path.join(
+    repository,
+    path.basename(standalone.directory),
+  );
+  for (const scanRoot of [fixture, linkedScanRoot]) {
+    await client.close();
+    client = await connect({ CODEX_SECURITY_SCAN_ROOT: scanRoot });
+    const location = { targetPath: repository, storage: "persistent" };
+    const repositoryEntries = await readdir(repository);
+    await assert.rejects(
+      () => save(location),
+      /Artifact storage must be outside the target repository/,
+    );
+    await assert.rejects(
+      () => save({ ...location, path: "threatmodel.md", content }),
+      /Artifact storage must be outside the target repository/,
+    );
+    await assert.rejects(stat(unsafeCollection), { code: "ENOENT" });
+
+    const temporary = { ...location, storage: "temporary", path: "notes.md" };
+    const scratch = await save({ ...temporary, content });
+    temporaryDirectories.add(scratch.directory);
+    assert.ok(
+      scratch.directory.startsWith((await realpath(tmpdir())) + path.sep),
+    );
+    assert.equal((await read(temporary)).content, content);
+    assert.deepEqual(await readdir(repository), repositoryEntries);
+
+    await mkdir(unsafeCollection);
+    const retainedPath = path.join(unsafeCollection, "threatmodel.md");
+    await writeFile(retainedPath, content);
+    await assert.rejects(
+      () => read({ ...location, path: "threatmodel.md" }),
+      /Artifact storage must be outside the target repository/,
+    );
+    assert.equal(await readFile(retainedPath, "utf8"), content);
+    await rm(unsafeCollection, { recursive: true });
+  }
+
   const repositoryAlias = path.join(fixture, "repository-alias");
   await symlink(
     repository,

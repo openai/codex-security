@@ -10,6 +10,7 @@ import { parse as parseToml } from "smol-toml";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { InternalSecurity } from "./support/internal-security.js";
+import { VERSION } from "../src/version.js";
 
 const fixtures = createApiTestFixtures();
 
@@ -84,6 +85,13 @@ describe("delegated scan attribution", () => {
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
+                analytics: { enabled: surface === "sdk" },
+                responses_api_metadata: {
+                  custom_attribution: surface,
+                  codex_security_surface: "spoofed",
+                  codex_security_command: "spoofed",
+                  codex_security_package_version: "spoofed",
+                },
                 ...(rootEndpoint === undefined
                   ? {}
                   : { openai_base_url: rootEndpoint }),
@@ -178,10 +186,29 @@ describe("delegated scan attribution", () => {
                       );
                       expect(options.config).toMatchObject({
                         features,
+                        analytics: { enabled: surface === "sdk" },
                         responses_api_metadata: {
+                          custom_attribution: surface,
                           codex_security_surface: surface,
+                          codex_security_command: "scan",
+                          codex_security_package_version: VERSION,
                         },
                       });
+                      const deepConfigPath =
+                        options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+                      const deepConfig =
+                        mode === "deep"
+                          ? await readFile(deepConfigPath!, "utf8")
+                          : undefined;
+                      if (deepConfig !== undefined) {
+                        expect(
+                          parseToml(deepConfig)["worker_runtime"],
+                        ).toMatchObject({
+                          analytics: { enabled: surface === "sdk" },
+                          responses_api_metadata:
+                            options.config?.["responses_api_metadata"],
+                        });
+                      }
                       expect(threadOptions.threadSource).toBe("security_scan");
                       const configPath =
                         options.env?.["CODEX_SECURITY_CONFIG_PATH"];
@@ -236,6 +263,7 @@ describe("delegated scan attribution", () => {
                         "responses_api_metadata",
                       );
                       expect(sharedConfig).not.toHaveProperty("codex_security");
+                      expect(sharedConfig).not.toHaveProperty("analytics");
                       expect(JSON.stringify(sharedConfig)).not.toContain(
                         "openai_base_url",
                       );
@@ -258,6 +286,11 @@ describe("delegated scan attribution", () => {
                         initialConfig,
                       );
                       expect(options.env).toEqual(initialEnvironment);
+                      if (deepConfig !== undefined) {
+                        expect(await readFile(deepConfigPath!, "utf8")).toBe(
+                          deepConfig,
+                        );
+                      }
                       throw new Error("delegated attribution observed");
                     } finally {
                       active -= 1;
