@@ -104,6 +104,10 @@ variables, and defaults as public API.
   unresolved work. Do not create new label taxonomies or bulk-edit labels on
   other PRs unless the user asks.
 
+## Dependency cooldowns
+
+Apply the cooldowns and exclusions in `.github/dependabot.yml` before merging manual or bot dependency upgrades. Devcontainer upgrades must pass the CI publication-age check; missing publication metadata does not make a version eligible. Dependabot can still open an early PR when a feature omits its publication timestamp, so wait for the reported eligibility time and rerun CI before merging.
+
 ## Public repository and pull requests
 
 Everything published in this repository is public. Review branch names before

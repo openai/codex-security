@@ -367,72 +367,6 @@ const PROJECT_CONFIG_OPTION = optionValue("--config")
     "Load a trusted YAML/JSON file (default: CODEX_SECURITY_PROJECT_CONFIG, otherwise no file).",
   );
 const EXPORT_DEFAULT_OUTPUTS = ARTIFACT_EXPORT_FILENAMES;
-const VALUE_OPTIONS = new Set([
-  "--config",
-  "-c",
-  "--port",
-  "--workflow-id",
-  "--concurrency",
-  "--auth",
-  "--safety-identifier",
-  "--cyber-access-program",
-  "--path",
-  "--component",
-  "--components-file",
-  "--knowledge-base",
-  "--rubric",
-  "--finding-id",
-  "--scan-prompt-file",
-  "--validation-prompt-file",
-  "--post-scan-prompt-file",
-  "--diff",
-  "--head",
-  "--base",
-  "--mode",
-  "--model",
-  "--effort",
-  "--provider",
-  "--output-dir",
-  "--plugin-path",
-  "--python",
-  "--codex",
-  "--linear-issue",
-  "--linear-project",
-  "--linear-filter",
-  "--github-alert",
-  "--github-ref",
-  "--github-state",
-  "--fail-on-severity",
-  "--patch-severity",
-  "--resume-pr",
-  "--scan",
-  "--scan-dir",
-  "--severity",
-  "--max-cost",
-  "--workers",
-  "--subagents",
-  "--stop-after-no-new",
-  "--max-discovery-runs",
-  "--max-time-hours",
-  "--max-attempts",
-  "--export-format",
-  "--artifact",
-  "--csv",
-  "--output",
-  "--source-root",
-  "--format",
-  "--filter-output",
-  "--token-limit",
-  "--token-offset",
-  "--scan-root",
-  "--reason",
-  "--to",
-  "--findings-url",
-  "--linear-team",
-  "--linear-api-key",
-  "--project",
-  "--linear-assignee",
-]);
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
@@ -1802,37 +1736,7 @@ export async function main(
     if (output === process.stdout) process.exit(exitCode);
     return exitCode;
   }
-  argv = normalizeScanImportArguments(defaultListCommand(argv));
-  const policyFullOutput =
-    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const positionals: string[] = [];
-  const argumentError = validateCliArguments(argv, positionals);
-  if (argumentError !== undefined && !policyFullOutput) {
-    errorOutput.write(`codex-security: ${argumentError}\n`);
-    return 2;
-  }
-  const updateController = new AbortController();
-  const pendingUpdate =
-    errorOutput.isTTY === true &&
-    argv.length > 0 &&
-    argv[0] !== "completions" &&
-    !argv.some((argument) =>
-      [
-        "--help",
-        "-h",
-        "--version",
-        "--llms",
-        "--llms-full",
-        "--schema",
-        "--mcp",
-        "--dry-run",
-      ].includes(argument),
-    ) &&
-    updateNoticeEnabled(dependencies.environment)
-      ? dependencies
-          .checkForUpdate(updateController.signal)
-          .catch(() => undefined)
-      : undefined;
   let exitCode = 0;
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
@@ -3530,7 +3434,7 @@ export async function main(
       return { exitCode: 2, error: message };
     }
   };
-  const infoSchema = z.object({
+  const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
     scanMcp: z.literal(true),
@@ -3578,6 +3482,7 @@ export async function main(
     };
   };
   const cli = Cli.create("codex-security", {
+    aliases: ["cs"],
     description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
@@ -3623,23 +3528,14 @@ export async function main(
           .boolean()
           .default(false)
           .describe("Validate local generation inputs without starting Codex."),
-        auth: z
-          .enum(["auto", "chatgpt", "api-key"])
-          .default("auto")
-          .describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-          ),
+        auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         provider: PROVIDER_OPTION.describe(
           "Inference provider for policy generation.",
         ),
-        maxCost: z
-          .number()
-          .positive()
-          .optional()
-          .describe(
-            "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
-          ),
+        maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
+        ),
         ...RUNTIME_OPTION_SCHEMAS,
       }),
       examples: [
@@ -4300,13 +4196,9 @@ export async function main(
             .describe("Run FILE after each scan, including failures."),
           ...modelOptions("Model for planning and component scans.").shape,
           provider: PROVIDER_OPTION,
-          maxCost: z
-            .number()
-            .positive()
-            .optional()
-            .describe(
-              "Stop each component scan if estimated USD cost exceeds AMOUNT.",
-            ),
+          maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+            "Stop each component scan if estimated USD cost exceeds AMOUNT.",
+          ),
           showCost: SHOW_COST_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
         })
@@ -4554,13 +4446,9 @@ export async function main(
           .positive()
           .default(1)
           .describe("Maximum scan attempts per repository."),
-        maxCost: z
-          .number()
-          .positive()
-          .optional()
-          .describe(
-            "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
-          ),
+        maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
+        ),
         pluginPath: z
           .string()
           .min(1)
@@ -5841,7 +5729,7 @@ export async function main(
           openWorldHint: false,
         },
       },
-      output: infoSchema,
+      output: infoOutput,
       run: ({ options }) => metadata(options),
     });
 
@@ -5919,7 +5807,7 @@ export async function main(
           },
         ),
       infoInputSchema: z.object({ config: PROJECT_CONFIG_OPTION }),
-      infoOutputSchema: infoSchema,
+      infoOutputSchema: infoOutput,
       readInfo: metadata,
       scanInputSchema: z
         .object(scanOptionsSchema.shape)
@@ -5943,6 +5831,262 @@ export async function main(
       },
     });
   }
+
+  const commands = Cli.toCommands.get(cli)!;
+  const valueOptions = cliValueOptions(commands);
+  function isScanImportCommand(argv: readonly string[]): boolean {
+    const commandIndex = cliCommandIndex(argv);
+    return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
+  }
+
+  function normalizeScanImportArguments(
+    argv: readonly string[],
+  ): readonly string[] {
+    if (!isScanImportCommand(argv)) return argv;
+    const normalized: string[] = [];
+    const subcommandIndex = cliCommandIndex(argv) + 1;
+    for (let index = 0; index < argv.length; index += 1) {
+      const argument = argv[index]!;
+      const next = argv[index + 1];
+      // Incur reserves bare --json for output, but parses --json=FILE normally.
+      if (
+        index > subcommandIndex &&
+        argument === "--json" &&
+        next !== undefined &&
+        !next.startsWith("--") &&
+        next !== "-h"
+      ) {
+        normalized.push(`--json=${next}`);
+        index += 1;
+      } else {
+        normalized.push(argument);
+      }
+    }
+    return normalized;
+  }
+
+  function cliCommandIndex(argv: readonly string[]): number {
+    return argv.findIndex((value, index) => {
+      if (value.startsWith("-")) return false;
+      return index === 0 || !valueOptions.has(argv[index - 1]!);
+    });
+  }
+
+  function defaultListCommand(argv: readonly string[]): readonly string[] {
+    const commandIndex = cliCommandIndex(argv);
+    if (
+      commandIndex < 0 ||
+      !["scans", "findings"].includes(argv[commandIndex]!) ||
+      argv.includes("--help") ||
+      argv.includes("-h")
+    ) {
+      return argv;
+    }
+    const following = argv[commandIndex + 1];
+    if (following !== undefined && !following.startsWith("-")) return argv;
+    return [
+      ...argv.slice(0, commandIndex + 1),
+      "list",
+      ...argv.slice(commandIndex + 1),
+    ];
+  }
+
+  function validateCliArguments(
+    argv: readonly string[],
+    positionals: string[],
+  ): string | undefined {
+    if (argv.includes("--help") || argv.includes("-h")) return undefined;
+    const commandIndex = cliCommandIndex(argv);
+    const command = argv[commandIndex];
+    if (command === undefined || !commands.has(command)) return undefined;
+    const structuredOutput = argv.some(
+      (value, index) =>
+        value === "--json" ||
+        ((value === "--format" ||
+          value === "--format=json" ||
+          value === "--format=jsonl") &&
+          (value.endsWith("=json") ||
+            value.endsWith("=jsonl") ||
+            argv[index + 1] === "json" ||
+            argv[index + 1] === "jsonl")),
+    );
+    if (
+      structuredOutput &&
+      ["validate", "login", "logout", "serve"].includes(command) &&
+      !argv.includes("--schema")
+    ) {
+      return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
+    }
+    if (
+      command === "export" &&
+      structuredOutput &&
+      argv.some(
+        (value, index) =>
+          value === "--output=-" ||
+          (value === "--output" && argv[index + 1] === "-"),
+      ) &&
+      argv.some(
+        (value, index) =>
+          value === "--export-format=csv" ||
+          (value === "--export-format" && argv[index + 1] === "csv"),
+      )
+    ) {
+      return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
+    }
+    if (
+      command === "export" &&
+      structuredOutput &&
+      argv.some(
+        (value, index) =>
+          value === "--output=-" ||
+          (value === "--output" && argv[index + 1] === "-"),
+      ) &&
+      argv.some(
+        (value, index) =>
+          value === "--artifact=threat-model" ||
+          (value === "--artifact" && argv[index + 1] === "threat-model") ||
+          value === "--export-format=md" ||
+          (value === "--export-format" && argv[index + 1] === "md"),
+      )
+    ) {
+      return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
+    }
+    if (command === "scan" && !argv.includes("--schema")) {
+      if (
+        argv.some(
+          (value) =>
+            value === "--filter-output" || value.startsWith("--filter-output="),
+        )
+      ) {
+        return "--filter-output is not supported for scan results.";
+      }
+      if (
+        argv.some(
+          (value, index) =>
+            value === "--format=md" ||
+            (value === "--format" && argv[index + 1] === "md"),
+        )
+      ) {
+        return "Markdown output is not supported for scan results.";
+      }
+    }
+    const scanImport = isScanImportCommand(argv);
+    const nestedCommand =
+      scanImport ||
+      command === "scans" ||
+      command === "findings" ||
+      command === "publish" ||
+      command === "import";
+    const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
+    if (command === "info") {
+      for (let index = 0; index < argv.length; index += 1) {
+        const argument = argv[index]!;
+        if (
+          argument !== "--filter-output" &&
+          !argument.startsWith("--filter-output=")
+        ) {
+          continue;
+        }
+        const selector = argument.includes("=")
+          ? argument.slice(argument.indexOf("=") + 1)
+          : argv[index + 1];
+        if (
+          selector !== undefined &&
+          !selector
+            .split(",")
+            .every((field) => Object.hasOwn(infoOutput.shape, field))
+        ) {
+          return "--filter-output must select an info metadata field.";
+        }
+      }
+    }
+    for (
+      let index = commandIndex + (nestedCommand ? 2 : 1);
+      index < argv.length;
+      index += 1
+    ) {
+      const value = argv[index]!;
+      if (!value.startsWith("-")) {
+        positionals.push(value);
+        continue;
+      }
+      const equals = value.indexOf("=");
+      const option = equals < 0 ? value : value.slice(0, equals);
+      const canonicalOption = option.replace(
+        /[A-Z]/g,
+        (letter) => `-${letter.toLowerCase()}`,
+      );
+      if (
+        equals >= 0 ||
+        (!valueOptions.has(canonicalOption) &&
+          !(scanImport && option === "--json"))
+      )
+        continue;
+      const next = argv[index + 1];
+      if (next === undefined || next.startsWith("--") || next === "-h") {
+        return `Missing value for flag: ${option}`;
+      }
+      index += 1;
+    }
+    if (
+      subcommand === "match" &&
+      !argv.some((value) =>
+        ["--schema", "--llms", "--llms-full"].includes(value),
+      )
+    ) {
+      if (argv.includes("--all") && positionals.length > 0) {
+        return "scans match --all does not accept scan identifiers.";
+      }
+      if (!argv.includes("--all") && positionals.length !== 2) {
+        return "scans match requires two scan identifiers or --all.";
+      }
+    }
+    if (
+      command !== "validate" &&
+      command !== "verify-fix" &&
+      command !== "patch" &&
+      positionals.length >
+        (scanImport ||
+        command === "logout" ||
+        command === "info" ||
+        command === "serve"
+          ? 0
+          : subcommand === "compare" || subcommand === "match"
+            ? 2
+            : 1)
+    ) {
+      return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
+    }
+  }
+  argv = normalizeScanImportArguments(defaultListCommand(argv));
+  const policyFullOutput =
+    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
+  const argumentError = validateCliArguments(argv, positionals);
+  if (argumentError !== undefined && !policyFullOutput) {
+    errorOutput.write(`codex-security: ${argumentError}\n`);
+    return 2;
+  }
+  const updateController = new AbortController();
+  const pendingUpdate =
+    errorOutput.isTTY === true &&
+    argv.length > 0 &&
+    argv[0] !== "completions" &&
+    !argv.some((argument) =>
+      [
+        "--help",
+        "-h",
+        "--version",
+        "--llms",
+        "--llms-full",
+        "--schema",
+        "--dry-run",
+      ].includes(argument),
+    ) &&
+    updateNoticeEnabled(dependencies.environment)
+      ? dependencies
+          .checkForUpdate(updateController.signal)
+          .catch(() => undefined)
+      : undefined;
 
   // Incur cannot mount a command with both a handler and subcommands.
   // Select the nested import route while preserving scan [repository].
@@ -6183,63 +6327,6 @@ async function runScanImport(
   }
 }
 
-function isScanImportCommand(argv: readonly string[]): boolean {
-  const commandIndex = cliCommandIndex(argv);
-  return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
-}
-
-function normalizeScanImportArguments(
-  argv: readonly string[],
-): readonly string[] {
-  if (!isScanImportCommand(argv)) return argv;
-  const normalized: string[] = [];
-  const subcommandIndex = cliCommandIndex(argv) + 1;
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]!;
-    const next = argv[index + 1];
-    // Incur reserves bare --json for output, but parses --json=FILE normally.
-    if (
-      index > subcommandIndex &&
-      argument === "--json" &&
-      next !== undefined &&
-      !next.startsWith("--") &&
-      next !== "-h"
-    ) {
-      normalized.push(`--json=${next}`);
-      index += 1;
-    } else {
-      normalized.push(argument);
-    }
-  }
-  return normalized;
-}
-
-function cliCommandIndex(argv: readonly string[]): number {
-  return argv.findIndex((value, index) => {
-    if (value.startsWith("-")) return false;
-    return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
-  });
-}
-
-function defaultListCommand(argv: readonly string[]): readonly string[] {
-  const commandIndex = cliCommandIndex(argv);
-  if (
-    commandIndex < 0 ||
-    !["scans", "findings"].includes(argv[commandIndex]!) ||
-    argv.includes("--help") ||
-    argv.includes("-h")
-  ) {
-    return argv;
-  }
-  const following = argv[commandIndex + 1];
-  if (following !== undefined && !following.startsWith("-")) return argv;
-  return [
-    ...argv.slice(0, commandIndex + 1),
-    "list",
-    ...argv.slice(commandIndex + 1),
-  ];
-}
-
 async function prepareScanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
   parentScanId: string,
@@ -6454,209 +6541,33 @@ async function prepareScanArgumentsFromRecipe(
   };
 }
 
-function validateCliArguments(
-  argv: readonly string[],
-  positionals: string[],
-): string | undefined {
-  if (argv.includes("--help") || argv.includes("-h")) return undefined;
-  const commandIndex = cliCommandIndex(argv);
-  const command = argv[commandIndex];
-  if (
-    command === undefined ||
-    ![
-      "scan",
-      "policy",
-      "install-hook",
-      "bulk-scan",
-      "scan-components",
-      "scans",
-      "findings",
-      "export",
-      "publish",
-      "import",
-      "validate",
-      "verify-fix",
-      "suggest-owners",
-      "classify-severity",
-      "dedupe",
-      "patch",
-      "login",
-      "logout",
-      "serve",
-      "feedback",
-      "info",
-      "init",
-    ].includes(command)
-  ) {
-    return undefined;
-  }
-  const structuredOutput = argv.some(
-    (value, index) =>
-      value === "--json" ||
-      ((value === "--format" ||
-        value === "--format=json" ||
-        value === "--format=jsonl") &&
-        (value.endsWith("=json") ||
-          value.endsWith("=jsonl") ||
-          argv[index + 1] === "json" ||
-          argv[index + 1] === "jsonl")),
-  );
-  if (
-    structuredOutput &&
-    ["validate", "login", "logout", "serve"].includes(command) &&
-    !argv.includes("--schema")
-  ) {
-    return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
-  }
-  if (
-    command === "export" &&
-    structuredOutput &&
-    argv.some(
-      (value, index) =>
-        value === "--output=-" ||
-        (value === "--output" && argv[index + 1] === "-"),
-    ) &&
-    argv.some(
-      (value, index) =>
-        value === "--export-format=csv" ||
-        (value === "--export-format" && argv[index + 1] === "csv"),
-    )
-  ) {
-    return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-  }
-  if (
-    command === "export" &&
-    structuredOutput &&
-    argv.some(
-      (value, index) =>
-        value === "--output=-" ||
-        (value === "--output" && argv[index + 1] === "-"),
-    ) &&
-    argv.some(
-      (value, index) =>
-        value === "--artifact=threat-model" ||
-        (value === "--artifact" && argv[index + 1] === "threat-model") ||
-        value === "--export-format=md" ||
-        (value === "--export-format" && argv[index + 1] === "md"),
-    )
-  ) {
-    return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
-  }
-  if (command === "scan" && !argv.includes("--schema")) {
-    if (
-      argv.some(
-        (value) =>
-          value === "--filter-output" || value.startsWith("--filter-output="),
-      )
-    ) {
-      return "--filter-output is not supported for scan results.";
-    }
-    if (
-      argv.some(
-        (value, index) =>
-          value === "--format=md" ||
-          (value === "--format" && argv[index + 1] === "md"),
-      )
-    ) {
-      return "Markdown output is not supported for scan results.";
-    }
-  }
-  const scanImport = isScanImportCommand(argv);
-  const nestedCommand =
-    scanImport ||
-    command === "scans" ||
-    command === "findings" ||
-    command === "publish" ||
-    command === "import";
-  const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
-  if (command === "info") {
-    const metadataFields = new Set([
-      "sdkVersion",
-      "bundledPluginVersion",
-      "scanMcp",
-      "cancellationNote",
-      "cliVersion",
-      "codexVersion",
-      "codexSdkVersion",
-      "model",
-      "reasoningEffort",
-      "nextStep",
-      "configuration",
-    ]);
-    for (let index = 0; index < argv.length; index += 1) {
-      const argument = argv[index]!;
-      if (
-        argument !== "--filter-output" &&
-        !argument.startsWith("--filter-output=")
-      ) {
-        continue;
-      }
-      const selector = argument.includes("=")
-        ? argument.slice(argument.indexOf("=") + 1)
-        : argv[index + 1];
-      if (
-        selector !== undefined &&
-        !selector.split(",").every((field) => metadataFields.has(field))
-      ) {
-        return "--filter-output must select an info metadata field.";
+function cliValueOptions(
+  commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
+): Set<string> {
+  const options = new Set([
+    "--format",
+    "--filter-output",
+    "--token-limit",
+    "--token-offset",
+  ]);
+  for (const command of commands.values()) {
+    if ("_group" in command) {
+      for (const option of cliValueOptions(command.commands))
+        options.add(option);
+    } else if ("options" in command && command.options) {
+      for (const [name, schema] of Object.entries(
+        z.toJSONSchema(command.options, { io: "input" }).properties ?? {},
+      )) {
+        if (typeof schema === "object" && schema.type === "boolean") continue;
+        options.add(
+          `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`,
+        );
+        const alias = command.alias?.[name];
+        if (alias !== undefined) options.add(`-${alias}`);
       }
     }
   }
-  for (
-    let index = commandIndex + (nestedCommand ? 2 : 1);
-    index < argv.length;
-    index += 1
-  ) {
-    const value = argv[index]!;
-    if (!value.startsWith("-")) {
-      positionals.push(value);
-      continue;
-    }
-    const equals = value.indexOf("=");
-    const option = equals < 0 ? value : value.slice(0, equals);
-    const canonicalOption = option.replace(
-      /[A-Z]/g,
-      (letter) => `-${letter.toLowerCase()}`,
-    );
-    if (
-      equals >= 0 ||
-      (!VALUE_OPTIONS.has(canonicalOption) &&
-        !(scanImport && option === "--json"))
-    )
-      continue;
-    const next = argv[index + 1];
-    if (next === undefined || next.startsWith("--") || next === "-h") {
-      return `Missing value for flag: ${option}`;
-    }
-    index += 1;
-  }
-  if (
-    subcommand === "match" &&
-    !argv.some((value) => ["--schema", "--llms", "--llms-full"].includes(value))
-  ) {
-    if (argv.includes("--all") && positionals.length > 0) {
-      return "scans match --all does not accept scan identifiers.";
-    }
-    if (!argv.includes("--all") && positionals.length !== 2) {
-      return "scans match requires two scan identifiers or --all.";
-    }
-  }
-  if (
-    command !== "validate" &&
-    command !== "verify-fix" &&
-    command !== "patch" &&
-    positionals.length >
-      (scanImport ||
-      command === "logout" ||
-      command === "info" ||
-      command === "serve"
-        ? 0
-        : subcommand === "compare" || subcommand === "match"
-          ? 2
-          : 1)
-  ) {
-    return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
-  }
+  return options;
 }
 
 async function matchAllScans(

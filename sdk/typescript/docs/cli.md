@@ -1,8 +1,9 @@
 # CLI and workflows
 
-Use `npx @openai/codex-security` without a global install. The examples below
-use `codex-security`, which is available after
-`npm install --global @openai/codex-security`.
+The global installation provides both `codex-security` and its short alias `cs`.
+They accept the same arguments and options. The examples below use
+`codex-security`; you can also use `cs` or, without a global installation,
+`npx @openai/codex-security`. See the [installation guide](../README.md#install).
 
 ```bash
 codex-security --help

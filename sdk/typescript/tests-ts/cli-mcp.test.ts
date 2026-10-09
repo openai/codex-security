@@ -191,9 +191,16 @@ describe("CLI MCP scans", () => {
       deps.runMcpCommand = async (_command, _input, options) => {
         expect(options.environment["CODEX_HOME"]).toBe(expected);
         expect(configuredCodexHome(options.environment)).toBe(expected);
-        expect(codexSecurityStateDirectory(options.environment)).toBe(
-          join(expected, "state", "plugins", "codex-security"),
-        );
+        if (process.platform === "win32") {
+          // Windows state paths reject trailing spaces; anchoring must not trim them.
+          expect(() =>
+            codexSecurityStateDirectory(options.environment),
+          ).toThrow("Windows-ambiguous components");
+        } else {
+          expect(codexSecurityStateDirectory(options.environment)).toBe(
+            join(expected, "state", "plugins", "codex-security"),
+          );
+        }
         return { exitCode: 0 };
       };
       const session = await connect(deps);

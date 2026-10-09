@@ -203,6 +203,7 @@ describe("CLI", () => {
     const stderr = capture();
     expect(await main([], root.stream, stderr.stream, dependencies())).toBe(0);
     expect(root.text()).toContain("Usage: codex-security <command>");
+    expect(root.text()).toContain("Aliases: cs");
     expect(root.text()).toContain("bulk-scan");
     expect(root.text()).toContain("install-hook");
     expect(root.text()).not.toContain("multiscan");
@@ -351,6 +352,11 @@ describe("CLI", () => {
       0,
     );
     expect(completions.text()).toContain('export COMPLETE="bash"');
+    for (const name of ["codex-security", "cs"]) {
+      expect(completions.text()).toMatch(
+        new RegExp(`^complete .+ ${name}$`, "mu"),
+      );
+    }
   });
 
   test("documents every public command argument and option", async () => {
@@ -2039,7 +2045,7 @@ describe("CLI", () => {
   });
 
   test.each([false, true])(
-    "shows durable Deep progress without changing stdout or TUI layout (interactive=%s)",
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=%j)",
     async (interactive) => {
       const { stdout, stderr, runCli } = createCliTest(main, {
         stderr: interactive,
@@ -2635,6 +2641,7 @@ describe("CLI", () => {
 
   test.each(
     [
+      ["info", "--workers"],
       ["classify-severity", "--scan", "--rubric", "policy.md"],
       ["classify-severity", "--scan-dir", "--rubric", "policy.md"],
       ["classify-severity", "--scan", "latest", "--rubric", "--reprocess"],
