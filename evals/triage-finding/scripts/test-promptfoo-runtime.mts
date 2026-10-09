@@ -14,7 +14,7 @@ try {
   for (const staged of [
     undefined,
     path.join(evalRoot, "synthetic staged runtime"),
-  ]) {
+  ] as const) {
     if (staged === undefined) delete process.env.TRIAGE_RUNTIME_ROOT;
     else process.env.TRIAGE_RUNTIME_ROOT = staged;
     const root = path.resolve(evalRoot, "../..");
@@ -59,19 +59,43 @@ for (const target of [
 }
 
 const calibrationRepo = "calibration-0123456789abcdef";
-for (const customRoot of ["", path.join(evalRoot, "custom targets # space")]) {
-  const replayed = runtimeVars({
-    calibration_repo: calibrationRepo,
-    calibration_repo_root: customRoot,
-    target_repo: "old checkout",
-  });
-  assert.equal(
-    replayed.target_repo,
-    path.join(
-      customRoot || path.join(evalRoot, "artifacts", "calibration-repos"),
-      calibrationRepo,
-    ),
-  );
+const originalCalibrationRoot = process.env.TRIAGE_CALIBRATION_ROOT;
+const defaultCalibrationRoot = path.join(
+  evalRoot,
+  "artifacts",
+  "calibration-repos",
+);
+const environmentCalibrationRoot = path.join(
+  evalRoot,
+  "environment targets # space",
+);
+const explicitCalibrationRoot = path.join(evalRoot, "case targets # space");
+try {
+  for (const [environmentRoot, caseRoot, expectedRoot] of [
+    ["", "", defaultCalibrationRoot],
+    [environmentCalibrationRoot, "", environmentCalibrationRoot],
+    ["", explicitCalibrationRoot, explicitCalibrationRoot],
+    [
+      environmentCalibrationRoot,
+      explicitCalibrationRoot,
+      explicitCalibrationRoot,
+    ],
+  ]) {
+    process.env.TRIAGE_CALIBRATION_ROOT = environmentRoot;
+    const replayed = runtimeVars({
+      calibration_repo: calibrationRepo,
+      calibration_repo_root: caseRoot,
+      target_repo: "old checkout",
+    });
+    assert.equal(
+      replayed.target_repo,
+      path.join(expectedRoot, calibrationRepo),
+    );
+  }
+} finally {
+  if (originalCalibrationRoot === undefined)
+    delete process.env.TRIAGE_CALIBRATION_ROOT;
+  else process.env.TRIAGE_CALIBRATION_ROOT = originalCalibrationRoot;
 }
 
 for (const name of [

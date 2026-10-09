@@ -13,6 +13,7 @@ export default (vars: Record<string, unknown>) => {
   if (vars.calibration_repo) {
     targetRepo = path.join(
       (vars.calibration_repo_root ||
+        process.env.TRIAGE_CALIBRATION_ROOT ||
         path.join(evalRoot, "artifacts", "calibration-repos")) as string,
       vars.calibration_repo as string,
     );
