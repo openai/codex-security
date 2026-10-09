@@ -531,7 +531,10 @@ describe("CLI workbench", () => {
       const calls: Array<readonly string[]> = [];
       const stdout = captureCli(main, "stdout");
       const deps = dependencies({
-        environment: { CODEX_SECURITY_STATE_DIR: state },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: state,
+          CODEX_HOME: join(state, "codex-home"),
+        },
         onWorkbench: (args): JsonObject => {
           calls.push(args);
           if (args[0] === "list-scans") {
@@ -1498,6 +1501,29 @@ describe("CLI workbench", () => {
     ).toBe(0);
     expect(onTurn.mock.lastCall?.[1]?.parentScanId).toBe(scanId);
   });
+
+  test.each([null, "", "unknown", 1])(
+    "rejects an invalid saved severity policy: %j",
+    async (failOnSeverity) => {
+      const stderr = captureCli(main, "stderr");
+      const onRun = mock();
+      const saved = savedRecipe();
+      expect(
+        await stderr.run(
+          ["scans", "rerun", saved.scanId],
+          dependencies({
+            onRun,
+            onWorkbench: () => ({
+              ...saved,
+              recipe: { ...saved.recipe, failOnSeverity },
+            }),
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain("invalid severity policy");
+      expect(onRun).not.toHaveBeenCalled();
+    },
+  );
 
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     const onConfig = mock<(config: CodexSecurityConfig) => void>();

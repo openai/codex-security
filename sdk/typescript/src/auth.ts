@@ -73,7 +73,7 @@ export async function readCodexHomeConfig(
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw new CodexSecurityError(
-      `Could not read Codex configuration ${path}: ${errorMessage(error)}`,
+      `Could not read the configured Codex provider from ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }

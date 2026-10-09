@@ -1,4 +1,7 @@
 import { readJson, writeJson } from "./support/json.ts";
+import { randomUUID } from "node:crypto";
+import { loadWorkbenchProcess } from "./support/workbench-process.ts";
+import { finding, workerDraft } from "./scan-draft-fixture.ts";
 import { assertFlagPair } from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { mock } from "node:test";
@@ -47,7 +50,7 @@ const {
   CodexSdkWorkerExecutor,
   resolveCodexPath,
   snapshotWorkerEnvironment,
-  appendSafeItemDiagnostic,
+  appendItemDiagnostic,
   classifyCodexWorkerError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
@@ -58,7 +61,7 @@ const {
   stdin: {
     // Test the environment snapshot without adding a production export.
     contents: `${await readFile(executorSource, "utf8")}
-export { snapshotWorkerEnvironment, appendSafeItemDiagnostic };
+export { snapshotWorkerEnvironment, appendItemDiagnostic };
 export * from "./errors.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
@@ -123,8 +126,11 @@ try {
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
     await testRetryNotificationDoesNotInterruptTurn();
-    await testSandboxNamespaceDiagnosticIsSanitized();
-    await testOwnedArtifactToolFailureDiagnosticIsSanitized();
+    await testSandboxNamespaceDiagnosticIsPreserved();
+    await testOwnedArtifactToolFailureDiagnosticIsPreserved();
+    for (const reference of ["discovery:\0" + "0", "😀".repeat(1300)]) {
+      await testArtifactDiagnosticSurvivesWorkerRetries(reference);
+    }
     await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
     await testStreamTerminationWithoutTerminalEventFails();
     await testAbortPropagation();
@@ -2467,6 +2473,13 @@ async function testRetryNotificationDoesNotInterruptTurn() {
       subagents: 3,
     });
     assert.equal(result.threadId, "fixture-thread-id");
+    assert.deepEqual(result.diagnostics, [
+      {
+        code: "worker_error",
+        message:
+          "Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)",
+      },
+    ]);
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--model"), false);
     assertConfigOverrides(invocation.argv, {
@@ -2475,7 +2488,7 @@ async function testRetryNotificationDoesNotInterruptTurn() {
   });
 }
 
-async function testSandboxNamespaceDiagnosticIsSanitized() {
+async function testSandboxNamespaceDiagnosticIsPreserved() {
   const result = await runFixtureWorker(
     "BWRAP_NAMESPACE_FAILURE",
     "discovery",
@@ -2484,14 +2497,222 @@ async function testSandboxNamespaceDiagnosticIsSanitized() {
   assert.deepEqual(result.diagnostics, [
     {
       code: "sandbox_namespace_exhausted",
-      message: "Codex worker sandbox namespace creation failed (bwrap ENOSPC).",
+      message:
+        "private source text\nbwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_user_namespaces exceeded (ENOSPC)",
     },
   ]);
   const serialized = JSON.stringify(result);
-  assert.doesNotMatch(serialized, /super-secret-command|private source text/);
+  assert.doesNotMatch(serialized, /super-secret-command/);
 }
 
-async function testOwnedArtifactToolFailureDiagnosticIsSanitized() {
+async function testArtifactDiagnosticSurvivesWorkerRetries(reference: string) {
+  const { executeWorkbench } = await loadWorkbenchProcess();
+  const {
+    WorkbenchDeepScanStore,
+    DeepScanWorkerRunner,
+    createDeepScanArtifacts,
+    requireRegularFile,
+    recordCodexSecurityDeepReduction,
+  } = await importModule({
+    stdin: {
+      contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
+export { DeepScanWorkerRunner } from "./src/deep-scan/worker-runner.ts";
+export { createDeepScanArtifacts, requireRegularFile } from "./src/deep-scan/artifacts.ts";
+export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";`,
+      resolveDir: path.resolve(import.meta.dirname, ".."),
+    },
+    loader: { ".md": "text" },
+  });
+  await withWorkerFixture(async (fixture) => {
+    const saved = ["CODEX_HOME", "FAKE_CODEX_ARTIFACT_EVENT"].map(
+      (name) => [name, process.env[name]] as const,
+    );
+    process.env.CODEX_HOME = fixture.root;
+    try {
+      const targetPath = path.join(fixture.root, "target");
+      await mkdir(targetPath);
+      await writeFile(
+        path.join(targetPath, "fixture.py"),
+        "print(1)\nprint(2)\n",
+      );
+      const store = new WorkbenchDeepScanStore(
+        (args: string[], input?: string) =>
+          executeWorkbench(
+            process.env.PYTHON?.trim() || "python3",
+            args,
+            path.join(fixture.root, "state"),
+            input,
+          ),
+      );
+      const started = await store.begin({
+        targetPath,
+        threadId: "diagnostic-owner",
+        scanRoot: path.join(fixture.root, "scans"),
+      });
+      const { run } = await store.claimCoordinator({
+        scanId: started.scanId,
+        threadId: "diagnostic-owner",
+      });
+      const artifacts = createDeepScanArtifacts(run.scanDir);
+      const sourcePath = path.join(
+        artifacts.workersRoot,
+        "discovery/output/result.json",
+      );
+      const artifactDir = path.join(
+        artifacts.dedupRoot,
+        randomUUID(),
+        "output",
+      );
+      const promptPath = path.join(path.dirname(artifactDir), "prompt.md");
+      await mkdir(path.dirname(sourcePath), { recursive: true });
+      await mkdir(artifactDir, { recursive: true });
+      await writeFile(promptPath, "Record the reducer result.");
+      const sourceFinding = finding("fixture", "fixture.py");
+      await writeJson(
+        sourcePath,
+        workerDraft([sourceFinding], { scanId: run.scanId }),
+      );
+      const workerIds = [randomUUID(), randomUUID()];
+      for (const id of workerIds) {
+        const worker = {
+          id,
+          scanId: run.scanId,
+          kind: "discovery",
+          promptPath,
+          artifactDir: path.dirname(sourcePath),
+          attempt: 1,
+        };
+        await store.updateWorker({ ...worker, status: "running" });
+        await store.updateWorker({
+          ...worker,
+          status: "succeeded",
+          resultManifestPath: sourcePath,
+        });
+      }
+      const workerId = randomUUID();
+      await store.claimDedup({
+        id: workerId,
+        scanId: run.scanId,
+        workerIds,
+        promptPath,
+        artifactDir,
+      });
+      const deepReducer = {
+        scanRoot: run.scanDir,
+        claimedWorkers: [{ id: "discovery", resultPath: sourcePath }],
+      };
+      let message = "";
+      await assert.rejects(
+        () =>
+          recordCodexSecurityDeepReduction(
+            {
+              root: artifactDir,
+              repoRoot: targetPath,
+              layout: "reducer",
+              scanId: run.scanId,
+              deepReducer,
+            },
+            {
+              scanId: run.scanId,
+              findings: [
+                {
+                  ...sourceFinding,
+                  provenance: {
+                    ...sourceFinding.provenance,
+                    sourceFindingIds: [reference],
+                  },
+                },
+              ],
+            },
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          message = error.message;
+          return message.includes(reference);
+        },
+      );
+      // Truncating the long, well-formed emoji message splits a surrogate pair.
+      const persistedDiagnostic = reference.includes("\0")
+        ? message
+        : "\ufffd\n...[truncated; sha256:";
+      process.env.FAKE_CODEX_ARTIFACT_EVENT = JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "diagnostic",
+          type: "mcp_tool_call",
+          server: "cs_artifacts",
+          tool: "record_codex_security_deep_reduction",
+          status: "failed",
+          error: null,
+          result: { isError: true, content: [{ type: "text", text: message }] },
+        },
+      });
+      let retries = 0;
+      const runner = new DeepScanWorkerRunner({
+        run,
+        store,
+        executor: new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+        }),
+        artifacts,
+        pluginRoot: path.resolve(import.meta.dirname, "../.."),
+        clock: {
+          now: () => new Date(),
+          sleep: async () => {
+            retries++;
+            const state = await store.get(run.scanId, "diagnostic-owner");
+            const worker = state.persistedWorkers.find(
+              (worker: { id: string }) => worker.id === workerId,
+            );
+            assert.equal(worker.attempt, 1);
+            assert.ok(worker.error.includes(persistedDiagnostic));
+            assert.equal(
+              (await readJson(fixture.markerPath)).argv.includes("resume"),
+              false,
+            );
+          },
+        },
+        random: () => 0,
+        log: () => {},
+        retryDelaysMs: [0],
+        signal: new AbortController().signal,
+      });
+      const outcome = await runner.runWorkerWithRetries({
+        workerId,
+        kind: "dedup",
+        promptPath,
+        promptRoot: path.join(path.dirname(artifactDir), "prompts"),
+        artifactDir,
+        artifactContext: { root: artifactDir, layout: "reducer", deepReducer },
+        subagents: 0,
+        validate: () =>
+          requireRegularFile(
+            path.join(artifactDir, "result.json"),
+            artifactDir,
+          ),
+        beforeRetry: async () => {},
+      });
+      assert.equal(outcome.status, "failed");
+      assert.equal(retries, 1);
+      const state = await store.get(run.scanId, "diagnostic-owner");
+      const worker = state.persistedWorkers.find(
+        (worker: { id: string }) => worker.id === workerId,
+      );
+      assert.equal(worker.status, "failed");
+      assert.equal(worker.attempt, 2);
+      assert.ok(worker.error.includes(persistedDiagnostic));
+      const invocation = await readJson(fixture.markerPath);
+      assert.equal(
+        invocation.argv[invocation.argv.indexOf("resume") + 1],
+        "fixture-thread-id",
+      );
+    } finally {
+      for (const [name, value] of saved) restoreEnv(name, value);
+    }
+  });
+}
+
+async function testOwnedArtifactToolFailureDiagnosticIsPreserved() {
   for (const { prompt, tool, reason } of [
     {
       prompt: "OWNED_ARTIFACT_TOOL_REJECTED",
@@ -2530,7 +2751,11 @@ async function testOwnedArtifactToolFailureDiagnosticIsSanitized() {
       assert.deepEqual(result.diagnostics, [
         {
           code: "artifact_tool_failed",
-          message: `Codex worker artifact tool ${tool} ${reason}.`,
+          message: prompt.includes("TRANSPORT_FAILED")
+            ? "--provider-error transport closed sk-proj-synthetic-secret /private/customer/path"
+            : prompt.includes("REJECTED")
+              ? "private output sk-proj-synthetic-secret"
+              : `Codex worker artifact tool ${tool} ${reason}.`,
         },
       ]);
     } else {
@@ -2538,7 +2763,7 @@ async function testOwnedArtifactToolFailureDiagnosticIsSanitized() {
     }
     assert.doesNotMatch(
       JSON.stringify(result),
-      /synthetic-secret|private source|private output|private\/customer\/path/i,
+      /Bearer synthetic-secret|private source text/i,
     );
   }
 }
@@ -2556,13 +2781,23 @@ function testCodeModeFrameDiagnosticBoundaries() {
   for (const item of [
     { type: "error", message: ipcFrameError },
     { ...failedArtifactTool, error: { message: ipcFrameError } },
+    {
+      ...failedArtifactTool,
+      server: "foreign_server",
+      error: { message: ipcFrameError },
+    },
     { ...failedArtifactTool, result: resultWithText(ipcFrameError) },
   ]) {
     const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendSafeItemDiagnostic(diagnostics, failedArtifactTool);
-    appendSafeItemDiagnostic(diagnostics, item);
-    appendSafeItemDiagnostic(diagnostics, failedArtifactTool);
+    appendItemDiagnostic(diagnostics, failedArtifactTool);
+    appendItemDiagnostic(diagnostics, item);
+    appendItemDiagnostic(diagnostics, failedArtifactTool);
     assert.deepEqual(diagnostics, [
+      {
+        code: "artifact_tool_failed",
+        message:
+          "Codex worker artifact tool get_codex_security_deep_reducer_inputs failed.",
+      },
       { code: "artifact_tool_failed", message: ipcFrameError },
     ]);
   }
@@ -2575,17 +2810,14 @@ function testCodeModeFrameDiagnosticBoundaries() {
     "private path /customer/repo: IPC frame limit exceeded",
   ]) {
     const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendSafeItemDiagnostic(diagnostics, { type: "error", message });
-    appendSafeItemDiagnostic(diagnostics, {
+    appendItemDiagnostic(diagnostics, { type: "error", message });
+    appendItemDiagnostic(diagnostics, {
       ...failedArtifactTool,
       result: resultWithText(message),
     });
     assert.deepEqual(diagnostics, [
-      {
-        code: "artifact_tool_failed",
-        message:
-          "Codex worker artifact tool get_codex_security_deep_reducer_inputs returned an error.",
-      },
+      { code: "worker_error", message },
+      { code: "artifact_tool_failed", message },
     ]);
   }
   for (const item of [
@@ -2593,6 +2825,11 @@ function testCodeModeFrameDiagnosticBoundaries() {
       ...failedArtifactTool,
       server: "foreign_server",
       result: resultWithText(ipcFrameError),
+    },
+    {
+      ...failedArtifactTool,
+      server: "foreign_server",
+      error: { message: "Synthetic unrelated transport failure" },
     },
     {
       type: "command_execution",
@@ -2603,7 +2840,7 @@ function testCodeModeFrameDiagnosticBoundaries() {
     { type: "unknown", status: "failed", error: { message: ipcFrameError } },
   ]) {
     const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendSafeItemDiagnostic(diagnostics, item);
+    appendItemDiagnostic(diagnostics, item);
     assert.deepEqual(diagnostics, []);
   }
 }
@@ -3106,6 +3343,7 @@ const resumeIndex = process.argv.indexOf('resume');
 const threadId = resumeIndex === -1 ? 'fixture-thread-id' : process.argv[resumeIndex + 1];
 console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));
 if (stdin.includes('IPC_DIAGNOSTIC_EVENT')) console.log(stdin.split('\\n')[1]);
+if (process.env.FAKE_CODEX_ARTIFACT_EVENT) console.log(process.env.FAKE_CODEX_ARTIFACT_EVENT);
 if (stdin.includes('MALFORMED_COMMAND_EVENT')) {
   const output = JSON.parse(stdin.split('\\n')[1]);
   const event = { type: 'item.completed', item: { id: 'fixture-command', type: 'command_execution', command: 'cat example.ts', aggregated_output: output, exit_code: 0, status: 'completed' } };
@@ -3129,7 +3367,7 @@ if (stdin.includes('BWRAP_NAMESPACE_FAILURE')) console.log(JSON.stringify({ type
 if (stdin.includes('ARTIFACT_TOOL_')) {
   const server = stdin.includes('FOREIGN_ARTIFACT_TOOL_') ? 'untrusted_server' : stdin.includes('LEGACY_OWNED_ARTIFACT_TOOL_') ? 'codex_security_artifacts' : 'cs_artifacts';
   const tool = stdin.includes('ADDITIONAL_OWNED_ARTIFACT_TOOL_') ? 'additional_codex_security_worker_tool' : stdin.includes('DISCOVERY_OWNED_ARTIFACT_TOOL_') ? 'record_codex_security_discovery_candidates' : 'record_codex_security_deep_reduction';
-  const item = { id: 'mcp-1', type: 'mcp_tool_call', server, tool, arguments: { secret: 'Bearer synthetic-secret', source: 'private source text' }, result: stdin.includes('REJECTED') ? { content: [{ type: 'text', text: 'private output sk-proj-synthetic-secret' }] } : null, error: stdin.includes('TRANSPORT_FAILED') ? { message: 'transport closed sk-proj-synthetic-secret /private/customer/path' } : null, status: 'failed' };
+  const item = { id: 'mcp-1', type: 'mcp_tool_call', server, tool, arguments: { secret: 'Bearer synthetic-secret', source: 'private source text' }, result: stdin.includes('REJECTED') ? { content: [{ type: 'text', text: 'private output sk-proj-synthetic-secret' }] } : null, error: stdin.includes('TRANSPORT_FAILED') ? { message: '--provider-error transport closed sk-proj-synthetic-secret /private/customer/path' } : null, status: 'failed' };
   console.log(JSON.stringify({ type: 'item.completed', item }));
 }
 console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));

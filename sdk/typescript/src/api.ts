@@ -4274,15 +4274,11 @@ async function collectResult(
       await requireScanFile(scanDir, name, name, signal);
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
-      const cause = error instanceof Error ? error.cause : undefined;
-      if ((cause as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-        missing.push(name);
-      } else {
-        throw new IncompleteScanError(
-          `Could not read required scan artifact: ${errorMessage(error)}${cause === undefined ? "" : `: ${errorMessage(cause)}`}`,
-          { cause: error },
-        );
-      }
+      let cause = error;
+      while (cause instanceof Error && cause.cause !== undefined)
+        cause = cause.cause;
+      if (!isRecord(cause) || cause["code"] !== "ENOENT") throw error;
+      missing.push(name);
     }
   }
   if (missing.length > 0) {

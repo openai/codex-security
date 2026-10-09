@@ -61,8 +61,11 @@ export async function readArtifactText(
   const canonical = await artifactSourcePath(context, components, label);
   try {
     return await fs.readFile(canonical, "utf8");
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
+  } catch (error) {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -81,8 +84,11 @@ export async function readArtifactTextWithMetadata(
     } finally {
       await handle.close();
     }
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
+  } catch (error) {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -97,7 +103,7 @@ export async function artifactSourcePath(
 
   for (const [index, component] of components.entries()) {
     current = join(current, component);
-    const metadata = await fs.lstat(current).catch(() => undefined);
+    const metadata = await inspectOptionalPath(current, label);
     if (!metadata) {
       throw new Error(label + ": the requested artifact is unavailable.");
     }
@@ -320,7 +326,10 @@ async function inspectOptionalPath(
     return await fs.lstat(path);
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return undefined;
-    throw new Error(label + ": artifact path cannot be inspected.");
+    throw new Error(
+      `${label}: artifact path cannot be inspected: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 

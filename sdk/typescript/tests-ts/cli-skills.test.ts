@@ -1323,6 +1323,40 @@ process.stdout.write(JSON.stringify({
     }
   });
 
+  test("escapes native validation launch failures at the CLI boundary", async () => {
+    const directory = await temporaryDirectory("validation-launch-failure-");
+    try {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const command = join(
+        directory,
+        "missing-codex\u001b[31m\rnext\nline-café",
+      );
+      expect(
+        await runCli(
+          ["validate", "Synthetic finding"],
+          dependencies({
+            currentDirectory: directory,
+            environment: {
+              PATH: process.env["PATH"],
+              CODEX_HOME: join(directory, "home"),
+              CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+              OPENAI_API_KEY: "synthetic-validation-key",
+            },
+            onCodex: (_args, output, environment) =>
+              runCodexSkillCommand([], output, { command }, environment),
+          }),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("missing-codex");
+      expect(stderr.text()).toContain("line-café");
+      expect(stderr.text()).not.toContain("\u001b");
+      expect(stderr.text()).not.toContain("\r");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     "Failed after 1401 bytes",
     "permission denied opening cache",
@@ -1399,6 +1433,11 @@ process.stdout.write(JSON.stringify({
     },
   );
 
+  test("retains raw diagnostic lines until the terminal boundary", () => {
+    const detail = "raw detail \u001b[31m\rnext\nline café C1 \u009b2J";
+    expect(skillCommandFailure("validate", 7, detail)).toContain(detail);
+  });
+
   test("keeps unknown credential failures neutral", () => {
     for (const authentication of [
       null,
@@ -1447,8 +1486,29 @@ process.stdout.write(JSON.stringify({
           "process.exitCode=7",
         status: 7,
         stdout: "",
-        stderr: "Authentication failed",
+        stderr: "401 sk-proj-SYNTHETIC_SECRET",
       },
+      {
+        source:
+          'process.stderr.write("EACCES: synthetic permission denial\\n" + "é🔒".repeat(25000));process.exitCode=7;',
+        status: 7,
+        stdout: "",
+        stderr: "EACCES: synthetic permission denial\n" + "é🔒".repeat(25000),
+      },
+      ...["stderr", "turn.failed"].map((transport) => {
+        const detail =
+          "EACCES: permission denied, open /synthetic/output/report.json\u001b[31m\rnext\nline café 🔒 sk-proj-SYNTHETIC_SECRET\u001b]52;c;U1lOVEhFVElD\u0007 C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end";
+        return {
+          source:
+            transport === "stderr"
+              ? `process.stderr.write(${JSON.stringify(detail)}); process.exitCode=7;`
+              : `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n"); process.exitCode=7;`,
+          status: 7,
+          stdout: "",
+          stderr:
+            "EACCES: permission denied, open /synthetic/output/report.json [31m next\nline café 🔒 sk-proj-SYNTHETIC_SECRET ]52;c;U1lOVEhFVElD  C1   2J H 52;c;U1lOVEhFVElD   end",
+        };
+      }),
       {
         source:
           'process.stdout.write(JSON.stringify({type:"turn.completed"})+"\\n")',
@@ -1474,8 +1534,6 @@ process.stdout.write(JSON.stringify({
       } else {
         expect(stderr.text()).toContain(scenario.stderr);
       }
-      if (scenario.status === 7)
-        expect(stderr.text()).toContain("401 sk-proj-SYNTHETIC_SECRET");
     }
   });
 

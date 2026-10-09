@@ -273,15 +273,14 @@ async function assertBundledNodeLauncher() {
   }
 }
 
-async function assertMissingPythonError() {
+async function assertPythonLaunchError(code: "ENOENT" | "EACCES") {
+  const python = path.join(tmpdir(), `codex-security-python-${randomUUID()}`);
+  if (code === "EACCES") await writeFile(python, "", { mode: 0o600 });
   const missingPythonServer = startTestServer({
     cwd: pluginRoot,
     env: {
       CODEX_SECURITY_STATE_DIR: stateDir,
-      PYTHON: path.join(
-        tmpdir(),
-        `codex-security-missing-python-${randomUUID()}`,
-      ),
+      PYTHON: python,
     },
   });
   try {
@@ -298,15 +297,17 @@ async function assertMissingPythonError() {
     const errorText = response.result.content
       .map((item: { text: string }) => item.text)
       .join(" ");
-    assert.match(errorText, /could not start its Python 3 helper/);
-    assert.match(errorText, /bundled Python runtime/);
-    assert.match(errorText, /set the PYTHON environment variable/);
-    assert.doesNotMatch(
-      errorText,
-      /ENOENT|spawn .*codex-security-missing-python/,
-    );
+    assert.ok(errorText.includes(`spawn ${python} ${code}`), errorText);
+    if (code === "ENOENT") {
+      assert.match(errorText, /could not start its Python 3 helper/);
+      assert.match(errorText, /bundled Python runtime/);
+      assert.match(errorText, /set the PYTHON environment variable/);
+    } else {
+      assert.doesNotMatch(errorText, /Reinstall or update/);
+    }
   } finally {
     await missingPythonServer.stop();
+    await rm(python, { force: true });
   }
 }
 
@@ -1438,7 +1439,8 @@ try {
 
   await assertBundledNodeLauncher();
   await assertBundledPythonRuntime();
-  await assertMissingPythonError();
+  await assertPythonLaunchError("ENOENT");
+  if (process.platform !== "win32") await assertPythonLaunchError("EACCES");
   await assertWorkbenchStdinFailureDoesNotCrashServer();
   await assertUnavailableUserInputFallback();
   for (const scope of [

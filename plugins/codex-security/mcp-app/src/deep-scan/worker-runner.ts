@@ -667,7 +667,10 @@ function withWorkerDiagnostics(
   const namespaceFailure = diagnostics.find(
     (diagnostic) => diagnostic.code === "sandbox_namespace_exhausted",
   );
-  const diagnostic = namespaceFailure ?? diagnostics[0];
+  const diagnostic =
+    namespaceFailure ??
+    diagnostics.find((item) => item.code !== "worker_error") ??
+    diagnostics[0];
   const combined = new Error(
     `${diagnostics.map((item) => item.message).join(" ")} Deterministic artifact validation also reported: ${normalized.message}`,
     { cause: normalized },
@@ -684,7 +687,9 @@ function withWorkerDiagnostics(
 function isMissingWorkerResult(error: Error, artifactDir: string): boolean {
   const diagnosed = error as NodeJS.ErrnoException;
   const original =
-    diagnosed.code === "artifact_tool_failed" && error.cause instanceof Error
+    (diagnosed.code === "artifact_tool_failed" ||
+      diagnosed.code === "worker_error") &&
+    error.cause instanceof Error
       ? (error.cause as NodeJS.ErrnoException)
       : diagnosed;
   return (

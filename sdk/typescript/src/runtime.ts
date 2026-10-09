@@ -1828,22 +1828,9 @@ export async function runWorkbench(
     }
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
-    const databaseFailure =
-      /\b(?:unable to open database file|attempt to write a readonly database|readonly database|disk i\/o error)\b/iu.test(
-        detail,
-      );
     const failure =
       options.failureMessage ?? "Could not run the Codex Security workbench";
-    throw new CodexSecurityError(
-      databaseFailure
-        ? `${failure}: cannot open the workbench database at ${join(
-            options.stateDirectory ??
-              codexSecurityStateDirectory(options.environment),
-            "workbench.sqlite3",
-          )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
-        : `${failure}: ${detail}`,
-      { cause: error },
-    );
+    throw new CodexSecurityError(`${failure}: ${detail}`, { cause: error });
   }
   let result: unknown;
   try {
@@ -2167,7 +2154,11 @@ async function prepareOutputDirectory(
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
         await rename(path, archiveDir);
-        onOutputArchived?.(archiveDir);
+        try {
+          void Promise.resolve(onOutputArchived?.(archiveDir)).catch(
+            () => undefined,
+          );
+        } catch {}
         existing = null;
       }
     }

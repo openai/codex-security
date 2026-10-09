@@ -2245,7 +2245,7 @@ async function runWorkbench(
       ? missingPythonHelperMessage(error, pythonCommand)
       : undefined;
     if (launchError) {
-      throw new Error(launchError);
+      throw new Error(launchError, { cause: error });
     }
     if (isExecError(error) && error.stderr.trim()) {
       throw new Error(error.stderr.trim(), { cause: error });
