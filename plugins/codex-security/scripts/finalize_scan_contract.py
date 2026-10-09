@@ -63,7 +63,8 @@ SARIF_SECURITY_SCORES = {
 }
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 RFC3339_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.(?P<fraction>\d+))?(?:[Zz]|[+-]\d{2}:\d{2})$",
+    re.ASCII,
 )
 REMOTE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 GITHUB_HASH_BLOCK_SIZE = 100
@@ -878,16 +879,19 @@ def _validate_remote(remote: str, context: str) -> None:
         )
 
 
+def parse_timestamp(value: str) -> datetime:
+    match = RFC3339_RE.fullmatch(value)
+    if match and (fraction := match.group("fraction")):
+        start, end = match.span("fraction")
+        value = value[:start] + fraction[:6].ljust(6, "0") + value[end:]
+    return datetime.fromisoformat(value.upper().replace("Z", "+00:00"))
+
+
 def _validate_date_time(value: str, context: str) -> None:
     if not RFC3339_RE.fullmatch(value):
         raise ContractError(f"{context}: expected an RFC 3339 timestamp")
-    # Python 3.10 only parses 3 or 6 fractional digits. Validate the calendar and
-    # offset without a complete ASCII fraction, leaving the original text intact.
-    parser_value = re.sub(r"\.[0-9]+(?=[Zz+-])", "", value)
     try:
-        parsed = datetime.fromisoformat(
-            parser_value[:-1] + "+00:00" if parser_value[-1] in "Zz" else parser_value
-        )
+        parsed = parse_timestamp(value)
     except ValueError as exc:
         raise ContractError(f"{context}: expected an RFC 3339 timestamp") from exc
     if parsed.tzinfo is None:

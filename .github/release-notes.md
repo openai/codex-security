@@ -193,6 +193,7 @@
 - preserve import and export representations ([#1510](https://github.com/openai/codex-security/pull/1510))
 - frame terminal input and skip unused activity ([#1511](https://github.com/openai/codex-security/pull/1511))
 - parse complete triage JSON before fenced content ([#1512](https://github.com/openai/codex-security/pull/1512))
+- remove legacy message and plugin compatibility ([#1548](https://github.com/openai/codex-security/pull/1548))
 
 <!-- release-section: highlights:end -->
 
@@ -204,5 +205,6 @@ Review migration steps for these breaking changes:
 
 - move findings and dashboard helpers to Node ([#1408](https://github.com/openai/codex-security/pull/1408))
 - remove the local findings serve command ([#1340](https://github.com/openai/codex-security/pull/1340))
+- remove legacy message and plugin compatibility ([#1548](https://github.com/openai/codex-security/pull/1548))
 
 <!-- release-section: upgrades:end -->
