@@ -11,11 +11,13 @@ import subprocess
 import sys
 import uuid
 from contextlib import closing
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from workbench_test_support import (
+    SCRIPT,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
@@ -861,6 +863,46 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
     assert any(
         finding["occurrenceId"] == off_prefix_occurrence_id for finding in selected["findings"]
     )
+
+
+@pytest.mark.parametrize("score", ["1.0000000000000001", "1e-400", "1.0", "1e0"])
+def test_raw_finding_responses_preserve_persisted_decimal_values(
+    tmp_path: Path, score: str
+) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    document["findings"][0]["severity"].update(score="EXACT_SCORE", scoringSystem="CVSS:3.1")
+    path.write_text(json.dumps(document).replace('"EXACT_SCORE"', score))
+    scan_command(state_dir, "complete-scan", scan_id)
+    sealed = path.read_bytes()
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        indexed = connection.execute(
+            "SELECT details_json FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
+        ).fetchone()[0]
+    for command, key in (("get-scan", "scan"), ("list-findings", "findingsPage")):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), command, "--scan-id", scan_id],
+            env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        response = json.loads(result.stdout, parse_float=Decimal, parse_int=Decimal)
+        assert response[key]["findings"][0]["severity"]["score"] == Decimal(score)
+    assert json.loads(sealed, parse_float=Decimal)["findings"][0]["severity"]["score"] == Decimal(
+        score
+    )
+    assert json.loads(indexed, parse_float=Decimal)["severity"]["score"] == Decimal(score)
+    assert path.read_bytes() == sealed
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT details_json FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
+            ).fetchone()[0]
+            == indexed
+        )
 
 
 def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -> None:
