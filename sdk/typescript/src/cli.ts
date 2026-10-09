@@ -46,6 +46,7 @@ import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
+import { fromMarkdown } from "mdast-util-from-markdown";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
@@ -6925,7 +6926,7 @@ async function publishPatchBranch(
               "--title",
               PATCH_PR_TITLE,
               "--description",
-              body.replace(/^\//gmu, "\\/"),
+              gitlabPatchDescription(body),
               "--yes",
               "--repo",
               gitlabRepository,
@@ -6953,6 +6954,35 @@ async function publishPatchBranch(
     );
     throw error;
   }
+}
+
+function gitlabPatchDescription(body: string): string {
+  const escaped = new Set<number>();
+  let multilineQuote = false;
+  for (const node of fromMarkdown(body).children) {
+    const { start, end } = node.position!;
+    if (
+      node.type === "blockquote" &&
+      body.slice(start.offset, end.offset).trim() === ">>>"
+    ) {
+      // GitLab's fenced blockquotes are not part of CommonMark.
+      multilineQuote = !multilineQuote;
+    }
+    if (multilineQuote || node.type !== "paragraph") continue;
+
+    // GitLab examines top-level paragraphs, excluding inline code and HTML.
+    // Keep the original source positions and bytes instead of rendering Markdown.
+    const offset = start.offset! - start.column + 1;
+    const paragraph = body.slice(offset, end.offset);
+    for (const match of paragraph.matchAll(
+      /`[\s\S]+?`|^<[^>]+?>\r?\n[\s\S]+?\r?\n<\/[^>]+?>\r?$|^\//gmu,
+    )) {
+      if (match[0] === "/") escaped.add(offset + match.index);
+    }
+  }
+  return body.replace(/^\//gmu, (slash, offset: number) =>
+    escaped.has(offset) ? `\\${slash}` : slash,
+  );
 }
 
 function patchRemoteHost(remote: string): string | undefined {

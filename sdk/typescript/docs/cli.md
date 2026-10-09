@@ -1352,8 +1352,9 @@ The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
 `glab auth login --hostname HOST`. `GITLAB_URI` and `GL_HOST` are fallback aliases.
 GitLab merge requests stay within the origin project; a fork merge request with
-the same branch name is not reused. Lines beginning with `/` in generated GitLab
-descriptions are escaped so they remain text instead of executing quick actions.
+the same branch name is not reused. Lines beginning with `/` in ordinary GitLab
+description paragraphs are escaped so they remain text instead of executing
+quick actions. Code examples retain their original text.
 
 ```bash
 GITLAB_HOST=gitlab.example.com codex-security patch --scan SCAN_ID --create-pr

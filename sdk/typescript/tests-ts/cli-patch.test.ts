@@ -2190,32 +2190,115 @@ describe("scan and patch workflow", () => {
     },
   );
 
-  test.each(["github", "gitlab"] as const)(
-    "keeps quick-action text in generated %s descriptions advisory",
-    async (provider) => {
+  test.each(
+    (["github", "gitlab"] as const).flatMap((provider) =>
+      (["fresh", "resume", "resume CRLF"] as const).map(
+        (mode) => [provider, mode] as const,
+      ),
+    ),
+  )(
+    "preserves Markdown and keeps %s quick actions advisory during %s publication",
+    async (provider, mode) => {
       const gitlab = provider === "gitlab";
+      const resumed = mode !== "fresh";
       const result = resultWithFindings(["high"]);
-      const summary =
-        "Review the patch.\n\n/label ~reviewed\n\nUse /tmp/example.";
+      const summary = [
+        "### Regression examples",
+        "",
+        "/label ~reviewed",
+        "",
+        "```js",
+        "// Regression check",
+        "/^safe$/.test(value);",
+        "/close",
+        "```",
+        "",
+        "~~~~text",
+        "/srv/example",
+        "~~~",
+        "/close",
+        "~~~~~",
+        "",
+        "    /close",
+        "    /srv/example",
+        "",
+        "Inline `example",
+        "/close",
+        "` content.",
+        "",
+        "> Quoted example",
+        "/close",
+        "",
+        "- List example",
+        "/close",
+        "",
+        "<div>",
+        "/close",
+        "</div>",
+        "",
+        "Text",
+        "<b>",
+        "/close",
+        "</b>",
+        "",
+        "<!--",
+        "/close",
+        "-->",
+        "",
+        ">>>",
+        "Multiline quote",
+        "/close",
+        ">>>",
+        "",
+        " /close",
+        "  /close",
+        "   /close",
+        "",
+        "Use /tmp/example.",
+        "",
+        "/assign @reviewer",
+        "",
+        "```text",
+        "/close",
+      ].join("\n");
+      let savedBody = `Synthetic saved report\n\n\t/close\n\n${summary}`;
+      if (mode === "resume CRLF")
+        savedBody = savedBody.replaceAll("\n", "\r\n");
       let publishedBody = "";
       const outcome = await runWorkflow(
-        [
-          "patch",
-          "--scan",
-          "scan-1",
-          "--assess-patch-risk",
-          "--create-pr",
-          "--json",
-        ],
+        resumed
+          ? ["patch", "--resume-pr", "codex-security/patch-scan-1", "--json"]
+          : [
+              "patch",
+              "--scan",
+              "scan-1",
+              "--assess-patch-risk",
+              "--create-pr",
+              "--json",
+            ],
         {
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
-            if (command === "git")
+            if (command === "git") {
+              if (args[0] === "config") {
+                if (args.at(-1)?.endsWith(".codexSecurityPatchCommit"))
+                  return "synthetic-commit";
+                if (
+                  args.includes("--get") &&
+                  args.at(-1)?.endsWith(".codexSecurityPatchPullRequestBody")
+                )
+                  return savedBody;
+                if (args[2]?.endsWith(".codexSecurityPatchPullRequestBody"))
+                  savedBody = args[3]!;
+              }
+              if (args[0] === "rev-parse" && args.includes("--verify"))
+                return "synthetic-commit";
               return args[0] === "remote"
                 ? `https://${provider}.com/example/repository.git`
                 : args.includes("--name-only")
                   ? "src/finding-1.ts\0"
                   : "";
+            }
             expect(command).toBe(gitlab ? "glab" : "gh");
             if (args[1] === "list") return "";
             publishedBody =
@@ -2234,11 +2317,15 @@ describe("scan and patch workflow", () => {
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(publishedBody).toContain(
-        gitlab ? "\n\\/label ~reviewed\n" : "\n/label ~reviewed\n",
+      expect(publishedBody).toBe(
+        gitlab
+          ? savedBody
+              .replace("/label ~reviewed", "\\/label ~reviewed")
+              .replace("/assign @reviewer", "\\/assign @reviewer")
+          : savedBody,
       );
-      expect(publishedBody).toContain("Use /tmp/example.");
-      expect(JSON.parse(outcome.stdout).patchRisk.report).toBe(summary);
+      if (!resumed)
+        expect(JSON.parse(outcome.stdout).patchRisk.report).toBe(summary);
     },
   );
 
