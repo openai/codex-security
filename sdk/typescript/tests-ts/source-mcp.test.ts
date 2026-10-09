@@ -2468,6 +2468,230 @@ test("HTTP header-helper checkpoints follow native host lookup and explicit envi
   }
 });
 
+test.each([
+  ["legacy", "command", "OPENAI_API_KEY"],
+  ["legacy", "command", "CODEX_API_KEY"],
+  ["legacy", "command", "SOURCE_BEARER"],
+  ["legacy", "api-key", "OPENAI_API_KEY"],
+  ["legacy", "stored", "OPENAI_API_KEY"],
+  ["capable", "command", "OPENAI_API_KEY"],
+] as const)(
+  "%s HTTP source bearer %s auth preserves %s and model authentication",
+  async (kind, auth, bearer) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    const providerCwd = join(home, "provider");
+    await mkdir(providerCwd);
+    const authCwd = join(home, "auth-cwd.json");
+    const sourceHeaders: (string | undefined)[] = [];
+    const modelHeaders: (string | undefined)[] = [];
+    const endpoint = createServer(async (request, response) => {
+      if (request.url === "/mcp") {
+        if (request.method !== "POST") {
+          response.writeHead(405).end();
+          return;
+        }
+        sourceHeaders.push(request.headers.authorization);
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(chunk as Buffer);
+        const message = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (message.id === undefined) {
+          response.writeHead(202).end();
+          return;
+        }
+        response.writeHead(200, { "Content-Type": "application/json" }).end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: message.id,
+            result:
+              message.method === "initialize"
+                ? {
+                    protocolVersion: "2024-11-05",
+                    capabilities: { tools: {} },
+                    serverInfo: { name: "synthetic-source", version: "1" },
+                  }
+                : { tools: [] },
+          }),
+        );
+      } else if (request.url?.includes("responses")) {
+        modelHeaders.push(request.headers.authorization);
+        response.writeHead(401, { "Content-Type": "application/json" }).end(
+          JSON.stringify({
+            error: { message: "Synthetic model auth checked" },
+          }),
+        );
+      } else {
+        response
+          .writeHead(200, { "Content-Type": "application/json" })
+          .end('{"data":[]}');
+      }
+    });
+    await new Promise<void>((resolve) =>
+      endpoint.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      const url = `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`;
+      const storedHome = join(home, "state", "codex-home");
+      if (auth === "stored") {
+        await mkdir(storedHome, { recursive: true, mode: 0o700 });
+        await writeFile(
+          join(storedHome, "auth.json"),
+          JSON.stringify({ OPENAI_API_KEY: "synthetic-stored-model-token" }),
+          { mode: 0o600 },
+        );
+      }
+      const digests: string[] = [];
+      const sourceTokens =
+        auth === "command" && kind === "legacy" && bearer !== "SOURCE_BEARER"
+          ? ["synthetic-source-first", "synthetic-source-second"]
+          : ["synthetic-source-first"];
+      for (const token of sourceTokens) {
+        const environment = {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(home, "state"),
+          OPENAI_API_KEY: "synthetic-ambient-model-token",
+          [bearer]: auth === "stored" ? " " : token,
+        };
+        const executor = {
+          environments: [
+            {
+              id: "source-executor",
+              program:
+                kind === "legacy"
+                  ? process.execPath
+                  : resolveCodexCommand(environment).command,
+              args:
+                kind === "legacy"
+                  ? [
+                      fileURLToPath(
+                        new URL(
+                          "./fixtures/legacy-source-executor.mjs",
+                          import.meta.url,
+                        ),
+                      ),
+                      resolveCodexCommand(environment).command,
+                    ]
+                  : ["exec-server", "--listen", "stdio"],
+              cwd: repository,
+              env: { [bearer]: "synthetic-executor-token" },
+            },
+          ],
+        };
+        const config = {
+          model_provider: "fixture",
+          model_providers: {
+            fixture: {
+              name: "Synthetic fixture",
+              wire_api: "responses",
+              base_url: `${url}/v1`,
+              request_max_retries: 0,
+              stream_max_retries: 0,
+              ...(auth === "command"
+                ? {
+                    auth: {
+                      command: process.execPath,
+                      args: [
+                        "-e",
+                        `require("node:fs").writeFileSync(${JSON.stringify(authCwd)}, JSON.stringify(process.cwd())); process.stdout.write("synthetic-command-model-token");`,
+                      ],
+                      cwd: "provider",
+                      refresh_interval_ms: 60000,
+                    },
+                  }
+                : { requires_openai_auth: true }),
+            },
+          },
+          mcp_servers: {
+            source: {
+              url: `${url}/mcp`,
+              environment_id: "source-executor",
+              bearer_token_env_var: bearer,
+            },
+          },
+        };
+        await writeFile(join(home, "environments.toml"), stringify(executor));
+        if (auth === "stored") {
+          await writeFile(
+            join(storedHome, "environments.toml"),
+            stringify(executor),
+          );
+          await writeFile(join(storedHome, "config.toml"), stringify(config));
+        }
+        const source = await sourceForTest(config, environment, repository);
+        const selected = await comparisonEnvironment(environment);
+        if (auth === "command" || auth === "stored")
+          expect(selected["OPENAI_API_KEY"]).toBeUndefined();
+        expect(source.server["bearer_token_env_var"]).toBe(bearer);
+        sourceHeaders.length = modelHeaders.length = 0;
+        const failure = await new CodexReviewRunner(
+          selected,
+          (command, args, options) => {
+            if (auth === "stored") {
+              expect(options.env!["CODEX_HOME"]).toBe(storedHome);
+              expect(options.env!["OPENAI_API_KEY"]).toBeUndefined();
+            }
+            return spawn(command, args, options);
+          },
+          AbortSignal.timeout(15_000),
+          repository,
+          undefined,
+          undefined,
+          undefined,
+          source,
+        )
+          .run({
+            stage: "pair-review",
+            model: "gpt-5.6-sol",
+            effort: "low",
+            prompt: "Compare synthetic source findings.",
+            schema: { type: "object" },
+            validate: (value) => value,
+          })
+          .then(
+            () => "unexpected success",
+            (error: unknown) => String(error),
+          );
+        if (kind === "capable" || auth === "stored") {
+          expect(failure).toMatch(/required.*source|source.*required/i);
+          if (kind === "capable")
+            expect(failure).toContain(
+              "cannot use executor environment variable OPENAI_API_KEY",
+            );
+          else expect(Object.hasOwn(source.environment, bearer)).toBe(false);
+          expect(sourceHeaders).toEqual([]);
+          expect(modelHeaders).toEqual([]);
+        } else {
+          expect(failure).toContain("Synthetic model auth checked");
+          expect(sourceHeaders.length).toBeGreaterThan(0);
+          expect(new Set(sourceHeaders)).toEqual(new Set([`Bearer ${token}`]));
+          expect(modelHeaders.length).toBeGreaterThan(0);
+          expect(new Set(modelHeaders)).toEqual(
+            new Set([
+              `Bearer ${auth === "command" ? "synthetic-command-model-token" : token}`,
+            ]),
+          );
+          if (auth === "command")
+            expect(
+              await realpath(JSON.parse(await readFile(authCwd, "utf8"))),
+            ).toBe(await realpath(providerCwd));
+        }
+        digests.push(
+          await reviewSettingsDigest(selected, undefined, {
+            mcp: source,
+            repository,
+          }),
+        );
+      }
+      if (sourceTokens.length === 2) expect(digests[0]).not.toBe(digests[1]);
+    } finally {
+      endpoint.closeAllConnections();
+      await new Promise<void>((resolve) => endpoint.close(() => resolve()));
+    }
+  },
+);
+
 test.each(["capable", "legacy"] as const)(
   "HTTP %s executor bearer resolution preserves credential ownership and host headers",
   async (kind) => {

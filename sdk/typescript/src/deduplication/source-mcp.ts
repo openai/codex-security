@@ -508,8 +508,16 @@ export async function resolveSourceMcp(
   // Bind the referenced host value as well as the executor configuration.
   const bearer = server["bearer_token_env_var"];
   if (environmentId !== "local" && typeof bearer === "string") {
-    const value = environmentEntry(reviewEnvironment, bearer);
-    if (value !== undefined) executorEnvironment[bearer] = value;
+    const reviewValue = environmentEntry(reviewEnvironment, bearer);
+    const value =
+      reviewValue ??
+      (hasCommandAuth(await readCodexHomeConfig(reviewEnvironment, signal))
+        ? environmentEntry(environment, bearer)
+        : undefined);
+    if (value !== undefined) {
+      executorEnvironment[bearer] = value;
+      if (reviewValue === undefined) credentials[bearer] = value;
+    }
   }
   const remaining: JsonValue[] = [];
   for (const variable of (server["env_vars"] as JsonValue[] | undefined) ??
