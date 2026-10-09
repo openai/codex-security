@@ -582,6 +582,7 @@ describe("CLI skill commands", () => {
       expect(stderr.text()).toContain(
         "review-conflict-reconciliation review returned an",
       );
+      expect(stderr.text()).toContain(reconciliationVerdict);
     }
   });
 
@@ -733,6 +734,7 @@ describe("CLI skill commands", () => {
   test("fails closed when an independent review is invalid or remains rejected", async () => {
     for (const verdict of [
       "not json",
+      '```json\n{"status":"blocked","findings":["Required check failed: synthetic-api-key-value"]}\n```',
       JSON.stringify({ status: "approved", findings: ["Unexpected finding"] }),
       JSON.stringify({
         status: "blocked",
@@ -769,6 +771,12 @@ describe("CLI skill commands", () => {
         ),
       ).toBe(2);
       expect(stdout.text()).toBe("");
+      if (
+        verdict === "not json" ||
+        verdict.startsWith("```") ||
+        verdict.includes("Unexpected finding")
+      )
+        expect(stderr.text()).toContain(verdict);
       expect(stderr.text()).not.toContain("local-coding-style review");
       expect(invocations).toBe(verdict.includes('"status":"revise"') ? 4 : 2);
     }

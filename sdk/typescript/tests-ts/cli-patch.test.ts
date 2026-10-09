@@ -3062,6 +3062,9 @@ describe("scan and patch workflow", () => {
                       ...(status === "no_change"
                         ? { verification: reason }
                         : { reason }),
+                      ...(status === "blocked"
+                        ? { verification: "Additional validation details." }
+                        : {}),
                     },
                   ],
                 }),
@@ -3076,6 +3079,8 @@ describe("scan and patch workflow", () => {
       expect(reviews).toBe(1);
       expect(JSON.parse(outcome.stdout).patches[0].status).toBe("failed");
       expect(outcome.stderr).toContain(reason);
+      if (status === "blocked")
+        expect(outcome.stderr).toContain("Additional validation details.");
     },
   );
 
@@ -3323,6 +3328,174 @@ describe("scan and patch workflow", () => {
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    },
+  );
+
+  test.each(["initial", "review", "revision", "throw"] as const)(
+    "preserves captured diagnostics when the %s stage fails",
+    async (failureStage) => {
+      let authors = 0;
+      let reviews = 0;
+      const commands: string[][] = [];
+      const report =
+        "\u001b[31mCaptured stdout: synthetic-api-key-value\u001b[0m\nSecond line.";
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          onRepositoryCommand: (command, args) => {
+            commands.push([command, ...args]);
+            return args.includes("--name-only") ? "app.ts\0" : "";
+          },
+          onCodex: (_args, output) => {
+            const review = output!.appServer!.sandbox === "read-only";
+            if (review) reviews += 1;
+            else authors += 1;
+            const fail = review
+              ? failureStage === "review"
+              : authors === 1
+                ? failureStage === "initial" || failureStage === "throw"
+                : failureStage === "revision";
+            if (fail) {
+              output!.stdout.write(report);
+              output!.stderr.write("Native diagnostic remains visible.\n");
+              if (failureStage === "throw")
+                throw new Error("Synthetic runner failure");
+              return 3;
+            }
+            output!.stdout.write(
+              review
+                ? JSON.stringify({
+                    status: "revise",
+                    findings: ["Add the focused check."],
+                  })
+                : "Initial verified patch.",
+            );
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(failureStage === "throw" ? 2 : 3);
+      expect(outcome.stderr).toContain(
+        "Captured stdout: synthetic-api-key-value\nSecond line.",
+      );
+      expect(outcome.stderr).toContain("Native diagnostic remains visible.");
+      expect(outcome.stderr).not.toContain("\u001b");
+      if (failureStage === "throw")
+        expect(outcome.stderr).toContain("Synthetic runner failure");
+      expect(JSON.parse(outcome.stdout).ok).toBe(false);
+      expect(outcome.stdout).not.toContain("Captured stdout");
+      expect(authors).toBe(failureStage === "revision" ? 2 : 1);
+      expect(reviews).toBe(
+        failureStage === "review" || failureStage === "revision" ? 1 : 0,
+      );
+      expect(
+        commands.some(
+          ([command, ...args]) =>
+            command === "gh" ||
+            args.includes("commit") ||
+            args.includes("push"),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  test.each([false, true])(
+    "preserves malformed saved-finding output (revision: %p)",
+    async (revision) => {
+      const result = resultWithFindings(["high"]);
+      const report = "Malformed author report: synthetic-api-key-value";
+      let authors = 0;
+      let reviews = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan", "--review-minimality", "--json"],
+        {
+          result,
+          onWorkbench: () => savedScan(result, "scan"),
+          onCodex: (args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "revise",
+                  findings: ["Add the focused check."],
+                }),
+              );
+            } else if (++authors === 1 && revision)
+              completePatches(args, output);
+            else output!.stdout.write(report);
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(report);
+      expect(JSON.parse(outcome.stdout).patches[0].status).toBe("failed");
+      expect(reviews).toBe(revision ? 1 : 0);
+    },
+  );
+
+  test.each([false, true])(
+    "preserves the author report when subject inspection fails (revision: %p)",
+    async (revision) => {
+      const report = "Author report: synthetic-api-key-value";
+      let authors = 0;
+      let reviews = 0;
+      const commands: string[][] = [];
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          onRepositoryCommand: (command, args) => {
+            commands.push([command, ...args]);
+            if (args.includes("read-tree") && authors >= (revision ? 2 : 1))
+              throw new Error("Synthetic snapshot failure");
+            return args.includes("--name-only") ? "app.ts\0" : "";
+          },
+          onCodex: (_args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "revise",
+                  findings: ["Add the focused check."],
+                }),
+              );
+            } else {
+              authors += 1;
+              output!.stdout.write(
+                authors === 1
+                  ? report
+                  : JSON.stringify({ status: "verified", report }),
+              );
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(report);
+      expect(outcome.stderr).toContain("Synthetic snapshot failure");
+      expect(JSON.parse(outcome.stdout).ok).toBe(false);
+      expect(reviews).toBe(revision ? 1 : 0);
+      expect(
+        commands.some(
+          ([command, ...args]) =>
+            command === "gh" ||
+            args.includes("commit") ||
+            args.includes("push"),
+        ),
+      ).toBe(false);
     },
   );
 

@@ -7512,6 +7512,7 @@ interface PatchReviewWorkflowContext {
 
 async function captureSkillStage(
   run: SkillStageRunner,
+  stderr: Writable,
   options?: SkillRunOptions,
 ): Promise<{ exitCode: number; response: string }> {
   let response = "";
@@ -7521,82 +7522,92 @@ async function captureSkillStage(
       return true;
     },
   };
-  const exitCode = await run(output, options);
-  return { exitCode, response };
+  let exitCode: number | undefined;
+  try {
+    exitCode = await run(output, options);
+    return { exitCode, response };
+  } finally {
+    if (exitCode !== PATCH_REVIEW_EXIT_CODE.success && response)
+      stderr.write(`${safePatchReport(response)}\n`);
+  }
 }
 
 async function parsePatchReviewSubject(
   response: string,
   context: PatchReviewWorkflowContext,
 ): Promise<PatchReviewSubject> {
-  let reported: { patches: unknown[] } | undefined;
-  const patches: FindingPatch[] = [];
-  if (context.options.findings !== undefined) {
-    try {
-      reported = JSON.parse(response) as { patches: unknown[] };
-      if (!Array.isArray(reported.patches)) return { status: "invalid" };
-      for (const patch of reported.patches) {
-        const parsed = findingPatchSchema.safeParse(patch);
-        if (!parsed.success) return { status: "invalid" };
-        patches.push(parsed.data);
+  try {
+    let reported: { patches: unknown[] } | undefined;
+    const patches: FindingPatch[] = [];
+    if (context.options.findings !== undefined) {
+      try {
+        reported = JSON.parse(response) as { patches: unknown[] };
+        if (!Array.isArray(reported.patches)) return { status: "invalid" };
+        for (const patch of reported.patches) {
+          const parsed = findingPatchSchema.safeParse(patch);
+          if (!parsed.success) return { status: "invalid" };
+          patches.push(parsed.data);
+        }
+      } catch {
+        return { status: "invalid" };
       }
-    } catch {
-      return { status: "invalid" };
+      if (!patches.some(({ status }) => status === "verified"))
+        return {
+          status: "empty",
+          reasons: patches.flatMap(({ reason, verification }) =>
+            [reason, verification].filter((value) => value !== undefined),
+          ),
+        };
     }
-    if (!patches.some(({ status }) => status === "verified"))
-      return {
-        status: "empty",
-        reasons: patches.flatMap(({ reason, verification }) => {
-          const explanation = reason ?? verification;
-          return explanation ? [explanation] : [];
-        }),
-      };
-  }
 
-  const head =
-    typeof context.base === "string"
-      ? await snapshotPatchTree(context.directory, context.dependencies)
-      : undefined;
-  context.paths = await changedPatchFiles(
-    context.directory,
-    context.base,
-    context.dependencies,
-    head,
-  );
-  if (typeof context.base === "string") {
-    const prefix = (
-      await context.dependencies.runRepositoryCommand(
-        "git",
-        ["rev-parse", "--show-prefix"],
-        context.directory,
-        { trim: false },
-      )
-    ).replace(/\r?\n$/u, "");
-    context.paths = context.paths.map((file) => posix.relative(prefix, file));
-    context.baseline = { tree: context.base, head };
-  } else if ("directory" in context.baseline) {
-    const baselineDirectory = await realpath(context.baseline.directory);
-    const targetDirectory = await realpath(context.directory);
-    context.paths = context.paths.filter((file) =>
-      isOutsidePath(
-        relative(baselineDirectory, resolve(targetDirectory, file)),
-      ),
+    const head =
+      typeof context.base === "string"
+        ? await snapshotPatchTree(context.directory, context.dependencies)
+        : undefined;
+    context.paths = await changedPatchFiles(
+      context.directory,
+      context.base,
+      context.dependencies,
+      head,
     );
+    if (typeof context.base === "string") {
+      const prefix = (
+        await context.dependencies.runRepositoryCommand(
+          "git",
+          ["rev-parse", "--show-prefix"],
+          context.directory,
+          { trim: false },
+        )
+      ).replace(/\r?\n$/u, "");
+      context.paths = context.paths.map((file) => posix.relative(prefix, file));
+      context.baseline = { tree: context.base, head };
+    } else if ("directory" in context.baseline) {
+      const baselineDirectory = await realpath(context.baseline.directory);
+      const targetDirectory = await realpath(context.directory);
+      context.paths = context.paths.filter((file) =>
+        isOutsidePath(
+          relative(baselineDirectory, resolve(targetDirectory, file)),
+        ),
+      );
+    }
+    if (reported === undefined && context.paths.length === 0)
+      return { status: "empty", reasons: [response] };
+    if (reported !== undefined) {
+      if (context.paths.length === 0) return { status: "invalid" };
+      response = JSON.stringify({
+        ...reported,
+        patches: patches.map((patch) =>
+          patch.status === "verified"
+            ? { ...patch, files: context.paths }
+            : patch,
+        ),
+      });
+    }
+    return { status: "ready", response };
+  } catch (error) {
+    context.stderr.write(`${safePatchReport(response)}\n`);
+    throw error;
   }
-  if (reported === undefined && context.paths.length === 0)
-    return { status: "empty", reasons: [response] };
-  if (reported !== undefined) {
-    if (context.paths.length === 0) return { status: "invalid" };
-    response = JSON.stringify({
-      ...reported,
-      patches: patches.map((patch) =>
-        patch.status === "verified"
-          ? { ...patch, files: context.paths }
-          : patch,
-      ),
-    });
-  }
-  return { status: "ready", response };
 }
 
 function parsePatchReviewVerdict(
@@ -7608,6 +7619,7 @@ function parsePatchReviewVerdict(
   try {
     verdict = patchReviewSchema.parse(JSON.parse(response));
   } catch {
+    stderr.write(`${safePatchReport(response)}\n`);
     stderr.write(`${stage} review returned an invalid verdict.\n`);
     return undefined;
   }
@@ -7615,6 +7627,7 @@ function parsePatchReviewVerdict(
     (verdict.status === "approved" && verdict.findings.length !== 0) ||
     (verdict.status === "revise" && verdict.findings.length === 0)
   ) {
+    stderr.write(`${safePatchReport(response)}\n`);
     stderr.write(`${stage} review returned an inconsistent verdict.\n`);
     return undefined;
   }
@@ -7631,7 +7644,7 @@ async function runIndependentPatchReview(
       ? "Reconciling conflicting patch review decisions...\n"
       : `Running independent ${stage} review...\n`,
   );
-  const review = await captureSkillStage(context.run, {
+  const review = await captureSkillStage(context.run, context.stderr, {
     ...context.options,
     reviewPaths: context.paths,
     reviewBaseline: context.baseline,
@@ -7699,11 +7712,12 @@ async function runPatchReviewWorkflow(
   stdout: Writable,
   context: PatchReviewWorkflowContext,
 ): Promise<number> {
-  let patch = await captureSkillStage(context.run);
+  let patch = await captureSkillStage(context.run, context.stderr);
   if (patch.exitCode !== PATCH_REVIEW_EXIT_CODE.success) return patch.exitCode;
 
   let subject = await parsePatchReviewSubject(patch.response, context);
   if (subject.status === "invalid") {
+    context.stderr.write(`${safePatchReport(patch.response)}\n`);
     context.stderr.write(
       "The generated patch did not return a valid review subject.\n",
     );
@@ -7750,7 +7764,7 @@ async function runPatchReviewWorkflow(
 
       stageRevisions += 1;
       totalRevisions += 1;
-      patch = await captureSkillStage(context.run, {
+      patch = await captureSkillStage(context.run, context.stderr, {
         ...context.options,
         reviewFindings: verdict.findings,
         reviewHistory: context.history,
@@ -7785,6 +7799,7 @@ async function runPatchReviewWorkflow(
         if (subject.status === "empty")
           for (const reason of subject.reasons)
             context.stderr.write(`${safePatchReport(reason)}\n`);
+        else context.stderr.write(`${safePatchReport(patch.response)}\n`);
         context.stderr.write(
           "The revised patch did not return a valid review subject.\n",
         );
