@@ -8042,7 +8042,12 @@ export function skillCommandFailure(
   detail: string,
   authentication: ScanAuthentication | null = null,
 ): string {
-  const classification = classifyConnectionFailure(detail);
+  // Numeric statuses need an HTTP/status label; the original diagnostic is retained below.
+  const classificationDetail = detail.replace(
+    /\b(?:(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]+(?:error|status(?:[ _-]?code)?))?|status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)(401|403|429)|(401|403|429))\b/giu,
+    (match, status: string | undefined) => (status ? match : ""),
+  );
+  const classification = classifyConnectionFailure(classificationDetail);
   let advice: string | undefined;
   if (
     classification === "unauthorized" ||
@@ -8058,7 +8063,7 @@ export function skillCommandFailure(
     ) ||
     (classification === "forbidden" &&
       /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
-        detail,
+        classificationDetail,
       ))
   ) {
     advice = "The selected model is unavailable for the current credentials.";

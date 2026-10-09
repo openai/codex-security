@@ -1288,7 +1288,7 @@ process.stdout.write(JSON.stringify({
 
   test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
-      ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
+      ["HTTP 401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
       [
         "403 model access denied /private/repository",
         "selected model is unavailable",
@@ -1400,6 +1400,37 @@ process.stdout.write(JSON.stringify({
         ] as const;
       }),
     ),
+    ...(
+      [
+        ["401", "Authentication failed"],
+        ["403", "selected model is unavailable"],
+        ["429", "rate limited"],
+      ] as const
+    ).flatMap(([status, advice]) => [
+      ...[
+        `HTTP ${status}`,
+        `HTTP/1.1 ${status}`,
+        `status code ${status}`,
+        `status_code=${status}`,
+        `{"status":${status}}`,
+      ].map((detail) => [detail, advice] as const),
+      ...[
+        `parse failed on line ${status}`,
+        `failed after ${status} bytes`,
+        `${status} bytes read`,
+        status,
+      ].map((detail) => [detail, null] as const),
+    ]),
+    ["401 Unauthorized", "Authentication failed"],
+    ["403 Forbidden", "selected model is unavailable"],
+    ["429 Too Many Requests", "rate limited"],
+    ["ThrottlingException", "rate limited"],
+    ["ExpiredTokenException", "Authentication failed"],
+    ["HTTP 403 ExpiredTokenException", "Authentication failed"],
+    ["HTTP 401; parsed 429 bytes", "Authentication failed"],
+    ["HTTP request failed while parsing line 429", null],
+    ["permission denied opening /synthetic/403/cache", null],
+    ["401 sk-proj-SYNTHETIC_SECRET", null],
     ["NetworkError", "could not connect"],
     ["TimeoutError", "could not connect"],
     ["RequestTimeout", "could not connect"],
@@ -1415,7 +1446,7 @@ process.stdout.write(JSON.stringify({
       ),
     ),
   )(
-    "retains diagnostic advice from %s for %s",
+    "preserves diagnostic advice from %s for %s",
     async (command, detail, advice) => {
       const stdout = capture();
       const stderr = capture();
@@ -1428,7 +1459,13 @@ process.stdout.write(JSON.stringify({
         ),
       ).toBe(7);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(advice);
+      if (advice === null) {
+        expect(stderr.text()).not.toContain("Authentication failed");
+        expect(stderr.text()).not.toContain("selected model is unavailable");
+        expect(stderr.text()).not.toContain("rate limited");
+      } else {
+        expect(stderr.text()).toContain(advice);
+      }
       expect(stderr.text()).toContain(detail);
     },
   );
@@ -1482,11 +1519,11 @@ process.stdout.write(JSON.stringify({
       {
         source:
           'process.stderr.write("/private/repository sk-proj-SYNTHETIC_SECRET\\n");' +
-          'process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"401 sk-proj-SYNTHETIC_SECRET"}})+"\\n");' +
+          'process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"HTTP 401 sk-proj-SYNTHETIC_SECRET"}})+"\\n");' +
           "process.exitCode=7",
         status: 7,
         stdout: "",
-        stderr: "401 sk-proj-SYNTHETIC_SECRET",
+        stderr: "HTTP 401 sk-proj-SYNTHETIC_SECRET",
       },
       {
         source:
@@ -1814,7 +1851,7 @@ lines.on("line", (line) => {
       'const readline=require("node:readline");',
       "const lines=readline.createInterface({input:process.stdin});",
       "lines.once('line',()=>process.stdout.write(JSON.stringify({",
-      'id:1,error:{code:-1,message:"401 sk-proj-SYNTHETIC_SECRET /private/repository"}',
+      'id:1,error:{code:-1,message:"HTTP 401 sk-proj-SYNTHETIC_SECRET /private/repository"}',
       '})+"\\n"));',
     ].join("");
     const stdout = capture();
@@ -1839,7 +1876,7 @@ lines.on("line", (line) => {
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Authentication failed");
     expect(stderr.text()).toContain(
-      "401 sk-proj-SYNTHETIC_SECRET /private/repository",
+      "HTTP 401 sk-proj-SYNTHETIC_SECRET /private/repository",
     );
   });
 
