@@ -92,6 +92,62 @@ EXPECTED_MIGRATIONS = [
 ]
 
 
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC])
+def test_state_directory_failure_preserves_original_exception(workbench_api, tmp_path, code):
+    error = OSError(code, os.strerror(code), str(tmp_path / "state"))
+    connect = workbench_api["connect"]
+    with (
+        mock.patch.dict(
+            connect.__globals__,
+            {
+                "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                "create_private_directory": mock.Mock(side_effect=error),
+            },
+        ),
+        pytest.raises(OSError) as failure,
+    ):
+        connect()
+    assert str(failure.value) == str(error)
+    assert failure.value is error
+    assert getattr(error, "_codex_security_state_unavailable", False) == (code != errno.ENOSPC)
+
+
+@pytest.mark.parametrize("during_open", [True, False])
+def test_state_open_failure_metadata_is_limited_to_sqlite_connect(
+    workbench_api, tmp_path, during_open, capsys
+):
+    error = sqlite3.OperationalError("unable to open database file")
+    connect = workbench_api["connect"]
+    connection = sqlite3.connect(":memory:")
+    try:
+        with (
+            mock.patch.dict(
+                connect.__globals__,
+                {
+                    "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                    "apply_migrations": mock.Mock(side_effect=error),
+                },
+            ),
+            mock.patch.object(
+                sqlite3,
+                "connect",
+                side_effect=error if during_open else None,
+                return_value=connection,
+            ),
+            pytest.raises(sqlite3.OperationalError) as failure,
+        ):
+            connect()
+        assert failure.value is error
+        assert str(error) == "unable to open database file"
+        assert getattr(error, "_codex_security_state_unavailable", False) is during_open
+        detail = capsys.readouterr().err
+        assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+        assert "SQLite journal files" in detail
+        assert "CODEX_SECURITY_STATE_DIR" in detail
+    finally:
+        connection.close()
+
+
 def create_historical_database(
     before_version: int,
     extra_migrations: tuple[tuple[int, str, str], ...] = (),

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
+import { findingsBaseUrl } from "./findings-client.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
 import {
   bundledPluginRoot,
@@ -53,11 +54,10 @@ export function workflowDigest(value: unknown): string {
 }
 
 export function workflowDestination(url: string): string {
-  const route = "v1/bulk/findings";
-  const destination = new URL(route, url.endsWith("/") ? url : `${url}/`);
+  const destination = findingsBaseUrl(url);
   destination.username = "";
   destination.password = "";
-  return destination.href.slice(0, -route.length);
+  return destination.href;
 }
 
 /** State lives in the workbench database, never in sealed scan artifacts. */

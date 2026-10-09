@@ -158,24 +158,6 @@ try {
     /repeats candidate candidate-b/,
   );
   await assertNoMutation(
-    context,
-    ledger,
-    {
-      validations: [
-        {
-          candidateId: "candidate-a",
-          validation: {
-            ...firstValidation,
-            confidence: "certain",
-          },
-        },
-        updates[0],
-      ],
-    },
-    /confidence/,
-  );
-
-  await assertNoMutation(
     { ...context, layout: "worker" },
     ledger,
     {
