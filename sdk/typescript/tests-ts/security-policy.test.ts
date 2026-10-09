@@ -1085,7 +1085,7 @@ describe("security policy preview", () => {
     expect(diff.match(/No newline at end of file/gu)).toHaveLength(2);
   });
 
-  test("preserves Node diff process errors ahead of failed input writes", async () => {
+  test("preserves native launch errors and settles failed diff input", async () => {
     const f = await fixture();
     const draft = await f.generate();
     const source = new URL("../src/security-policy.ts", import.meta.url);
@@ -1099,8 +1099,13 @@ describe("security policy preview", () => {
     const module = join(f.root, "policy.mjs");
     await writeFile(module, await built.outputs[0]!.text());
     const ignoreInput = join(f.root, "ignore-input");
-    if (process.platform !== "win32")
+    const deniedInterpreter = join(f.root, "denied-interpreter");
+    if (process.platform !== "win32") {
       await writeFile(ignoreInput, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(deniedInterpreter, "#!/bin/sh\nexit 0\n", {
+        mode: 0o600,
+      });
+    }
     const result = JSON.parse(
       execFileSync(
         nodeCommand().command,
@@ -1113,55 +1118,77 @@ import { setTimeout as delay } from "node:timers/promises";
 const { securityPolicyDiff } = await import(process.argv[1]);
 const draft = JSON.parse(readFileSync(0, "utf8"));
 const failures = [];
-for (const [interpreter, size] of [[process.execPath, 100], [process.execPath, 900000], [process.argv[2], 900000]].filter(([interpreter]) => interpreter)) {
+for (const [interpreter, size] of [[process.execPath, 100], [process.argv[3], 900000], [process.argv[4], 900000], [process.argv[2], 900000]].filter(([interpreter]) => interpreter)) {
   try { await securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(size) }, interpreter); failures.push(null); }
   catch (error) { failures.push({ code: error.code, message: error.message }); }
 }
 if (process.argv[2]) {
   const wrapper = process.argv[2];
-  for (const code of [0, 7]) {
-    const release = wrapper + code;
-    const diagnostic = '  synthetic café 日本語 😀 error\\n  ';
-    const holder = "const fs = require('fs'); process.send('ready'); const timer = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(timer); fs.writeFileSync(process.argv[1] + '.done', 'done'); process.exit(0); } }, 10); setTimeout(() => process.exit(2), 10000).unref();";
-    const launcher = [
-      '#!' + process.execPath,
-      "require('fs').closeSync(0);",
-      "const child = require('child_process').spawn(process.execPath, ['-e', " + JSON.stringify(holder) + ", " + JSON.stringify(release) + "], { stdio: ['ignore', 1, 2, 'ipc'] });",
-      "child.once('message', () => process.stderr.write(" + JSON.stringify(diagnostic) + ", () => process.exit(" + code + ")));",
-    ].join('\\n');
-    writeFileSync(wrapper, launcher, { mode: 0o700 });
+  const release = wrapper + '-held';
+  const diagnostic = '  synthetic café 日本語 😀 error\\n  ';
+  const holder = "const fs = require('fs'); process.send('ready'); const timer = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(timer); fs.writeFileSync(process.argv[1] + '.done', 'done'); process.exit(0); } }, 10); setTimeout(() => process.exit(2), 10000).unref();";
+  const launcher = [
+    '#!' + process.execPath,
+    "require('fs').closeSync(0);",
+    "const child = require('child_process').spawn(process.execPath, ['-e', " + JSON.stringify(holder) + ", " + JSON.stringify(release) + "], { stdio: ['ignore', 1, 2, 'ipc'] });",
+    "child.once('message', () => process.stderr.write(" + JSON.stringify(diagnostic) + ", () => process.exit(0)));",
+  ].join('\\n');
+  writeFileSync(wrapper, launcher, { mode: 0o700 });
+  const task = securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(900000) }, wrapper).then(
+    () => ({ code: null }), error => ({ code: error.code, message: error.message }));
+  let outcome;
+  try {
+    outcome = await Promise.race([task, delay(2000).then(() => null)]);
+  } finally {
+    writeFileSync(release, 'release');
+    await task;
+    while (!existsSync(release + '.done')) await delay(10);
+  }
+  failures.push({ ...outcome, settledBeforeRelease: outcome !== null });
+  for (const live of [true, false]) {
+    const release = wrapper + '-live-' + live;
+    const pid = release + '.pid';
+    const finish = "require('fs').writeFileSync(" + JSON.stringify(release + '.done') + ", 'done'); process.stderr.write(" + JSON.stringify(diagnostic) + ", () => process.exit(7));";
+    const body = live
+      ? "const fs=require('fs'); fs.writeFileSync(" + JSON.stringify(pid) + ", String(process.pid)); fs.closeSync(0); const timer=setInterval(() => { if (fs.existsSync(" + JSON.stringify(release) + ")) { clearInterval(timer); " + finish + " } }, 10);"
+      : "process.stdin.resume(); process.stdin.once('end', () => { " + finish + " });";
+    writeFileSync(wrapper, ['#!' + process.execPath, body].join('\\n'), { mode: 0o700 });
     const task = securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(900000) }, wrapper).then(
       () => ({ code: null }), error => ({ code: error.code, message: error.message }));
     let outcome;
+    let childAlive = false;
     try {
       outcome = await Promise.race([task, delay(2000).then(() => null)]);
+      if (live) {
+        process.kill(Number(readFileSync(pid, 'utf8')), 0);
+        childAlive = true;
+      }
     } finally {
       writeFileSync(release, 'release');
       await task;
       while (!existsSync(release + '.done')) await delay(10);
     }
-    failures.push({ ...outcome, settledBeforeRelease: outcome !== null, preservedDiagnostic: code === 0 || outcome?.message.endsWith(diagnostic) });
+    failures.push({ ...outcome, settledBeforeRelease: outcome !== null, childAlive, preservedDiagnostic: live || outcome?.message.endsWith(diagnostic) });
   }
 }
 console.log(JSON.stringify(failures));`,
           pathToFileURL(module).href,
           process.platform === "win32" ? "" : ignoreInput,
+          join(f.root, "missing-interpreter"),
+          process.platform === "win32" ? "" : deniedInterpreter,
         ],
         { encoding: "utf8", input: JSON.stringify(draft), timeout: 20_000 },
       ),
     );
-    for (const failure of result.slice(0, 2)) {
-      expect(failure.code).toBe(9);
-      expect(failure.message).toContain("bad option: -I");
-    }
+    expect(result[0].code).toBe(9);
+    expect(result[0].message).toContain("bad option: -I");
+    expect(result[1].code).toBe("ENOENT");
     if (process.platform !== "win32") {
-      expect(result[2].code).toBe("EPIPE");
-      expect(result.slice(3)).toMatchObject([
-        {
-          code: "EPIPE",
-          settledBeforeRelease: true,
-          preservedDiagnostic: true,
-        },
+      expect(result[2].code).toBe("EACCES");
+      expect(result[3].code).toBe("EPIPE");
+      expect(result.slice(4)).toMatchObject([
+        { code: "EPIPE", settledBeforeRelease: true },
+        { code: "EPIPE", settledBeforeRelease: true, childAlive: true },
         { code: 7, settledBeforeRelease: true, preservedDiagnostic: true },
       ]);
     }
