@@ -528,7 +528,7 @@ def _rule_location_identities(
         FROM finding_occurrences AS occurrences
         JOIN findings ON findings.id = occurrences.finding_id
         JOIN finding_locations AS locations ON locations.occurrence_id = occurrences.id
-        WHERE occurrences.id IN ({placeholders})
+        WHERE occurrences.id IN (SELECT value FROM json_each(?))
         ORDER BY occurrences.id,
             CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
             locations.sort_order
