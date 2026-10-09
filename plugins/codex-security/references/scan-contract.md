@@ -26,7 +26,7 @@ Retention is an explicit consumer decision. Producing a sealed bundle must not s
 
 A sealed manifest records the terminal timestamp and hashes for the canonical documents and immutable evidence receipts included in that bundle. Readable reports and generated exports are projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
 
-Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format. History and finding queries use native date precision and stable ID tie-breakers; ordering beyond millisecond precision is not guaranteed. Stored timestamp text remains unchanged.
+Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format. Ordinary timestamps with one through six fractional digits remain readable on every supported Python version. History and finding queries use native date precision and stable ID tie-breakers; ordering beyond millisecond precision is not guaranteed. Stored timestamp text remains unchanged.
 
 `scan.status` records why the bundle was sealed:
 

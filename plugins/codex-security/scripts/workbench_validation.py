@@ -22,7 +22,7 @@ reject_non_finite_json = finalizer._reject_non_finite_json
 
 
 def timestamp_key(value: str) -> datetime:
-    return datetime.fromisoformat(value.upper().replace("Z", "+00:00"))
+    return finalizer.parse_timestamp(value)
 
 
 def require_uuid(value: str, label: str) -> str:

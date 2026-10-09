@@ -63,7 +63,8 @@ SARIF_SECURITY_SCORES = {
 }
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 RFC3339_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$",
+    re.ASCII,
 )
 REMOTE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 GITHUB_HASH_BLOCK_SIZE = 100
@@ -878,11 +879,20 @@ def _validate_remote(remote: str, context: str) -> None:
         )
 
 
+def parse_timestamp(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.upper().replace("Z", "+00:00"))
+    except ValueError:
+        if not RFC3339_RE.fullmatch(value):
+            raise
+        return datetime.strptime(value.upper(), "%Y-%m-%dT%H:%M:%S.%f%z")
+
+
 def _validate_date_time(value: str, context: str) -> None:
     if not RFC3339_RE.fullmatch(value):
         raise ContractError(f"{context}: expected an RFC 3339 timestamp")
     try:
-        parsed = datetime.fromisoformat(value.upper().replace("Z", "+00:00"))
+        parsed = parse_timestamp(value)
     except ValueError as exc:
         raise ContractError(f"{context}: expected an RFC 3339 timestamp") from exc
     if parsed.tzinfo is None:

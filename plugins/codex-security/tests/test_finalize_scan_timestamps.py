@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -49,7 +50,11 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
     def test_preserves_timestamp_text_when_sealing(self) -> None:
         for timestamp in (
             "2024-02-29T18:09:00Z",
+            "2024-02-29T18:09:00.1Z",
+            "2024-02-29T18:09:00.12+02:00",
             "2024-02-29T18:09:00.123Z",
+            "2024-02-29T18:09:00.1234Z",
+            "2024-02-29T18:09:00.12345-02:00",
             "2024-02-29T18:09:00.123456+02:00",
             "2024-02-29t18:09:00.123z",
         ):
@@ -64,6 +69,25 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
                     self.assertEqual(manifest["scan"][field], timestamp)
                 before = self.scan_file_bytes(*CANONICAL_FILES)
                 FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), before)
+
+    def test_exports_sealed_scan_with_fractional_timestamps_without_rewriting(self) -> None:
+        self.write_scan()
+        manifest, _, _ = FINALIZER.finalize_scan(self.scan_dir)
+        fractions = ("1", "12", "123", "1234", "12345", "123456")
+        if sys.version_info >= (3, 11):
+            fractions += ("123456789",)
+        for fraction in fractions:
+            with self.subTest(fraction=fraction):
+                timestamp = f"2026-10-08t01:00:00.{fraction}z"
+                for field in ("startedAt", "completedAt", "sealedAt"):
+                    manifest["scan"][field] = timestamp
+                self.write_json("scan-manifest.json", manifest)
+                before = self.scan_file_bytes(*CANONICAL_FILES)
+
+                sarif = FINALIZER.build_sarif_projection(self.scan_dir)
+
+                self.assertEqual(len(sarif["runs"]), 1)
                 self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), before)
 
     def test_rejects_non_rfc3339_timestamps(self) -> None:
@@ -81,6 +105,7 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
             "2026-05-31T18:09:00.123",
             "2026-05-31T18:09:00.\u0661Z",
             "2026-05-31T18:09:00.123\u0664Z",
+            "２０２６-05-31T18:09:00.1Z",
         ):
             with self.subTest(timestamp=timestamp):
                 self.manifest["scan"]["startedAt"] = timestamp
