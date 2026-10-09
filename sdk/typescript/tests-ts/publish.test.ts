@@ -6,8 +6,10 @@ import { nodeCommand } from "./support/shell.js";
 import { randomUUID } from "node:crypto";
 import {
   appendFile,
+  mkdir,
   readFile,
   readdir,
+  rename,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -40,6 +42,86 @@ const copyPublishedIssues: PublishScanDependencies["recordPublishedIssues"] =
   async (_prepared, issues) => {
     return [...issues];
   };
+
+test("returns completed publication when cancellation arrives during receipt persistence", async () => {
+  const publication = preparedPublication();
+  const controller = new AbortController();
+  const receipts: PublishScanResult[] = [];
+  const result = await publishScanInternal(
+    "scan",
+    { ...OPTIONS, signal: controller.signal },
+    dependencies(publication, {
+      writeReceipt: async (receipt) => {
+        receipts.push(receipt);
+        controller.abort(new Error("Cancellation after saved receipt"));
+      },
+    }),
+  );
+  expect(receipts).toHaveLength(1);
+  expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+});
+
+test("retains indeterminate publication evidence when reading the handoff fails", async () => {
+  const publication = preparedPublication();
+  const receipts: PublishScanResult[] = [];
+  let file = "";
+  const injected = dependencies(publication, {
+    runCodex: async (_command, _args, input) => {
+      file = publicationData(input).handoffFile;
+      await writeHandoff(input, [
+        handoffRecord(publication, publication.issues[0]!, {
+          identifier: "SEC-123",
+        }),
+      ]);
+      await rename(file, `${file}.saved`);
+      await mkdir(file);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    writeReceipt: async (receipt) => {
+      receipts.push(receipt);
+    },
+  });
+  await expect(publishScanInternal("scan", OPTIONS, injected)).rejects.toThrow(
+    "could not verify every completed mutation",
+  );
+  expect(receipts.length).toBeGreaterThan(0);
+  expect(receipts[0]!.indeterminate).toBe(true);
+  expect(receipts[0]!.failed[0]!.error).toContain("EISDIR");
+  expect((await stat(dirname(file))).isDirectory()).toBe(true);
+  expect(await readFile(`${file}.saved`, "utf8")).toContain("SEC-123");
+});
+
+test("preserves unreadable handoff diagnostics when every connector outcome failed", async () => {
+  const publication = preparedPublication();
+  const receipts: PublishScanResult[] = [];
+  const injected = dependencies(publication, {
+    runCodex: async (_command, _args, input) => {
+      const file = publicationData(input).handoffFile;
+      await rename(file, `${file}.saved`);
+      await mkdir(file);
+      return {
+        exitCode: 0,
+        stdout: issueEvent(publication.issues[0]!, {
+          status: "failed",
+          error: "Synthetic connector failure",
+        }),
+        stderr: "",
+      };
+    },
+    writeReceipt: async (receipt) => {
+      receipts.push(structuredClone(receipt));
+    },
+  });
+  await expect(publishScanInternal("scan", OPTIONS, injected)).rejects.toThrow(
+    "EISDIR",
+  );
+  expect(receipts.length).toBeGreaterThan(0);
+  for (const receipt of receipts) {
+    expect(receipt.indeterminate).toBe(true);
+    expect(receipt.warnings?.join(" ")).toContain("EISDIR");
+    expect(receipt.failed[0]?.error).toBe("Synthetic connector failure");
+  }
+});
 
 function issueMapping(record: Record<string, unknown>) {
   return [record["findingId"], record["issueIdentifier"]];
@@ -306,6 +388,15 @@ async function writeHandoff(
       )
       .join("\n")}\n`,
     "utf8",
+  );
+}
+
+function publicationHandoffRoot(injected: PublishScanDependencies): string {
+  return join(
+    injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+    "publications",
+    "linear",
+    "handoffs",
   );
 }
 
@@ -719,13 +810,7 @@ describe("direct Linear API publication", () => {
         ),
       ).toBe(false);
 
-      const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
-      const handoffRoot = join(
-        stateDirectory,
-        "publications",
-        "linear",
-        "handoffs",
-      );
+      const handoffRoot = publicationHandoffRoot(injected);
       const handoffDirectories = await readdir(handoffRoot);
       expect(handoffDirectories).toHaveLength(1);
       const handoffRecords = await readJsonLines<Record<string, unknown>>(
@@ -882,13 +967,7 @@ describe("direct Linear API publication", () => {
       counts: { findings: 3, created: 1, failed: 2 },
     });
 
-    const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
-    const handoffRoot = join(
-      stateDirectory,
-      "publications",
-      "linear",
-      "handoffs",
-    );
+    const handoffRoot = publicationHandoffRoot(injected);
     const handoffDirectories = await readdir(handoffRoot);
     expect(handoffDirectories).toHaveLength(1);
     const handoff = await readFile(
@@ -978,13 +1057,7 @@ describe("direct Linear API publication", () => {
           ...(skipExisting ? { skipped: 1 } : {}),
         },
       });
-      const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
-      const handoffRoot = join(
-        stateDirectory,
-        "publications",
-        "linear",
-        "handoffs",
-      );
+      const handoffRoot = publicationHandoffRoot(injected);
       const handoffDirectories = await readdir(handoffRoot);
       expect(handoffDirectories).toHaveLength(1);
       expect(
@@ -2658,12 +2731,7 @@ describe("connected Linear publication", () => {
       publishScanInternal(publication.scanDirectory, OPTIONS, injected),
     ).rejects.toThrow("The Codex executable could not be resolved.");
 
-    const handoffRoot = join(
-      injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
-      "publications",
-      "linear",
-      "handoffs",
-    );
+    const handoffRoot = publicationHandoffRoot(injected);
     expect(
       await stat(handoffRoot).then(
         () => false,
@@ -2689,12 +2757,7 @@ describe("connected Linear publication", () => {
       publishScanInternal(publication.scanDirectory, OPTIONS, injected),
     ).rejects.toThrow("Could not start Codex for Linear publication.");
 
-    const handoffRoot = join(
-      injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
-      "publications",
-      "linear",
-      "handoffs",
-    );
+    const handoffRoot = publicationHandoffRoot(injected);
     expect(await readdir(handoffRoot)).toEqual([]);
     expect(persisted).not.toHaveBeenCalled();
   });
@@ -2823,7 +2886,7 @@ describe("connected Linear publication", () => {
           '].join("");',
           'spawn(process.execPath, ["-e", descendant], { env: { CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });',
           "const waiter = new Int32Array(new SharedArrayBuffer(4));",
-          "for (let attempts = 0; !fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID); attempts += 1) {",
+          "for (let attempts = 0; (!fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID) || fs.statSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID).size === 0); attempts += 1) {",
           "  if (attempts === 1000) process.exit(3);",
           "  Atomics.wait(waiter, 0, 0, 10);",
           "}",

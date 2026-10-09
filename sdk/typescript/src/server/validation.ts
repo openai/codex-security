@@ -36,9 +36,10 @@ export async function findingsRequestValidator(): Promise<
   return new Ajv2020({ strict: false }).compile<FindingsRequest>({
     type: "object",
     required: ["findings"],
+    $defs: schema.$defs,
     properties: {
       findings: schema.properties.findings,
-      repositoryId: { type: "string", minLength: 1 },
+      repositoryId: { type: "string", minLength: 1, pattern: "^[^\\u0000]*$" },
     },
   });
 }
@@ -47,6 +48,11 @@ export function findingSearchScope(
   parameters: URLSearchParams,
 ): FindingSearchScope {
   const repositoryId = parameters.get("repositoryId");
+  if (repositoryId?.includes("\0"))
+    throw new FindingsError(
+      "invalid_request",
+      "repositoryId must not contain NUL bytes.",
+    );
   const allRepositories = parameters.get("allRepositories");
   if (allRepositories === "true" && repositoryId === null)
     return { allRepositories: true };

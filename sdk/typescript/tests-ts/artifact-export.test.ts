@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, spyOn, test } from "bun:test";
 import { exportArtifact } from "../src/index.js";
@@ -37,6 +37,60 @@ const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
 await rm(caseProbe, { recursive: true, force: true });
 
 describe("offline artifact export", () => {
+  test("exports with Python from the selected managed-runtime cache", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-export-cache-"));
+    const environment = {
+      XDG_CACHE_HOME: join(root, "cache"),
+      HOME: root,
+      USERPROFILE: root,
+      PATH: "",
+      PYTHON: undefined,
+    };
+    const previous = Object.keys(environment).map(
+      (key) => [key, process.env[key]] as const,
+    );
+    try {
+      const dependencies = join(
+        environment.XDG_CACHE_HOME,
+        "codex-runtimes",
+        "codex-primary-runtime",
+        "dependencies",
+      );
+      await mkdir(dependencies, { recursive: true });
+      await symlink(
+        process.platform === "win32"
+          ? dirname(PYTHON)
+          : dirname(dirname(PYTHON)),
+        join(dependencies, "python"),
+        "junction",
+      );
+      await writeFile(
+        join(root, "THREAT_MODEL.md"),
+        "# Synthetic saved model\n",
+      );
+      Object.assign(process.env, environment);
+      delete process.env["PYTHON"];
+      const result = await runArtifactHelper(
+        [
+          "--scan-dir",
+          root,
+          "--export-artifact",
+          "threat-model",
+          "--export-format",
+          "md",
+        ],
+        { pluginRoot: PLUGIN_ROOT },
+      );
+      expect(result.stdout).toBe("# Synthetic saved model\n");
+    } finally {
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test.each([0, 1])(
     "preserves split UTF-8 diagnostics at exit %i",
     async (exitCode) => {

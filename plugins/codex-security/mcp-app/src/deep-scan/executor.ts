@@ -14,6 +14,7 @@ import {
   isAbsolute,
   join,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import {
@@ -485,11 +486,18 @@ async function workerRuntimeSettings(
       ? profiles[config.profile]
       : undefined;
   const selected = { ...config, ...(isRecord(profile) ? profile : {}) };
+  for (const key of ["analytics", "responses_api_metadata"]) {
+    if (isRecord(config[key]) && isRecord(profile) && isRecord(profile[key])) {
+      selected[key] = { ...config[key], ...profile[key] };
+    }
+  }
   const inherited = Object.fromEntries(
-    ["model_reasoning_summary", "service_tier"].map((key) => [
-      key,
-      selected[key],
-    ]),
+    [
+      "model_reasoning_summary",
+      "service_tier",
+      "analytics",
+      "responses_api_metadata",
+    ].map((key) => [key, selected[key]]),
   );
   const settings: CodexSdkWorkerRuntimeSettings = { config: inherited };
   const workerConfigPath = environmentVariable(
@@ -716,7 +724,7 @@ function resolveFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(resolve(originalCwd, directory), executableName);
+    const candidate = `${absoluteCodexPath(directory, process.platform, originalCwd)}${sep}${executableName}`;
     if (isExecutableFile(candidate)) return candidate;
   }
   return undefined;
@@ -823,7 +831,9 @@ function absoluteCodexPath(
   if (isAbsolute(value) || (platform === "win32" && win32.isAbsolute(value))) {
     return value;
   }
-  return resolve(originalCwd, value);
+  return platform === "win32"
+    ? resolve(originalCwd, value)
+    : `${originalCwd}${sep}${value}`;
 }
 
 function isNativeWindowsRootRelativePath(value: string): boolean {

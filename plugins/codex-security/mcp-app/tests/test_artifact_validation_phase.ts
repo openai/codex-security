@@ -11,7 +11,7 @@ const {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
 } = await importSource(
-  new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-validation-phase.ts"),
 );
 
 const toolSchema = await readJson(

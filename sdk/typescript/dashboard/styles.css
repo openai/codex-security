@@ -1,6 +1,5 @@
 @import "tailwindcss";
 @import "@openai/apps-sdk-ui/css";
-@import "katex/dist/katex.min.css" layer(base);
 @source "../node_modules/@openai/apps-sdk-ui";
 @source "./**/*.{ts,tsx}";
 

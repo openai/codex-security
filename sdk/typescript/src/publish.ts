@@ -450,6 +450,13 @@ export async function publishScanInternal(
     result.indeterminate = true;
     result.warnings = [
       `The Linear publication outcome is indeterminate; local history may not include every created issue. ${recoveryMessage}`,
+      ...evidence.flatMap((item) =>
+        item.source === "handoff" &&
+        item.status === "invalid" &&
+        item.ownerFindingId === undefined
+          ? [item.error]
+          : [],
+      ),
     ];
     await preserveConnectorEvents();
     if (eventLogNotice !== undefined) result.warnings.push(eventLogNotice);
@@ -527,7 +534,6 @@ export async function publishScanInternal(
       `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
     ];
   }
-  options.signal?.throwIfAborted();
   reportPublicationProgress(progressObserver, {
     type: "completed",
     created: result.counts.created,
@@ -915,8 +921,17 @@ async function collectPublicationHandoffEvidence(
   let content: string;
   try {
     content = await readFile(file, "utf8");
-  } catch {
-    return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return [
+      {
+        source: "handoff",
+        status: "invalid",
+        possibleMutation: true,
+        resolution: resolveClaims([]),
+        error: `Could not read the Linear publication handoff: ${errorMessage(error)}`,
+      },
+    ];
   }
 
   const expectedIssues = new Map(publication.issues.map(findingEntry));
@@ -1071,23 +1086,24 @@ function reconcilePublicationEvidence(
   const byOwner = Map.groupBy(evidence, (item) => item.ownerFindingId);
   const claimLedger = new Map<
     string,
-    {
-      kinds: Set<PublicationClaim["kind"]>;
-      owners: Set<string | undefined>;
-    }
+    { kind: PublicationClaim["kind"]; owner: string | undefined }
   >();
-
+  const collidingOwners = new Set<string>();
   for (const item of evidence) {
     for (const claim of item.resolution.claims) {
       for (const alias of publicationClaimAliases(claim)) {
-        const key = alias.value;
-        const reservation = claimLedger.get(key) ?? {
-          kinds: new Set<PublicationClaim["kind"]>(),
-          owners: new Set<string | undefined>(),
-        };
-        reservation.kinds.add(alias.kind);
-        reservation.owners.add(item.ownerFindingId);
-        claimLedger.set(key, reservation);
+        const reservation = claimLedger.get(alias.value);
+        const owner = item.ownerFindingId;
+        if (reservation === undefined) {
+          claimLedger.set(alias.value, { kind: alias.kind, owner });
+        } else if (
+          reservation.kind !== alias.kind ||
+          reservation.owner !== owner
+        ) {
+          if (reservation.owner !== undefined)
+            collidingOwners.add(reservation.owner);
+          if (owner !== undefined) collidingOwners.add(owner);
+        }
       }
     }
   }
@@ -1097,14 +1113,6 @@ function reconcilePublicationEvidence(
   );
   let indeterminate = outcomes.some((outcome) => outcome.indeterminate);
 
-  const collidingOwners = new Set<string>();
-  for (const reservation of claimLedger.values()) {
-    if (reservation.kinds.size > 1 || reservation.owners.size > 1) {
-      for (const owner of reservation.owners) {
-        if (owner !== undefined) collidingOwners.add(owner);
-      }
-    }
-  }
   for (const outcome of outcomes) {
     if (!collidingOwners.has(outcome.issue.findingId)) continue;
     outcome.created = undefined;
@@ -1346,7 +1354,8 @@ async function preserveVerifiedHandoff(
   let current: string;
   try {
     current = await readFile(file, "utf8");
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     current = "";
   }
   const planned = new Map(publication.issues.map(findingEntry));

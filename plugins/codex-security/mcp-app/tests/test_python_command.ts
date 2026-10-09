@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   isUsablePythonExecutable,
   missingPythonHelperMessage,
   resolvePythonCommand,
+  runPythonWithInput,
 } from "../src/python_command.ts";
 
 const windowsHome = "C:\\Users\\fixture";
@@ -131,6 +139,8 @@ assert.equal(overrideProbeCount, 0);
 const executableFixtureRoot = await mkdtemp(
   path.join(tmpdir(), "codex-security-python-command-"),
 );
+const previousPython = process.env.PYTHON;
+const previousResolvedPython = process.env.CODEX_SECURITY_PYTHON_COMMAND;
 try {
   const directoryCandidate = path.join(executableFixtureRoot, "directory");
   const fileCandidate = path.join(executableFixtureRoot, "python3");
@@ -140,7 +150,77 @@ try {
     await isUsablePythonExecutable(directoryCandidate, "linux"),
     false,
   );
+  const resolvedPython =
+    process.platform === "win32" ? process.execPath : `${fileCandidate} `;
+  if (process.platform !== "win32")
+    await symlink(process.execPath, resolvedPython);
+  process.env.PYTHON = ` ${fileCandidate} `;
+  process.env.CODEX_SECURITY_PYTHON_COMMAND = resolvedPython;
+  assert.equal(await resolvePythonCommand(), resolvedPython);
+  assert.equal(
+    await resolvePythonCommand({ configuredPython: "  /custom/python  " }),
+    "/custom/python",
+  );
+  const input = "λ😀\n".repeat(250_000);
+  assert.equal(
+    await runPythonWithInput(
+      await resolvePythonCommand(),
+      ["-e", "process.stdin.pipe(process.stdout)"],
+      Buffer.from(input),
+      "Fixture helper",
+    ),
+    input,
+  );
+  delete process.env.CODEX_SECURITY_PYTHON_COMMAND;
+  assert.equal(await resolvePythonCommand(), fileCandidate);
+  const diagnostic = "--provider-error EACCES: λ😀\npermission denied";
+  await assert.rejects(
+    runPythonWithInput(
+      process.execPath,
+      [
+        "-e",
+        `process.stdin.resume(); process.stdin.on('end', () => { const text = Buffer.from(${JSON.stringify(diagnostic)}); process.stderr.write(text.subarray(0, 26)); setTimeout(() => { process.stderr.write(text.subarray(26)); process.exitCode = 2; }, 1); });`,
+      ],
+      "",
+      "Fixture helper",
+    ),
+    (error: Error) => error.message === diagnostic,
+  );
+  await assert.rejects(
+    runPythonWithInput(
+      process.execPath,
+      [
+        "-e",
+        `process.stderr.write(${JSON.stringify(diagnostic)}); process.exit(1);`,
+      ],
+      input,
+      "Fixture helper",
+    ),
+    (error: Error) => error.message === diagnostic,
+  );
+  await assert.rejects(
+    runPythonWithInput(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      input,
+      "Fixture helper",
+    ),
+    (error: NodeJS.ErrnoException) => typeof error.code === "string",
+  );
+  await assert.rejects(
+    runPythonWithInput(
+      path.join(executableFixtureRoot, "missing"),
+      [],
+      "",
+      "Fixture helper",
+    ),
+    { code: "ENOENT" },
+  );
   if (process.platform !== "win32") {
+    await assert.rejects(
+      runPythonWithInput(fileCandidate, [], "", "Fixture helper"),
+      { code: "EACCES" },
+    );
     assert.equal(await isUsablePythonExecutable(fileCandidate, "linux"), false);
     await chmod(fileCandidate, 0o755);
     assert.equal(await isUsablePythonExecutable(fileCandidate, "linux"), true);
@@ -148,6 +228,11 @@ try {
   }
   assert.equal(await isUsablePythonExecutable(fileCandidate, "win32"), true);
 } finally {
+  if (previousPython === undefined) delete process.env.PYTHON;
+  else process.env.PYTHON = previousPython;
+  if (previousResolvedPython === undefined)
+    delete process.env.CODEX_SECURITY_PYTHON_COMMAND;
+  else process.env.CODEX_SECURITY_PYTHON_COMMAND = previousResolvedPython;
   await rm(executableFixtureRoot, { force: true, recursive: true });
 }
 
