@@ -5561,40 +5561,6 @@ export async function main(
         });
       },
     })
-    .command("serve", {
-      description: "Start the local findings HTTP service.",
-      hint:
-        "Environment: HOST=127.0.0.1, PORT=3000.\n" +
-        "CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint\n" +
-        "(default: https://api.openai.com/v1/embeddings).",
-      destructive: true,
-      mcp: false,
-      options: z.object({
-        port: z
-          .number()
-          .int()
-          .min(0)
-          .max(65535)
-          .optional()
-          .describe(
-            "Listen port (default: PORT or 3000; 0 picks a free port).",
-          ),
-      }),
-      async run({ options }) {
-        try {
-          const { serveFindings } = await import("./server/serve.js");
-          await serveFindings(
-            options.port === undefined
-              ? dependencies.environment
-              : { ...dependencies.environment, PORT: String(options.port) },
-            output,
-          );
-        } catch (error) {
-          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
-          exitCode = 1;
-        }
-      },
-    })
     .command("init", {
       description: "Create a starter project configuration.",
       hint: "Existing files are never overwritten.",
@@ -5828,7 +5794,7 @@ export async function main(
     );
     if (
       structuredOutput &&
-      ["validate", "login", "logout", "serve"].includes(command) &&
+      ["validate", "login", "logout"].includes(command) &&
       !argv.includes("--schema")
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
@@ -5962,10 +5928,7 @@ export async function main(
       command !== "verify-fix" &&
       command !== "patch" &&
       positionals.length >
-        (scanImport ||
-        command === "logout" ||
-        command === "info" ||
-        command === "serve"
+        (scanImport || command === "logout" || command === "info"
           ? 0
           : subcommand === "compare" || subcommand === "match"
             ? 2

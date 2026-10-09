@@ -17,9 +17,6 @@ const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
 const { parseJson, stringifyJson } = await importSource("src/helpers/json.ts");
-const { dashboard } = (await importSource(
-  "src/workbench/dashboard.ts",
-)) as typeof import("../src/workbench/dashboard.ts");
 const { findPotentialDuplicates, listDedupeGroups } = (await importSource(
   "src/workbench/duplicates.ts",
 )) as typeof import("../src/workbench/duplicates.ts");
@@ -130,7 +127,6 @@ test("finding helper help exits without reading stdin", async () => {
     "find-potential-duplicates",
     "store-dedupe-groups",
     "list-dedupe-groups",
-    "dashboard",
   ];
   for (const command of commands) {
     // execFile leaves stdin open; help must exit without waiting for JSON.
@@ -237,11 +233,7 @@ test("historical timestamp spellings retain exact chronology, page boundaries, a
     "upper-year",
   ];
   for (const [id, timestamp] of timestamps) {
-    const item = entry(id);
-    item.finding.severity = {
-      level: id === "zero-b" ? "critical" : id === "zero-a" ? "low" : "high",
-    };
-    storeFindings(database, [item], timestamp, "repository");
+    storeFindings(database, [entry(id)], timestamp, "repository");
   }
   for (const [id, timestamp] of timestamps) {
     database
@@ -277,51 +269,6 @@ test("historical timestamp spellings retain exact chronology, page boundaries, a
       ),
       expected.filter((id) => id !== "native"),
     );
-  }
-  for (const view of ["findings", "groups"] as const) {
-    for (const sort of ["newest", "activity"] as const) {
-      for (const direction of ["asc", "desc"] as const) {
-        const chronological =
-          direction === "asc"
-            ? expected
-            : [
-                "upper-year",
-                "later",
-                "nanosecond",
-                "microsecond",
-                "offset",
-                "offset-overflow",
-                "native",
-                "bare",
-                "zero-a",
-                "zero-b",
-                "lower-year",
-              ];
-        const ordered = [...chronological];
-        if (view === "findings" && sort === "activity")
-          ordered.splice(
-            ordered.indexOf("bare"),
-            3,
-            "zero-b",
-            "bare",
-            "zero-a",
-          );
-        const items = expected.flatMap(
-          (_, offset) =>
-            dashboard(database, { view, sort, direction, limit: 1, offset })
-              .items,
-        );
-        assert.deepEqual(
-          items.map((item) => item.id),
-          ordered,
-          `${view}/${sort}/${direction}`,
-        );
-        assert.deepEqual(
-          items.map((item) => item.createdAt),
-          ordered.map((id) => timestamps.find(([key]) => key === id)![1]),
-        );
-      }
-    }
   }
   assert.deepEqual(
     database
