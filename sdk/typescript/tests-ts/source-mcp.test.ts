@@ -11,6 +11,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { delimiter, join, relative, resolve } from "node:path";
@@ -36,9 +37,229 @@ import {
 import { resolveCodexCommand } from "../src/runtime.js";
 import { comparisonEnvironment } from "../src/scan-comparison.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
+
+test.each(["local", "executor"])(
+  "native %s cwd preserves directory-link traversal and review identity",
+  async (mode) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    for (const path of ["real/inner", "real/target", "target"])
+      await mkdir(join(home, path), { recursive: true });
+    await symlink(
+      join(home, "real/inner"),
+      join(home, "link"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const captured = join(home, "cwd.json");
+    const script = join(home, "source.mjs");
+    await writeFile(
+      script,
+      `import { writeFileSync } from "node:fs";
+writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+process.exit(1);`,
+    );
+    const executorScript = join(home, "executor.mjs");
+    await writeFile(
+      executorScript,
+      `import { writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { stdio: "inherit" }).status ?? 1);`,
+    );
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(home, "state"),
+      OPENAI_API_KEY: "synthetic-review-key",
+    };
+    const store = checkpointWorkbench("source-cwd", { repository });
+    const workflow = new FindingWorkflow("source-cwd", environment, store.run);
+    const snapshot = await workflow.sourceSnapshot(repository);
+    const review: CodexReview<{ cwd: string }> = {
+      stage: "pair-review",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      prompt: "Read synthetic source.",
+      schema: { type: "object" },
+      validate: (value) => value as { cwd: string },
+    };
+    let calls = 0;
+    for (const cwd of ["link/../target", "target"]) {
+      if (mode === "executor")
+        await writeFile(
+          join(home, "environments.toml"),
+          stringify({
+            environments: [
+              {
+                id: "source-executor",
+                program: process.execPath,
+                args: [
+                  executorScript,
+                  captured,
+                  resolveCodexCommand(environment).command,
+                ],
+                cwd,
+              },
+            ],
+          }),
+        );
+      const source = await sourceForTest(
+        {
+          projects: { [repository]: { trust_level: "trusted" } },
+          mcp_servers: {
+            source: {
+              command: process.execPath,
+              args: [
+                script,
+                mode === "local" ? captured : join(home, "source-cwd.json"),
+              ],
+              cwd:
+                mode === "local"
+                  ? `${relative(process.cwd(), home)}/${cwd}`
+                  : repository,
+              ...(mode === "executor"
+                ? { environment_id: "source-executor" }
+                : {}),
+            },
+          },
+        },
+        environment,
+        repository,
+      );
+      const digest = await reviewSettingsDigest(environment, undefined, {
+        mcp: source,
+        repository,
+      });
+      await expect(
+        new CodexReviewRunner(
+          environment,
+          undefined,
+          undefined,
+          repository,
+          undefined,
+          undefined,
+          undefined,
+          source,
+        ).run(review),
+      ).rejects.toThrow(/required.*source/i);
+      const actual = JSON.parse(await readFile(captured, "utf8")) as {
+        cwd: string;
+      };
+      expect(await realpath(actual.cwd)).toBe(
+        await realpath(
+          join(
+            home,
+            cwd.startsWith("link") && process.platform !== "win32"
+              ? "real/target"
+              : "target",
+          ),
+        ),
+      );
+      const checkpoint = new CheckpointedReviewRunner(
+        workflow,
+        {
+          async run<T>(request: CodexReview<T>): Promise<T> {
+            calls++;
+            return request.validate(actual);
+          },
+        },
+        snapshot,
+        { allRepositories: true },
+        digest,
+      );
+      expect(await checkpoint.run(review)).toEqual(actual);
+      expect(await checkpoint.run(review)).toEqual(actual);
+    }
+    expect(calls).toBe(
+      mode === "executor" && process.platform === "win32" ? 1 : 2,
+    );
+  },
+);
+
+test("remote source environment retains exact key casing for a Windows caller", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "remote source environment retains exact key casing for a Windows caller",
+    )
+  )
+    return;
+  const home = await temporaryDirectory();
+  const repository = await sourceCheckout();
+  const fixture = join(home, "config.mjs");
+  const config = {
+    mcp_servers: {
+      source: {
+        command: "synthetic-source",
+        environment_id: "remote",
+        env_vars: ["SOURCE_ROOT"],
+        env: { source_root: "synthetic-explicit" },
+      },
+    },
+  };
+  await writeFile(join(home, "config.toml"), stringify(config));
+  await writeFile(
+    join(home, "environments.toml"),
+    stringify({ environments: [{ id: "remote", url: "ws://127.0.0.1:9" }] }),
+  );
+  await writeFile(
+    fixture,
+    `import { createInterface } from "node:readline";
+const config = JSON.parse(process.argv[2]);
+for await (const line of createInterface({ input: process.stdin })) {
+ const message = JSON.parse(line);
+ if (message.id === undefined) continue;
+ const result = message.method === "config/read" ? { config, layers: [] } : message.method === "environment/status" ? { status: "ready" } : {};
+ process.stdout.write(JSON.stringify({ id: message.id, result }) + "\\n");
+}`,
+  );
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  try {
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    const source = await resolveSourceMcp(
+      "source",
+      {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        TEMP: process.env["TEMP"],
+        TMP: process.env["TMP"],
+        CODEX_HOME: home,
+        CODEX_CLI_PATH: join(home, "synthetic.exe"),
+        OPENAI_API_KEY: "synthetic-review-key",
+        SOURCE_ROOT: "synthetic-inherited",
+      },
+      undefined,
+      repository,
+      (_command, _args, options) => {
+        Object.defineProperty(process, "platform", platform);
+        try {
+          return spawn(
+            process.execPath,
+            [fixture, JSON.stringify(config)],
+            options,
+          );
+        } finally {
+          Object.defineProperty(process, "platform", {
+            ...platform,
+            value: "win32",
+          });
+        }
+      },
+    );
+    expect(source.server["env"]).toEqual({
+      SOURCE_ROOT: "synthetic-inherited",
+      source_root: "synthetic-explicit",
+    });
+    expect(source.server["env_vars"]).toEqual([]);
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+});
 
 test.each([
   "local-inherited",

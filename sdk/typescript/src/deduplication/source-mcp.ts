@@ -70,6 +70,15 @@ const CUSTOM_CA_ENV_KEYS = [
   "NPM_CONFIG_CAFILE",
 ];
 
+function nativeAbsolutePath(path: string, base = process.cwd()): string {
+  // Unix resolves symlink/.. through the filesystem; Windows resolves it lexically.
+  return process.platform === "win32"
+    ? resolve(base, path)
+    : isAbsolute(path)
+      ? path
+      : `${base}/${path}`;
+}
+
 function localCaEnvironment(
   environment: ProcessEnvironment,
 ): Record<string, string> {
@@ -85,12 +94,7 @@ function localCaEnvironment(
       !names.has(process.platform === "win32" ? name.toUpperCase() : name)
     )
       continue;
-    // Keep relative path components intact on Unix, including symlink/.. paths.
-    inherited[name] = isAbsolute(value)
-      ? value
-      : process.platform === "win32"
-        ? resolve(value)
-        : `${process.cwd()}/${value}`;
+    inherited[name] = nativeAbsolutePath(value);
   }
   return inherited;
 }
@@ -320,7 +324,7 @@ async function sourceExecutor(
   );
   // Native anchors an executor's relative host cwd to its configuration home.
   if (typeof selected?.["cwd"] === "string")
-    selected["cwd"] = resolve(home, selected["cwd"]);
+    selected["cwd"] = nativeAbsolutePath(selected["cwd"], home);
   return selected;
 }
 
@@ -445,7 +449,7 @@ export async function resolveSourceMcp(
     (!isAbsolute(server["cwd"]) ||
       (process.platform === "win32" && parse(server["cwd"]).root.length === 1))
   )
-    server["cwd"] = resolve(server["cwd"]);
+    server["cwd"] = nativeAbsolutePath(server["cwd"]);
   if (server["tools"] !== undefined) {
     server["tools"] = Object.fromEntries(
       Object.entries(server["tools"] as JsonObject).map(([tool, settings]) => [
@@ -489,7 +493,12 @@ export async function resolveSourceMcp(
   // Explicit server values retain native precedence and never become host values.
   const inherited: JsonObject = Object.create(null);
   const explicit = (server["env"] ?? {}) as JsonObject;
-  const explicitNames = new Set(Object.keys(explicit).map(environmentName));
+  // Native remote stdio overlays use exact keys, regardless of the caller OS.
+  const serverEnvironmentName = (name: string) =>
+    environmentId === "local" ? environmentName(name) : name;
+  const explicitNames = new Set(
+    Object.keys(explicit).map(serverEnvironmentName),
+  );
   const executorEnvironment: Record<string, string> = Object.create(null);
   const executorEnvironmentNames = new Set(
     Object.keys((executor?.["env"] ?? {}) as JsonObject).map(environmentName),
@@ -514,7 +523,7 @@ export async function resolveSourceMcp(
       if (
         entry["source"] === "remote" &&
         typeof executor?.["program"] === "string" &&
-        !explicitNames.has(environmentName(name)) &&
+        !explicitNames.has(serverEnvironmentName(name)) &&
         !executorEnvironmentNames.has(environmentName(name))
       ) {
         const value = environmentEntry(reviewEnvironment, name);
@@ -539,7 +548,7 @@ export async function resolveSourceMcp(
       continue;
     }
     const value = environmentEntry(environment, name);
-    if (value !== undefined && !explicitNames.has(environmentName(name)))
+    if (value !== undefined && !explicitNames.has(serverEnvironmentName(name)))
       inherited[name] = value;
   }
   if (Object.keys(inherited).length) {
