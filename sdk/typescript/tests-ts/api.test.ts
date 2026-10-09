@@ -89,6 +89,7 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
 import { importScan } from "../src/import-scan.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
+import { restoreScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { VERSION } from "../src/version.js";
 import { createProviderProfile } from "../src/provider-profile.js";
@@ -5463,7 +5464,7 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each(["repository", "standalone-file"])(
-    "protects %s knowledge-base context without retaining its documents",
+    "protects %s knowledge-base context and retains private continuation inputs",
     async (kind) => {
       const scanPrompt = "Review the synthetic authorization boundary.";
       const root = await temporaryDirectory();
@@ -5558,12 +5559,11 @@ describe("CodexSecurity orchestration", () => {
         }),
       });
 
-      await expect(
-        client.run(repository, {
-          knowledgeBasePaths: [knowledgeBase],
-          scanPrompt,
-        }),
-      ).resolves.toMatchObject({ threadId: "thread-1" });
+      const result = await client.run(repository, {
+        knowledgeBasePaths: [knowledgeBase],
+        scanPrompt,
+      });
+      expect(result).toMatchObject({ threadId: "thread-1" });
       expect(existsSync(knowledgeDirectory)).toBe(false);
       expect(workbenchGit).toBe(expectedGit);
       expect(prompt).toContain(
@@ -5575,6 +5575,16 @@ describe("CodexSecurity orchestration", () => {
       expect(prompt).not.toContain("deep-discovery userContext");
       expect(prompt).not.toContain(context.trim());
       expect(recipe).toMatchObject({ knowledgeBasePaths: [knowledgeBase] });
+      await rm(document);
+      const saved = await restoreScanKnowledge(
+        scanDir,
+        repository,
+        (recipe as JsonObject)["scanInputs"],
+      );
+      expect(Object.values(saved.documents)).toContain(context);
+      expect((recipe as JsonObject)["scanInputs"]).toEqual(
+        scanInputIdentity(scanPrompt, saved),
+      );
       expect(await readdir(scanDir)).not.toContain("knowledge-base");
       await client.close();
     },

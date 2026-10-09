@@ -147,6 +147,11 @@ import {
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import {
+  readKnowledgeBaseSnapshot,
+  type KnowledgeBaseSnapshot,
+} from "./knowledge-base.js";
+import { restoreScanKnowledge, scanInputIdentity } from "./scan-inputs.js";
+import {
   CodexSecurityError,
   AuthenticationRequiredError,
   ConfigurationError,
@@ -935,6 +940,8 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  rerunInputIdentity?: JsonValue;
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
   resumeScanId?: string;
@@ -2294,6 +2301,13 @@ export async function main(
             dependencies.currentDirectory(),
             saved["scanDir"],
           );
+          if (scanArguments.knowledgeBasePaths.length > 0) {
+            scanArguments.knowledgeBaseSnapshot = await restoreScanKnowledge(
+              scanArguments.outputDir,
+              scanArguments.repository!,
+              (saved["recipe"] as JsonObject)["scanInputs"],
+            );
+          }
           scanArguments.parentScanId = undefined;
           // Resume uses the installed engine with the saved recipe and checkpoints.
           scanArguments.expectedPluginVersion = undefined;
@@ -2314,7 +2328,8 @@ export async function main(
       },
     })
     .command("rerun", {
-      description: "Rerun a saved scan with its original configuration.",
+      description:
+        "Start a new scan using saved settings and current checkout/context files.",
       hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       destructive: true,
       mcp: false,
@@ -2442,6 +2457,9 @@ export async function main(
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
+          scanArguments.rerunInputIdentity = isJsonObject(recipe)
+            ? (recipe["scanInputs"] ?? null)
+            : null;
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
@@ -8424,6 +8442,7 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),
@@ -8709,6 +8728,37 @@ async function executeScan(
         }
       },
     };
+    if (arguments_.rerunInputIdentity !== undefined) {
+      if (options.knowledgeBasePaths?.length) {
+        options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
+          options.knowledgeBasePaths,
+          preparationAbortController.signal,
+        );
+      }
+      const previousInputs = arguments_.rerunInputIdentity;
+      const currentInputs = scanInputIdentity(
+        options.scanPrompt,
+        options.knowledgeBaseSnapshot,
+      );
+      const changes = isJsonObject(previousInputs)
+        ? ["scanPromptSha256", "knowledgeBase"]
+            .filter(
+              (key) =>
+                JSON.stringify(previousInputs[key]) !==
+                JSON.stringify(currentInputs[key]),
+            )
+            .map((key) =>
+              key === "scanPromptSha256"
+                ? "scan instructions"
+                : "knowledge base",
+            )
+        : [];
+      writeAboveProgress(() =>
+        errorOutput.write(
+          `codex-security: Starting a new scan with current checkout/context files.${changes.length ? ` Changed inputs: ${changes.join(", ")}.` : ""}\n`,
+        ),
+      );
+    }
     if (arguments_.dryRun) {
       preflight = await security.preflight(repository, options);
     } else {

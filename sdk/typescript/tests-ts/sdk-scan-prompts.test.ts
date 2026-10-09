@@ -9,9 +9,61 @@ import { mockWorkbench, TestClient } from "./support/api-client.js";
 import { completedCodex, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
+import { scanInputIdentity } from "../src/scan-inputs.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
+
+test("rerun identifies changed instructions and captures current knowledge for the new scan", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  await mkdir(repository);
+  const document = join(root, "architecture.md");
+  const prompt = join(root, "instructions.md");
+  await writeFile(document, "Original architecture.");
+  const scanInputs = scanInputIdentity(
+    "Original instructions.",
+    await readKnowledgeBaseSnapshot([document]),
+  );
+  await writeFile(document, "Current architecture.");
+  await writeFile(prompt, "Current instructions.");
+  let selected: unknown;
+  const stderr = captureCli(main, "stderr");
+  const code = await stderr.run(
+    ["scans", "rerun", "saved", "--scan-prompt-file", prompt, "--json"],
+    dependencies({
+      currentDirectory: repository,
+      onWorkbench: async () => ({
+        scanId: "saved",
+        recipe: {
+          repository,
+          target: { kind: "repository", paths: [] },
+          mode: "deep",
+          config: {},
+          knowledgeBasePaths: [document],
+          requiresScanPrompt: true,
+          scanInputs,
+        },
+      }),
+      onTurn: (_repository, options) => {
+        selected = options;
+      },
+    }),
+  );
+  expect(code, stderr.text()).toBe(0);
+  expect(selected).toMatchObject({
+    parentScanId: "saved",
+    scanPrompt: "Current instructions.",
+    knowledgeBaseSnapshot: {
+      documents: { "0-architecture.md.txt": "Current architecture." },
+    },
+  });
+  expect(stderr.text()).toContain("Starting a new scan");
+  expect(stderr.text()).toContain(
+    "Changed inputs: scan instructions, knowledge base",
+  );
+});
 
 test.each([
   ["omitted", undefined],
