@@ -179,6 +179,9 @@
 - preserve worker settings and executable selection ([#1501](https://github.com/openai/codex-security/pull/1501))
 - normalize candidates against selected sources ([#1502](https://github.com/openai/codex-security/pull/1502))
 - preserve coordinator ownership and source novelty (#1503) ([8ea9763](https://github.com/openai/codex-security/commit/8ea9763a6e446399969d88f1bff233fe8c2a6dc1))
+- retain underlying artifact and process failures ([#1504](https://github.com/openai/codex-security/pull/1504))
+- preserve finding queries and timestamp order (#1505) ([c0c7f12](https://github.com/openai/codex-security/commit/c0c7f1223440093d8a874aca226a5f5fb06d3e86))
+- preserve archived workflows and saved scan replay (#1506) ([45b3efb](https://github.com/openai/codex-security/commit/45b3efb04d70d033097705ec443f365f02a61c1e))
 
 <!-- release-section: highlights:end -->
 

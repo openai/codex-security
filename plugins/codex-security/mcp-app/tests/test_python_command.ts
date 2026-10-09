@@ -179,7 +179,9 @@ try {
       process.execPath,
       [
         "-e",
-        `process.stdin.resume(); process.stdin.on('end', () => { const text = Buffer.from(${JSON.stringify(diagnostic)}); process.stderr.write(text.subarray(0, 26)); setTimeout(() => { process.stderr.write(text.subarray(26)); process.exitCode = 2; }, 1); });`,
+        "process.stdin.resume(); process.stdin.on('end', () => { const text = Buffer.from(process.argv[1]); process.stderr.write(text.subarray(0, 26)); setTimeout(() => { process.stderr.write(text.subarray(26)); process.exitCode = 2; }, 1); });",
+        "--",
+        diagnostic,
       ],
       "",
       "Fixture helper",
@@ -191,7 +193,9 @@ try {
       process.execPath,
       [
         "-e",
-        `process.stderr.write(${JSON.stringify(diagnostic)}); process.exit(1);`,
+        "process.stderr.write(process.argv[1]); process.exit(1);",
+        "--",
+        diagnostic,
       ],
       input,
       "Fixture helper",
@@ -237,10 +241,18 @@ try {
 }
 
 const pythonCommand = "/selected/python";
-for (const code of ["ENOENT", "EACCES", "ENOEXEC", "UNKNOWN"]) {
-  assert.match(
-    missingPythonHelperMessage({ code, path: pythonCommand }, pythonCommand)!,
-    /could not start its Python 3 helper/,
+const launchError = Object.assign(new Error(`spawn ${pythonCommand} ENOENT`), {
+  code: "ENOENT",
+  path: pythonCommand,
+});
+assert.match(
+  missingPythonHelperMessage(launchError, pythonCommand)!,
+  /spawn \/selected\/python ENOENT\n.*could not start its Python 3 helper/,
+);
+for (const code of ["EACCES", "ENOEXEC", "UNKNOWN"]) {
+  assert.equal(
+    missingPythonHelperMessage({ code, path: pythonCommand }, pythonCommand),
+    undefined,
   );
 }
 assert.equal(
