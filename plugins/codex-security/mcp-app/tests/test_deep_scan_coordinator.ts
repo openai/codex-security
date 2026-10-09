@@ -22,6 +22,7 @@ import path from "node:path";
 import { testDeepScanLifecycle } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
+  WorkbenchDeepScanStore,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,
   AsyncLock,
@@ -355,6 +356,54 @@ async function testConsumedSourceWithToolDiagnosticIsNotRereadAfterReducerWrites
   assert.equal(terminal?.terminalReason, "saturated");
   assert.equal(executor.dedupCalls, 1);
   assert.deepEqual((await readJson(terminal.manifestPath)).findings, []);
+}
+
+async function testIndependentSourceGroupsDoNotSaturate() {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 1,
+    stopAfterNoNew: 1,
+    maxDiscoveryRuns: 4,
+  });
+  const executor = new FakeExecutor({
+    discoveryCandidateId: "shared-identity",
+  });
+  const run = executor.run.bind(executor);
+  executor.run = async (request) => {
+    const result = await run(request);
+    if (request.kind === "dedup") {
+      const assigned = request.artifactContext!.deepReducer!;
+      const previous = assigned.previousReducerResultPath
+        ? (await readJson(assigned.previousReducerResultPath)).findings
+        : [];
+      const discoveries = await Promise.all(
+        assigned.claimedWorkers.map(async (worker) =>
+          (await readJson(worker.resultPath)).findings.map(
+            (finding: Record<string, unknown>, index: number) => ({
+              ...finding,
+              provenance: {
+                source: "local_plugin",
+                sourceFindingIds: [`${worker.id}:${index}`],
+              },
+            }),
+          ),
+        ),
+      );
+      const resultPath = path.join(
+        request.artifactContext!.root,
+        "result.json",
+      );
+      await writeJson(resultPath, {
+        ...(await readJson(resultPath)),
+        findings: [...previous, ...discoveries.flat()],
+      });
+    }
+    return result;
+  };
+  const terminal = await runCoordinator(fixture, store, executor);
+  assert.equal(terminal?.terminalReason, "capped", terminal?.error);
+  assert.equal(store.run.noNewStreak, 0);
+  assert.equal(executor.discoveryCalls, 4);
+  assert.equal((await readJson(terminal.manifestPath)).findings.length, 4);
 }
 
 async function testRetryKeepsLogicalWorker() {
@@ -2353,6 +2402,266 @@ async function testStaleMutationObservesReplacement() {
   );
 }
 
+async function testStoreConfirmedReplacementSurvivesReadFailure() {
+  for (const confirmation of ["mutation", "failure-write"])
+    for (const replaced of [false, true]) {
+      const fixture = await fixtureRun();
+      const run = { ...fixture.run, coordinatorGeneration: 2 };
+      let current: DeepScanRunState = run;
+      const stale =
+        "Deep Scan coordinator lease belongs to a newer generation.";
+      const diagnostic = replaced
+        ? stale
+        : `Permission denied: /fixture/${stale}/lock`;
+      let reads = 0;
+      const failures: string[][] = [];
+      const store = new WorkbenchDeepScanStore(async (args: string[]) => {
+        switch (args[0]) {
+          case "claim-deep-scan-coordinator":
+            return { deepScan: current, coordinatorDisposition: "claimed" };
+          case "update-progress":
+            if (replaced) current = { ...current, coordinatorGeneration: 3 };
+            throw new Error(diagnostic);
+          case "get-deep-scan": {
+            reads += 1;
+            if (
+              reads === 2 ||
+              (reads === 1 && (!replaced || confirmation === "failure-write"))
+            )
+              throw new Error("sqlite3.OperationalError: database is locked");
+            const snapshot = current;
+            if (replaced)
+              current = {
+                ...current,
+                status: "succeeded",
+                terminalReason: "capped",
+              };
+            return { deepScan: snapshot };
+          }
+          case "fail-deep-scan":
+            failures.push(args);
+            if (replaced)
+              throw new Error(
+                args.includes("--coordinator-generation")
+                  ? stale
+                  : "Deep Scan mutation requires the current coordinator lease.",
+              );
+            current = {
+              ...current,
+              status: "failed",
+              error: args
+                .find((arg) => arg.startsWith("--message="))!
+                .slice("--message=".length),
+            };
+            return { deepScan: current };
+          default:
+            throw new Error(`Unexpected fixture operation: ${args[0]}`);
+        }
+      });
+      await store.claimCoordinator({
+        scanId: run.scanId,
+        threadId: "fixture-thread",
+      });
+      const coordinator = new DeepScanCoordinatorRegistry().start({
+        run,
+        store,
+        executor: new FakeExecutor(),
+        pluginRoot: fixture.pluginRoot,
+        clock: immediateClock,
+        threadId: "fixture-thread",
+        heartbeatIntervalMs: 60_000,
+      });
+      const terminal = await coordinator.wait(undefined, 2_500);
+      assert.equal(
+        terminal?.status,
+        replaced ? "succeeded" : "failed",
+        confirmation,
+      );
+      assert.equal(terminal?.coordinatorGeneration, replaced ? 3 : 2);
+      assert.equal(current.status, terminal?.status);
+      assert.equal(
+        failures.length,
+        replaced && confirmation === "mutation" ? 0 : 1,
+      );
+      if (replaced) {
+        assert.equal(reads, confirmation === "mutation" ? 3 : 4);
+        assert.deepEqual(store.coordinatorLeaseArgs(run.scanId), []);
+      } else {
+        assert.equal(
+          reads,
+          2,
+          "unconfirmed diagnostics must not add ownership reads",
+        );
+        assert.equal(terminal?.error, diagnostic);
+        const generationFlag = failures[0].indexOf("--coordinator-generation");
+        assert.equal(failures[0][generationFlag + 1], "2");
+      }
+    }
+}
+
+async function testStoreConfirmationSurvivesReplayAndThreadMetadata() {
+  for (const operation of [
+    "finish",
+    "worker-acceptance",
+    "thread-started",
+  ] as const)
+    for (const replaced of [false, true]) {
+      const fixture = await fixtureRun();
+      const run = { ...fixture.run, coordinatorGeneration: 2 };
+      let current: DeepScanRunState = run;
+      const store = new FakeStore(run);
+      const stale =
+        "Deep Scan coordinator lease belongs to a newer generation.";
+      const diagnostic = replaced
+        ? stale
+        : `Permission denied: /fixture/${stale}/lock`;
+      let mutations = 0;
+      let reads = 0;
+      let failures = 0;
+      const persisted = new WorkbenchDeepScanStore(async (args: string[]) => {
+        switch (args[0]) {
+          case "claim-deep-scan-coordinator":
+            return { deepScan: current, coordinatorDisposition: "claimed" };
+          case "finish-deep-scan":
+          case "upsert-deep-scan-worker":
+            mutations += 1;
+            if (operation !== "thread-started" && mutations === 1)
+              throw new Error("Synthetic initial persistence failure.");
+            if (replaced) current = { ...current, coordinatorGeneration: 3 };
+            throw new Error(diagnostic);
+          case "get-deep-scan": {
+            reads += 1;
+            if (reads === 2)
+              throw new Error("sqlite3.OperationalError: database is locked");
+            const snapshot = current;
+            if (replaced)
+              current = {
+                ...current,
+                status: "succeeded",
+                terminalReason: "capped",
+              };
+            return { deepScan: snapshot };
+          }
+          case "fail-deep-scan":
+            failures += 1;
+            if (replaced)
+              throw new Error(
+                "Deep Scan mutation requires the current coordinator lease.",
+              );
+            current = {
+              ...current,
+              status: "failed",
+              error: args
+                .find((arg) => arg.startsWith("--message="))!
+                .slice("--message=".length),
+            };
+            return { deepScan: current };
+          default:
+            throw new Error(`Unexpected fixture operation: ${args[0]}`);
+        }
+      });
+      await persisted.claimCoordinator({
+        scanId: run.scanId,
+        threadId: "fixture-thread",
+      });
+      store.get = persisted.get.bind(persisted);
+      store.fail = persisted.fail.bind(persisted);
+      if (operation === "finish")
+        store.finish = persisted.finish.bind(persisted);
+      else {
+        const updateWorker = store.updateWorker.bind(store);
+        store.updateWorker = async (update) =>
+          (operation === "worker-acceptance" &&
+            update.status === "succeeded") ||
+          (operation === "thread-started" && update.threadId !== undefined)
+            ? persisted.updateWorker(update)
+            : updateWorker(update);
+      }
+      const coordinator = new DeepScanCoordinatorRegistry().start({
+        run,
+        store,
+        executor: new FakeExecutor(),
+        pluginRoot: fixture.pluginRoot,
+        clock: immediateClock,
+        threadId: "fixture-thread",
+        heartbeatIntervalMs: 60_000,
+        retryDelaysMs: [],
+      });
+      const terminal = await coordinator.wait(undefined, 2_500);
+      assert.equal(
+        terminal?.status,
+        replaced ? "succeeded" : "failed",
+        operation,
+      );
+      assert.equal(terminal?.coordinatorGeneration, replaced ? 3 : 2);
+      assert.equal(current.status, terminal?.status);
+      assert.equal(failures, replaced ? 0 : 1);
+      if (replaced) {
+        assert.equal(mutations, operation === "thread-started" ? 1 : 2);
+        assert.equal(reads, 3);
+      } else {
+        assert.ok(terminal?.error?.includes(diagnostic));
+      }
+    }
+}
+
+async function testReducerDiagnosticDoesNotOverrideOwnership() {
+  for (const failRead of [false, true])
+    for (const reference of [
+      "missing-reference",
+      "Deep Scan coordinator lease belongs to a newer generation.",
+    ]) {
+      const { fixture, store } = await coordinatorFixture({
+        workers: 1,
+        maxDiscoveryRuns: 1,
+        stopAfterConsecutiveErrors: 1,
+      });
+      fixture.run.coordinatorGeneration = store.run.coordinatorGeneration = 2;
+      const worker = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+      const executor = {
+        async run(request: Parameters<FakeExecutor["run"]>[0]) {
+          const result = await worker.run(request);
+          if (request.kind === "dedup") {
+            const resultPath = path.join(
+              request.artifactContext!.root,
+              "result.json",
+            );
+            const draft = await readJson(resultPath);
+            draft.findings[0].provenance.sourceFindingIds = [reference];
+            await writeJson(resultPath, draft);
+          }
+          return result;
+        },
+      };
+      if (failRead) {
+        const get = store.get.bind(store);
+        let failed = false;
+        store.get = async (...args) => {
+          if (!failed) {
+            failed = true;
+            throw new Error("Synthetic authoritative ownership read failed");
+          }
+          return get(...args);
+        };
+      }
+      let observations = 0;
+      const terminal = await runCoordinator(fixture, store, executor, {
+        retryDelaysMs: [],
+        threadId: "fixture-thread",
+        heartbeatIntervalMs: 60_000,
+        observeReplacement: async (run) => {
+          observations += 1;
+          return run;
+        },
+      });
+      assert.equal(observations, 0);
+      assert.equal(terminal?.status, "failed");
+      assert.equal(store.run.status, "failed");
+      assert.equal(terminal?.coordinatorGeneration, 2);
+      assert.ok(store.failureMessages[0].includes(reference));
+    }
+}
+
 async function testJoinAndOrphanRules() {
   const fixture = await fixtureRun(twoRunConfig({ workers: 2, subagents: 1 }));
   const existingCoordinator = { marker: "existing" };
@@ -3379,7 +3688,9 @@ async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
   }
 }
 
-async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
+async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
+  replaced = false,
+) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     stopAfterNoNew: 2,
@@ -3391,18 +3702,54 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
   executor.dedupGate = Promise.withResolvers<void>();
   const updateWorker = store.updateWorker.bind(store);
   const rejectedCancellations = new Set();
+  fixture.run.coordinatorGeneration = store.run.coordinatorGeneration = 2;
+  let ownershipReads = 0;
+  const persisted = new WorkbenchDeepScanStore(async (args: string[]) => {
+    if (args[0] === "claim-deep-scan-coordinator")
+      return { deepScan: store.run, coordinatorDisposition: "claimed" };
+    if (args[0] === "get-deep-scan") {
+      ownershipReads += 1;
+      if (ownershipReads > 1)
+        throw new Error("sqlite3.OperationalError: database is locked");
+      return {
+        deepScan: {
+          ...store.run,
+          status: "succeeded",
+          coordinatorGeneration: 3,
+          terminalReason: "capped",
+        },
+      };
+    }
+    throw new Error(
+      "Deep Scan coordinator lease belongs to a newer generation.",
+    );
+  });
+  if (replaced) {
+    await persisted.claimCoordinator({
+      scanId: fixture.run.scanId,
+      threadId: "fixture-thread",
+    });
+    store.get = persisted.get.bind(persisted);
+  }
   store.updateWorker = async (update) => {
     if (update.kind === "discovery" && update.status === "canceled") {
       assert.equal(executor.dedupSignal?.aborted, true);
       assert.equal(store.run.noNewStreak, 2);
       rejectedCancellations.add(update.id);
+      if (replaced) return await persisted.updateWorker(update);
       throw new Error("fixture cancellation persistence failure");
     }
     return updateWorker(update);
   };
   const completed: ScanDraftInput[] = [];
   const coordinator = createCoordinator(fixture, store, executor, {
-    onComplete: async (draft) => void completed.push(structuredClone(draft)),
+    threadId: "fixture-thread",
+    heartbeatIntervalMs: 60_000,
+    onComplete: async (draft) => {
+      if (replaced)
+        throw new Error("Only a running scan can update artifacts.");
+      completed.push(structuredClone(draft));
+    },
   });
   coordinator.start();
   await executor.dedupStarted.promise;
@@ -3418,6 +3765,15 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
     "the redundant discoveries reached the failing cancellation write",
   );
   assert.equal(terminal?.status, "succeeded", terminal?.error);
+  if (replaced) {
+    assert.equal(terminal.coordinatorGeneration, 3);
+    assert.equal(terminal.terminalReason, "capped");
+    assert.equal(store.failureMessages.length, 0);
+    assert.equal(store.finishCalls.length, 0);
+    assert.equal(completed.length, 0);
+    assert.equal(executor.runningDiscovery, 0);
+    return;
+  }
   assert.equal(terminal.terminalReason, "saturated");
   assert.equal(store.failureMessages.length, 0);
   assert.equal(store.finishCalls.length, 1);
@@ -3738,6 +4094,7 @@ try {
   await testWorkerScopedCandidateSourceAggregation();
   await testConsumedSourceIsNotRereadAfterReducerWritesResult();
   await testConsumedSourceWithToolDiagnosticIsNotRereadAfterReducerWritesResult();
+  await testIndependentSourceGroupsDoNotSaturate();
   await testRetryKeepsLogicalWorker();
   await testSandboxDiagnosticSurvivesArtifactRetries();
   await testCompletionOrdering();
@@ -3745,6 +4102,7 @@ try {
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
   await testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
+  await testSaturationIgnoresDiscoveryCancellationWriteFailure(true);
   await testPublicationUsesAcceptedReducerSnapshot();
   await testDirectReducerCannotDropAcceptedFinding();
   await testSaturationDrainsBufferedAndCancelsInflight();
@@ -3811,6 +4169,9 @@ try {
   await testStoppedPublicationFailureBoundsPrefixedDiagnostic();
   await testTerminalReadFailureIsNotRecordedAsPublicationFailure();
   await testStaleMutationObservesReplacement();
+  await testStoreConfirmedReplacementSurvivesReadFailure();
+  await testStoreConfirmationSurvivesReplayAndThreadMetadata();
+  await testReducerDiagnosticDoesNotOverrideOwnership();
   await testCoordinatorHeartbeatsStopAfterOwnershipChanges();
   await testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead();
   await testRemoteObserverRetriesTransientPersistenceFailures();

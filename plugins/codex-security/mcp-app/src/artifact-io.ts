@@ -86,7 +86,7 @@ export async function readArtifactTextWithMetadata(
   }
 }
 
-async function artifactSourcePath(
+export async function artifactSourcePath(
   context: ArtifactContext,
   components: readonly string[],
   label: string,

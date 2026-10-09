@@ -177,6 +177,8 @@
 - consolidate GitHub release publication ([#1474](https://github.com/openai/codex-security/pull/1474))
 - simplify scan configuration processing ([#1459](https://github.com/openai/codex-security/pull/1459))
 - preserve worker settings and executable selection ([#1501](https://github.com/openai/codex-security/pull/1501))
+- normalize candidates against selected sources ([#1502](https://github.com/openai/codex-security/pull/1502))
+- preserve coordinator ownership and source novelty (#1503) ([8ea9763](https://github.com/openai/codex-security/commit/8ea9763a6e446399969d88f1bff233fe8c2a6dc1))
 
 <!-- release-section: highlights:end -->
 
