@@ -629,12 +629,12 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 
-def source_directory_snapshot_paths(target: Path) -> list[Path]:
+def source_directory_snapshot_paths(target: Path, excluded: tuple[Path, ...] = ()) -> list[Path]:
     paths: list[Path] = []
     pending = [target]
     while pending:
         for path in pending.pop().iterdir():
-            if path.name == ".git":
+            if path.name == ".git" or path in excluded:
                 continue
             paths.append(path)
             metadata = path.lstat()
@@ -654,7 +654,7 @@ def directory_content_digest(
         path.relative_to(target) for path in excluded if path.is_relative_to(target)
     ]
     paths = (
-        source_directory_snapshot_paths(target)
+        source_directory_snapshot_paths(target, excluded)
         if include_ignored
         else git_directory_snapshot_paths(target)
     )
