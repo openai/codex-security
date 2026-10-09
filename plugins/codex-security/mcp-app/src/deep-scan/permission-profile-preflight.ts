@@ -317,7 +317,20 @@ class AppServerPreflightClient {
     this.removeAbortListener();
     this.stopChild();
     if (this.childClosed) return;
-    await this.childClose;
+    const forcedTermination = setTimeout(() => {
+      if (this.child.exitCode === null && this.child.signalCode === null) {
+        this.child.kill("SIGKILL");
+      }
+      // Descendants can keep inherited pipes open after the child exits.
+      this.child.stdin.destroy();
+      this.child.stdout.destroy();
+      this.child.stderr.destroy();
+    }, 1_000);
+    try {
+      await this.childClose;
+    } finally {
+      clearTimeout(forcedTermination);
+    }
   }
 
   private write(message: JsonRecord): void {

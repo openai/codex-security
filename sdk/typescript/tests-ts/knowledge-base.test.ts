@@ -12,9 +12,13 @@ import {
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
-import { prepareKnowledgeBase } from "../src/knowledge-base.js";
+import { ConfigurationError } from "../src/errors.js";
+import {
+  prepareKnowledgeBase,
+  readKnowledgeBaseSnapshot,
+} from "../src/knowledge-base.js";
 import { expandHome } from "../src/runtime.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -30,10 +34,14 @@ async function extractedDocuments(path: string): Promise<string[]> {
   );
 }
 
-function docx(text: string): Uint8Array {
+function docx(
+  text: string,
+  secondLine?: string,
+  breakElement = "<w:br/>",
+): Uint8Array {
   return zipSync({
     "word/document.xml": strToU8(
-      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`,
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r>${secondLine === undefined ? "" : `${breakElement}<w:r><w:t>${secondLine}</w:t></w:r>`}</w:p></w:body></w:document>`,
     ),
   });
 }
@@ -462,14 +470,154 @@ describe("scan knowledge bases", () => {
       join(root, "architecture.pdf"),
       pdf("Payment service boundary"),
     );
-    await writeFile(join(root, "threat-model.docx"), docx("SSRF &amp; IDOR"));
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("SSRF &amp; IDOR", "Review authentication"),
+    );
+    await writeFile(
+      join(root, "paired-break.docx"),
+      docx("Authorization", "Review permissions", "<w:br></w:br>"),
+    );
+    await writeFile(
+      join(root, "carriage-return.docx"),
+      docx("Authentication", "Review sessions", "<w:cr/>"),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.track(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
     expect(documents).toContain("Payment service boundary");
-    expect(documents).toContain("SSRF & IDOR\n");
+    expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
+    expect(documents).toContain("Authorization\nReview permissions\n");
+    expect(documents).toContain("Authentication\nReview sessions\n");
+  });
+
+  test.each([
+    ["preparation", prepareKnowledgeBase],
+    ["snapshot extraction", readKnowledgeBaseSnapshot],
+  ] as const)(
+    "preserves the local origin and cause of document parser failures during %s",
+    async (_name, prepare) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "network-security.pdf");
+      await writeFile(source, pdf("Network design"));
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      const cause = new Error("Synthetic parser failure.");
+      const parser = spyOn(pdfjs, "getDocument").mockImplementation(() => {
+        throw cause;
+      });
+
+      try {
+        const prepared = prepare([source]);
+        await expect(prepared).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(prepared).rejects.toMatchObject({
+          message: `Cannot extract text from knowledge base PDF: ${source}`,
+          cause: { cause },
+        });
+      } finally {
+        parser.mockRestore();
+      }
+    },
+  );
+
+  test("cancels PDF extraction when the scan is aborted", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "large.pdf");
+    await writeFile(source, pdf("Cancellable content"));
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation.");
+    let pagesRead = 0;
+    const destroy = mock(async () => {});
+    const parser = spyOn(pdfjs, "getDocument").mockImplementation(
+      () =>
+        ({
+          promise: Promise.resolve({
+            numPages: 3,
+            getPage: async () => {
+              pagesRead += 1;
+              return {
+                getTextContent: async () => {
+                  controller.abort(reason);
+                  return { items: [{ str: "page" }] };
+                },
+              };
+            },
+          }),
+          destroy,
+        }) as never,
+    );
+
+    try {
+      const prepared = prepareKnowledgeBase([source], controller.signal);
+      await expect(prepared).rejects.toBe(reason);
+      expect(pagesRead).toBe(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      parser.mockRestore();
+    }
+  });
+
+  test("preserves the local origin and cause when snapshot staging fails", async () => {
+    const root = await temporaryDirectory();
+    const parent = join(root, "not-a-directory");
+    await writeFile(parent, "synthetic occupied path");
+    const prepared = prepareKnowledgeBase(
+      {
+        sources: [],
+        protectedRoots: [],
+        documents: { "0.txt": "Synthetic knowledge" },
+      },
+      undefined,
+      parent,
+    );
+    await expect(prepared).rejects.toBeInstanceOf(ConfigurationError);
+    await expect(prepared).rejects.toMatchObject({ cause: expect.any(Error) });
+    expect(await readFile(parent, "utf8")).toBe("synthetic occupied path");
+  });
+
+  test.each([
+    ["&#x110000;", "&#x110000;"],
+    ["&#1114112;", "&#1114112;"],
+    ["&#99999999999999;", "&#99999999999999;"],
+    ["&#xD800;", "&#xD800;"],
+    ["&#xDFFF;", "&#xDFFF;"],
+    ["&#55296;", "&#55296;"],
+    ["&#xD7FF;", "\uD7FF"],
+    ["&#xE000;", "\uE000"],
+    ["&#65;", "A"],
+    ["&#128512;", "\u{1F600}"],
+    ["&#x10FFFF;", "\u{10FFFF}"],
+    ["&#0;", "\0"],
+    ["&#x1;", "\x01"],
+  ])(
+    "decodes DOCX Unicode scalar references and preserves unusable ones: %s",
+    async (reference, expected) => {
+      const root = await temporaryDirectory();
+      await writeFile(join(root, "reference.docx"), docx(`Text ${reference}.`));
+      const knowledgeBase = await prepareKnowledgeBase([root]);
+      temporaryDirectories.track(knowledgeBase.path);
+      const documents = await extractedDocuments(knowledgeBase.path);
+      expect(documents).toEqual([`Text ${expected}.\n`]);
+    },
+  );
+
+  test("keeps one unusable reference from failing the other knowledge-base documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "notes.md"), "Authentication boundary notes");
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("Boundary &#x110000; case."),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+    const documents = await extractedDocuments(knowledgeBase.path);
+
+    expect(documents).toHaveLength(2);
+    expect(documents).toContain("Authentication boundary notes");
+    expect(documents).toContain("Boundary &#x110000; case.\n");
   });
 
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
