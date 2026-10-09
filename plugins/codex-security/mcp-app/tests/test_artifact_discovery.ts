@@ -453,6 +453,7 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
   git("update-index", "--add", "--cacheinfo", `120000,${linkBlob},link.ts`);
   const headRevision = commit(false);
   await rm(path.join(repository, "head-only.ts"));
+  await rm(path.join(repository, "support.ts"));
   await writeFile(path.join(repository, "changed.ts"), "current\n");
   await writeFile(
     path.join(repository, "unrelated.ts"),
@@ -488,13 +489,24 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
       scan,
     );
   for (const kind of ["commit", "range", "working_tree"]) {
+    if (kind === "working_tree") {
+      git("reset", "--hard", baseRevision);
+      await rm(path.join(repository, "deleted.ts"));
+      await writeFile(path.join(repository, "changed.ts"), "current\n");
+    }
     const scan: ArtifactContext = {
       ...context,
       repoRoot: repository,
       pluginRoot,
       pythonCommand: undefined,
       mode: "diff",
-      targetContract: { diffTarget: { kind, baseRevision, headRevision } },
+      targetContract: {
+        diffTarget: {
+          kind,
+          baseRevision,
+          headRevision: kind === "working_tree" ? baseRevision : headRevision,
+        },
+      },
     };
     if (kind === "working_tree")
       await writeFile(inventory, "deleted.ts\nchanged.ts\n");
@@ -528,6 +540,30 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
       { code: "ENOENT" },
     );
     assert.equal(await readFile(destination, "utf8"), accepted);
+    for (const invalid of [
+      "../outside.ts",
+      path.join(repository, "changed.ts"),
+    ]) {
+      await assert.rejects(
+        recordCodexSecurityDiscoveryCandidates(
+          {
+            candidates: [
+              rawCandidate({
+                locations: [
+                  { path: "changed.ts", start_line: 1, role: "sink" },
+                ],
+              }),
+              rawCandidate({
+                locations: [{ path: invalid, start_line: 1, role: "sink" }],
+              }),
+            ],
+          },
+          scan,
+        ),
+        /candidate input row 2: path: expected a repository-relative path without traversal/u,
+      );
+      assert.equal(await readFile(destination, "utf8"), accepted);
+    }
     await assert.rejects(
       record(
         {
@@ -564,28 +600,44 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
       /at least one in-scope/,
     );
     if (kind === "working_tree") {
-      git(
-        "rm",
-        "--cached",
-        process.platform === "win32" ? "CHANGED.ts" : "changed.ts",
-      );
+      git("rm", "--cached", "changed.ts");
       await writeFile(
         path.join(repository, ".git", "info", "exclude"),
         "changed.ts\nCHANGED.ts\n",
       );
-      await record(scan, [["changed.ts", 1]]);
-      await assert.rejects(record(scan, [["changed.ts", 2]]), /line range/);
+      await record(scan, [["changed.ts", 2]]);
+      await assert.rejects(record(scan, [["changed.ts", 3]]), /line range/);
+      await mkdir(path.join(repository, "deleted.ts"));
+      await record(scan, [["deleted.ts", 4]]);
+      await assert.rejects(record(scan, [["deleted.ts", 5]]), /line range/);
+      await rm(path.join(repository, "deleted.ts"), { recursive: true });
     }
     if (process.platform === "win32") {
-      await record(scan, [
-        ["SUPPORT.TS", 1],
-        ["deleted.ts", 4],
-      ]);
-      if (kind !== "working_tree")
+      for (const prefix of ["", "./", ".\\", ".//./"]) {
+        await record(scan, [
+          [`${prefix}SUPPORT.TS`, 1],
+          [`${prefix}DELETED.TS`, 4],
+          [`${prefix}CHANGED.ts`, kind === "working_tree" ? 2 : 3],
+        ]);
+        const candidate = JSON.parse(await readFile(destination, "utf8"));
+        assert.ok(
+          candidate.locations.some(
+            (location: { path: string }) => location.path === "deleted.ts",
+          ),
+        );
+        if (kind !== "working_tree")
+          assert.ok(
+            candidate.locations.some(
+              (location: { path: string }) => location.path === "changed.ts",
+            ),
+          );
+      }
+      if (kind !== "working_tree") {
         await assert.rejects(
           record(scan, [["UNRELATED.TS", 1]]),
           /no selected source/,
         );
+      }
     }
     if (kind !== "working_tree")
       await assert.rejects(

@@ -201,12 +201,21 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
+def _register_query_function(
+    connection: sqlite3.Connection, name: str, function: Callable[[str], str]
+) -> None:
+    # Replacing a function fails while another cursor is active on this connection.
+    if not any(row[0] == name for row in connection.execute("PRAGMA function_list")):
+        connection.create_function(name, 1, function, deterministic=name == "casefold")
+
+
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
     register_timestamp_collation(connection)
+    _register_query_function(connection, "casefold", str.casefold)
     if os.name == "nt":
-        connection.create_function("codex_security_path_key", 1, _windows_path_key)
+        _register_query_function(connection, "codex_security_path_key", _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
     if args is not None and args.repository:
@@ -264,13 +273,12 @@ def list_scans(
     if args is not None and args.query:
         query = args.query.strip().casefold()
         if query:
-            connection.create_function("codex_security_casefold", 1, str.casefold)
             clauses.append(
-                "(instr(codex_security_casefold(scans.target_path), ?) > 0 "
-                "OR instr(codex_security_casefold(COALESCE(scans.name, '')), ?) > 0 "
-                "OR instr(codex_security_casefold(COALESCE(scans.target_summary, '')), ?) > 0 "
-                "OR instr(codex_security_casefold(scans.scope), ?) > 0 "
-                "OR instr(lower(scans.mode), ?) > 0)"
+                "(instr(casefold(scans.target_path), ?) > 0 "
+                "OR instr(casefold(COALESCE(scans.name, '')), ?) > 0 "
+                "OR instr(casefold(COALESCE(scans.target_summary, '')), ?) > 0 "
+                "OR instr(casefold(scans.scope), ?) > 0 "
+                "OR instr(casefold(scans.mode), ?) > 0)"
             )
             values.extend((query, query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -1099,6 +1107,7 @@ def finding_occurrence_rows(
     severity: str | None = None,
     status: str | None = None,
 ) -> list[sqlite3.Row]:
+    _register_query_function(connection, "casefold", str.casefold)
     conditions, values = finding_occurrence_conditions(
         scan_id, query=query, severity=severity, status=status
     )
@@ -1153,12 +1162,12 @@ def finding_occurrence_conditions(
         search = query.strip().casefold()
         if search:
             conditions.append(
-                "(instr(lower(occurrences.title), ?) > 0 "
-                "OR instr(lower(occurrences.summary), ?) > 0 "
+                "(instr(casefold(occurrences.title), ?) > 0 "
+                "OR instr(casefold(occurrences.summary), ?) > 0 "
                 "OR EXISTS ("
                 "SELECT 1 FROM finding_locations AS locations "
                 "WHERE locations.occurrence_id = occurrences.id "
-                "AND instr(lower(locations.relative_path), ?) > 0))"
+                "AND instr(casefold(locations.relative_path), ?) > 0))"
             )
             values.extend((search, search, search))
     return " AND ".join(conditions), values

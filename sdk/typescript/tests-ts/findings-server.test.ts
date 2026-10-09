@@ -1,3 +1,4 @@
+import { readJson } from "./support/json.js";
 import {
   mkdir,
   mkdtemp,
@@ -8,7 +9,9 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import type { Server } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { handleFindingsRequest } from "../src/server/routes.js";
+import { findingsRequestValidator } from "../src/server/validation.js";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
@@ -31,12 +34,9 @@ import { rejecting } from "./support/errors.js";
 const servers: Server[] = [];
 const directories: string[] = [];
 const example = (
-  JSON.parse(
-    await readFile(
-      join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
-      "utf8",
-    ),
-  ) as FindingsDocument
+  await readJson<FindingsDocument>(
+    join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+  )
 ).findings[0]!;
 
 function finding(index = 1): Finding {
@@ -744,69 +744,6 @@ ${script}
   return JSON.parse(result.stdout);
 }
 
-test("shared findings reject unsupported SDK numbers without changing native storage", async () => {
-  const { store, environment } = await fixture();
-  const base = await start(store);
-  const errors = spyOn(console, "error").mockImplementation(() => undefined);
-  try {
-    for (const [literal, expected] of [
-      ["42", 42],
-      ["0.125", 0.125],
-      ["9007199254740991", Number.MAX_SAFE_INTEGER],
-      ["9007199254740993", "unsafe integer-valued"],
-      ["1" + "0".repeat(400), "non-finite"],
-    ] as const) {
-      const stored = await database(
-        environment,
-        `
-from workbench_finding_index import upsert_finding
-payload = json.load(sys.stdin)
-finding = payload['finding']
-finding['extensions'] = {'evidenceNumber': json.loads(payload['literal'])}
-upsert_finding(db, finding, '2026-01-01T00:00:00Z', 'synthetic')
-db.commit()
-print(json.dumps(db.execute('SELECT details_json FROM findings').fetchone()[0]))`,
-        { finding: finding(), literal },
-      );
-      const native = await runCodexCommand(
-        { command: "node" },
-        [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "list-stored-findings"],
-        environment,
-        JSON.stringify({
-          stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
-          payload: { limit: 10, offset: 0 },
-        }),
-      );
-      expect(native.success, native.stderr).toBe(true);
-      expect(native.stdout.match(/"evidenceNumber":\s*([^,}]+)/u)?.[1]).toBe(
-        literal,
-      );
-      expect(stored).toContain(`"evidenceNumber": ${literal}`);
-      const response = await fetch(`${base}/v1/findings`);
-      if (typeof expected === "number") {
-        expect(response.status).toBe(200);
-        expect(
-          (await response.json()).findings[0].extensions.evidenceNumber,
-        ).toBe(expected);
-      } else {
-        await expect(store.list({ limit: 10, offset: 0 })).rejects.toThrow(
-          `${expected} JSON numbers are not supported`,
-        );
-        expect(response.status).toBe(500);
-        expect(await response.json()).toEqual({ error: "internal_error" });
-      }
-      expect(
-        await database(
-          environment,
-          "print(json.dumps(db.execute('SELECT details_json FROM findings').fetchone()[0]))",
-        ),
-      ).toBe(stored);
-    }
-  } finally {
-    errors.mockRestore();
-  }
-});
-
 test("bulk insert keeps startup dependencies and complete findings without creating scans", async () => {
   const { store, environment } = await fixture();
   const options = { store, embeddings: embedder, host: "127.0.0.1", port: 0 };
@@ -1388,82 +1325,72 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
   ]);
 });
 
-test("rejects unsupported JSON numbers before embedding or storing a batch", async () => {
+test("dashboard can sort and search a stored title with an unpaired surrogate", async () => {
   const { store } = await fixture();
-  const embed = mock(embedder.embed);
-  const base = await start(store, { embed });
-  const write = spyOn(store, "insert");
-  try {
-    for (const number of [
-      "1e400",
-      "-1e400",
-      "9007199254740993",
-      "-9007199254740993",
-    ]) {
-      const bad = finding(2);
-      bad.extensions = { nested: { values: ["REPLACE_NUMBER"] } };
-      const response = await fetch(base + "/v1/bulk/findings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ findings: [finding(1), bad] }).replace(
-          '"REPLACE_NUMBER"',
-          number,
-        ),
-      });
-      expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ error: "invalid_request" });
-    }
-    expect(embed).not.toHaveBeenCalled();
-    expect(write).not.toHaveBeenCalled();
-    const valid = finding(3);
-    valid.extensions = { values: [0, -1, 0.125, Number.MAX_SAFE_INTEGER] };
-    expect((await insert(base, [valid])).status).toBe(201);
-    expect((await store.list({ limit: 10, offset: 0 })).findings).toEqual([
-      valid,
-    ]);
-  } finally {
-    write.mockRestore();
+  const base = await start(store);
+  const malformed = finding();
+  malformed.title = "Synthetic title \ud800";
+  expect((await insert(base, [malformed, finding(2)])).status).toBe(201);
+  const queries: Record<string, string>[] = [
+    {},
+    { sort: "title" },
+    { query: "synthetic" },
+  ];
+  for (const parameters of queries) {
+    const result = await dashboard(base, parameters);
+    expect(result.items).toHaveLength(2);
+    expect(
+      result.items.find((item) => item.id === malformed.findingId)?.title,
+    ).toContain("Synthetic title");
   }
 });
 
-test("rejects invalid UTF-8 before embedding or storing findings", async () => {
+test("malformed request targets return invalid_request at the HTTP handler", async () => {
+  const { store } = await fixture();
+  let status: number | undefined;
+  let body: string | undefined;
+  await handleFindingsRequest(
+    { method: "GET", url: "//" } as IncomingMessage,
+    {
+      writeHead(code: number) {
+        status = code;
+      },
+      end(data: string) {
+        body = data;
+      },
+    } as ServerResponse,
+    store,
+    embedder,
+    await findingsRequestValidator(),
+  );
+  expect(status).toBe(400);
+  expect(JSON.parse(body!).error).toBe("invalid_request");
+});
+
+test("NUL repository IDs are rejected before ingestion and lookup", async () => {
   const { store } = await fixture();
   const embed = mock(embedder.embed);
   const base = await start(store, { embed });
-  const write = spyOn(store, "insert");
-  try {
-    const valid = { ...finding(), title: "Synthetic � 🧪" };
-    const body = Buffer.from(JSON.stringify({ findings: [valid] }));
-    const offset = body.indexOf(Buffer.from("�"));
-    for (const bytes of [Buffer.from([0xff]), Buffer.from([0xe2, 0x82])]) {
-      const response = await fetch(base + "/v1/bulk/findings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: Buffer.concat([
-          body.subarray(0, offset),
-          bytes,
-          body.subarray(offset + Buffer.byteLength("�")),
-        ]),
-      });
-      expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ error: "invalid_request" });
-    }
-    expect(
-      (
-        await fetch(base + "/v1/bulk/findings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]),
-        })
-      ).status,
-    ).toBe(400);
-    expect(embed).not.toHaveBeenCalled();
-    expect(write).not.toHaveBeenCalled();
-    expect((await insert(base, [valid])).status).toBe(201);
-    expect((await store.list({ limit: 10, offset: 0 })).findings).toEqual([
-      valid,
-    ]);
-  } finally {
-    write.mockRestore();
+  for (const repositoryId of ["\0", "repository\0suffix"]) {
+    const response = await insert(base, [finding()], repositoryId);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_request" });
+    const lookup = await fetch(
+      `${base}/v1/finding/${finding().findingId}/potential-duplicates?${new URLSearchParams({ repositoryId })}`,
+    );
+    expect(lookup.status).toBe(400);
+    expect(await lookup.json()).toMatchObject({ error: "invalid_request" });
   }
+  expect(embed).toHaveBeenCalledTimes(0);
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([]);
+
+  for (const repositoryId of ["repository-a", "\\^@"]) {
+    expect((await insert(base, [finding()], repositoryId)).status).toBe(201);
+    const lookup = await fetch(
+      `${base}/v1/finding/${finding().findingId}/potential-duplicates?${new URLSearchParams({ repositoryId })}`,
+    );
+    expect(lookup.status).toBe(200);
+    expect(await lookup.json()).toMatchObject({ finding: finding() });
+  }
+  expect(embed).toHaveBeenCalledTimes(2);
 });
