@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
 import {
   validateDiscoveryArtifacts,
@@ -158,16 +158,6 @@ export class DeepScanWorkerRunner {
         await validateDiscoveryArtifacts(artifacts, resultPath, run.scanId);
         discoveryValidated = true;
       },
-      beforeRetry: async (attempt) => {
-        await archiveDirectory(
-          artifactDir,
-          join(
-            workerRoot,
-            "attempts",
-            `attempt-${String(attempt).padStart(2, "0")}`,
-          ),
-        );
-      },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
       await this.persistWorkerCancellation(
@@ -319,14 +309,6 @@ export class DeepScanWorkerRunner {
           run.scanId,
         );
       },
-      beforeRetry: async (attempt) => {
-        const attemptRoot = join(
-          reducerRoot,
-          "attempts",
-          `attempt-${String(attempt).padStart(2, "0")}`,
-        );
-        await archiveDirectory(artifactDir, attemptRoot);
-      },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
       await this.persistWorkerCancellation(
@@ -389,7 +371,6 @@ export class DeepScanWorkerRunner {
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
     validate: () => Promise<void>;
-    beforeRetry: (attempt: number) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -546,7 +527,7 @@ export class DeepScanWorkerRunner {
         } else {
           resumableThreadId = undefined;
           continuationPrompt = undefined;
-          await input.beforeRetry(attempt);
+          await this.archiveWorkerAttempt(input.artifactDir, attempt);
           if (validationStarted && !validationCompleted) {
             executionPromptPath = await writeValidationRetryPrompt({
               kind: input.kind,
@@ -582,6 +563,17 @@ export class DeepScanWorkerRunner {
         }
       }
     }
+  }
+
+  private async archiveWorkerAttempt(artifactDir: string, attempt: number) {
+    await archiveDirectory(
+      artifactDir,
+      join(
+        dirname(artifactDir),
+        "attempts",
+        `attempt-${String(attempt).padStart(2, "0")}`,
+      ),
+    );
   }
 
   private async persistWorkerCancellation(

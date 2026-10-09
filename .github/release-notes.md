@@ -158,6 +158,20 @@
 - add cs alias and clarify onboarding ([#1415](https://github.com/openai/codex-security/pull/1415))
 - enforce devcontainer cooldown before merge ([#1517](https://github.com/openai/codex-security/pull/1517))
 - preserve argument text and typed state failures ([#1500](https://github.com/openai/codex-security/pull/1500))
+- share tool registration and annotations ([#1485](https://github.com/openai/codex-security/pull/1485))
+- consolidate workbench command handling ([#1494](https://github.com/openai/codex-security/pull/1494))
+- reuse workbench finding projection metadata ([#1442](https://github.com/openai/codex-security/pull/1442))
+- use native promise and array primitives ([#1488](https://github.com/openai/codex-security/pull/1488))
+- simplify validated artifact reconciliation ([#1454](https://github.com/openai/codex-security/pull/1454))
+- remove unused artifact declarations ([#1483](https://github.com/openai/codex-security/pull/1483))
+- share workflow GitHub API calls ([#1466](https://github.com/openai/codex-security/pull/1466))
+- simplify session cost tracking ([#1456](https://github.com/openai/codex-security/pull/1456))
+- simplify publication reconciliation ([#1455](https://github.com/openai/codex-security/pull/1455))
+- share final scan schema definitions ([#1493](https://github.com/openai/codex-security/pull/1493))
+- share Deep Scan retry archiving ([#1465](https://github.com/openai/codex-security/pull/1465))
+- reuse repeated workflow configuration ([#1464](https://github.com/openai/codex-security/pull/1464))
+- remove redundant dashboard copies ([#1451](https://github.com/openai/codex-security/pull/1451))
+- consolidate Deep Scan preflight compatibility coverage ([#1482](https://github.com/openai/codex-security/pull/1482))
 
 <!-- release-section: highlights:end -->
 
