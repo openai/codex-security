@@ -280,20 +280,8 @@ function isCanonicalUuid(value: string): boolean {
 function linearIssueReferenceFromUrl(
   value: string,
 ): { id: string; workspace: string } | undefined {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return undefined;
-  }
   // Recognize every scheme linearIssueReference parses, so a plain HTTP URL
   // still resolves to the issue it names instead of an unrecognized claim.
-  if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.hostname !== "linear.app"
-  ) {
-    return undefined;
-  }
   try {
     const reference = linearIssueReference(value);
     return reference.workspace === undefined
