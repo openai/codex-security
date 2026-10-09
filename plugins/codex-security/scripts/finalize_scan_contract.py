@@ -1396,19 +1396,53 @@ def _populate_unsealed_manifest_envelope(
         allowed_kinds = completion_binding["allowedTargetKinds"]
         if len(allowed_kinds) == 1:
             target.setdefault("kind", allowed_kinds[0])
-        _populate_unsealed_target_binding(target, completion_binding["target"])
+        _populate_unsealed_target_binding(target, completion_binding["target"], allowed_kinds)
 
     scope = scan.setdefault("scope", {})
     if isinstance(scope, dict):
         scope.update(copy.deepcopy(completion_binding["scope"]))
 
 
+def _populate_unsealed_target_kind(
+    target: dict[str, Any],
+    target_binding: dict[str, Any],
+    allowed_kinds: Any,
+) -> None:
+    """Adopt the registered target kind when the binding owns every coordinate it needs.
+
+    The workbench, not the draft, knows how the target was registered: a scan agent
+    that infers the kind from the checkout (a clean worktree registered as
+    git_revision is the common case) used to discard the whole completed scan at the
+    seal step. The kind carries no draft-owned information when the registration
+    allows a single value, so take that value instead of failing.
+
+    Rewriting the kind also reinterprets the coordinates that kind requires, and a
+    coordinate the binding does not own survives the replacement below with whatever
+    the draft computed under its own reading of the target. Adopting git_diff without
+    a bound snapshotDigest, for example, would seal a whole-worktree digest as the
+    diff digest. Leave the kind alone whenever the binding cannot restate every
+    coordinate the registered kind requires, and let the binding check reject the
+    draft instead.
+    """
+
+    if not isinstance(allowed_kinds, list) or len(allowed_kinds) != 1:
+        return
+    registered_kind = allowed_kinds[0]
+    if not isinstance(registered_kind, str) or target.get("kind") == registered_kind:
+        return
+    if not TARGET_REQUIRED_COORDINATE_FIELDS.get(registered_kind, set()) <= target_binding.keys():
+        return
+    target["kind"] = registered_kind
+
+
 def _populate_unsealed_target_binding(
     target: dict[str, Any],
     target_binding: dict[str, Any],
+    allowed_kinds: Any = None,
 ) -> None:
     """Replace workbench-owned target coordinates without retaining incompatible drafts."""
 
+    _populate_unsealed_target_kind(target, target_binding, allowed_kinds)
     target_kind = target.get("kind")
     required_coordinates = (
         TARGET_REQUIRED_COORDINATE_FIELDS.get(target_kind, set())
