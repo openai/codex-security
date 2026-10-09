@@ -1872,7 +1872,9 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
 
 
 def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
-    return scan_history.coverage_summary_for_history(scan, require_canonical_scan_directory)
+    return scan_history.coverage_summary_for_history(
+        _WORKBENCH_DB_CONTEXT, scan, require_canonical_scan_directory
+    )
 
 
 def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
