@@ -389,6 +389,13 @@
   },
   {
     "version": 47,
+    "name": "snapshot deep scan discovery context",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
+    ]
+  },
+  {
+    "version": 48,
     "name": "share finding issue receipts across trackers",
     "statements": [
       "CREATE TABLE finding_issue_receipts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    scan_id TEXT NOT NULL,\n    finding_id TEXT NOT NULL,\n    occurrence_id TEXT NOT NULL,\n    destination_key TEXT NOT NULL,\n    external_id TEXT NOT NULL,\n    external_url TEXT,\n    operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'reuse')),\n    readback_json TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    UNIQUE (occurrence_id, destination_key, external_id, operation)\n);",

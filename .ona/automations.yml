@@ -6,6 +6,23 @@ tasks:
       - manual
       - prebuild
 
+  findings-start:
+    name: Start findings service
+    command: >-
+      docker compose -f compose.findings.yaml -f .ona/compose.findings.yaml up --detach --no-build findings &&
+      ona environment port open 3000 --name findings --admission creator_only
+    triggeredBy:
+      - manual
+      - postDevcontainerStart
+      - postEnvironmentStart
+
+  findings-stop:
+    name: Stop findings service
+    command: >-
+      docker compose -f compose.findings.yaml -f .ona/compose.findings.yaml stop findings
+    triggeredBy:
+      - manual
+
   build:
     name: Build
     command: pnpm --dir sdk/typescript run build

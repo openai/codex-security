@@ -1,4 +1,5 @@
 import { createCliTest } from "./support/cli-run.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
@@ -136,8 +137,7 @@ async function interruptedScan(
       ? {}
       : { OPENAI_API_KEY: "synthetic-resume-key" }),
   };
-  const command = (args: readonly string[], input?: string) =>
-    runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args, input);
+  const command = workbenchCommand(python, () => environment);
   const recipe = {
     repository,
     target: { kind: "repository", paths: [] },
@@ -843,12 +843,7 @@ test.each(["chatgpt", "api-key"] as const)(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-launch-key",
     };
-    const command = (args: readonly string[], input?: string) =>
-      runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
-        args,
-        input,
-      );
+    const command = workbenchCommand(python, () => environment);
     const { stderr, runCli } = createCliTest(main);
 
     const code = await runCli(
