@@ -288,10 +288,10 @@ test.each(["csv", "json"] as const)(
       import: { format, sourceRef, findingCount: 2 },
     });
     expect(
-      result.manifest.scan.artifacts.some(
+      result.manifest.scan.artifacts.filter(
         (artifact) => artifact.path === sourceRef,
       ),
-    ).toBe(true);
+    ).toHaveLength(1);
     expect(await readFile(join(result.scanDir, sourceRef), "utf8")).toBe(
       context.source,
     );
@@ -322,7 +322,7 @@ test.each(["csv", "json"] as const)(
 );
 
 test.each(["csv", "json"] as const)(
-  "%s imports without findings do not claim a reported or analyzed surface",
+  "empty %s imports preserve source integrity without claiming an analyzed surface",
   async (format) => {
     const context = await fixture(format);
     const source =
@@ -343,16 +343,45 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan["extensions"]).toMatchObject({
       import: { format, sourceRef, findingCount: 0 },
     });
-    expect(await readFile(join(result.scanDir, sourceRef), "utf8")).toBe(
-      source,
-    );
-    expect(await readFile(result.reportPath, "utf8")).not.toContain(
-      "Reported |",
-    );
+    expect(
+      result.manifest.scan.artifacts.filter(
+        (artifact) => artifact.path === sourceRef,
+      ),
+    ).toHaveLength(1);
+    const retainedSource = join(result.scanDir, sourceRef);
+    expect(await readFile(retainedSource, "utf8")).toBe(source);
     expect((await storedScans(context))[0]).toMatchObject({
       status: "complete",
       occurrence_count: 0,
     });
+    const manifestPath = join(result.scanDir, "scan-manifest.json");
+    const manifestText = await readFile(manifestPath, "utf8");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        ...result.manifest,
+        scan: {
+          ...result.manifest.scan,
+          artifacts: result.manifest.scan.artifacts.filter(
+            (artifact) => artifact.path !== sourceRef,
+          ),
+        },
+      }),
+    );
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("Import source is missing from sealed artifacts");
+    await writeFile(manifestPath, manifestText);
+    await writeFile(retainedSource, `${source}\n`);
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("sealed artifact changed");
+    await writeFile(retainedSource, source);
+    await loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT });
+    await rm(retainedSource);
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("expected a file inside the scan directory");
   },
 );
 
