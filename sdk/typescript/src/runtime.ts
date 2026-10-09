@@ -1569,6 +1569,16 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+const WORKBENCH_ARGUMENTS_PROGRAM = String.raw`
+import json, sys
+sys.argv[2:] = json.loads(sys.stdin.buffer.readline())
+`;
+const WORKBENCH_SCRIPT_PROGRAM = String.raw`
+import runpy, sys
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+`;
+
 const ARCHIVE_READY = "codex-security-archive-ready\n";
 const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
 import io, json, runpy, sys
@@ -1636,6 +1646,13 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
+    // OS argv cannot carry NUL, but workbench text fields can.
+    const framedArguments =
+      !native && arguments_.some((argument) => argument.includes("\0"));
+    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
+    if (framedArguments)
+      program =
+        WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
     const result = await runCodexCommand(
       { command },
       native
@@ -1645,9 +1662,9 @@ export async function runWorkbench(
             "-X",
             "utf8",
             "-B",
-            ...(archiveHandshake ? ["-c", ARCHIVE_REGISTRATION_PROGRAM] : []),
+            ...(program === undefined ? [] : ["-c", program]),
             script,
-            ...arguments_,
+            ...(framedArguments ? [] : arguments_),
           ],
       pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
@@ -1663,6 +1680,10 @@ export async function runWorkbench(
         : input,
       signal,
       archiveHandshake,
+      // Match native argv's UTF-8 encoding for the private argument frame.
+      framedArguments
+        ? `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`
+        : undefined,
     );
     if (!result.success) {
       throw new Error(
@@ -3283,6 +3304,7 @@ export async function runCodexCommand(
   input?: string | Uint8Array,
   signal?: AbortSignal,
   archiveHandshake = false,
+  stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
@@ -3340,6 +3362,7 @@ export async function runCodexCommand(
     if (signal?.aborted) abort();
   }
   try {
+    if (stdinPrefix !== undefined) child.stdin.write(stdinPrefix);
     if (archiveHandshake) child.stdin.write(`${JSON.stringify(input ?? "")}\n`);
     else child.stdin.end(input);
     return await completion;
