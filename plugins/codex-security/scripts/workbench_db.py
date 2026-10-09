@@ -47,8 +47,6 @@ from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
     RecoverableContractError,
-    _json_bytes,
-    _loads_json,
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
     finalize_scan,
@@ -58,7 +56,6 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
-from workbench.json_numbers import dumps_json
 from workbench.storage import create_private_directory, resolve_scan_root, state_dir
 from workbench_cli import parse_args
 from workbench_constants import (
@@ -1096,7 +1093,7 @@ def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
 
 
 def published_manifest_digest(scan_dir: Path, manifest: dict[str, Any]) -> str:
-    canonical = _json_bytes(manifest)
+    canonical = (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n").encode()
     expected = f"sha256:{hashlib.sha256(canonical).hexdigest()}"
     actual = scan_local_file_digest(scan_dir, ARTIFACTS["manifest"])
     if actual != expected:
@@ -1423,7 +1420,7 @@ def budget_exhausted_draft(
             write_scan_local_bytes(
                 scan_dir,
                 name,
-                _json_bytes(payload),
+                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
             )
         except (ContractError, OSError, TypeError, ValueError) as exc:
             raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
@@ -2876,7 +2873,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
             continue
         updates.append(
             (
-                dumps_json(finding, allow_nan=False, sort_keys=True),
+                json.dumps(finding, allow_nan=False, sort_keys=True),
                 scan["id"],
                 row["id"],
             )
@@ -3071,7 +3068,7 @@ def scan_local_regular_file(scan_dir: Path, relative_path: str) -> bool:
 
 def read_finding_details(value: str) -> dict[str, Any]:
     try:
-        details = _loads_json(value)
+        details = json.loads(value, parse_constant=reject_non_finite_json)
     except (TypeError, ValueError):
         return {}
     return details if isinstance(details, dict) else {}
@@ -3278,7 +3275,10 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
 
 def read_json_object(path: Path) -> dict[str, Any]:
     try:
-        payload = _loads_json(path.read_text(encoding="utf-8"))
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=reject_non_finite_json,
+        )
     except (OSError, ValueError) as exc:
         raise SystemExit(f"{path.name}: invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):
@@ -3497,7 +3497,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             result = finding_workflow(connection, json.load(sys.stdin), now())
         else:
             raise SystemExit(f"Unknown command: {args.command}")
-    print(dumps_json(result, allow_nan=False, sort_keys=True))
+    print(json.dumps(result, allow_nan=False, sort_keys=True))
 
 
 if __name__ == "__main__":

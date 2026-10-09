@@ -354,10 +354,6 @@ JSON accepts a complete `codex-security.findings` document or
 selects the input file; use `--format json` for JSON output. The input must be a
 regular file with no symlinks or directory junctions in its path.
 
-JSON numbers, including those in nested fields, are checked after JavaScript
-decoding. Decoded numbers must be finite, and integer-valued numbers must be safe
-integers.
-
 Each import creates a completed scan in local history, retains the input under
 `artifacts/import/`, and preserves each occurrence, including duplicates.
 Original identifiers live in `extensions.import`; referenced writeup paths are
@@ -989,10 +985,6 @@ external directories), accept `reprocess: true`, and treat `findingIds: []` as a
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and
 publication. Older JSON-only assessments need reclassification once. All
 classification methods accept `signal`; keep human overrides in your workflow.
-
-All JavaScript number values passed to `classifySeverity()`, including nested
-evidence and metadata, must be finite; integer-valued numbers must be safe
-integers.
 
 ## Suggest finding owners
 

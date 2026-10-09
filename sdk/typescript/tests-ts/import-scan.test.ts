@@ -318,29 +318,6 @@ test.each(["csv", "json"] as const)(
   },
 );
 
-test.each([false, true])(
-  "unsupported import numbers fail before persistence (dryRun=%s)",
-  async (dryRun) => {
-    const context = await fixture("json");
-    const document = JSON.parse(context.source);
-    document.findings[0].extensions = { value: "numeric-placeholder" };
-    const source = JSON.stringify(document).replace(
-      '"numeric-placeholder"',
-      "1e400",
-    );
-    await writeFile(context.options.sourcePath, source);
-    const workbench = mock(runWorkbench);
-    await expect(
-      importScan(
-        { ...context.options, dryRun },
-        { ...context.dependencies, runWorkbench: workbench },
-      ),
-    ).rejects.toThrow("non-finite JSON numbers are not supported");
-    expect(workbench).not.toHaveBeenCalled();
-    expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
-  },
-);
-
 test.each(["csv", "json"] as const)(
   "%s import rejects a symlinked source before persistence",
   async (format) => {
