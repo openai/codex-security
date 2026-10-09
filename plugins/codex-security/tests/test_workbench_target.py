@@ -360,6 +360,23 @@ def test_reviewed_patch_restores_junction_git_context(
         assert (source / patched).read_bytes() == after.replace("\n", newline).encode()
 
 
+@pytest.mark.cross_platform
+def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    initialize_unborn_git_repository(repository)
+    attributes = tmp_path / "attributes"
+    attributes.write_text("*.txt text eol=crlf\n")
+    subprocess.run(
+        ["git", "config", "core.attributesFile", str(attributes)], cwd=repository, check=True
+    )
+    source = repository / "component"
+    source.mkdir()
+
+    assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n", newline="\n")
+
+    assert (source / "app.txt").read_bytes() == b"after\n"
+
+
 def assert_reviewed_change(
     source: Path,
     tmp_path: Path,

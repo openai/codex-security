@@ -2474,8 +2474,6 @@ def require_reviewed_patch_applied(
                 "core.autocrlf=input",
                 *arguments,
                 text=True,
-                git_dir=Path(git_dir) if git_dir is not None else None,
-                work_tree=checkout if git_dir is not None else None,
             )
             if applied_without_conversion.returncode == 0:
                 restore_directory_junctions(target, checkout, junctions)
