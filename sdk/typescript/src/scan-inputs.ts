@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
@@ -98,7 +98,7 @@ export async function restoreScanKnowledge(
   // Document names become staging filenames; imported state cannot escape that directory.
   if (
     Object.keys(snapshot.documents).some(
-      (name) => name === "." || name === ".." || /[\\/]/u.test(name),
+      (name) => name === "." || name === ".." || basename(name) !== name,
     )
   ) {
     throw new CodexSecurityError(

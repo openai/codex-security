@@ -151,6 +151,7 @@ import {
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import { restoreScanKnowledge, scanInputIdentity } from "./scan-inputs.js";
+import { workflowDigest } from "./finding-workflow.js";
 import {
   CodexSecurityError,
   AuthenticationRequiredError,
@@ -8744,8 +8745,8 @@ async function executeScan(
         ? ["scanPromptSha256", "knowledgeBase"]
             .filter(
               (key) =>
-                JSON.stringify(previousInputs[key]) !==
-                JSON.stringify(currentInputs[key]),
+                workflowDigest(previousInputs[key] ?? null) !==
+                workflowDigest(currentInputs[key] ?? null),
             )
             .map((key) =>
               key === "scanPromptSha256"
@@ -8753,11 +8754,15 @@ async function executeScan(
                 : "knowledge base",
             )
         : [];
-      writeAboveProgress(() =>
-        errorOutput.write(
-          `codex-security: Starting a new scan with current checkout/context files.${changes.length ? ` Changed inputs: ${changes.join(", ")}.` : ""}\n`,
-        ),
-      );
+      try {
+        writeAboveProgress(() =>
+          errorOutput.write(
+            `codex-security: Starting a new scan with current checkout/context files.${changes.length ? ` Changed inputs: ${changes.join(", ")}.` : ""}\n`,
+          ),
+        );
+      } catch {
+        // Optional input-change diagnostics must not prevent the new scan.
+      }
     }
     if (arguments_.dryRun) {
       preflight = await security.preflight(repository, options);
