@@ -119,15 +119,15 @@ async function testPrepareUsesTheExistingStandardGenerator() {
 async function testPrepareListsIgnoredTrackedFilesOnce() {
   const fixture = await createFixture("ignored tracked files");
   await runGit(fixture.repoRoot, "init", "-q");
-  await fixture.writeRepositoryFile(".gitignore", "generated/\n");
+  await fixture.writeRepositoryFile(".gitignore", "-generated/\n");
   for (const name of ["a.ts", "b.ts"]) {
     await fixture.writeRepositoryFile(
-      `generated/${name}`,
+      `-generated/${name}`,
       "export const value = 1;\n",
     );
   }
-  await runGit(fixture.repoRoot, "add", "--force", "--", "generated");
-  const context = { ...fixture.scan, scope: "generated" };
+  await runGit(fixture.repoRoot, "add", "--force", "--", "-generated");
+  const context = { ...fixture.scan, scope: "-generated" };
 
   assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
     reviewItemsTotal: 2,
@@ -136,7 +136,7 @@ async function testPrepareListsIgnoredTrackedFilesOnce() {
     limit: 1,
   });
   assert.deepEqual(first, {
-    items: [{ path: "generated/a.ts" }],
+    items: [{ path: "-generated/a.ts" }],
     nextCursor: "1",
   });
   assert.deepEqual(
@@ -144,7 +144,7 @@ async function testPrepareListsIgnoredTrackedFilesOnce() {
       cursor: first.nextCursor,
       limit: 1,
     }),
-    { items: [{ path: "generated/b.ts" }] },
+    { items: [{ path: "-generated/b.ts" }] },
   );
 }
 
