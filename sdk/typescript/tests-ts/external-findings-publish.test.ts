@@ -14,7 +14,11 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { prepareExternalPublication } from "../src/external-findings-publish.js";
+import {
+  ExternalPublicationError,
+  prepareExternalPublication,
+  type ExternalPublicationProgress,
+} from "../src/external-findings-publish.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
   validateExternalEvidence,
@@ -737,7 +741,7 @@ test("normalized input accepts server-materialized optional evidence defaults", 
 });
 
 test.each(["human", "json"])(
-  "interactive %s publication shows selected evidence before confirmation",
+  "interactive %s publication summarizes the input and confirms exclusions",
   async (format) => {
     const selected = {
       ...normalized("vendor-selected"),
@@ -749,7 +753,6 @@ test.each(["human", "json"])(
       },
     };
     const f = await fixture([selected, normalized("unsupported", "unknown")]);
-    const expected = (await readVendorFindings(f.file)).findings;
     const cli = createCliTest(main);
     let prompted = false;
     expect(
@@ -757,7 +760,7 @@ test.each(["human", "json"])(
         ...f.cliDeps,
         externalPublicationPrompt: {
           isInteractive: () => true,
-          confirm: async (_question, defaultValue) => {
+          confirm: async (question, defaultValue) => {
             prompted = true;
             expect(defaultValue).toBe(false);
             expect(cli.stderr.text()).toContain(
@@ -767,12 +770,11 @@ test.each(["human", "json"])(
             expect(cli.stderr.text()).toContain("synthetic-account");
             expect(cli.stderr.text()).toContain("environment-example");
             expect(cli.stderr.text()).toContain("Excluded: 1");
-            expect(cli.stderr.text()).toContain(
-              "Selected findings and evidence:",
-            );
-            expect(cli.stderr.text()).toContain(
-              JSON.stringify(expected, null, 2),
-            );
+            expect(question).toContain("skip 1 excluded");
+            expect(cli.stderr.text()).toContain("vendor-selected [high]");
+            expect(cli.stderr.text()).toContain(f.file);
+            expect(cli.stderr.text()).toContain("--dry-run --format json");
+            expect(cli.stderr.text()).not.toContain("Original vendor detail");
             expect(cli.stderr.text()).not.toContain("\u001b");
             expect(cli.stderr.text()).not.toContain("synthetic-token");
             expect(cli.stdout.text()).toBe("");
@@ -781,16 +783,17 @@ test.each(["human", "json"])(
           },
         },
       }),
-    ).toBe(0);
+    ).toBe(1);
     expect(prompted).toBe(true);
     expect(f.reports.has("vendor-selected")).toBe(true);
     if (format === "json") {
       const result = JSON.parse(cli.stdout.text());
+      expect(result.status).toBe("partial");
       expect(result.counts.created).toBe(1);
       expect(result).not.toHaveProperty("cloudUrl");
     } else {
-      expect(cli.stderr.text()).toContain("Findings");
-      expect(cli.stderr.text()).not.toContain("/codex/cloud/security/findings");
+      expect(cli.stdout.text()).toContain("Findings");
+      expect(cli.stdout.text()).not.toContain("/codex/cloud/security/findings");
     }
   },
 );
@@ -1407,12 +1410,8 @@ test.each(["JSON", "JSONL"])(
     await writeFile(
       runner,
       `
-      import { main } from "../src/cli.js";
-      import { dependencies } from "../tests-ts/cli-fixtures.js";
-      process.exitCode = await main(process.argv.slice(2), process.stdout, process.stderr, {
-        ...dependencies({ environment: process.env }),
-        cloudFetch: async () => { throw new Error("Unexpected Cloud request"); },
-      });
+      export { main } from "../src/cli.js";
+      export { dependencies } from "../tests-ts/cli-fixtures.js";
     `,
     );
     const built = await Bun.build({
@@ -1423,8 +1422,19 @@ test.each(["JSON", "JSONL"])(
       packages: "external",
     });
     expect(built.success).toBe(true);
+    const invocation = join(bundle, "invoke.mjs");
+    await writeFile(
+      invocation,
+      `
+      import { main, dependencies } from ${JSON.stringify(pathToFileURL(built.outputs[0]!.path).href)};
+      process.exitCode = await main(process.argv.slice(2), process.stdout, process.stderr, {
+        ...dependencies({ environment: process.env }),
+        cloudFetch: async () => { throw new Error("Unexpected Cloud request"); },
+      });
+    `,
+    );
     const child = Bun.spawn(
-      [Bun.which("node")!, built.outputs[0]!.path, ...f.command, "--dry-run"],
+      [Bun.which("node")!, invocation, ...f.command, "--dry-run"],
       {
         env: f.environment,
         stdout: "pipe",
@@ -1437,8 +1447,14 @@ test.each(["JSON", "JSONL"])(
       new Response(child.stderr).text(),
     ]);
     expect(code).toBe(2);
-    expect(stdout).toBe("");
-    expect(stderr).toContain("Could not read vendor findings:");
+    expect(JSON.parse(stdout)).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("malformed"),
+    });
+    expect(stdout).not.toContain("\u001b");
+    expect(stderr).toContain(
+      "Could not read vendor findings as UTF-8 JSON or JSONL:",
+    );
     expect(stderr).toContain("malformed");
     expect(stderr).not.toContain("\u001b");
     expect(f.posts).toHaveLength(0);
@@ -1851,4 +1867,244 @@ test("numeric evidence size excludes an oversized item and preserves a valid mix
     accepted.evidence.source_data,
   );
   expect(f.reports.has("oversized-numbers")).toBe(false);
+});
+
+test.each([0xff, 0xfe])(
+  "invalid UTF-8 byte %p cannot change a source identity",
+  async (byte) => {
+    const f = await fixture();
+    await writeFile(
+      f.file,
+      Buffer.concat([
+        Buffer.from('{"source_finding_id":"vendor-'),
+        Buffer.from([byte]),
+        Buffer.from('","evidence":{"title":"Example","severity":"high"}}'),
+      ]),
+    );
+    await expect(
+      prepareExternalPublication(f.file, options, f.deps),
+    ).rejects.toThrow("UTF-8");
+    expect(f.posts).toHaveLength(0);
+    await writeFile(
+      f.file,
+      `\uFEFF${JSON.stringify(normalized("vendor-\uFFFD"))}`,
+    );
+    expect(
+      (await readVendorFindings(f.file)).findings[0]!.source_finding_id,
+    ).toBe("vendor-\uFFFD");
+  },
+);
+
+test("unsafe evidence integers are rejected while exact strings and safe integers survive", async () => {
+  const f = await fixture();
+  await writeFile(
+    f.file,
+    `[
+    {"source_finding_id":"unsafe-a","evidence":{"title":"Example","severity":"high","source_data":{"counter":9007199254740992}}},
+    {"source_finding_id":"unsafe-b","evidence":{"title":"Example","severity":"high","source_data":{"counter":9007199254740993}}},
+    {"source_finding_id":"unsafe-negative","evidence":{"title":"Example","severity":"high","source_data":{"counter":-9007199254740993}}},
+    {"source_finding_id":"exact","evidence":{"title":"Example","severity":"high","source_data":{"counter":"9007199254740993","safe":9007199254740991,"fraction":0.125}}}
+  ]`,
+  );
+  const parsed = await readVendorFindings(f.file);
+  expect(parsed.excluded.map((item) => item.source_finding_id)).toEqual([
+    "unsafe-a",
+    "unsafe-b",
+    "unsafe-negative",
+  ]);
+  expect(
+    parsed.excluded.every((item) => item.reason.includes("safe integer")),
+  ).toBe(true);
+  expect(parsed.findings[0]!.evidence.source_data).toEqual({
+    counter: "9007199254740993",
+    safe: Number.MAX_SAFE_INTEGER,
+    fraction: 0.125,
+  });
+});
+
+test("mixed valid and rejected input reports partial completion with exit code 1", async () => {
+  const f = await fixture([
+    normalized("invalid", "unknown"),
+    normalized("valid"),
+  ]);
+  const cli = createCliTest(main);
+  expect(await cli.runCli([...f.command, "--yes"], f.cliDeps)).toBe(1);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "partial",
+    read: 2,
+    ready: 1,
+    counts: { created: 1, error: 0 },
+    unacknowledged: 0,
+    verified: 1,
+    excluded: [{ source_finding_id: "invalid", position: 1 }],
+  });
+});
+
+test("server item failures identify the vendor record after local exclusions", async () => {
+  const f = await fixture([
+    normalized("invalid", "unknown"),
+    normalized("rejected-vendor"),
+  ]);
+  f.state.finalError = true;
+  const cli = createCliTest(main);
+  expect(await cli.runCli([...f.command, "--yes"], f.cliDeps)).toBe(1);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "partial",
+    verified: 0,
+    unacknowledged: 0,
+    failures: [
+      {
+        source_finding_id: "rejected-vendor",
+        code: "version_conflict",
+        message: "Reload current evidence",
+      },
+    ],
+  });
+});
+
+test("interrupted CLI output preserves acknowledged batches and resumes only unfinished uploads", async () => {
+  const f = await fixture(
+    Array.from({ length: 101 }, (_, i) => normalized(`vendor-${i}`)),
+  );
+  f.state.postBudget = 1;
+  const first = createCliTest(main);
+  expect(await first.runCli([...f.command, "--yes"], f.cliDeps)).toBe(2);
+  const partial = JSON.parse(first.stdout.text());
+  expect(partial).toMatchObject({
+    status: "interrupted",
+    ready: 101,
+    counts: { created: 100 },
+    unacknowledged: 1,
+    verified: 0,
+  });
+  expect(partial.receipts).toHaveLength(1);
+  expect(partial.savedSubmission).toEndWith(".pending.json");
+  expect(partial.error).toContain("Repeat the same command");
+  expect(f.reports.size).toBe(100);
+  f.state.postBudget = Infinity;
+  const retry = createCliTest(main);
+  expect(await retry.runCli([...f.command, "--yes"], f.cliDeps)).toBe(0);
+  expect(JSON.parse(retry.stdout.text())).toMatchObject({
+    status: "complete",
+    counts: { created: 101 },
+    unacknowledged: 0,
+    verified: 101,
+  });
+  expect(f.posts).toHaveLength(3);
+  expect(f.posts[2]).toBe(f.posts[1]);
+});
+
+test("readback interruption distinguishes acknowledged findings from verified findings", async () => {
+  const f = await fixture();
+  f.state.brokenReadback = true;
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  try {
+    await prepared.publish();
+    throw new Error("Expected readback interruption");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ExternalPublicationError);
+    expect((error as ExternalPublicationError).result).toMatchObject({
+      status: "interrupted",
+      counts: { created: 1 },
+      unacknowledged: 0,
+      verified: 0,
+    });
+  }
+});
+
+test("repository URLs and IDs share the same resumable destination", async () => {
+  const f = await fixture();
+  f.state.loseResponse = true;
+  const first = await prepareExternalPublication(
+    f.file,
+    { ...options, repository: `${f.destination().url}.git` },
+    f.deps,
+  );
+  expect(first.preview.destination.id).toBe(options.repository);
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  const retry = await prepareExternalPublication(f.file, options, f.deps);
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).status).toBe("complete");
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
+
+test("read lookups and verification run concurrently with bounded requests and ordered input", async () => {
+  const f = await fixture(
+    Array.from({ length: 9 }, (_, i) => normalized(`vendor-${i}`)),
+  );
+  const phases: ExternalPublicationProgress[] = [];
+  let active = 0;
+  let maximum = 0;
+  const prepared = await prepareExternalPublication(f.file, options, {
+    ...f.deps,
+    onProgress: (event) => phases.push(event),
+    fetch: async (url, init) => {
+      if (!url.includes("/source_reports")) return f.deps.fetch(url, init);
+      active++;
+      maximum = Math.max(maximum, active);
+      try {
+        await Promise.resolve();
+        return await f.deps.fetch(url, init);
+      } finally {
+        active--;
+      }
+    },
+  });
+  expect(
+    prepared.preview.requests.flatMap((batch) =>
+      batch.items.map((item) => item.source_finding_id),
+    ),
+  ).toEqual(Array.from({ length: 9 }, (_, i) => `vendor-${i}`));
+  expect((await prepared.publish()).status).toBe("complete");
+  expect(maximum).toBeGreaterThan(1);
+  expect(maximum).toBeLessThanOrEqual(4);
+  expect(active).toBe(0);
+  for (const phase of ["preparing", "uploading", "verifying"])
+    expect(
+      phases.filter((event) => event.phase === phase).at(-1),
+    ).toMatchObject({ completed: 9, total: 9 });
+});
+
+test("progress is optional and stderr progress never corrupts JSON results", async () => {
+  const f = await fixture();
+  const prepared = await prepareExternalPublication(f.file, options, {
+    ...f.deps,
+    onProgress: () => {
+      throw new Error("Optional observer failed");
+    },
+  });
+  expect((await prepared.publish()).status).toBe("complete");
+  const cli = createCliTest(main, { stderr: true });
+  expect(await cli.runCli([...f.command, "--yes"], f.cliDeps)).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "complete",
+    counts: { unchanged: 1 },
+  });
+  expect(cli.stderr.text()).toContain("Preparing findings");
+  expect(cli.stderr.text()).toContain("Verifying imported findings: 1/1");
+});
+
+test("human previews stay compact while JSON previews retain complete evidence", async () => {
+  const records = Array.from({ length: 6 }, (_, i) => ({
+    ...normalized(`vendor-${i}`),
+    evidence: {
+      ...normalized().evidence,
+      source_data: { detail: `complete-vendor-evidence-${i}` },
+    },
+  }));
+  const f = await fixture(records);
+  const human = createCliTest(main);
+  expect(
+    await human.runCli([...f.command.slice(0, -2), "--dry-run"], f.cliDeps),
+  ).toBe(0);
+  expect(human.stderr.text()).toContain("Showing 5 of 6 findings");
+  expect(human.stderr.text()).not.toContain("complete-vendor-evidence-");
+  expect(human.stdout.text()).not.toContain("request_id");
+  const json = createCliTest(main);
+  expect(await json.runCli([...f.command, "--dry-run"], f.cliDeps)).toBe(0);
+  expect(JSON.parse(json.stdout.text()).findings).toHaveLength(6);
+  expect(
+    JSON.parse(json.stdout.text()).findings[5].evidence.source_data.detail,
+  ).toBe("complete-vendor-evidence-5");
+  expect(f.posts).toHaveLength(0);
 });

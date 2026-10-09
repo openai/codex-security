@@ -791,15 +791,41 @@ again when rerunning.
 
 ## Publish findings to Cloud
 
-Publish selected external Wiz vulnerability findings without creating a scan:
+### Import Wiz package vulnerabilities
+
+Import selected Wiz package vulnerabilities without creating a scan. Imported
+records retain vendor evidence and remain **not assessed by Codex**. Raw SAST,
+secret, IaC, and external network findings need separate mappings; this is not
+a synchronization of every finding in Wiz.
+
+Before the first import:
+
+1. Select an existing repository in Codex Security Cloud and copy its repository
+   URL (for example, a GitHub URL) or Cloud repository ID. The repository needs an
+   authorized environment, but does not need a completed native scan.
+2. Use your authorized Wiz connection to read selected package vulnerability
+   records and save their JSON. Include `id`, `name`, `detailedName`,
+   `vendorSeverity` (or `severity`), and `vulnerableAsset.id`; retain the available
+   package, image, and source metadata. The command does not fetch Wiz data or
+   accept CSV exports. See the accepted input formats below.
+3. Choose a stable source key such as `TENANT_ID/vulnerability-finding`. Reuse it
+   for that Wiz tenant and finding class across exports. Do not create a new key
+   for each project filter or import; that creates different source identities.
+4. Check the ChatGPT account used by your existing file-backed Codex Security
+   login. API-key-only and keyring-only logins are not supported for Cloud
+   publication. See the credential-storage instructions below.
+
+Preview the selection and destination:
 
 ```bash
 codex-security publish findings selected-wiz.json \
-  --to cloud --repository REPOSITORY_ID --provider wiz \
+  --to cloud --repository https://github.com/example/project --provider wiz \
   --source-key TENANT_ID/vulnerability-finding --dry-run --format json
 ```
 
-This command reads the authorized destination and current source versions during
+`--repository` accepts the repository's URL or ID. Both resolve to the same Cloud
+destination and resume the same saved submission. This command reads the
+authorized destination and current source versions during
 preview. It uses the same saved ChatGPT file login as scan publication. The Cloud
 repository needs an existing environment; no native scan is required. Review the
 account, repository, environments, findings, and exclusions, then rerun without
@@ -807,7 +833,11 @@ account, repository, environments, findings, and exclusions, then rerun without
 reviewed input for scripts or the plugin. Without a terminal or `--yes`, no upload
 occurs. Existing source findings keep their Cloud environment; new findings use
 the repository’s current authorized default. Preview shows the environments that
-will receive the selected findings.
+will receive the selected findings. The terminal preview summarizes severities,
+shows up to five finding IDs and titles, and identifies the evidence file and
+exclusions. `--dry-run --format json` retains all normalized findings and complete
+evidence for inspection. A prompt explicitly includes any records that will be
+skipped.
 
 Input can be a Wiz vulnerability finding, an array, a complete
 `data.vulnerabilityFindings.nodes` response, or JSONL with one vendor record per
@@ -835,18 +865,46 @@ fetch from Wiz, assess findings, or change vendor or Cloud triage decisions.
 Findings from external network scans are excluded from this package vulnerability
 mapping.
 
+Inputs must be valid UTF-8. Integer-valued evidence outside JavaScript's safe
+integer range is rejected; export those values as strings to preserve them
+exactly. Invalid records appear in `excluded` with their source ID and reason.
+
 Requests contain at most 100 findings and respect the Cloud payload limits.
 Before uploading, the publisher saves request IDs and bodies privately under
 the configured Codex Security state directory. After an uncertain response,
 repeat the same command with unchanged input to resume those requests. A reset
 retires the old request without republishing; review and explicitly approve a
-fresh invocation. Final item errors are reported individually with exit code 1;
-correct the input or source conflict before a fresh submission. Transport or
-readback failures return exit code 2 and retain the resumable request. Successful
-receipts are saved locally; the CLI verifies Cloud source-report reads and
-returns publication receipts and counts. Open the Codex Security Cloud app, go
+fresh invocation.
+
+Results distinguish completion from partial or interrupted work:
+
+| Status        | Exit code | Meaning                                                                                            |
+| ------------- | --------- | -------------------------------------------------------------------------------------------------- |
+| `complete`    | 0         | All selected records were acknowledged and verified.                                               |
+| `partial`     | 1         | The import finished, but some records were excluded locally or rejected by Cloud.                  |
+| `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is included in the result. |
+| `failed`      | 2         | Preparation failed before uploading; structured output includes the error.                         |
+
+Ctrl-C and SIGTERM retain exit codes 130 and 143. Interrupted JSON output preserves
+`receipts`, `counts`, `failures` with vendor source IDs, `excluded`, `verified`, and
+`unacknowledged`. A lost response can mean unacknowledged findings were accepted;
+resume the saved submission rather than treating them as never uploaded. When
+available, `savedSubmission` identifies the checkpoint to resume by repeating the
+same command. Review `error` before retrying; a repository reset retires the old
+submission and requires fresh approval. Correct local exclusions or final source
+conflicts before preparing a new submission.
+
+Counts are cumulative for the saved submission: a resumed result includes
+batches acknowledged by earlier invocations, not just the latest upload attempt.
+
+Terminal progress reports preparation, acknowledged uploads, and verification
+on stderr; JSON results stay on stdout. Lookups and readback use at most four
+concurrent requests, while uploads remain sequential. Successful receipts are
+saved locally. Open the Codex Security Cloud app, go
 to its main Findings view, and find the repository’s imported Wiz findings.
 Search indexing can lag an accepted import.
+
+### Publish completed scans
 
 Preview selected completed scans before uploading:
 

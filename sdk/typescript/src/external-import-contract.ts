@@ -133,6 +133,10 @@ export function validateExternalEvidence(
     } else if (typeof value === "number") {
       if (!Number.isFinite(value))
         throw new Error("Evidence must contain finite JSON numbers.");
+      if (Number.isInteger(value) && !Number.isSafeInteger(value))
+        throw new Error(
+          "Evidence integers must be within JavaScript's safe integer range; export larger values as strings to preserve them exactly.",
+        );
       const wire = JSON.stringify(value);
       // Cloud pads short exponents and formats small fractions scientifically.
       const cloud = (

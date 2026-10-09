@@ -22,6 +22,7 @@ import type {
   FindingImportRequest,
   FindingImportReceipt,
   ImportRepository,
+  SourceReportSummary,
 } from "./external-import-models.js";
 
 const BASE_URL = "https://chatgpt.com/backend-api/aardvark/external";
@@ -40,6 +41,45 @@ export interface ExternalPublicationDependencies {
   fetch?: (url: string, options: RequestInit) => Promise<Response>;
   credentials?: () => Promise<{ access_token: string; account_id: string }>;
   signal?: AbortSignal;
+  onProgress?: (event: ExternalPublicationProgress) => void;
+}
+
+export interface ExternalPublicationProgress {
+  phase:
+    | "reading"
+    | "discovering"
+    | "preparing"
+    | "waiting"
+    | "uploading"
+    | "verifying";
+  completed: number;
+  total?: number;
+}
+
+/** Counts describe acknowledged receipts, even when later transport or readback fails. */
+export interface ExternalPublicationResult {
+  status: "complete" | "partial" | "interrupted";
+  read: number;
+  ready: number;
+  excluded: VendorFindings["excluded"];
+  receipts: FindingImportReceipt[];
+  counts: Required<FindingImportReceipt["counts"]>;
+  failures: { source_finding_id: string; code: string; message: string }[];
+  unacknowledged: number;
+  verified: number;
+  error?: string;
+  savedSubmission?: string;
+}
+
+/** Preserve accepted work in CLI JSON output when publication cannot finish. */
+export class ExternalPublicationError extends CodexSecurityError {
+  constructor(
+    message: string,
+    public readonly result: ExternalPublicationResult,
+    cause: unknown,
+  ) {
+    super(message, { cause });
+  }
 }
 
 interface SavedSubmission {
@@ -58,10 +98,30 @@ export interface ExternalPublicationPreview extends VendorFindings {
 
 export interface PreparedExternalPublication {
   preview: ExternalPublicationPreview;
-  publish(): Promise<{
-    receipts: FindingImportReceipt[];
-    counts: FindingImportReceipt["counts"];
-  }>;
+  publish(): Promise<ExternalPublicationResult>;
+}
+
+// Limit read concurrency to avoid one network round trip per finding in series.
+// Wait for the entire batch on failure so callers never outlive their read tasks.
+async function readInBatches<T, U>(
+  items: T[],
+  read: (item: T) => Promise<U>,
+): Promise<U[]> {
+  const output: U[] = [];
+  for (let start = 0; start < items.length; start += 4) {
+    const batch = await Promise.allSettled(
+      items.slice(start, start + 4).map(read),
+    );
+    for (const result of batch) {
+      if (result.status === "rejected") throw result.reason;
+      output.push(result.value);
+    }
+  }
+  return output;
+}
+
+function repositoryUrl(value: string): string {
+  return value.replace(/\/$/u, "").replace(/\.git$/u, "");
 }
 
 function canonicalJson(value: unknown): string {
@@ -164,17 +224,26 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  const progress = (event: ExternalPublicationProgress): void => {
+    try {
+      dependencies.onProgress?.(event);
+    } catch {
+      // Optional progress must not interrupt preparation or publication.
+    }
+  };
   if (!options.sourceKey.trim() || Buffer.byteLength(options.sourceKey) > 512) {
     throw new CodexSecurityError(
-      "The source key must contain 1–512 UTF-8 bytes and identify the stable vendor namespace.",
+      "The source key must contain 1–512 UTF-8 bytes. Use a stable Wiz tenant/finding namespace, such as TENANT_ID/vulnerability-finding, across exports.",
     );
   }
+  progress({ phase: "reading", completed: 0 });
   const parsed = await readVendorFindings(path);
   if (parsed.findings.length === 0) {
     throw new CodexSecurityError(
       `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}`,
     );
   }
+  progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
   const credentials = await (
     dependencies.credentials ?? (() => readCloudCredentials(environment))
@@ -225,7 +294,11 @@ export async function prepareExternalPublication(
       ),
     );
     destinations.push(
-      ...result.data.filter((item) => item.id === options.repository),
+      ...result.data.filter(
+        (item) =>
+          item.id === options.repository ||
+          repositoryUrl(item.url) === repositoryUrl(options.repository),
+      ),
     );
     page = result.next;
     if (
@@ -240,8 +313,8 @@ export async function prepareExternalPublication(
   if (destinations.length !== 1)
     throw new CodexSecurityError(
       destinations.length
-        ? "The repository ID matches multiple connectors. Select an unambiguous Cloud repository."
-        : "The destination repository is not available to this Cloud account.",
+        ? "The repository matches multiple connectors. Select an unambiguous Cloud repository."
+        : "The destination repository is not available to this Cloud account. Copy its repository URL or ID from Codex Security Cloud and check that you are signed into the intended account.",
     );
   const destination = destinations[0]!;
   const source = { provider: options.provider, source_key: options.sourceKey };
@@ -253,7 +326,7 @@ export async function prepareExternalPublication(
     "sha256",
     canonicalJson([
       credentials.account_id,
-      options.repository,
+      destination.id,
       destination.repo_connector_id,
       source,
       parsed.findings,
@@ -321,34 +394,52 @@ export async function prepareExternalPublication(
   }
   let requests = saved?.requests;
   if (!requests) {
+    let preparedCount = 0;
+    progress({
+      phase: "preparing",
+      completed: 0,
+      total: parsed.findings.length,
+    });
+    const previousReports = await readInBatches(
+      parsed.findings,
+      async (finding): Promise<SourceReportSummary | undefined> => {
+        const query = new URLSearchParams({
+          provider: source.provider,
+          source_key: source.source_key,
+          source_finding_id: finding.source_finding_id,
+          limit: "2",
+        });
+        const summaries = validateSourceReports(
+          await request(`${sourcePath(destination)}?${query}`),
+        );
+        if (summaries.has_more || summaries.data.length > 1)
+          throw new CodexSecurityError(
+            "Cloud returned more than one report for a source identity.",
+          );
+        const previous = summaries.data[0];
+        if (
+          previous &&
+          (previous.source_finding_id !== finding.source_finding_id ||
+            previous.source.provider !== source.provider ||
+            previous.source.source_key !== source.source_key ||
+            previous.repo_id !== destination.id ||
+            previous.repo_connector_id !== destination.repo_connector_id)
+        )
+          throw new CodexSecurityError(
+            "Cloud returned a different source identity.",
+          );
+        progress({
+          phase: "preparing",
+          completed: ++preparedCount,
+          total: parsed.findings.length,
+        });
+        return previous;
+      },
+    );
     requests = [];
     let current: FindingImportRequest | undefined;
     for (const [index, finding] of parsed.findings.entries()) {
-      const query = new URLSearchParams({
-        provider: source.provider,
-        source_key: source.source_key,
-        source_finding_id: finding.source_finding_id,
-        limit: "2",
-      });
-      const summaries = validateSourceReports(
-        await request(`${sourcePath(destination)}?${query}`),
-      );
-      if (summaries.has_more || summaries.data.length > 1)
-        throw new CodexSecurityError(
-          "Cloud returned more than one report for a source identity.",
-        );
-      const previous = summaries.data[0];
-      if (
-        previous &&
-        (previous.source_finding_id !== finding.source_finding_id ||
-          previous.source.provider !== source.provider ||
-          previous.source.source_key !== source.source_key ||
-          previous.repo_id !== destination.id ||
-          previous.repo_connector_id !== destination.repo_connector_id)
-      )
-        throw new CodexSecurityError(
-          "Cloud returned a different source identity.",
-        );
+      const previous = previousReports[index];
       const environmentId =
         previous?.environment_id ?? destination.import_environment_id;
       if (environmentId == null)
@@ -399,6 +490,7 @@ export async function prepareExternalPublication(
   return {
     preview,
     async publish() {
+      progress({ phase: "waiting", completed: 0 });
       return await withImportLock(state, key, dependencies.signal, async () => {
         // Re-read under the lock to keep checkpoints from another publisher.
         const pending = await readFile(pendingPath, "utf8").catch(
@@ -420,9 +512,56 @@ export async function prepareExternalPublication(
           throw new CodexSecurityError(
             "Saved publication has more receipts than requests.",
           );
-        if (pending === undefined)
-          await writeAtomicJson(pendingPath, submission);
+        const acknowledged: FindingImportReceipt[] = [];
+        let verified = 0;
+        let persisted = pending !== undefined;
+        const result = (): ExternalPublicationResult => {
+          const counts = { created: 0, updated: 0, unchanged: 0, error: 0 };
+          const failures: ExternalPublicationResult["failures"] = [];
+          for (const [index, receipt] of acknowledged.entries()) {
+            for (const outcome of Object.keys(
+              counts,
+            ) as (keyof typeof counts)[])
+              counts[outcome] += receipt.counts[outcome] ?? 0;
+            const ids = new Map(
+              requests[index]!.items.map((item) => [
+                item.client_id,
+                item.source_finding_id,
+              ]),
+            );
+            for (const item of receipt.results)
+              if (item.error)
+                failures.push({
+                  source_finding_id: ids.get(item.client_id)!,
+                  ...item.error,
+                });
+          }
+          return {
+            status:
+              parsed.excluded.length || counts.error ? "partial" : "complete",
+            read: parsed.read,
+            ready: parsed.findings.length,
+            excluded: parsed.excluded,
+            receipts: acknowledged,
+            counts,
+            failures,
+            unacknowledged:
+              parsed.findings.length -
+              Object.values(counts).reduce((sum, count) => sum + count, 0),
+            verified,
+          };
+        };
         try {
+          if (pending === undefined) {
+            await writeAtomicJson(pendingPath, submission);
+            persisted = true;
+          }
+          progress({
+            phase: "uploading",
+            completed: 0,
+            total: parsed.findings.length,
+          });
+          let acknowledgedCount = 0;
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validateImportReceipt(
               receipts[batchIndex] ??
@@ -474,6 +613,13 @@ export async function prepareExternalPublication(
               throw new CodexSecurityError(
                 "Cloud returned inconsistent publication counts.",
               );
+            acknowledged.push(receipt);
+            acknowledgedCount += receipt.item_count;
+            progress({
+              phase: "uploading",
+              completed: acknowledgedCount,
+              total: parsed.findings.length,
+            });
             if (batchIndex === receipts.length) {
               receipts.push(receipt);
               // Acknowledged batches must not consume another POST quota on retry.
@@ -486,56 +632,73 @@ export async function prepareExternalPublication(
           }
           // Verify readable source records without mistaking a newer concurrent
           // observation for failure of the original, immutable import receipt.
-          for (const [batchIndex, receipt] of receipts.entries()) {
+          const readbacks = receipts.flatMap((receipt, batchIndex) => {
             const batch = requests[batchIndex]!;
             const batchItems = new Map(
               batch.items.map((item) => [item.client_id, item]),
             );
-            for (const item of receipt.results) {
-              if (item.outcome === "error") continue;
-              const expected = batchItems.get(item.client_id)!;
-              const report = validateSourceReport(
-                await request(
-                  `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
-                ),
+            return receipt.results
+              .filter((item) => item.outcome !== "error")
+              .map((item) => ({
+                item,
+                expected: batchItems.get(item.client_id)!,
+                batch,
+              }));
+          });
+          progress({
+            phase: "verifying",
+            completed: 0,
+            total: readbacks.length,
+          });
+          await readInBatches(readbacks, async ({ item, expected, batch }) => {
+            const report = validateSourceReport(
+              await request(
+                `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
+              ),
+            );
+            if (
+              report.canonical_finding_id !== item.canonical_finding_id ||
+              report.version < item.version! ||
+              (report.version === item.version &&
+                (report.observation_id !== item.observation_id ||
+                  canonicalJson(report.evidence) !==
+                    canonicalJson(expected.evidence))) ||
+              report.source_finding_id !== expected.source_finding_id ||
+              report.repo_id !== destination.id ||
+              report.repo_connector_id !== destination.repo_connector_id ||
+              report.environment_id !== batch.repository.environment_id ||
+              canonicalJson(report.source) !== canonicalJson(source)
+            )
+              throw new CodexSecurityError(
+                "Cloud readback did not match the saved finding identity.",
               );
-              if (
-                report.canonical_finding_id !== item.canonical_finding_id ||
-                report.version < item.version! ||
-                (report.version === item.version &&
-                  (report.observation_id !== item.observation_id ||
-                    canonicalJson(report.evidence) !==
-                      canonicalJson(expected.evidence))) ||
-                report.source_finding_id !== expected.source_finding_id ||
-                report.repo_id !== destination.id ||
-                report.repo_connector_id !== destination.repo_connector_id ||
-                report.environment_id !== batch.repository.environment_id ||
-                canonicalJson(report.source) !== canonicalJson(source)
-              )
-                throw new CodexSecurityError(
-                  "Cloud readback did not match the saved finding identity.",
-                );
-            }
-          }
+            progress({
+              phase: "verifying",
+              completed: ++verified,
+              total: readbacks.length,
+            });
+          });
+          const completed = result();
+          await writeAtomicJson(join(state, `${key}.result.json`), completed);
+          await rm(pendingPath, { force: true });
+          return completed;
         } catch (error) {
-          if (error instanceof CloudImportError && error.status === 409)
+          if (error instanceof CloudImportError && error.status === 409) {
             await rm(pendingPath, { force: true });
-          throw new CodexSecurityError(
-            `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}`}`,
-            { cause: error },
+            persisted = false;
+          }
+          const message = `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : persisted ? `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}` : "No resumable request was saved. Correct the error and review the input before retrying."}`;
+          throw new ExternalPublicationError(
+            message,
+            {
+              ...result(),
+              status: "interrupted",
+              error: message,
+              ...(persisted ? { savedSubmission: pendingPath } : {}),
+            },
+            error,
           );
         }
-        const counts = { created: 0, updated: 0, unchanged: 0, error: 0 };
-        for (const receipt of receipts)
-          for (const outcome of Object.keys(counts) as (keyof typeof counts)[])
-            counts[outcome] += receipt.counts[outcome] ?? 0;
-        const result = {
-          receipts,
-          counts,
-        };
-        await writeAtomicJson(join(state, `${key}.result.json`), result);
-        await rm(pendingPath, { force: true });
-        return result;
       });
     },
   };

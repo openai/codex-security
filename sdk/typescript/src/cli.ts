@@ -92,7 +92,12 @@ import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
-import { prepareExternalPublication } from "./external-findings-publish.js";
+import {
+  ExternalPublicationError,
+  prepareExternalPublication,
+  type ExternalPublicationProgress,
+  type ExternalPublicationResult,
+} from "./external-findings-publish.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
@@ -545,6 +550,34 @@ function publicationIssueUrl(value: string | undefined): string | undefined {
   }
 
   return value;
+}
+
+function renderExternalPublicationSummary(
+  result: ExternalPublicationResult,
+): string {
+  return [
+    `Import ${result.status}.`,
+    `Submission totals — Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}`,
+    `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
+    ...result.failures.map(
+      (item) =>
+        `Failed ${diagnosticValue(item.source_finding_id)} (${item.code}): ${diagnosticValue(item.message)}`,
+    ),
+    ...result.excluded.map(
+      (item) =>
+        `Excluded item ${item.position}${item.source_finding_id ? ` (${diagnosticValue(item.source_finding_id)})` : ""}: ${diagnosticValue(item.reason)}`,
+    ),
+    ...(result.savedSubmission
+      ? [`Saved submission: ${diagnosticValue(result.savedSubmission)}`]
+      : []),
+    ...(result.status === "interrupted"
+      ? []
+      : [
+          "Imported Wiz evidence remains not assessed by Codex.",
+          "Open the Codex Security Cloud app's Findings view and select this repository. Search indexing can lag an accepted import.",
+        ]),
+    "",
+  ].join("\n");
 }
 
 function renderPublicationSummary(
@@ -3114,7 +3147,9 @@ export async function main(
     },
   });
   publication.command("findings", {
-    description: "Preview and publish selected Wiz findings to Cloud.",
+    description:
+      "Preview and import selected Wiz package vulnerabilities to Cloud.",
+    hint: "Supply selected Wiz vulnerability JSON or normalized JSONL (not CSV, SAST, secrets, or IaC exports).\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
@@ -3125,7 +3160,7 @@ export async function main(
     options: z.object({
       to: z.literal("cloud").describe("Publication destination."),
       repository: optionValue("--repository").describe(
-        "Authorized Cloud repository ID.",
+        "Authorized Cloud repository ID or repository URL copied from Cloud.",
       ),
       provider: z
         .literal("wiz")
@@ -3151,6 +3186,31 @@ export async function main(
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       const structured = formatExplicit && format !== "toon";
+      const humanSummary =
+        format === "toon" &&
+        !formatExplicit &&
+        !argv.some((argument) => OUTPUT_OPTION.test(argument));
+      let lastProgress = "";
+      const onProgress = (event: ExternalPublicationProgress) => {
+        if (errorOutput.isTTY !== true) return;
+        const step = event.total
+          ? Math.floor((event.completed * 10) / event.total)
+          : 0;
+        const key = `${event.phase}:${step}`;
+        if (key === lastProgress) return;
+        lastProgress = key;
+        const labels = {
+          reading: "Reading selected findings",
+          discovering: "Checking Cloud account and repository",
+          preparing: "Preparing findings",
+          waiting: "Waiting for publication access",
+          uploading: "Acknowledged findings",
+          verifying: "Verifying imported findings",
+        };
+        errorOutput.write(
+          `${labels[event.phase]}${event.total === undefined ? "..." : `: ${event.completed}/${event.total}`}\n`,
+        );
+      };
       try {
         const prepared = await prepareExternalPublication(
           resolveCliPath(dependencies.currentDirectory(), args.file),
@@ -3159,6 +3219,7 @@ export async function main(
             environment: dependencies.environment,
             fetch: dependencies.cloudFetch,
             signal: controller.signal,
+            onProgress,
           },
         );
         const { preview } = prepared;
@@ -3170,9 +3231,36 @@ export async function main(
             errorOutput.write(
               `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
             );
+          errorOutput.write(
+            `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
+          );
+          const severities = new Map<string, number>();
+          for (const finding of preview.findings)
+            severities.set(
+              finding.evidence.severity,
+              (severities.get(finding.evidence.severity) ?? 0) + 1,
+            );
+          errorOutput.write(
+            `Severities: ${[...severities].map(([severity, count]) => `${severity}: ${count}`).join("  ")}\n`,
+          );
+          for (const finding of preview.findings.slice(0, 5))
+            errorOutput.write(
+              `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
+            );
+          if (preview.findings.length > 5)
+            errorOutput.write(
+              `Showing 5 of ${preview.findings.length} findings.\n`,
+            );
+          errorOutput.write(
+            "Use --dry-run --format json to inspect all normalized findings and the complete evidence before uploading.\n",
+          );
         };
         if (!structured) showPreview();
-        if (options.dryRun) return { ...preview, dryRun: true };
+        if (options.dryRun) {
+          if (humanSummary)
+            renderedPublication = "Dry run complete. No findings uploaded.\n";
+          return { ...preview, dryRun: true };
+        }
         if (!options.yes) {
           const prompt =
             dependencies.externalPublicationPrompt ??
@@ -3182,31 +3270,39 @@ export async function main(
               "Publication needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.",
             );
           if (structured) showPreview();
-          errorOutput.write(
-            `Selected findings and evidence:\n${JSON.stringify(preview.findings, null, 2).split("\n").map(diagnosticValue).join("\n")}\n`,
-          );
           if (
             !(await prompt.confirm(
-              `Publish these ${preview.findings.length} findings?`,
+              `Publish these ${preview.findings.length} findings${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
               false,
               controller.signal,
             ))
-          )
+          ) {
+            if (humanSummary) renderedPublication = "No findings published.\n";
             return { published: false, preview };
+          }
         }
         const result = await prepared.publish();
-        if (result.counts.error) exitCode = 1;
-        if (!structured)
-          errorOutput.write(
-            `Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}\nOpen the Codex Security Cloud app, go to Findings, and find this repository’s imported Wiz findings.\n`,
-          );
-        return { ...result, excluded: preview.excluded };
+        if (result.status === "partial") exitCode = 1;
+        if (humanSummary)
+          renderedPublication = renderExternalPublicationSummary(result);
+        else if (!structured)
+          errorOutput.write(renderExternalPublicationSummary(result));
+        return { ...result };
       } catch (error) {
         reportPublicationError(
           diagnosticValue(error),
           controller.signal.aborted ? controller.signal.reason : undefined,
         );
-        return undefined;
+        if (error instanceof ExternalPublicationError) {
+          if (humanSummary)
+            renderedPublication = renderExternalPublicationSummary(
+              error.result,
+            );
+          return { ...error.result };
+        }
+        return structured
+          ? { status: "failed", error: diagnosticValue(error) }
+          : undefined;
       } finally {
         removeSignals();
       }

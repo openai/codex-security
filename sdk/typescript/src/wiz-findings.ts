@@ -152,9 +152,12 @@ function records(payload: unknown): unknown[] {
 export async function readVendorFindings(
   path: string,
 ): Promise<VendorFindings> {
-  const contents = (await readFile(path, "utf8")).replace(/^\uFEFF/u, "");
   let input: unknown[];
   try {
+    // A replacement character would change vendor identities and retained evidence.
+    const contents = new TextDecoder("utf-8", { fatal: true }).decode(
+      await readFile(path),
+    );
     let payload: unknown;
     try {
       payload = JSON.parse(contents);
@@ -167,7 +170,7 @@ export async function readVendorFindings(
     input = records(payload);
   } catch (cause) {
     throw new CodexSecurityError(
-      `Could not read vendor findings: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `Could not read vendor findings as UTF-8 JSON or JSONL: ${cause instanceof Error ? cause.message : String(cause)}`,
       { cause },
     );
   }
