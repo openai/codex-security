@@ -358,6 +358,46 @@ describe("plain npm tar entries", () => {
     },
   );
 
+  test("keeps retained extents between separate sparse metadata segments", () => {
+    const path = "package/logo.png";
+    const logo = readFileSync(
+      new URL(
+        "../../../plugins/codex-security/assets/logo.png",
+        import.meta.url,
+      ),
+    );
+    const firstPadding = Buffer.alloc(512 - 250);
+    firstPadding.write(".openai.", firstPadding.length - 8);
+    const secondPadding = Buffer.alloc(512 - 250);
+    secondPadding.write("org");
+    const bytes = archive(
+      tarRecord(
+        paxRecords({
+          "GNU.sparse.size": String(logo.length),
+          "GNU.sparse.numblocks": "3",
+          "GNU.sparse.map": `0,250,250,250,500,${logo.length - 500}`,
+        }),
+        { name: "PaxHeaders/logo", type: 0x78 },
+      ),
+      tarRecord(
+        Buffer.concat([
+          logo.subarray(0, 250),
+          firstPadding,
+          logo.subarray(250, 500),
+          secondPadding,
+          logo.subarray(500),
+        ]),
+        { name: path },
+      ),
+    );
+    expect(() =>
+      assertStoredSparseContents(
+        readTarArchive(bytes),
+        new Map([[path, logo]]),
+      ),
+    ).not.toThrow();
+  });
+
   test("checks markers crossing discarded padding and retained sparse bytes", () => {
     const path = "package/logo.png";
     const logo = readFileSync(

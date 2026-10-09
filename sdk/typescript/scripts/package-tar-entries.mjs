@@ -113,9 +113,6 @@ export function assertStoredSparseContents(archive, extractedFiles) {
   const parts = archive.metadata.flatMap((part) =>
     typeof part === "string" ? sparseMetadata.get(part) : part,
   );
-  assertPublicText(
-    Buffer.concat(parts.filter(Buffer.isBuffer)).toString("utf8"),
-  );
   const binaryRanges = [];
   let text = "";
   for (const part of parts) {
