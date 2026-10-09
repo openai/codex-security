@@ -745,6 +745,8 @@ export class DeepScanCoordinator {
       let firstFailure: unknown | undefined;
       for (const result of results) {
         if (result.status === "rejected") {
+          if (confirmedOwnershipChange(result.reason, this.state.scanId))
+            throw result.reason;
           firstFailure ??= result.reason;
           continue;
         }
