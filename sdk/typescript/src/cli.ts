@@ -201,7 +201,9 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  anchorExecutablePath,
   executablePathForSpawn,
+  expandExecutableHome,
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
@@ -5770,25 +5772,33 @@ export async function main(
     const commandEnvironment = { ...dependencies.environment };
     for (const [name, value] of Object.entries(commandEnvironment)) {
       const configured = value?.trim();
+      const key = name.toUpperCase();
+      const executable =
+        key === "CODEX_CLI_PATH" ||
+        (key === "PYTHON" &&
+          (configured?.includes("/") || configured?.includes("\\")));
       if (
         configured &&
-        ([
-          "CODEX_SECURITY_STATE_DIR",
-          "CODEX_SECURITY_PROJECT_CONFIG",
-          "CODEX_HOME",
-          "CODEX_CLI_PATH",
-        ].includes(name.toUpperCase()) ||
-          (name.toUpperCase() === "PYTHON" &&
-            (configured.includes("/") || configured.includes("\\"))))
+        (executable ||
+          [
+            "CODEX_SECURITY_STATE_DIR",
+            "CODEX_SECURITY_PROJECT_CONFIG",
+            "CODEX_HOME",
+          ].includes(key))
       ) {
         // Tool working directories must not change the server's state or runtime.
-        commandEnvironment[name] = resolve(
-          serverDirectory,
-          expandHome(
-            name.toUpperCase() === "CODEX_HOME" ? value! : configured,
-            dependencies.environment,
-          ),
-        );
+        commandEnvironment[name] = executable
+          ? anchorExecutablePath(
+              expandExecutableHome(configured, dependencies.environment),
+              serverDirectory,
+            )
+          : resolve(
+              serverDirectory,
+              expandHome(
+                key === "CODEX_HOME" ? value! : configured,
+                dependencies.environment,
+              ),
+            );
       }
     }
     const protocolOutput =

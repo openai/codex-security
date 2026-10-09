@@ -1,5 +1,8 @@
-import { buildCliMcpArguments } from "../src/cli-mcp-commands.js";
-import { writeFile } from "node:fs/promises";
+import {
+  buildCliMcpArguments,
+  runCliMcpCommand,
+} from "../src/cli-mcp-commands.js";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
@@ -260,7 +263,10 @@ describe("CLI MCP scans", () => {
           ),
           CodeX_Home: resolve(serverDirectory, "codex home"),
           codex_cli_path: resolve(serverDirectory, "bin/codex.exe"),
-          PyThOn: resolve(serverDirectory, "../runtime/python3"),
+          PyThOn:
+            process.platform === "win32"
+              ? resolve(serverDirectory, "../runtime/python3")
+              : `${serverDirectory}/../runtime/python3`,
         });
       }
       expect(environment).toEqual(originalEnvironment);
@@ -268,6 +274,96 @@ describe("CLI MCP scans", () => {
       await session.close();
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "launches inherited runtimes through symlink parent paths",
+    async () => {
+      const root = await temporaryDirectory();
+      const server = join(root, "server");
+      const repository = join(root, "repository");
+      const release = join(root, "selected runtime");
+      await mkdir(server);
+      await mkdir(repository);
+      await mkdir(join(release, "child"), { recursive: true });
+      await symlink(join(release, "child"), join(server, "linked"), "dir");
+      for (const executable of ["codex", "python"]) {
+        for (const [directory, marker] of [
+          [release, "selected"],
+          [server, "wrong sibling"],
+        ] as const) {
+          await writeFile(
+            join(directory, executable),
+            `#!/bin/sh\nprintf '%s\\n' '${marker}'\n`,
+            { mode: 0o755 },
+          );
+        }
+      }
+      const entrypoint = join(root, "runtime-inspector.cjs");
+      await build({
+        stdin: {
+          contents: `
+            import { execFileSync } from "node:child_process";
+            import { resolveCodexCommand } from "./src/runtime.ts";
+            import { resolveTrustedExecutable } from "./src/trusted-executable.ts";
+            async function inspect() {
+              const python = await resolveTrustedExecutable(process.env.PYTHON, process.env, process.env.SYNTHETIC_REPOSITORY);
+              const run = command => execFileSync(command, [], { encoding: "utf8" }).trim();
+              console.log(JSON.stringify({ codex: run(resolveCodexCommand(process.env).command), python: run(python.executable), cwd: process.cwd() }));
+            }
+            inspect().catch(error => { console.error(error); process.exitCode = 1; });
+          `,
+          resolveDir: resolve(import.meta.dir, ".."),
+        },
+        outfile: entrypoint,
+        bundle: true,
+        platform: "node",
+        format: "cjs",
+        define: {
+          "import.meta.url": JSON.stringify(
+            new URL("../src/version.ts", import.meta.url).href,
+          ),
+        },
+      });
+      for (const prefix of [`${server}/`, "", "~/", "~\\"]) {
+        const suffix = prefix === "~\\" ? "linked\\..\\" : "linked/../";
+        const environment = {
+          PATH: process.env["PATH"],
+          HOME: server,
+          CODEX_CLI_PATH: `${prefix}${suffix}codex`,
+          PYTHON: `${prefix}${suffix}python`,
+          SYNTHETIC_REPOSITORY: repository,
+        };
+        const original = { ...environment };
+        const deps = dependencies({ currentDirectory: server, environment });
+        deps.runMcpCommand = (command, input, options) =>
+          runCliMcpCommand(command, input, {
+            ...options,
+            executable: nodeCommand().command,
+            entrypoint,
+          });
+        const session = await connect(deps);
+        try {
+          for (const workingDirectory of [undefined, repository]) {
+            expect(
+              await session.call("scans_list", { workingDirectory }).result,
+            ).toMatchObject({
+              structuredContent: {
+                exitCode: 0,
+                data: {
+                  codex: "selected",
+                  python: "selected",
+                  cwd: workingDirectory ?? server,
+                },
+              },
+            });
+          }
+          expect(environment).toEqual(original);
+        } finally {
+          await session.close();
+        }
+      }
+    },
+  );
 
   test.each([
     ["HOME", "python3"],
