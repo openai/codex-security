@@ -215,6 +215,140 @@ for (const unreadableHead of [false, true]) {
   });
 }
 
+for (const inaccessibleAttempt of [0, 1, 2]) {
+  test(`readable retry history survives inaccessible archive=${inaccessibleAttempt}`, async (t) => {
+    const f = await fixture();
+    const originals = new Map<string, Buffer>();
+    try {
+      const worker = {
+        root: f.output,
+        repoRoot: f.root,
+        scanId,
+        layout: "worker",
+      };
+      for (const attempt of [1, 2]) {
+        await recordCodexSecurityWorkerScanDraft(
+          worker,
+          workerDraft([], {
+            complete: false,
+            coverage: {
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [
+                {
+                  id: `task-${attempt}`,
+                  reason: `Synthetic proof ${attempt}.`,
+                },
+              ],
+            },
+          }),
+        );
+        const archive = path.join(
+          f.workerRoot,
+          "attempts",
+          `attempt-0${attempt}`,
+        );
+        await archiveDirectory(f.output, archive);
+        for (const name of await readdir(archive, { recursive: true })) {
+          const saved = path.join(archive, name);
+          if ((await fs.lstat(saved)).isFile())
+            originals.set(saved, await readFile(saved));
+        }
+      }
+      for (const attempt of [1, 2]) {
+        const saved = originals.get(
+          path.join(
+            f.workerRoot,
+            "attempts",
+            `attempt-0${attempt}`,
+            "result.json",
+          ),
+        )!;
+        const produced = JSON.parse(saved.toString("utf8"));
+        assert.deepEqual(
+          produced.coverage.deferred
+            .map((row: { id: string }) => row.id)
+            .sort(),
+          attempt === 1 ? ["task-1"] : ["task-1", "task-2"],
+        );
+      }
+      await writeFile(
+        f.resultPath,
+        JSON.stringify(workerDraft([], { complete: true })),
+      );
+      originals.set(f.resultPath, await readFile(f.resultPath));
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      if (inaccessibleAttempt !== 0) {
+        const archive = await fs.realpath(
+          path.join(
+            f.workerRoot,
+            "attempts",
+            `attempt-0${inaccessibleAttempt}`,
+          ),
+        );
+        const lstat = fs.lstat;
+        t.mock.method(
+          fs,
+          "lstat",
+          async (...args: Parameters<typeof lstat>) => {
+            if (
+              typeof args[0] === "string" &&
+              args[0].startsWith(archive + path.sep)
+            ) {
+              throw Object.assign(
+                new Error("Synthetic inaccessible archived attempt."),
+                { code: "EACCES" },
+              );
+            }
+            return lstat(...args);
+          },
+        );
+        await assert.rejects(readArchivedWorkerCheckpoints(worker), {
+          code: "EACCES",
+          message: "Synthetic inaccessible archived attempt.",
+        });
+      }
+      const coverage = (await readDeepReductionSources(f.context))
+        .discoveries[0].coverage;
+      t.mock.restoreAll();
+      for (const [saved, contents] of originals)
+        assert.deepEqual(await readFile(saved), contents);
+      assert.deepEqual(
+        coverage.deferred
+          .map(
+            (row: {
+              provenance: {
+                sourceId: string;
+                attempt: number;
+                workerId: string;
+              };
+            }) => [
+              row.provenance.sourceId,
+              row.provenance.attempt,
+              row.provenance.workerId,
+            ],
+          )
+          .sort(),
+        inaccessibleAttempt === 2
+          ? [["task-1", 1, "synthetic-worker"]]
+          : [
+              ["task-1", inaccessibleAttempt === 1 ? 2 : 1, "synthetic-worker"],
+              ["task-2", 2, "synthetic-worker"],
+            ],
+      );
+      assert.equal(coverage.completeness, "partial");
+    } finally {
+      t.mock.restoreAll();
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const unsafe of ["wrong-scan", "linked-checkpoints"]) {
   test(`archived ${unsafe} retains its existing rejection`, async () => {
     const f = await fixture();

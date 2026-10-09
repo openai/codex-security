@@ -1506,11 +1506,11 @@ export async function readArchivedWorkerCheckpoints(
         checkpointHead = undefined;
       }
     }
-    const resultMetadata = await lstatIfExists(
-      join(attemptRoot, "result.json"),
-    );
-    if (resultMetadata !== undefined) {
-      try {
+    try {
+      const resultMetadata = await lstatIfExists(
+        join(attemptRoot, "result.json"),
+      );
+      if (resultMetadata !== undefined) {
         if (!resultMetadata.isFile()) {
           throw new Error(
             "scan checkpoint: archived result is not a safe file.",
@@ -1542,9 +1542,9 @@ export async function readArchivedWorkerCheckpoints(
             if (!skipInvalid) throw error;
           }
         }
-      } catch (error) {
-        if (!skipInvalid) throw error;
       }
+    } catch (error) {
+      if (!skipInvalid) throw error;
     }
     drafts.push(
       ...(
