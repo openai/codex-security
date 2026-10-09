@@ -1,3 +1,4 @@
+import { isDeepStrictEqual as sameArray } from "node:util";
 import { createHash, hash } from "node:crypto";
 import { isNonEmptyString } from "./value.js";
 import { constants, type BigIntStats, type Stats } from "node:fs";
@@ -91,29 +92,16 @@ export async function loadContractWithScanDirectory(
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
-  const payloads = {
-    "scan-manifest.json": await readScanJson(
+  const payloads: Record<string, unknown> = {};
+  for (const filename of Object.keys(DOCUMENTS)) {
+    payloads[filename] = await readScanJson(
       scanDir,
-      "scan-manifest.json",
+      filename as keyof typeof DOCUMENTS,
       documentDigests,
       options.signal,
       scanRoot,
-    ),
-    "findings.json": await readScanJson(
-      scanDir,
-      "findings.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-    "coverage.json": await readScanJson(
-      scanDir,
-      "coverage.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-  };
+    );
+  }
   throwIfAborted(options.signal);
   let findingsPayload: unknown = payloads["findings.json"];
 
@@ -129,9 +117,7 @@ export async function loadContractWithScanDirectory(
     try {
       validate = ajv.compile(schema);
       payload =
-        filename === "findings.json"
-          ? findingsPayload
-          : payloads[filename as keyof typeof payloads];
+        filename === "findings.json" ? findingsPayload : payloads[filename];
       const validatePayload = (payload: unknown) => {
         const result = validate(payload);
         if (typeof result !== "boolean") {
@@ -1172,13 +1158,6 @@ function schemaError(
   const count = errors.length;
   return new ContractValidationError(
     `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"}).`,
-  );
-}
-
-function sameArray(left: readonly string[], right: readonly string[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every((value, index) => value === right[index])
   );
 }
 

@@ -10,7 +10,7 @@ const execFile = promisify(nodeExecFile);
 const temporaryDirectories = createTemporaryDirectories(true);
 
 const inventory = await importSource(
-  new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-inventory.ts"),
 );
 
 try {
@@ -434,7 +434,7 @@ async function createFixture(label: string) {
   const repoRoot = path.join(fixtureRoot, "repository");
   const scanRoot = path.join(fixtureRoot, "scan");
   const workerRoot = path.join(fixtureRoot, "worker");
-  const pluginRoot = new URL("../../", import.meta.url).pathname;
+  const pluginRoot = path.join(import.meta.dirname, "../../");
   await mkdir(repoRoot, { recursive: true });
   await mkdir(scanRoot, { recursive: true });
   return {
