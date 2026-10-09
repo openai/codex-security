@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   DiffTarget,
@@ -28,6 +28,7 @@ import {
   gitMarkerRoot,
   gitProtectionRoots,
 } from "../src/targets.js";
+import { runCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
@@ -156,6 +157,76 @@ describe("scan target normalization", () => {
     });
   });
 
+  test.skipIf(process.platform === "win32").each(["node", "bun"])(
+    "rejects socket path targets and their symlinks in %s preflight",
+    async (runtime) => {
+      const root = await temporaryDirectory("cs-target-");
+      const built = await Bun.build({
+        entrypoints: [
+          fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        ],
+        target: "node",
+        format: "esm",
+      });
+      expect(built.success).toBe(true);
+      const module = join(root, "targets.mjs");
+      await writeFile(module, await built.outputs[0]!.text());
+      const result = await runCommand(runtime, [
+        "--input-type=module",
+        "--eval",
+        `
+          import assert from "node:assert/strict";
+          import { stat, symlink } from "node:fs/promises";
+          import { createServer } from "node:net";
+          import { join } from "node:path";
+          const { normalizeTarget } = await import(${JSON.stringify(pathToFileURL(module).href)});
+          const root = ${JSON.stringify(root)};
+          const socket = join(root, "target.sock");
+          const alias = join(root, "alias");
+          const server = createServer();
+          try {
+            await new Promise((resolve, reject) => {
+              server.once("error", reject);
+              server.listen(socket, resolve);
+            });
+            await symlink(socket, alias);
+            for (const path of [socket, alias]) {
+              assert.equal((await stat(path)).isSocket(), true);
+              await assert.rejects(normalizeTarget(root, [path]), {
+                name: "InvalidTargetError",
+                message: "Path target must be a regular file or directory: " + path,
+              });
+            }
+          } finally {
+            await new Promise((resolve) => server.close(resolve));
+          }
+        `,
+      ]);
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+    },
+  );
+
+  test("keeps in-repository file and directory symlink targets valid", async () => {
+    const repo = await repository();
+    const file = join(repo, "file-link");
+    const directory = join(repo, "directory-link");
+    await symlink(join(repo, "src", "app.ts"), file, "file");
+    await symlink(
+      join(repo, "src"),
+      directory,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await expect(normalizeTarget(repo, [file, directory])).resolves.toEqual({
+      kind: "paths",
+      paths: ["src/app.ts", "src"],
+    });
+    const missing = join(repo, "missing-link");
+    await symlink(join(repo, "missing-file"), missing, "file");
+    await expect(normalizeTarget(repo, [missing])).rejects.toThrow(
+      `Path target does not exist: ${missing}`,
+    );
+  });
+
   test.skipIf(process.platform !== "win32")(
     "rejects Windows repository roots that alias across runtimes",
     async () => {
@@ -241,20 +312,23 @@ describe("scan target normalization", () => {
     },
   );
 
-  test("reports a path that disappears during normalization as invalid", async () => {
-    const repo = await repository();
-    const script = `
+  test.each(["realpath", "stat"])(
+    "reports a path that disappears during %s as invalid",
+    async (operation) => {
+      const repo = await repository();
+      const script = `
       import { mockFs } from ${JSON.stringify(fileURLToPath(new URL("./support/module-mocks.ts", import.meta.url)))};
       import { rmSync } from "node:fs";
       import * as original from "node:fs/promises";
       import { join } from "node:path";
       const [repo, targets] = process.argv.slice(1);
       const target = join(repo, "src", "app.ts");
-      const actualRealpath = original.realpath;
+      const operation = ${JSON.stringify(operation)};
+      const actualOperation = original[operation];
       mockFs(() => ({
-        realpath: async (path, ...args) => {
+        [operation]: async (path, ...args) => {
           if (path === target) rmSync(target);
-          return await actualRealpath(path, ...args);
+          return await actualOperation(path, ...args);
         },
       }));
       const { normalizeTarget } = await import(targets);
@@ -270,6 +344,51 @@ describe("scan target normalization", () => {
         );
       }
     `;
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          script,
+          repo,
+          fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        "REJECTED true Path target does not exist",
+      );
+    },
+  );
+
+  test("preserves cancellation while reading path target metadata", async () => {
+    const repo = await repository();
+    const script = `
+      import { mockFs } from ${JSON.stringify(fileURLToPath(new URL("./support/module-mocks.ts", import.meta.url)))};
+      import * as original from "node:fs/promises";
+      import { join } from "node:path";
+      const [repo, targets] = process.argv.slice(1);
+      const target = join(repo, "src", "app.ts");
+      const controller = new AbortController();
+      const reason = new Error("synthetic cancellation");
+      const actualStat = original.stat;
+      mockFs(() => ({
+        stat: async (path, ...args) => {
+          if (path === target) {
+            controller.abort(reason);
+            return await new Promise(() => {});
+          }
+          return await actualStat(path, ...args);
+        },
+      }));
+      const { normalizeTarget } = await import(targets);
+      try {
+        await normalizeTarget(repo, [target], controller.signal);
+        process.exitCode = 2;
+      } catch (error) {
+        console.log("ORIGINAL_ABORT", error === reason);
+      }
+    `;
     const result = spawnSync(
       process.execPath,
       [
@@ -281,7 +400,7 @@ describe("scan target normalization", () => {
       { encoding: "utf8" },
     );
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("REJECTED true Path target does not exist");
+    expect(result.stdout).toContain("ORIGINAL_ABORT true");
   });
 
   test("binds ref and working-tree targets to commit IDs", async () => {
