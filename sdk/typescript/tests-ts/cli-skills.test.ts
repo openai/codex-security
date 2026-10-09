@@ -1338,25 +1338,27 @@ process.stdout.write(JSON.stringify({
     expect(message).not.toContain("rate limited");
   });
 
-  test.each(["validate", "patch", "verify-fix"] as const)(
-    "retains authentication advice for token_expired from %s",
-    async (command) => {
-      const stdout = capture();
-      const stderr = capture();
-      const source =
-        'process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"token_expired"}})+"\\n");process.exitCode=7';
-      expect(
-        await runCodexSkillCommand(
-          ["-e", source],
-          { command, stdout: stdout.stream, stderr: stderr.stream },
-          { command: process.execPath },
-        ),
-      ).toBe(7);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain("Authentication failed");
-      expect(stderr.text()).toContain("token_expired");
-    },
-  );
+  test.each(
+    (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      ["token_expired", "token.expired", "token-expired"].map(
+        (detail) => [command, detail] as const,
+      ),
+    ),
+  )("retains authentication advice from %s for %s", async (command, detail) => {
+    const stdout = capture();
+    const stderr = capture();
+    const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+    expect(
+      await runCodexSkillCommand(
+        ["-e", source],
+        { command, stdout: stdout.stream, stderr: stderr.stream },
+        { command: process.execPath },
+      ),
+    ).toBe(7);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Authentication failed");
+    expect(stderr.text()).toContain(detail);
+  });
 
   test("keeps unknown credential failures neutral", () => {
     for (const authentication of [
