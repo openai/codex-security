@@ -269,8 +269,28 @@ export function formatCliHelp(text: string, columns = 80): string {
       if (command === "") {
         sections.push(
           "Get started:\n" +
-            "  codex-security login\n" +
-            "  codex-security scan .\n" +
+            "  codex-security login\n\n" +
+            wrap(
+              "In your repository, optionally draft SECURITY.md:",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n  codex-security policy .\n" +
+            wrap(
+              "Review and edit the draft, then copy it to the displayed Policy target.",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n" +
+            wrap(
+              "Skip this step to keep an existing policy or scan without one.",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n\n  codex-security scan .\n" +
             "  codex-security findings",
         );
       } else if (examples) {

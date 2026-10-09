@@ -31,7 +31,8 @@
     "./schemas/project-config.schema.json": "./schemas/project-config.schema.json"
   },
   "bin": {
-    "codex-security": "./bin/codex-security.mjs"
+    "codex-security": "./bin/codex-security.mjs",
+    "cs": "./bin/codex-security.mjs"
   },
   "files": [
     "bin",
@@ -105,6 +106,7 @@
     "fast-check": "4.10.2",
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "16.0.0",
+    "json5": "2.2.3",
     "minimatch": "10.2.6",
     "prettier": "3.9.9",
     "saxes": "6.0.0",

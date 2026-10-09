@@ -104,6 +104,9 @@ importers:
       json-schema-to-typescript:
         specifier: 16.0.0
         version: 16.0.0
+      json5:
+        specifier: 2.2.3
+        version: 2.2.3
       minimatch:
         specifier: 10.2.6
         version: 10.2.6
