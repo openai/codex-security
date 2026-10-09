@@ -1120,14 +1120,14 @@ def _recover_unsealed_findings(
                     continue
                 try:
                     _validate_schema_node(
-                        finding[auxiliary], auxiliary_schema, f"{context}.{auxiliary}"
+                        finding[auxiliary], auxiliary_schema, f"{context}.{auxiliary}", schema
                     )
                 except ContractError as exc:
                     finding.pop(auxiliary)
                     warnings.append(
                         f"Skipped malformed {auxiliary} for finding {index + 1}: {exc}."
                     )
-            _validate_schema_node(finding, finding_schema, context)
+            _validate_schema_node(finding, finding_schema, context, schema)
         except ContractError as exc:
             warning = f"Skipped malformed finding {index + 1}: {exc}."
             warnings.append(warning)
@@ -1780,16 +1780,22 @@ def _validate_findings(manifest: dict[str, Any], findings: dict[str, Any]) -> No
     _require_safe_json_value(findings, "findings.json")
 
 
+_SCHEMA_TYPES = {
+    "array": list,
+    "boolean": bool,
+    "integer": int,
+    "number": (int, float),
+    "object": dict,
+    "string": str,
+}
+
+
 def _schema_type_matches(value: Any, expected: str) -> bool:
-    return {
-        "array": isinstance(value, list),
-        "boolean": isinstance(value, bool),
-        "integer": isinstance(value, int) and not isinstance(value, bool),
-        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
-        "object": isinstance(value, dict),
-        "string": isinstance(value, str),
-        "null": value is None,
-    }[expected]
+    if expected == "null":
+        return value is None
+    return isinstance(value, _SCHEMA_TYPES[expected]) and (
+        expected not in ("integer", "number") or not isinstance(value, bool)
+    )
 
 
 def _schema_values_equal(left: Any, right: Any) -> bool:
@@ -1860,6 +1866,8 @@ def _validate_schema_node(
             context,
             root_schema,
         )
+        if len(schema) == 1:
+            return
     expected = schema.get("type")
     if isinstance(expected, list):
         if not any(_schema_type_matches(value, item) for item in expected):
