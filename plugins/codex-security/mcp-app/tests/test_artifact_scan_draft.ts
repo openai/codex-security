@@ -27,6 +27,7 @@ import {
   claimToken,
   draftApi,
   draftFixture,
+  recordCodexSecurityScanDraft,
   scanId,
   surfaceDisposition,
 } from "./scan-draft-recovery-fixture.ts";
@@ -34,7 +35,6 @@ import {
 const {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
-  recordCodexSecurityScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
   saveScanDraftCheckpoint,
@@ -515,11 +515,15 @@ try {
     { ...context, root: parentCheckpointRoot },
     { ...input, complete: false },
   );
-  const parentSnapshot = await readJson(
-    parentCheckpointRoot,
-    "checkpoints",
-    (await readdir(path.join(parentCheckpointRoot, "checkpoints")))[0],
+  const parentSnapshots = await Promise.all(
+    (await readdir(path.join(parentCheckpointRoot, "checkpoints"))).map(
+      (name) => readJson(parentCheckpointRoot, "checkpoints", name),
+    ),
   );
+  const parentSnapshot = parentSnapshots.find(
+    (snapshot) => !snapshot.findings[0].identity,
+  );
+  assert.ok(parentSnapshot);
   assert.equal(parentSnapshot.handoffClaimToken, undefined);
   assert.equal(parentSnapshot.complete, false);
   assert.deepEqual(parentSnapshot.findings, [finding]);
@@ -1561,7 +1565,7 @@ try {
   assert.deepEqual(await readdir(path.join(root, "drafts")), []);
 
   let conflictAttempts = 0;
-  const retried = await recordCodexSecurityScanDraft(
+  const retried = await recordCodexSecurityScanDraftViaWorkbench(
     context,
     input,
     async () => {
@@ -1575,6 +1579,7 @@ try {
   );
   assert.equal(conflictAttempts, 10);
   assert.equal(retried.status, "draft_written");
+  assert.deepEqual(await readdir(path.join(root, "drafts")), []);
 
   const conflictAbort = new AbortController();
   const abortedConflictAttempts = mock.fn(async () => {
@@ -1584,15 +1589,16 @@ try {
     });
   });
   await assert.rejects(
-    recordCodexSecurityScanDraft(
+    recordCodexSecurityScanDraftViaWorkbench(
       context,
       input,
       abortedConflictAttempts,
       conflictAbort.signal,
     ),
-    /draft publication canceled/,
+    (error) => error === conflictAbort.signal.reason,
   );
   assert.equal(abortedConflictAttempts.mock.callCount(), 1);
+  assert.deepEqual(await readdir(path.join(root, "drafts")), []);
 
   const monotonicRoot = path.join(root, "monotonic-final-draft");
   await mkdir(monotonicRoot);
@@ -2129,6 +2135,28 @@ try {
       portfolioPath: "hardening/hardening.md",
     },
   );
+
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    const beforePermissionFailure = await snapshotScanDraft(root);
+    for (const [file, mode, message] of [
+      [hardeningDirectory, 0o600, /artifact path cannot be inspected.*EACCES/],
+      [hardeningPortfolio, 0o000, /requested artifact cannot be read.*EACCES/],
+    ] as const) {
+      try {
+        await fsPromises.chmod(file, mode);
+        await rejectsDraft(input, message);
+        assert.deepEqual(
+          await snapshotScanDraft(root),
+          beforePermissionFailure,
+        );
+      } finally {
+        await fsPromises.chmod(
+          file,
+          file === hardeningDirectory ? 0o700 : 0o600,
+        );
+      }
+    }
+  }
 
   await rm(hardeningPortfolio);
   await recordFreshScanDraft(context, input);

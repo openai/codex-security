@@ -2,7 +2,7 @@
 
 This Promptfoo lane measures how accurately the source version of `plugins/codex-security/skills/triage-finding/SKILL.md` triages supplied scanner findings from public SastBench v0.1. It does not measure repository-wide vulnerability discovery.
 
-SastBench contains 2,737 findings: 299 labeled true positive and 2,438 labeled false positive. The JavaScript test generator exposes the scanner claim and the exact affected checkout to Codex while keeping SastBench's label-bearing `finding_id` and ground-truth label out of the rendered prompt. Codex reads the skill directly from the checkout's plugin directory. Its permission profile also allows the selected target, the label-free Git cache, and the Node runtime; the label-bearing eval harness remains outside those roots.
+SastBench contains 2,737 findings: 299 labeled true positive and 2,438 labeled false positive. The JavaScript test generator exposes the scanner claim and the exact affected checkout to Codex while keeping SastBench's label-bearing `finding_id` and ground-truth label out of the rendered prompt. The common eval runner stages the checkout skill and policy helper in a throwaway directory. Its permission profile also allows the hydrated target repositories, the label-free Git cache, and the Node runtime; the label-bearing eval harness remains outside those roots.
 
 Run commands from the repository root. The parent `evals/triage-finding/` directory owns the pinned Promptfoo and Codex SDK dependencies and the ignored `artifacts/` tree.
 
@@ -54,7 +54,7 @@ pnpm --dir evals/triage-finding run eval:sastbench:sample \
 
 `eval:sastbench:sample` always passes `--no-cache --no-share` and defaults to 32 concurrent cases, matching the completed full benchmark's proven setting. The prior case latencies imply roughly a 35-minute run, although provider capacity and changes to the skill can change that duration. If capacity errors occur, use Promptfoo's `--retry-errors` mode at lower concurrency so successful rows stay in the same evaluation.
 
-The `representative-100-v1` selection is deterministic. It allocates each class proportionally across scanner evidence-size buckets (`1`, `2-3`, `4-10`, and `11+` locations), then uses seeded systematic sampling ordered by repository, CWE, language, and original case index. It preserves the original opaque case IDs so baseline and candidate skill runs compare the same findings.
+The `representative-100-v1` selection retains its established `en-US` collation for paired baseline comparisons. It allocates each class proportionally across scanner evidence-size buckets (`1`, `2-3`, `4-10`, and `11+` locations), then uses seeded systematic sampling ordered by repository, CWE, language, and original case index. It preserves the original opaque case IDs so baseline and candidate skill runs compare the same findings.
 
 Because positives are deliberately oversampled, each test's metadata includes a population weight. The existing SastBench metrics extension applies that weight to its additive counters, so aggregate derived metrics estimate the full 2,737-case benchmark. Per-row Promptfoo pass/fail counts and the `schema_valid`/`strict_case_correct` assertions still describe the 100 executed rows.
 

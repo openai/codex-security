@@ -13,8 +13,12 @@ function endpointPattern(path: string, queryParts: string[] = []) {
     const repository = repositoryName(context.vars.target_repo as string);
     const paths = [path, path.replace("{owner}/{repo}", repository)];
     return (
-      paths.some((candidate) => escapedLiteralPattern(candidate).test(text)) &&
-      queryParts.every((part) => escapedLiteralPattern(part).test(text))
+      paths.some((candidate) =>
+        new RegExp(
+          escapedLiteralPattern(candidate).source + "\\b(?![/-]|\\.\\w)",
+          "i",
+        ).test(text),
+      ) && queryParts.every((part) => escapedLiteralPattern(part).test(text))
     );
   };
 }

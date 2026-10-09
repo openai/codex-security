@@ -20,7 +20,7 @@ from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
-from workbench_validation import reject_non_finite_json
+from workbench_validation import register_timestamp_collation, reject_non_finite_json, timestamp_key
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -204,6 +204,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
+    register_timestamp_collation(connection)
     connection.create_function("casefold", 1, str.casefold, deterministic=True)
     if os.name == "nt":
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
@@ -297,8 +298,9 @@ def list_scans(
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
-            MAX(scans.updated_at, progress.updated_at) DESC,
-            scans.started_at DESC,
+            MAX(scans.updated_at COLLATE codex_security_timestamp, progress.updated_at)
+                COLLATE codex_security_timestamp DESC,
+            scans.started_at COLLATE codex_security_timestamp DESC,
             scans.id
         {pagination}
         """,
@@ -337,7 +339,11 @@ def list_scans(
                 "targetPath": row["target_path"],
                 "targetRevision": row["target_revision"],
                 "targetSummary": row["target_summary"],
-                "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
+                "updatedAt": max(
+                    row["updated_at"],
+                    row["progress_updated_at"],
+                    key=lambda value: (timestamp_key(value), value),
+                ),
                 **(
                     {"warnings": json.loads(row["completion_warnings_json"])}
                     if row["completion_warnings_json"] != "[]"
@@ -460,7 +466,7 @@ def _saved_finding_links(connection: sqlite3.Connection, scan_ids: set[str]) -> 
             FROM scan_comparison_matches AS matches
             JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
             JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
-            WHERE matches.before_scan_id IN ({placeholders})
+            WHERE matches.before_scan_id IN (SELECT value FROM json_each(?))
             ORDER BY matches.before_scan_id, after.scan_id, before.finding_id, after.finding_id
             """,
             sorted(scan_ids),
@@ -828,14 +834,8 @@ def _rows_for_ids(
     connection: sqlite3.Connection, query: str, ids: Iterable[str]
 ) -> Iterator[sqlite3.Row]:
     values = tuple(dict.fromkeys(ids))
-    getlimit = getattr(connection, "getlimit", None)
-    # Python 3.10 lacks getlimit; 999 is SQLite's older host-parameter limit.
-    limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if getlimit else 999
-    for start in range(0, len(values), limit):
-        batch = values[start : start + limit]
-        yield from connection.execute(
-            query.format(placeholders=", ".join("?" for _ in batch)), batch
-        )
+    if values:
+        yield from connection.execute(query, (json.dumps(values),))
 
 
 # Stable finding IDs already include the target identity. Follow their indexed
@@ -855,7 +855,7 @@ _LINKED_FINDINGS_SQL = f"""
     WITH RECURSIVE linked(finding_id) AS (
         SELECT occurrences.finding_id
         FROM finding_occurrences AS occurrences
-        WHERE occurrences.id IN ({{placeholders}})
+        WHERE occurrences.id IN (SELECT value FROM json_each(?))
         UNION
         SELECT neighbor.finding_id
         {_FINDING_NEIGHBORS_SQL}
@@ -924,7 +924,7 @@ def finding_relations(
         for row in _rows_for_ids(
             connection,
             "SELECT id, finding_id, scan_id, title FROM finding_occurrences "
-            "WHERE id IN ({placeholders})",
+            "WHERE id IN (SELECT value FROM json_each(?))",
             (pair[key] for pair in pairs for key in ("beforeOccurrenceId", "afterOccurrenceId")),
         )
     }
