@@ -8,6 +8,7 @@ import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
 import type { Finding, ScanManifest } from "./models.js";
 import {
   CSV_TARGET_ID,
+  bindImportedFindings,
   csvRowFinding,
   parseFindingsCsv,
 } from "./findings-import.js";
@@ -93,7 +94,12 @@ export async function publishFindingsCsvToCloud(
   const scanId = `scan_csv_${sha256(
     ["codex-security-csv-import/v1", VERSION, source].join("\0"),
   ).slice(0, 24)}`;
-  const findings = rows.map((row) => csvRowFinding(row, scanId));
+  const findings = bindImportedFindings(
+    rows.map(csvRowFinding),
+    "csv",
+    scanId,
+    CSV_TARGET_ID,
+  );
   const timestamp = "1970-01-01T00:00:00.000Z";
   const findingsDocument = JSON.stringify({
     documentType: "codex-security.findings",

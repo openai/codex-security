@@ -189,8 +189,14 @@ export class CodexLoginHandle {
 
   public cancel(): void {
     this.#canceled = true;
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null)
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
+      // Descendants can retain inherited pipes after the login process exits.
+      // Cancellation must release those pipes so the close event can settle.
+      this.#child.stdin.destroy();
+      this.#child.stdout.destroy();
+      this.#child.stderr.destroy();
       return;
+    }
     this.#child.kill("SIGTERM");
     if (this.#forcedTermination !== undefined) return;
     this.#forcedTermination = setTimeout(() => {

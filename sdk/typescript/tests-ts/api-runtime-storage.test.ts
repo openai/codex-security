@@ -1,3 +1,4 @@
+import { codexFactory } from "./support/api-events.js";
 import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -62,68 +63,61 @@ test.each([false, true])(
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              launched = true;
-              const file = join(protectedDirectory!, "config-preflight.toml");
-              expect(options.env!["CODEX_SECURITY_CONFIG_PATH"]).toBe(
-                operation === "validation" ? undefined : file,
+        createCodex: (options) =>
+          codexFactory(async function runStreamed() {
+            launched = true;
+            const file = join(protectedDirectory!, "config-preflight.toml");
+            expect(options.env!["CODEX_SECURITY_CONFIG_PATH"]).toBe(
+              operation === "validation" ? undefined : file,
+            );
+            expect(dirname(file)).toBe(protectedDirectory!);
+            expect(await readFile(file, "utf8")).not.toContain(
+              "synthetic-client-secret",
+            );
+            workerFile ??= options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+            expect(options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]).toBe(
+              operation === "deep" ? workerFile : undefined,
+            );
+            expect(dirname(dirname(workerFile!))).toBe(
+              options.env!["CODEX_HOME"]!,
+            );
+            expect(await readFile(workerFile!, "utf8")).not.toContain(
+              "synthetic-client-secret",
+            );
+            const profileFile = join(
+              options.env!["CODEX_HOME"]!,
+              `${options.nativeProfile}.config.toml`,
+            );
+            expect(await readFile(profileFile, "utf8")).toContain(
+              "synthetic-client-secret",
+            );
+            expect(JSON.stringify(options)).not.toContain(
+              "synthetic-client-secret",
+            );
+            const filesystem = parseToml(
+              options.configOverrides!.find((value) =>
+                value.startsWith("permissions.codex_security_scan.filesystem="),
+              )!,
+            )["permissions"] as Record<string, Record<string, unknown>>;
+            expect(
+              (
+                filesystem["codex_security_scan"]!["filesystem"] as Record<
+                  string,
+                  unknown
+                >
+              )[dirname(profileFile)],
+            ).toEqual({ ".": "deny" });
+            if (process.platform !== "win32") {
+              expect((await stat(profileFile)).mode & 0o777).toBe(0o600);
+              expect((await stat(file)).mode & 0o777).toBe(0o600);
+              expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
+              expect((await stat(workerFile!)).mode & 0o777).toBe(0o600);
+              expect((await stat(dirname(workerFile!))).mode & 0o777).toBe(
+                0o700,
               );
-              expect(dirname(file)).toBe(protectedDirectory!);
-              expect(await readFile(file, "utf8")).not.toContain(
-                "synthetic-client-secret",
-              );
-              workerFile ??=
-                options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
-              expect(options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]).toBe(
-                operation === "deep" ? workerFile : undefined,
-              );
-              expect(dirname(dirname(workerFile!))).toBe(
-                options.env!["CODEX_HOME"]!,
-              );
-              expect(await readFile(workerFile!, "utf8")).not.toContain(
-                "synthetic-client-secret",
-              );
-              const profileFile = join(
-                options.env!["CODEX_HOME"]!,
-                `${options.nativeProfile}.config.toml`,
-              );
-              expect(await readFile(profileFile, "utf8")).toContain(
-                "synthetic-client-secret",
-              );
-              expect(JSON.stringify(options)).not.toContain(
-                "synthetic-client-secret",
-              );
-              const filesystem = parseToml(
-                options.configOverrides!.find((value) =>
-                  value.startsWith(
-                    "permissions.codex_security_scan.filesystem=",
-                  ),
-                )!,
-              )["permissions"] as Record<string, Record<string, unknown>>;
-              expect(
-                (
-                  filesystem["codex_security_scan"]!["filesystem"] as Record<
-                    string,
-                    unknown
-                  >
-                )[dirname(profileFile)],
-              ).toEqual({ ".": "deny" });
-              if (process.platform !== "win32") {
-                expect((await stat(profileFile)).mode & 0o777).toBe(0o600);
-                expect((await stat(file)).mode & 0o777).toBe(0o600);
-                expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
-                expect((await stat(workerFile!)).mode & 0o777).toBe(0o600);
-                expect((await stat(dirname(workerFile!))).mode & 0o777).toBe(
-                  0o700,
-                );
-              }
-              throw new Error("synthetic scan reached");
-            },
-          }),
-        }),
+            }
+            throw new Error("synthetic scan reached");
+          })(),
       },
     );
     try {
