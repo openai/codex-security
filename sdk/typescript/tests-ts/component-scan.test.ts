@@ -1120,7 +1120,7 @@ test("plans Unicode files when directory entry types are unknown", async () => {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts", "résumé/🙂.ts"];
-  for (const path of [...paths, ".git/ignored.ts"]) {
+  for (const path of [...paths, "nested/.git/ignored.ts"]) {
     await mkdir(dirname(join(repository, path)), { recursive: true });
     await writeFile(join(repository, path), "export {};\n");
   }
