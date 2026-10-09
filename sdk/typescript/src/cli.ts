@@ -8548,13 +8548,15 @@ async function executeScan(
         progress?.stage(message);
         progress?.startTimer(runningMessage());
       },
-      onActivity: (activity) => {
-        if (dashboard === null) return;
-        dashboard.record(activity);
-        if (activity.paths.length > 0 && phase === "preflight") {
-          dashboard.setStage("inspecting repository files");
-        }
-      },
+      onActivity:
+        dashboard === null
+          ? undefined
+          : (activity) => {
+              dashboard?.record(activity);
+              if (activity.paths.length > 0 && phase === "preflight") {
+                dashboard?.setStage("inspecting repository files");
+              }
+            },
       onSessionEvent:
         scanInput.isTTY === true
           ? dashboard?.recordDetails.bind(dashboard)
