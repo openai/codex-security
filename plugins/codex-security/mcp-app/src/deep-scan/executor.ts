@@ -214,14 +214,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             if (event.type === "thread.started") {
               await request.onThreadStarted?.(event.thread_id);
             } else if (event.type === "item.completed") {
-              appendSafeItemDiagnostic(diagnostics, event.item);
+              appendItemDiagnostic(diagnostics, event.item);
             } else if (event.type === "turn.completed") {
               request.signal.removeEventListener("abort", forwardAbort);
             } else if (event.type === "turn.failed") {
               throw new Error(event.error.message);
             } else if (event.type === "error") {
               // Codex exec emits retry-in-progress notifications as error events.
-              appendCodeModeFrameDiagnostic(diagnostics, event.message);
+              appendStreamDiagnostic(diagnostics, event.message);
             }
           },
         });
@@ -374,36 +374,35 @@ function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
   };
 }
 
-/**
- * Convert SDK item failures into bounded classifications without retaining the
- * command, output, or paths carried by the event. Those fields can contain
- * repository contents and credentials, while the coordinator only needs the
- * reason a later deterministic artifact check failed.
- */
-function appendSafeItemDiagnostic(
+/** Retain SDK failure messages for a later deterministic artifact check. */
+function appendItemDiagnostic(
   diagnostics: CodexWorkerDiagnostic[],
   item: unknown,
 ): void {
   if (!isRecord(item) || typeof item.type !== "string") return;
-  if (item.type === "error") {
-    appendCodeModeFrameDiagnostic(diagnostics, item.message);
+  if (item.type === "error" && typeof item.message === "string") {
+    appendStreamDiagnostic(diagnostics, item.message);
     return;
   }
   if (item.status !== "failed") return;
   if (
     item.type === "mcp_tool_call" &&
     isRecord(item.error) &&
-    appendCodeModeFrameDiagnostic(diagnostics, item.error.message)
-  )
-    return;
+    typeof item.error.message === "string" &&
+    isCodeModeFrameError(item.error.message)
+  ) {
+    appendUniqueDiagnostic(diagnostics, {
+      code: "artifact_tool_failed",
+      message: item.error.message,
+    });
+  }
   if (item.type === "command_execution") {
     const output =
       typeof item.aggregated_output === "string" ? item.aggregated_output : "";
     if (isSandboxNamespaceExhaustion(output)) {
       appendUniqueDiagnostic(diagnostics, {
         code: "sandbox_namespace_exhausted",
-        message:
-          "Codex worker sandbox namespace creation failed (bwrap ENOSPC).",
+        message: output,
       });
     }
     return;
@@ -421,50 +420,51 @@ function appendSafeItemDiagnostic(
       item.server === "codex_security_artifacts") &&
     typeof item.tool === "string"
   ) {
-    if (isRecord(item.result) && Array.isArray(item.result.content)) {
-      for (const content of item.result.content) {
-        if (
-          isRecord(content) &&
-          content.type === "text" &&
-          appendCodeModeFrameDiagnostic(diagnostics, content.text)
-        )
-          return;
-      }
-    }
+    const messages = [
+      ...(isRecord(item.error) ? [item.error.message] : []),
+      ...(isRecord(item.result) && Array.isArray(item.result.content)
+        ? item.result.content.flatMap((content) =>
+            isRecord(content) && content.type === "text" ? [content.text] : [],
+          )
+        : []),
+    ].filter(
+      (message): message is string =>
+        typeof message === "string" && message.length > 0,
+    );
     const reason = isRecord(item.result)
       ? "returned an error"
       : isRecord(item.error)
         ? "transport failed"
         : "failed";
-    appendUniqueDiagnostic(diagnostics, {
-      code: "artifact_tool_failed",
-      message: `Codex worker artifact tool ${item.tool} ${reason}.`,
-    });
+    for (const message of messages.length > 0
+      ? messages
+      : [`Codex worker artifact tool ${item.tool} ${reason}.`]) {
+      appendUniqueDiagnostic(diagnostics, {
+        code: "artifact_tool_failed",
+        message,
+      });
+    }
   }
 }
 
-function appendCodeModeFrameDiagnostic(
-  diagnostics: CodexWorkerDiagnostic[],
-  message: unknown,
-): boolean {
-  // Codex exposes this transport error as text, without a structured code.
-  // Preserve only its complete numeric template, never surrounding tool output.
-  if (typeof message !== "string") return false;
-  const match =
+function isCodeModeFrameError(message: string): boolean {
+  return (
     /^code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length [0-9]+ exceeds [0-9]+ bytes$/u.exec(
       message,
-    );
-  if (match?.[0] !== message) return false;
-  const diagnostic: CodexWorkerDiagnostic = {
-    code: "artifact_tool_failed",
-    message,
-  };
-  const index = diagnostics.findIndex(
-    (existing) => existing.code === diagnostic.code,
+    )?.[0] === message
   );
-  if (index === -1) diagnostics.push(diagnostic);
-  else diagnostics[index] = diagnostic;
-  return true;
+}
+
+function appendStreamDiagnostic(
+  diagnostics: CodexWorkerDiagnostic[],
+  message: string,
+): void {
+  appendUniqueDiagnostic(diagnostics, {
+    code: isCodeModeFrameError(message)
+      ? "artifact_tool_failed"
+      : "worker_error",
+    message,
+  });
 }
 
 function isSandboxNamespaceExhaustion(output: string): boolean {
@@ -477,7 +477,13 @@ function appendUniqueDiagnostic(
   diagnostics: CodexWorkerDiagnostic[],
   diagnostic: CodexWorkerDiagnostic,
 ): void {
-  if (!diagnostics.some((existing) => existing.code === diagnostic.code)) {
+  if (
+    !diagnostics.some(
+      (existing) =>
+        existing.code === diagnostic.code &&
+        existing.message === diagnostic.message,
+    )
+  ) {
     diagnostics.push(diagnostic);
   }
 }
