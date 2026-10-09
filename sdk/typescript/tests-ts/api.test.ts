@@ -2404,6 +2404,11 @@ describe("CodexSecurity orchestration", () => {
               ]
             : []),
           "    if sys.argv[1:2] == ['register-cli-scan'] and '--help' not in sys.argv:",
+          ...(mode === "real"
+            ? [
+                `        sys.argv.remove(${JSON.stringify("--fixture-message=出力\0literal\nsecond line")})`,
+              ]
+            : []),
           "        payload = sys.stdin.buffer.read()",
           `        Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)`,
           '        sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")',
@@ -2429,6 +2434,10 @@ describe("CodexSecurity orchestration", () => {
         if (args[0] === "register-cli-scan") {
           submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
           input = submitted;
+          // The custom wrapper accepts this text argument before calling the
+          // real workbench, exercising framed argv at each archive boundary.
+          if (mode === "real")
+            args = [...args, "--fixture-message=出力\0literal\nsecond line"];
         }
         return runWorkbench(options, args, input);
       };
@@ -5244,8 +5253,7 @@ describe("CodexSecurity orchestration", () => {
       "fail-scan",
       "--scan-id",
       "scan_example_001",
-      "--message",
-      `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
       "--cost-json",
       JSON.stringify(cost),
     ]);
@@ -5313,7 +5321,13 @@ describe("CodexSecurity orchestration", () => {
           artifact.sha256 = hash("sha256", coverageBytes);
           await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
           return {
-            scan: { warnings: [args[args.indexOf("--message") + 1]!] },
+            scan: {
+              warnings: [
+                args
+                  .find((value) => value.startsWith("--message="))!
+                  .slice("--message=".length),
+              ],
+            },
           };
         },
         createCodex: codexFactory(runStreamed),
@@ -5354,7 +5368,9 @@ describe("CodexSecurity orchestration", () => {
           (args) => args[0] === "complete-budget-exhausted-scan",
         );
         expect(recovery?.includes("--cost-json")).toBe(true);
-        expect(recovery?.includes("--message")).toBe(true);
+        expect(recovery?.some((value) => value.startsWith("--message="))).toBe(
+          true,
+        );
       } finally {
         clearTimeout(keepAlive);
         await client.close();
@@ -5604,8 +5620,7 @@ describe("CodexSecurity orchestration", () => {
       "fail-scan",
       "--scan-id",
       expect.stringMatching(/^[0-9a-f-]{36}$/),
-      "--message",
-      "original scan failure",
+      "--message=original scan failure",
     ]);
     const history = await runWorkbench(
       { python: python!, pluginRoot: PLUGIN_ROOT, environment },
@@ -5617,66 +5632,68 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("preserves original failures in saved scan history", async () => {
-    const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const stateDirectory = join(root, "state");
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const environment = {
-      PATH: process.env["PATH"] ?? "",
-      CODEX_SECURITY_STATE_DIR: stateDirectory,
-    };
-    const commands: Array<readonly string[]> = [];
-    const quotedCredential = JSON.stringify({
-      client_secret_value: "SYNTHETIC correct horse battery staple",
-    });
-    const originalFailure = `request failed: token=SYNTHETIC_TOKEN ${quotedCredential}`;
-    const client = TestClient.withDependencies({
-      environment,
-      prepareRuntime: runtimePreparer(codexHome, () => ({ environment })),
-      resolvePluginPython: async () => python!,
-      prepareOutputDir: async () => scanDir,
-      repositoryRevision: async () => "deadbeef",
-      runWorkbench: async (
-        options: Parameters<typeof runWorkbench>[0],
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
-        commands.push(args);
-        return await runWorkbench(options, args, input);
-      },
-      createCodex: codexFactory(async () => {
-        async function* failingEvents(): AsyncGenerator<ThreadEvent> {
-          yield { type: "thread.started", thread_id: "failed-thread" };
-          yield {
-            type: "error",
-            message: originalFailure,
-          };
-        }
-        return { events: failingEvents() };
-      }),
-    });
+  test.each(["", "\0literal", "\0high\ud800.low\udfff.pair😀"])(
+    "preserves original failures in saved scan history (%j)",
+    async (suffix) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const stateDirectory = join(root, "state");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const environment = {
+        PATH: process.env["PATH"] ?? "",
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      };
+      const commands: Array<readonly string[]> = [];
+      const quotedCredential = JSON.stringify({
+        client_secret_value: "SYNTHETIC correct horse battery staple",
+      });
+      const originalFailure = `--provider-error: token=SYNTHETIC_TOKEN ${quotedCredential}${suffix}`;
+      const client = TestClient.withDependencies({
+        environment,
+        prepareRuntime: runtimePreparer(codexHome, () => ({ environment })),
+        resolvePluginPython: async () => python!,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          options: Parameters<typeof runWorkbench>[0],
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          commands.push(args);
+          return await runWorkbench(options, args, input);
+        },
+        createCodex: codexFactory(async () => {
+          async function* failingEvents(): AsyncGenerator<ThreadEvent> {
+            yield { type: "thread.started", thread_id: "failed-thread" };
+            yield {
+              type: "error",
+              message: originalFailure,
+            };
+          }
+          return { events: failingEvents() };
+        }),
+      });
 
-    await expect(client.run(repository)).rejects.toThrow(originalFailure);
-    const failure = commands.find((args) => args[0] === "fail-scan");
-    const scanId = failure?.[2] ?? "";
-    expect(scanId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(failure?.[3]).toBe("--message");
-    expect(failure?.[4]).toBe(originalFailure);
+      await expect(client.run(repository)).rejects.toThrow(originalFailure);
+      const failure = commands.find((args) => args[0] === "fail-scan");
+      const scanId = failure?.[2] ?? "";
+      expect(scanId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(failure?.[3]).toBe(`--message=${originalFailure}`);
 
-    // `scans show` reads the stored message back through get-scan.
-    const context = await runWorkbench(
-      { python: python!, pluginRoot: PLUGIN_ROOT, environment },
-      ["get-scan", "--scan-id", scanId],
-    );
-    expect(context["scan"]).toMatchObject({
-      continuationThreadId: "failed-thread",
-      progress: { status: "failed" },
-      failureMessage: originalFailure,
-    });
+      // `scans show` reads the stored message back through get-scan.
+      const context = await runWorkbench(
+        { python: python!, pluginRoot: PLUGIN_ROOT, environment },
+        ["get-scan", "--scan-id", scanId],
+      );
+      expect(context["scan"]).toMatchObject({
+        continuationThreadId: "failed-thread",
+        progress: { status: "failed" },
+        failureMessage: Buffer.from(originalFailure).toString("utf8"),
+      });
 
-    await client.close();
-  });
+      await client.close();
+    },
+  );
 
   test("retains default scan output under persistent plugin state", async () => {
     const { root, repository, codexHome } = await runtimeDirectories();
