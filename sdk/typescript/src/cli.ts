@@ -5879,7 +5879,10 @@ export async function main(
         // Tool working directories must not change the server's state or runtime.
         commandEnvironment[name] = resolve(
           serverDirectory,
-          expandHome(configured, dependencies.environment),
+          expandHome(
+            name.toUpperCase() === "CODEX_HOME" ? value! : configured,
+            dependencies.environment,
+          ),
         );
       }
     }

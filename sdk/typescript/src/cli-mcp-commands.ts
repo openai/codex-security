@@ -304,16 +304,34 @@ export async function runCliMcpCommand(
     let startError: Error | undefined;
     let cancelled = false;
     let termination: Promise<void> | undefined;
+    let cancellationSignal: "SIGINT" | "SIGTERM" = "SIGTERM";
     const abort = (): void => {
       if (cancelled) return;
       cancelled = true;
-      termination = terminateProcess(child, options.signal);
+      cancellationSignal =
+        options.signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM";
+      termination = terminateProcess(child, cancellationSignal);
       // The CLI owns its subprocess cleanup, including detached workers and
       // their termination grace periods. Wait for that cleanup before closing.
     };
     const force = (): void => {
+      const forcePublication =
+        cancelled &&
+        command.name === "publish_scan" &&
+        input.options?.["to"] === "linear" &&
+        input.options?.["dryRun"] !== true;
       cancelled = true;
-      termination = terminateProcess(child, undefined, true);
+      // Linear publication owns detached Codex processes. Its repeated-signal
+      // handler kills those before exiting; a different signal bypasses the
+      // duplicate-delivery debounce. Other commands may ignore repeated signals.
+      termination = terminateProcess(
+        child,
+        forcePublication
+          ? cancellationSignal === "SIGINT"
+            ? "SIGTERM"
+            : "SIGINT"
+          : "SIGKILL",
+      );
     };
     options.signal?.addEventListener("abort", abort, { once: true });
     options.forceSignal?.addEventListener("abort", force, { once: true });
@@ -360,14 +378,10 @@ export async function runCliMcpCommand(
 
 function terminateProcess(
   child: ChildProcess,
-  signal?: AbortSignal,
-  force = false,
+  signal: NodeJS.Signals,
 ): Promise<void> {
   if (process.platform !== "win32" || child.pid === undefined) {
-    terminateProcessGroup(
-      child,
-      force ? "SIGKILL" : signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
-    );
+    terminateProcessGroup(child, signal);
     return Promise.resolve();
   }
   return new Promise((resolve) => {

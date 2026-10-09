@@ -1,8 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { build } from "esbuild";
+import { nodeCommand } from "./support/shell.js";
 import {
   buildCliMcpArguments,
   buildCliMcpCommands,
@@ -443,6 +452,7 @@ describe("CLI MCP command processes", () => {
     async () => {
       const options = await script(`
       process.on("SIGTERM", () => process.stderr.write("cancelled\\n"));
+      process.on("SIGINT", () => {});
       process.stderr.write(String(process.pid) + "\\n");
       setInterval(() => {}, 1000);
     `);
@@ -558,6 +568,119 @@ describe("CLI MCP command processes", () => {
       }
     },
     10_000,
+  );
+
+  test.skipIf(process.platform === "win32").each(["SIGINT", "SIGTERM"])(
+    "forced publication cleanup after %s stops its detached publisher and descendants",
+    async (signal) => {
+      const options = await script("");
+      options.executable = nodeCommand().command;
+      options.entrypoint = join(options.cwd, "publication.mjs");
+      await symlink(
+        join(import.meta.dir, "../node_modules"),
+        join(options.cwd, "node_modules"),
+        "dir",
+      );
+      Object.assign(options.environment, {
+        CODEX_SECURITY_STATE_DIR: join(options.cwd, "state"),
+      });
+      await build({
+        entryPoints: [join(import.meta.dir, "fixtures/mcp-publication.mjs")],
+        outfile: options.entrypoint,
+        bundle: true,
+        platform: "node",
+        format: "esm",
+        packages: "external",
+        define: {
+          "import.meta.url": JSON.stringify(
+            new URL("../src/version.ts", import.meta.url).href,
+          ),
+        },
+      });
+      await writeFile(
+        join(options.cwd, "publisher.cjs"),
+        `#!${options.executable}
+        const { spawn } = require("node:child_process");
+        require("node:fs").readFileSync(0);
+        process.on("SIGINT", () => {});
+        process.on("SIGTERM", () => {});
+        const child = spawn(process.execPath, ["-e", [
+          'process.on("SIGINT", () => {});',
+          'process.on("SIGTERM", () => {});',
+          'console.log("ready");',
+          'setInterval(() => {}, 1000);',
+        ].join("")], { env: {}, stdio: ["ignore", "pipe", "ignore"] });
+        child.stdout.once("data", () => {
+          require("node:fs").writeFileSync("publication-pids.json", JSON.stringify([process.pid, child.pid]));
+          console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic" }));
+        });
+        setInterval(() => {}, 1000);
+      `,
+        { mode: 0o700 },
+      );
+      const controller = new AbortController();
+      const force = new AbortController();
+      const cancelled = Promise.withResolvers<void>();
+      let progress = "";
+      const operation = runCliMcpCommand(
+        command("publish scan", {
+          args: { properties: { scanDir: { type: "string" } } },
+          options: {
+            properties: {
+              to: { type: "string" },
+              linearTeam: { type: "string" },
+            },
+          },
+          output: { type: "object" },
+        }),
+        {
+          args: { scanDir: "completed-scan" },
+          options: { to: "linear", linearTeam: "synthetic-team" },
+        },
+        {
+          ...options,
+          signal: controller.signal,
+          forceSignal: force.signal,
+          onStderr: (chunk) => {
+            progress += chunk;
+            if (progress.includes("cancelled\n")) cancelled.resolve();
+          },
+        },
+      );
+      const pids: number[] = [];
+      try {
+        for (let attempt = 0; attempt < 500; attempt++) {
+          const value = await readFile(
+            join(options.cwd, "publication-pids.json"),
+            "utf8",
+          ).catch(() => "");
+          if (value) {
+            pids.push(...JSON.parse(value));
+            break;
+          }
+          await Bun.sleep(20);
+        }
+        expect(pids.length, progress).toBe(2);
+        controller.abort(signal);
+        await cancelled.promise;
+        force.abort(signal);
+        expect(await operation).toMatchObject({
+          exitCode: 130,
+          error: "Command cancelled.",
+        });
+        expect(progress).toContain("Publication force-stopped");
+        for (const pid of pids) expect(await processHasExited(pid)).toBe(true);
+      } finally {
+        controller.abort(signal);
+        force.abort(signal);
+        for (const pid of pids) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+        await operation;
+      }
+    },
   );
 });
 

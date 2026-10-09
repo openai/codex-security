@@ -13,6 +13,8 @@ import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import { main } from "../src/cli.js";
+import { configuredCodexHome } from "../src/auth.js";
+import { codexSecurityStateDirectory } from "../src/runtime.js";
 import { ConfigurationError } from "../src/errors.js";
 import type { ScanOptions } from "../src/api.js";
 import {
@@ -173,6 +175,41 @@ async function connect(
 }
 
 describe("CLI MCP scans", () => {
+  test.each([" codex home ", "~/codex home "])(
+    "preserves CODEX_HOME whitespace when anchoring %s for tool directories",
+    async (configured) => {
+      const serverDirectory = resolve("synthetic server");
+      const home = resolve("synthetic home");
+      const environment = { HOME: home, CODEX_HOME: configured };
+      const expected = configured.startsWith("~/")
+        ? join(home, configured.slice(2))
+        : resolve(serverDirectory, configured);
+      const deps = dependencies({
+        currentDirectory: serverDirectory,
+        environment,
+      });
+      deps.runMcpCommand = async (_command, _input, options) => {
+        expect(options.environment["CODEX_HOME"]).toBe(expected);
+        expect(configuredCodexHome(options.environment)).toBe(expected);
+        expect(codexSecurityStateDirectory(options.environment)).toBe(
+          join(expected, "state", "plugins", "codex-security"),
+        );
+        return { exitCode: 0 };
+      };
+      const session = await connect(deps);
+      try {
+        for (const workingDirectory of [undefined, "other repository"]) {
+          expect(
+            await session.call("scans_list", { workingDirectory }).result,
+          ).toMatchObject({ structuredContent: { exitCode: 0 } });
+        }
+        expect(environment.CODEX_HOME).toBe(configured);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
   test("anchors inherited runtime paths while preserving environment names and values", async () => {
     const serverDirectory = resolve("synthetic server");
     const environment = {
