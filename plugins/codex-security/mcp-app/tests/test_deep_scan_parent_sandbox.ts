@@ -41,6 +41,7 @@ assert.deepEqual(
   ),
   {
     filesystemDenies: [],
+    filesystemRootWritable: true,
   },
 );
 assert.deepEqual(
@@ -264,9 +265,7 @@ for (const invalid of [
     () => resolveDeepWorkerParentSandbox(invalid),
     (error: Error) =>
       error.name === "DeepScanNonRetryableError" &&
-      error.message.startsWith(
-        "Deep Scan cannot safely start a read-only worker:",
-      ),
+      error.message.startsWith("Deep Scan cannot safely start a worker:"),
   );
 }
 

@@ -4,6 +4,8 @@ Apply this policy to plugin-managed scans and standalone artifact-producing skil
 
 An assigned worker scratch workspace requires a matching concrete filesystem grant or an unambiguous `/tmp` grant from the host. A read-only parent stays read-only. If the host exposes only an unresolved `TMPDIR` grant, the worker retains source-backed validation and records any runtime proof gap; the plugin does not infer the parent's temporary directory from its own environment. This does not change network access.
 
+Before assigning scratch, native preflight checks that the worker can create, read, and remove a small temporary file there under its verified permission profile. A blocked candidate is skipped in favor of another authorized location; if none work, the worker remains read-only. Transport and configuration failures retain their existing error behavior.
+
 ## Scan ownership
 
 For a full scan, obtain the authoritative `scanId` before creating artifacts. Standard uses `start_codex_security_standard_scan`; a headless Diff without a scan uses `start_codex_security_prompt_only_scan` with its exact target, `mode: "diff"`, `scope: "."` and `diffTarget`. Deep uses its existing coordinator. Preserve an existing scan and handoff token. If the required MCP is unavailable or the selected baseline is unsupported, report the blocker; do not fall back to shell-authored canonical files. These rules take precedence over older terminal file-authoring fallbacks.

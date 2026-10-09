@@ -90,9 +90,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           "Deep Scan cannot start a worker without verified parent sandbox metadata.",
         );
       }
-      const scratch = await this.workerScratchAccess(request, parentSandbox);
-      const workerProfile = workerPermissionProfile(parentSandbox, scratch);
       const originalCwd = process.cwd();
+      const hostTemporaryDirectory = tmpdir();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
@@ -107,9 +106,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         }
         childEnv[name] = value;
       }
+      const temporaryDirectory =
+        (process.platform === "win32"
+          ? ["TEMP", "TMP"]
+          : ["TMPDIR", "TMP", "TEMP"]
+        )
+          .map((name) => environmentVariable(childEnv, name, process.platform))
+          .find((value) => value) ?? hostTemporaryDirectory;
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
-      const configOverrides = profileConfigOverrides({
+      const workerConfig = {
         ...runtimeSettings.config,
         ...(this.modelSettings.reasoningEffort
           ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -125,9 +131,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ),
         approval_policy: "never",
         default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-        [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
-          workerProfile,
-      });
+      };
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -144,8 +148,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         process.arch,
         originalCwd,
       );
-      const { useOpenAiApiKey } =
-        await preflightDeepScanWorkerPermissionProfile({
+      const preflight = async (scratch?: DeepWorkerScratchAccess) => {
+        const workerProfile = workerPermissionProfile(parentSandbox, scratch);
+        const configOverrides = profileConfigOverrides({
+          ...workerConfig,
+          [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
+            workerProfile,
+        });
+        const result = await preflightDeepScanWorkerPermissionProfile({
           codexPath,
           cwd: request.workingDirectory,
           configOverrides,
@@ -154,11 +164,29 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           env: childEnv,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
           signal: request.signal,
+          ...(scratch ? { scratchPath: scratch.writePath } : {}),
         });
+        return { ...result, configOverrides };
+      };
+      let scratch: DeepWorkerScratchAccess | undefined;
+      let prepared: Awaited<ReturnType<typeof preflight>> | undefined;
+      for await (const candidate of this.workerScratchAccesses(
+        request,
+        parentSandbox,
+        temporaryDirectory,
+      )) {
+        const checked = await preflight(candidate);
+        if (checked.scratchWritable === true) {
+          scratch = candidate;
+          prepared = checked;
+          break;
+        }
+      }
+      const { useOpenAiApiKey, configOverrides } =
+        prepared ?? (await preflight());
       if (scratch) {
-        // Verify the concrete profile before creating the worker's temporary
-        // workspace; preflight keeps the host's existing temporary directory.
-        await fs.mkdir(scratch.writePath, { recursive: true });
+        // Native preflight proved the selected directory usable before it
+        // becomes the temporary directory for the real worker.
         for (const name of ["TMPDIR", "TMP", "TEMP"]) {
           if (process.platform === "win32") {
             for (const key of Object.keys(childEnv)) {
@@ -268,10 +296,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     }
   }
 
-  private async workerScratchAccess(
+  private async *workerScratchAccesses(
     request: CodexWorkerRequest,
     sandbox: DeepWorkerParentSandbox,
-  ): Promise<DeepWorkerScratchAccess | undefined> {
+    temporaryDirectory: string,
+  ): AsyncGenerator<DeepWorkerScratchAccess> {
     const scan = this.modelSettings.artifactContext;
     const assigned = request.artifactContext;
     if (request.kind !== "discovery" || !scan || assigned?.layout !== "worker")
@@ -287,16 +316,20 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     );
     const candidates = new Set([
       join(workerRoot, "scratch"),
-      join(tmpdir(), temporaryPath),
+      join(temporaryDirectory, temporaryPath),
       ...(process.platform === "win32" ? [] : [join("/tmp", temporaryPath)]),
     ]);
+    const seen = new Set<string>();
     for (const candidate of candidates) {
       const access = await resolveDeepWorkerScratchAccess(
         sandbox,
         candidate,
         scan.repoRoot,
       );
-      if (access) return access;
+      if (access && !seen.has(access.writePath)) {
+        seen.add(access.writePath);
+        yield access;
+      }
     }
   }
 
@@ -436,7 +469,7 @@ function scratchInstructions(
 ): string {
   if (!scratch) {
     return (
-      "This worker has no scratch write permission inherited from the parent. " +
+      "This worker has no usable scratch workspace under the parent's permissions. " +
       "Keep validation source-backed and record any runtime proof gap; do not seek broader permissions."
     );
   }

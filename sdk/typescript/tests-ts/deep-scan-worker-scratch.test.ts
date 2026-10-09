@@ -43,11 +43,14 @@ type WorkerLaunch = {
 };
 type Preflight = WorkerOptions & {
   expectedProfile: Record<string, unknown>;
+  scratchPath?: string;
 };
 
 async function bundledExecutor(
   environment: Record<string, string>,
-  preflightCheck: (input: Preflight) => Promise<void> = async () => {},
+  preflightCheck: (
+    input: Preflight,
+  ) => Promise<boolean | void> = async () => {},
   inheritedEnvironment: Record<string, string> = {},
 ) {
   const runtime = await loadBundledRuntime();
@@ -69,6 +72,7 @@ async function bundledExecutor(
     "workerPermissionProfile",
     "scratchFilesystemEntry",
     "scratchInstructions",
+    "environmentVariable",
   ].map((name) => {
     const source = new RegExp(
       `function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n\\}`,
@@ -133,11 +137,20 @@ async function bundledExecutor(
       config: {},
       environment: inheritedEnvironment,
     }),
-    environmentVariable: (env: Record<string, string>, key: string) => env[key],
     preflightDeepScanWorkerPermissionProfile: async (input: Preflight) => {
       preflights.push({ ...input, env: { ...input.env } });
-      await preflightCheck(input);
-      return { useOpenAiApiKey: false };
+      const scratchWritable = await preflightCheck(input);
+      if (input.scratchPath !== undefined) {
+        // Native preflight prepares the directory after verifying the profile,
+        // then checks write access using that profile and the original temp env.
+        await promises.mkdir(input.scratchPath, { recursive: true });
+      }
+      return {
+        useOpenAiApiKey: false,
+        ...(input.scratchPath === undefined
+          ? {}
+          : { scratchWritable: scratchWritable ?? true }),
+      };
     },
     deepScanPermissionProfileFallbackError: () => undefined,
     resolveCodexPath: () => process.execPath,
@@ -261,6 +274,9 @@ test("bundled discovery workers retain their authorized scratch across fresh, re
     await worker.run(item.request);
 
     expect(launches).toHaveLength(3);
+    expect(preflights.map((input) => input.scratchPath)).toEqual(
+      Array(3).fill(item.scratch),
+    );
     expect(launches.map((launch) => launch.resumedThread)).toEqual([
       undefined,
       "synthetic-resumed-thread",
@@ -326,7 +342,9 @@ test.each([
   async (scenario) => {
     const item = await fixture();
     try {
-      const { Worker, launches } = await bundledExecutor(item.environment);
+      const { Worker, launches, preflights } = await bundledExecutor(
+        item.environment,
+      );
       const denied = path.dirname(item.output);
       const parentSandbox: ParentSandbox = {
         filesystemDenies: scenario === "parent denial" ? [denied] : [],
@@ -334,9 +352,9 @@ test.each([
           ? {}
           : {
               filesystemWriteRules: [
-                { path: item.root, access: "write" as const },
+                { path: denied, access: "write" as const },
                 ...(scenario === "read carveout"
-                  ? [{ path: denied, access: "read" as const }]
+                  ? [{ path: item.scratch, access: "read" as const }]
                   : []),
               ],
             }),
@@ -363,6 +381,10 @@ test.each([
         resumeThreadId: "synthetic-resumed-thread",
       });
       expect(launches).toHaveLength(2);
+      expect(preflights).toHaveLength(2);
+      expect(preflights.every((input) => input.scratchPath === undefined)).toBe(
+        true,
+      );
       for (const launch of launches) {
         expect(profile(launch.options)).toEqual({
           extends: ":read-only",
@@ -389,6 +411,7 @@ test("bundled workers do not create scratch before their permission profile pass
     const { Worker, launches } = await bundledExecutor(
       item.environment,
       async (input) => {
+        expect(input.scratchPath).toBe(item.scratch);
         expect(profile(input).filesystem[item.scratch]).toBe("write");
         expect(fs.existsSync(item.scratch)).toBe(false);
         expect(temporaryEnvironment(input.env)).toEqual(
@@ -414,6 +437,135 @@ test("bundled workers do not create scratch before their permission profile pass
   }
 });
 
+test.each(["temporary scratch", "read-only execution"] as const)(
+  "bundled workers fall back to %s when native scratch probes reject candidates",
+  async (fallback) => {
+    const item = await fixture();
+    const temporaryRoot = await promises.realpath(os.tmpdir());
+    const environment = {
+      TMPDIR: temporaryRoot,
+      TMP: temporaryRoot,
+      TEMP: temporaryRoot,
+    };
+    const temporaryScratchRoot = path.join(
+      temporaryRoot,
+      "codex-security-deep-scratch",
+      item.artifactContext.scanId,
+    );
+    const temporaryScratch = path.join(
+      temporaryScratchRoot,
+      path.basename(path.dirname(item.output)),
+    );
+    try {
+      const { Worker, launches, preflights } = await bundledExecutor(
+        environment,
+        async (input) => {
+          expect(input.env).toEqual(environment);
+          expect(input.expectedProfile).toEqual(profile(input));
+          if (input.scratchPath !== undefined) {
+            expect(profile(input).filesystem[input.scratchPath]).toBe("write");
+          }
+          return (
+            fallback === "temporary scratch" &&
+            input.scratchPath === temporaryScratch
+          );
+        },
+      );
+      const worker = new Worker({
+        artifactContext: item.artifactContext,
+        parentSandbox: {
+          filesystemDenies: [],
+          filesystemWriteRules: [{ path: temporaryRoot, access: "write" }],
+        },
+      });
+      await worker.run(item.request);
+      const probes = preflights.filter(
+        (input) => input.scratchPath !== undefined,
+      );
+      expect(probes.length).toBeGreaterThanOrEqual(2);
+      expect(probes[0]!.scratchPath).toBe(item.scratch);
+      expect(probes[1]!.scratchPath).toBe(temporaryScratch);
+      expect(launches).toHaveLength(1);
+      const launch = launches[0]!;
+      const selected = preflights.at(-1)!;
+      expect(launch.options.configOverrides).toEqual(selected.configOverrides);
+      expect(profile(launch.options)).toEqual({
+        extends: ":read-only",
+        filesystem: {
+          ":root": "read",
+          ...(fallback === "temporary scratch"
+            ? { [temporaryScratch]: "write" }
+            : {}),
+        },
+        network: { enabled: false },
+      });
+      if (fallback === "temporary scratch") {
+        expect(selected.scratchPath).toBe(temporaryScratch);
+        expect(temporaryEnvironment(launch.options.env)).toEqual(
+          Array(3).fill(temporaryScratch),
+        );
+        expect(launch.input).toContain(JSON.stringify(temporaryScratch));
+      } else {
+        expect(selected.scratchPath).toBeUndefined();
+        expect(launch.options.env).toEqual(environment);
+      }
+    } finally {
+      await Promise.all(
+        [item.root, temporaryScratchRoot].map((directory) =>
+          promises.rm(directory, { recursive: true, force: true }),
+        ),
+      );
+    }
+  },
+);
+
+test("bundled resumed workers recheck native scratch access before retaining their write profile", async () => {
+  const item = await fixture();
+  try {
+    let permitted = true;
+    const { Worker, launches, preflights } = await bundledExecutor(
+      item.environment,
+      async () => permitted,
+    );
+    const worker = new Worker({
+      artifactContext: item.artifactContext,
+      parentSandbox: {
+        filesystemDenies: [],
+        filesystemWriteRules: [{ path: item.scratch, access: "write" }],
+      },
+    });
+    await worker.run(item.request);
+    const proof = path.join(item.scratch, "proof.txt");
+    await promises.writeFile(proof, "retained synthetic evidence");
+    permitted = false;
+    await worker.run({
+      ...item.request,
+      resumeThreadId: "synthetic-resumed-thread",
+    });
+    expect(preflights.map((input) => input.scratchPath)).toEqual([
+      item.scratch,
+      item.scratch,
+      undefined,
+    ]);
+    expect(launches).toHaveLength(2);
+    expect(profile(launches[0]!.options).filesystem[item.scratch]).toBe(
+      "write",
+    );
+    expect(profile(launches[1]!.options)).toEqual({
+      extends: ":read-only",
+      filesystem: { ":root": "read" },
+      network: { enabled: false },
+    });
+    expect(launches[1]!.resumedThread).toBe("synthetic-resumed-thread");
+    expect(launches[1]!.options.env).toEqual(item.environment);
+    expect(await promises.readFile(proof, "utf8")).toBe(
+      "retained synthetic evidence",
+    );
+  } finally {
+    await promises.rm(item.root, { recursive: true, force: true });
+  }
+});
+
 test.each(["one scan", "different scans"] as const)(
   "concurrent bundled workers in %s isolate temporary scratch when scan output is read-only",
   async (scenario) => {
@@ -424,30 +576,44 @@ test.each(["one scan", "different scans"] as const)(
     if (scenario === "one scan") {
       items[1]!.artifactContext.scanId = items[0]!.artifactContext.scanId;
     }
-    const temporaryRoot = await promises.realpath(os.tmpdir());
-    const scratchRoots = items.map((item) =>
+    const temporaryRoots = items.map((item) =>
       path.join(
-        temporaryRoot,
+        scenario === "one scan" ? items[0]!.root : item.root,
+        "configured temporary directory",
+      ),
+    );
+    const scratchRoots = items.map((item, index) =>
+      path.join(
+        temporaryRoots[index]!,
         "codex-security-deep-scratch",
         item.artifactContext.scanId,
       ),
     );
     try {
-      const { Worker, launches } = await bundledExecutor(items[0]!.environment);
+      const executors = await Promise.all(
+        items.map((_item, index) =>
+          bundledExecutor(items[0]!.environment, undefined, {
+            TMPDIR: temporaryRoots[index]!,
+            TMP: temporaryRoots[index]!,
+            TEMP: temporaryRoots[index]!,
+          }),
+        ),
+      );
       await Promise.all(
-        items.map((item) =>
-          new Worker({
+        items.map((item, index) =>
+          new executors[index]!.Worker({
             artifactContext: item.artifactContext,
             parentSandbox: {
               filesystemDenies: [],
               filesystemWriteRules: [
-                { path: temporaryRoot, access: "write" },
+                { path: temporaryRoots[index]!, access: "write" },
                 { path: item.root, access: "read" },
               ],
             },
           }).run(item.request),
         ),
       );
+      const launches = executors.flatMap((executor) => executor.launches);
       expect(launches).toHaveLength(2);
       for (const [index, item] of items.entries()) {
         const launch = launches.find(

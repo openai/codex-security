@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as promises from "node:fs/promises";
 import * as path from "node:path";
@@ -264,21 +265,17 @@ test("keeps readonly, denied, target-overlapping, and unresolved symbolic paths 
 });
 
 test("binds root writes to the parent volume and accepts a file URL cwd", async () => {
-  const { root, scratch, access, policy } = await scratchFixture();
+  const { root, scratch, target, policy } = await scratchFixture();
   const writeRoot = {
     path: { type: "special", value: { kind: "root" } },
     access: "write",
   };
   const sandbox = policy.resolve(metadata([writeRoot], root));
   expect(sandbox.filesystemRootWritePath).toBe(path.parse(root).root);
-  expect(await access(sandbox)).toEqual({
-    writePath: scratch,
-    readOnlyPaths: [],
-  });
   expect(
     policy.resolve(metadata([writeRoot], url.pathToFileURL(root).href)),
   ).toEqual(sandbox);
-  expect(await access(policy.resolve(metadata([writeRoot])))).toBeUndefined();
+  const sandboxes = [sandbox, policy.resolve(metadata([writeRoot]))];
   if (process.platform === "win32") {
     const otherDrive = path.parse(root).root.toLowerCase().startsWith("c:")
       ? "D:\\"
@@ -288,8 +285,51 @@ test("binds root writes to the parent volume and accepts a file URL cwd", async 
     );
     expect(other.filesystemRootWritePath).toBe(otherDrive);
     expect(other.filesystemRootWritable).toBeUndefined();
-    expect(await access(other)).toBeUndefined();
+    sandboxes.push(other);
   }
+  // Bun 1.3.14 strips Windows drive-root separators in promises.realpath
+  // (oven-sh/bun#42581). Verify the supported Node runtime's volume handling.
+  const build = await Bun.build({
+    entrypoints: [
+      url.fileURLToPath(
+        new URL(
+          "../../../plugins/codex-security/mcp-app/src/deep-scan/parent-sandbox.ts",
+          import.meta.url,
+        ),
+      ),
+    ],
+    target: "node",
+    format: "esm",
+  });
+  expect(build.success).toBe(true);
+  const module = path.join(root, "parent-sandbox.mjs");
+  await promises.writeFile(module, await build.outputs[0]!.text());
+  const results = JSON.parse(
+    execFileSync(
+      "node",
+      [
+        "--input-type=module",
+        "--eval",
+        `
+    import { readFileSync } from "node:fs";
+    import { resolveDeepWorkerScratchAccess } from ${JSON.stringify(url.pathToFileURL(module).href)};
+    const { sandboxes, scratch, target } = JSON.parse(readFileSync(0, "utf8"));
+    console.log(JSON.stringify(await Promise.all(sandboxes.map(
+      sandbox => resolveDeepWorkerScratchAccess(sandbox, scratch, target)
+    ))));
+  `,
+      ],
+      {
+        encoding: "utf8",
+        input: JSON.stringify({ sandboxes, scratch, target }),
+      },
+    ),
+  );
+  expect(results).toEqual([
+    { writePath: scratch, readOnlyPaths: [] },
+    null,
+    ...(process.platform === "win32" ? [null] : []),
+  ]);
 });
 
 test("uses concrete temporary grants and only resolves slash_tmp on Unix", async () => {

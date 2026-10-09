@@ -1,6 +1,9 @@
 import type { JsonObject as JsonRecord } from "../types.js";
 import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { version as MCP_APP_VERSION } from "../../package.json";
@@ -32,6 +35,8 @@ export interface DeepScanPermissionProfilePreflightOptions {
   readonly allowOpenAiApiKeyFallback?: boolean;
   /** The injected profile before app-server expands omitted options to null. */
   readonly expectedProfile: Readonly<Record<string, unknown>>;
+  /** Optional scratch candidate to verify with native sandboxed filesystem I/O. */
+  readonly scratchPath?: string;
   readonly signal: AbortSignal;
   /** Internal SDK helper context changes the wrapper-owned subject label. */
   readonly context?: "helper";
@@ -82,7 +87,7 @@ export async function readDeepScanRuntimeConfig(
  */
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
-): Promise<{ useOpenAiApiKey: boolean }> {
+): Promise<{ useOpenAiApiKey: boolean; scratchWritable?: boolean }> {
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
@@ -105,11 +110,21 @@ export async function preflightDeepScanWorkerPermissionProfile(
       catalogEntry,
       requirementsResponse,
     );
+    const scratchResult =
+      options.scratchPath === undefined
+        ? {}
+        : {
+            scratchWritable: await probeScratchDirectory(
+              client,
+              options,
+              options.scratchPath,
+            ),
+          };
     if (
       !options.allowOpenAiApiKeyFallback ||
       record(configResponse.config)?.forced_login_method === "chatgpt"
     ) {
-      return { useOpenAiApiKey: false };
+      return { useOpenAiApiKey: false, ...scratchResult };
     }
     // Reuse Codex's selected credential store, including keyring, instead of
     // interpreting auth.json here. Custom provider auth is loaded privately by exec.
@@ -117,10 +132,74 @@ export async function preflightDeepScanWorkerPermissionProfile(
       refreshToken: false,
     });
     return {
+      ...scratchResult,
       useOpenAiApiKey:
         account.requiresOpenaiAuth === true && account.account === null,
     };
   });
+}
+
+// The path is an argv value, never evaluated as source or passed through a shell.
+const scratchProbeScript = `
+const fs = require("node:fs");
+const path = process.argv[1];
+let created = false;
+try {
+  fs.writeFileSync(path, "codex-security-scratch-probe", { flag: "wx" });
+  created = true;
+  if (fs.readFileSync(path, "utf8") !== "codex-security-scratch-probe") {
+    process.exitCode = 1;
+  }
+} finally {
+  if (created) fs.unlinkSync(path);
+}
+`;
+
+async function probeScratchDirectory(
+  client: AppServerPreflightClient,
+  options: DeepScanPermissionProfilePreflightOptions,
+  scratchPath: string,
+): Promise<boolean> {
+  if (options.signal.aborted) throw abortError(options.signal.reason);
+  try {
+    await mkdir(scratchPath, { recursive: true });
+  } catch (error) {
+    if (options.signal.aborted) throw abortError(options.signal.reason);
+    const code = (error as NodeJS.ErrnoException).code;
+    if (
+      code === "EACCES" ||
+      code === "EPERM" ||
+      code === "EROFS" ||
+      code === "ENOENT" ||
+      code === "ENOTDIR" ||
+      code === "EEXIST" ||
+      code === "ELOOP" ||
+      code === "ENAMETOOLONG"
+    )
+      return false;
+    throw error;
+  }
+  const probePath = join(scratchPath, `.codex-security-probe-${randomUUID()}`);
+  try {
+    // Omit sandboxPolicy and permissionProfile: command/exec uses this
+    // session's exact default profile, already verified above.
+    const result = await client.request("command/exec", {
+      command: [process.execPath, "-e", scratchProbeScript, probePath],
+      cwd: options.cwd,
+    });
+    if (
+      typeof result.exitCode !== "number" ||
+      !Number.isInteger(result.exitCode) ||
+      typeof result.stdout !== "string" ||
+      typeof result.stderr !== "string"
+    )
+      throw malformedPreflightError(options.context);
+    return result.exitCode === 0;
+  } finally {
+    // Native finally normally removes the file. Cancellation or a read/delete
+    // denial must not leave a probe artifact or mask the original failure.
+    await rm(probePath, { force: true }).catch(() => {});
+  }
 }
 
 async function withPreflightClient<T>(
@@ -370,7 +449,7 @@ class AppServerPreflightClient {
     const id = message.id;
     if (typeof id !== "number") {
       // Notifications and server-initiated requests are irrelevant to this
-      // read-only preflight. We never answer them or start a turn.
+      // no-turn preflight. We never answer them or start a model turn.
       return;
     }
     const pending = this.pending;
