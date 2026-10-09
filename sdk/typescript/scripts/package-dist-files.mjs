@@ -52,6 +52,7 @@ const distModules = [
   "publish",
   "result",
   "record",
+  "request-metadata",
   "runtime",
   "scan-activity",
   "scan-comparison",
@@ -62,7 +63,6 @@ const distModules = [
   "security-policy-cli",
   "suggest-owners",
   "scan-sessions",
-  "server/index",
   "server/api",
   "deduplication/codex-review",
   "deduplication/checkpointed-review",
@@ -72,6 +72,7 @@ const distModules = [
   "finding-retrieval",
   "finding-workflow",
   "findings-client",
+  "findings-errors",
   "finding-dedupe-groups",
   "deduplication/deduplication-prompts",
   "deduplication/deduplication-reviewer",
@@ -85,15 +86,9 @@ const distModules = [
   "saved-scan",
   "saved-scan-bootstrap",
   "server/embeddings",
-  "server/dashboard",
-  "server/dashboard-types",
   "server/errors",
-  "server/routes",
-  "server/server",
-  "server/serve",
   "server/sqlite-store",
   "server/storage",
-  "server/validation",
   "targets",
   "thread-source",
   "trusted-executable",
@@ -103,14 +98,8 @@ const distModules = [
   "worker-progress",
 ];
 
-export const packageDistFiles = [
-  ...distModules.flatMap((module) =>
-    ["js", "js.map", "d.ts", "d.ts.map"].map(
-      (extension) => `package/dist/${module}.${extension}`,
-    ),
+export const packageDistFiles = distModules.flatMap((module) =>
+  ["js", "js.map", "d.ts", "d.ts.map"].map(
+    (extension) => `package/dist/${module}.${extension}`,
   ),
-  "package/dist/server/dashboard/index.html",
-  "package/dist/server/dashboard/app.js",
-  "package/dist/server/dashboard/app.css",
-  "package/dist/server/dashboard/THIRD_PARTY_NOTICES.txt",
-];
+);
