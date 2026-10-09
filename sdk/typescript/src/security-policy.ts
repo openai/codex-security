@@ -130,14 +130,12 @@ export interface SecurityPolicyPreflight
   maxCostUsd?: number;
 }
 
-const securityPolicyStageSchema = z
-  .object({
-    markdown: z.string(),
-    questions: z.array(z.string()),
-    reviewNotes: z.array(z.string()),
-    blockedReason: z.string().nullable(),
-  })
-  .strict();
+const securityPolicyStageSchema = z.strictObject({
+  markdown: z.string(),
+  questions: z.array(z.string()),
+  reviewNotes: z.array(z.string()),
+  blockedReason: z.string().nullable(),
+});
 
 export interface SecurityPolicyStageResult {
   markdown: string;

@@ -12,6 +12,9 @@ import {
   skillCommandFailure,
 } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
+import { pluginMetadata } from "../src/runtime.js";
+import { VERSION } from "../src/version.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { capture, dependencies, type OnCodex } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -103,6 +106,12 @@ describe("CLI skill commands", () => {
           'approval_policy="never"',
           "--config",
           'responses_api_metadata.codex_security_surface="cli"',
+          "--config",
+          `responses_api_metadata.codex_security_command=${JSON.stringify(command)}`,
+          "--config",
+          `responses_api_metadata.codex_security_package_version=${JSON.stringify(VERSION)}`,
+          "--config",
+          `responses_api_metadata.codex_security_plugin_version=${JSON.stringify((await pluginMetadata(PLUGIN_ROOT)).version)}`,
           ...(command === "patch"
             ? []
             : [
@@ -1262,6 +1271,7 @@ process.stdout.write(JSON.stringify({
       "ENOTFOUND /synthetic/repository",
       "EACCES: permission denied, open /synthetic/output/report.json",
       "Unsupported provider setting: synthetic_option",
+      "raw detail \u001b[31m\rnext\nline sk-proj-SYNTHETIC_SECRET C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end",
     ])
       expect(skillCommandFailure("validate", 7, detail)).toBe(detail);
     const authentication = "401 sk-proj-SYNTHETIC_SECRET";
@@ -1274,6 +1284,40 @@ process.stdout.write(JSON.stringify({
     expect(skillCommandFailure("validate", 7, "")).toBe(
       "validate failed with exit code 7.",
     );
+  });
+
+  test("escapes native validation launch failures at the CLI boundary", async () => {
+    const directory = await temporaryDirectory("validation-launch-failure-");
+    try {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const command = join(
+        directory,
+        "missing-codex\u001b[31m\rnext\nline-café",
+      );
+      expect(
+        await runCli(
+          ["validate", "Synthetic finding"],
+          dependencies({
+            currentDirectory: directory,
+            environment: {
+              PATH: process.env["PATH"],
+              CODEX_HOME: join(directory, "home"),
+              CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+              OPENAI_API_KEY: "synthetic-validation-key",
+            },
+            onCodex: (_args, output, environment) =>
+              runCodexSkillCommand([], output, { command }, environment),
+          }),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("missing-codex");
+      expect(stderr.text()).toContain("line-café");
+      expect(stderr.text()).not.toContain("\u001b");
+      expect(stderr.text()).not.toContain("\r");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("keeps unknown credential failures neutral", () => {
@@ -1335,7 +1379,7 @@ process.stdout.write(JSON.stringify({
       },
       ...["stderr", "turn.failed"].map((transport) => {
         const detail =
-          "EACCES: permission denied, open /synthetic/output/report.json";
+          "EACCES: permission denied, open /synthetic/output/report.json\u001b[31m\rnext\nline café 🔒 sk-proj-SYNTHETIC_SECRET\u001b]52;c;U1lOVEhFVElD\u0007 C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end";
         return {
           source:
             transport === "stderr"
@@ -1343,7 +1387,8 @@ process.stdout.write(JSON.stringify({
               : `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n"); process.exitCode=7;`,
           status: 7,
           stdout: "",
-          stderr: detail,
+          stderr:
+            "EACCES: permission denied, open /synthetic/output/report.json [31m next\nline café 🔒 sk-proj-SYNTHETIC_SECRET ]52;c;U1lOVEhFVElD  C1   2J H 52;c;U1lOVEhFVElD   end",
         };
       }),
       {

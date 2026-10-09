@@ -55585,12 +55585,14 @@ function parseInputs(read, workspace) {
   const maxTimeHours = num("max-time-hours", false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== void 0 && mode !== "deep") throw new Error("max-time-hours requires mode: deep.");
   const dryRun = bool("dry-run", false);
+  const cyberAccessProgram = str("cyber-access-program") ? choice("cyber-access-program", ["standard", "daybreak_blue", "daybreak_red"], "standard") : void 0;
   return {
     repository: str("repository", workspace),
     scope,
     paths,
     diffBase,
     mode,
+    cyberAccessProgram,
     model: str("model", "gpt-5.6-sol"),
     effort: choice("effort", ["minimal", "low", "medium", "high", "xhigh", "max"], "xhigh"),
     maxCost: num("max-cost", false, Number.MIN_VALUE),
@@ -55627,6 +55629,7 @@ function scanArguments(inputs, target, resultsDirectory) {
   args.push("--codex", "analytics.enabled=false");
   for (const path6 of inputs.paths) args.push(`--path=./${path6}`);
   const options = [
+    ["--cyber-access-program", inputs.cyberAccessProgram],
     ["--diff", target.diffBase],
     ["--head", target.diffHead],
     ["--max-cost", inputs.maxCost],
@@ -99279,6 +99282,7 @@ async function runAction(actionRoot, overrides = {}) {
       log2(`Target commit: ${target.scannedSha}.${target.diffBase ? ` Diff: ${target.diffBase}..${target.diffHead}.` : ""}`);
       if (inputs.paths.length) log2(`Paths: ${inputs.paths.join(", ")}.`);
       log2(`Model: ${inputs.model}; estimated cost stop threshold: ${inputs.maxCost === void 0 ? "unset" : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
+      if (inputs.cyberAccessProgram) log2(`Requested Cyber access program: ${inputs.cyberAccessProgram}.`);
       const scanLabel = inputs.dryRun ? "CLI configuration validation" : "Security scan";
       const scanStarted = performance.now();
       info(`Starting ${scanLabel.toLowerCase()}. CLI diagnostics: ${inputs.verbose ? "streaming" : "disabled (verbose: false)"}.`);
