@@ -8,8 +8,7 @@ import { importSource } from "./import-module.ts";
 
 const { validateDiscoveryArtifacts, validateReducerArtifacts } =
   await importSource(
-    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
-      .pathname,
+    path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
   );
 
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";

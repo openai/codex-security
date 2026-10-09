@@ -8,16 +8,6 @@ const schemas = resolve(packageRoot, "../../plugins/codex-security/schemas");
 
 if (!existsSync(schemas)) throw new Error("Could not find the plugin schemas.");
 
-function withoutAllOf(value) {
-  if (Array.isArray(value)) return value.map(withoutAllOf);
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) => key !== "allOf")
-      .map(([key, child]) => [key, withoutAllOf(child)]),
-  );
-}
-
 async function generate() {
   const documents = [
     ["scan-manifest.schema.json", "ScanManifest"],
@@ -26,9 +16,11 @@ async function generate() {
   ];
   const models = await Promise.all(
     documents.map(async ([filename, name]) => {
-      const schema = JSON.parse(readFileSync(join(schemas, filename), "utf8"));
       // json-schema-to-typescript drops object fields when allOf uses contains or if/then.
-      const input = withoutAllOf(schema);
+      const input = JSON.parse(
+        readFileSync(join(schemas, filename), "utf8"),
+        (key, value) => (key === "allOf" ? undefined : value),
+      );
       input.title = name;
       return compile(input, name, {
         bannerComment: "",
