@@ -2375,27 +2375,11 @@ function normalizeDeferred(rows: JsonObject[]): JsonObject[] {
 
 function coverageMode(context: ArtifactContext, contract: JsonObject): string {
   if (context.mode === "diff") {
-    const diff = requireObject(
-      contract.diffTarget,
-      "scan draft: authoritative diff target",
-    );
-    const modes: Record<string, string> = {
-      commit: "commit",
-      range: "branch_diff",
-      working_tree: "working_tree",
-    };
-    const mode = modes[String(diff.kind)];
-    if (!mode)
-      throw new Error(
-        "scan draft: the authoritative diff coverage mode is invalid.",
-      );
-    return mode;
+    const kind = (contract.diffTarget as JsonObject).kind as string;
+    return kind === "range" ? "branch_diff" : kind;
   }
 
-  const trustedScope = requireObject(
-    contract.scope,
-    "scan draft: authoritative scope",
-  );
+  const trustedScope = contract.scope as JsonObject;
   const includes = trustedScope.requiredIncludePaths;
   const scoped = Array.isArray(includes)
     ? includes.length !== 1 || includes[0] !== "."
@@ -2498,10 +2482,7 @@ function validateFindingSemantics(findings: JsonObject[]): void {
         if (references === undefined) continue;
         if (
           !Array.isArray(references) ||
-          references.some(
-            (reference) =>
-              typeof reference !== "string" || !evidenceIds.has(reference),
-          )
+          references.some((reference) => !evidenceIds.has(reference))
         ) {
           throw new Error(
             `scan draft: findings[${findingIndex}].${sectionName}.${referencesName} ` +

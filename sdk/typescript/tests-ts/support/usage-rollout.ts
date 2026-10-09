@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { runNodePython } from "./python-probe.js";
 import { join } from "node:path";
 import { expect } from "bun:test";
 
@@ -107,20 +107,14 @@ export function readPythonRolloutUsage(
     ")",
     "print(json.dumps({'usage': usage, 'warnings': sorted(warnings)}, sort_keys=True))",
   ].join("\n");
-  const result = spawnSync(
-    python!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      probe,
-      join(pluginRoot, "scripts"),
-      rolloutPath,
-      childUuid7Thread,
-      scanThreadId,
-    ],
-    { encoding: "utf8" },
-  );
+  const result = runNodePython(python!, [
+    "-c",
+    probe,
+    join(pluginRoot, "scripts"),
+    rolloutPath,
+    childUuid7Thread,
+    scanThreadId,
+  ]);
 
   expect(result.error).toBeUndefined();
   expect(result.status, result.stderr).toBe(0);
