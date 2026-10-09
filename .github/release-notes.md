@@ -192,6 +192,7 @@
 - update Node types and string-width ([#1545](https://github.com/openai/codex-security/pull/1545))
 - preserve import and export representations ([#1510](https://github.com/openai/codex-security/pull/1510))
 - frame terminal input and skip unused activity ([#1511](https://github.com/openai/codex-security/pull/1511))
+- parse complete triage JSON before fenced content ([#1512](https://github.com/openai/codex-security/pull/1512))
 
 <!-- release-section: highlights:end -->
 
