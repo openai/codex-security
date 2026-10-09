@@ -423,7 +423,7 @@ describe("live scan dashboard", () => {
     expect(observer).toHaveBeenCalledTimes(2);
   });
 
-  test.each(["scan", "budget", "components"] as const)(
+  test.each(["scan", "budget", "components", "component detail"] as const)(
     "preserves Escape-prefixed cancellation and chunk ownership in %s",
     async (mode) => {
       jest.useFakeTimers();
@@ -442,6 +442,14 @@ describe("live scan dashboard", () => {
         ["\u001B\u001B", "\u0003"],
         ["\u001B\u001B\u0003"],
         ["\u001B", "\u001B\u0003d"],
+        ["\u001B\u001B[\u0003"],
+        ["\u001B", "\u001B[\u0003"],
+        ["\u001B\u001B", "[\u0003"],
+        ["\u001B\u001B[", "\u0003"],
+        ["\u001B", "\u001B", "[\u0003"],
+        ["\u001B", "\u001B[", "\u0003"],
+        ["\u001B\u001B", "[", "\u0003"],
+        ["\u001B", "\u001B", "[", "\u0003"],
         ...Array.from({ length: 8 }, (_, index) => {
           const escapes = "\u001B".repeat(index + 1);
           return [
@@ -462,7 +470,7 @@ describe("live scan dashboard", () => {
         const onInterrupt = mock(() => controller.abort("SIGINT"));
         const dashboard = createDashboard(stderr.stream, {
           input,
-          presentation: mode === "components" ? "components" : "scan",
+          presentation: mode.startsWith("component") ? "components" : "scan",
           onInterrupt,
         });
         let answer: number | undefined | "pending" = "pending";
@@ -472,6 +480,18 @@ describe("live scan dashboard", () => {
             : [];
         dashboard.start();
         try {
+          if (mode === "component detail") {
+            dashboard.setComponents([
+              {
+                id: "component",
+                name: "Component",
+                paths: ["src"],
+                status: "started",
+                outputDir: "/synthetic/results",
+              },
+            ]);
+            input.emit("data", "\r");
+          }
           if (mode === "budget")
             void dashboard
               .requestBudgetIncrease({
@@ -513,7 +533,9 @@ describe("live scan dashboard", () => {
         expect(input.isRaw).toBe(true);
         expect(input.listenerCount("data")).toBe(1);
         expect(input.listenerCount("keypress")).toBe(1);
-        expect(observer).toHaveBeenCalledTimes(pasted.length + chunks.length);
+        expect(observer).toHaveBeenCalledTimes(
+          pasted.length + chunks.length + Number(mode === "component detail"),
+        );
         expect(jest.getTimerCount()).toBe(0);
       }
     },

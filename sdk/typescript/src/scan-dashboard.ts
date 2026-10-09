@@ -216,11 +216,11 @@ export class ScanDashboard {
             ? undefined
             : key.sequence.match(/^\u001B+(?=\u001B)/u)?.[0];
         const keys =
-          escapes !== undefined
-            ? [...escapes, key.sequence.slice(escapes.length)]
-            : (key.meta && key.code === undefined) ||
-                key.sequence.includes("\u0003")
-              ? Array.from(key.sequence)
+          (key.meta && key.code === undefined) ||
+          key.sequence.includes("\u0003")
+            ? Array.from(key.sequence)
+            : escapes !== undefined
+              ? [...escapes, key.sequence.slice(escapes.length)]
               : [key.sequence];
         const batch = this.#inputKeys;
         const continued = batch?.continued === true;
