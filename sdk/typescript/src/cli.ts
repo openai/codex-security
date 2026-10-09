@@ -6958,27 +6958,43 @@ async function publishPatchBranch(
 
 function gitlabPatchDescription(body: string): string {
   const escaped = new Set<number>();
-  let multilineQuote = false;
-  for (const node of fromMarkdown(body).children) {
-    const { start, end } = node.position!;
-    if (
-      node.type === "blockquote" &&
-      body.slice(start.offset, end.offset).trim() === ">>>"
-    ) {
-      // GitLab's fenced blockquotes are not part of CommonMark.
-      multilineQuote = !multilineQuote;
-    }
-    if (multilineQuote || node.type !== "paragraph") continue;
+  let offset = 0;
+  for (;;) {
+    const markdown = body.slice(offset);
+    let closingQuote: RegExpExecArray | null | undefined;
+    for (const node of fromMarkdown(markdown).children) {
+      const { start, end } = node.position!;
+      const quote =
+        node.type === "blockquote"
+          ? /^ {0,3}(>{3,})[ \t]*(?:\r?\n|$)/u.exec(
+              markdown.slice(start.offset),
+            )
+          : null;
+      if (quote) {
+        // GitLab closes fenced quotes before parsing their children, even code.
+        // Resume CommonMark parsing after the matching or longer closing fence.
+        const fence = new RegExp(
+          `^ {0,3}>{${quote[1]!.length},}[ \\t]*(?:\\r?\\n|$)`,
+          "gm",
+        );
+        fence.lastIndex = start.offset! + quote[0].length;
+        closingQuote = fence.exec(markdown);
+        break;
+      }
+      if (node.type !== "paragraph") continue;
 
-    // GitLab examines top-level paragraphs, excluding inline code and HTML.
-    // Keep the original source positions and bytes instead of rendering Markdown.
-    const offset = start.offset! - start.column + 1;
-    const paragraph = body.slice(offset, end.offset);
-    for (const match of paragraph.matchAll(
-      /`[\s\S]+?`|^<[^>]+?>\r?\n[\s\S]+?\r?\n<\/[^>]+?>\r?$|^\//gmu,
-    )) {
-      if (match[0] === "/") escaped.add(offset + match.index);
+      // Match GitLab's top-level paragraph and inline-code/HTML exclusions.
+      const paragraphOffset = start.offset! - start.column + 1;
+      const paragraph = markdown.slice(paragraphOffset, end.offset);
+      for (const match of paragraph.matchAll(
+        /`[\s\S]+?`|^<[^>]+?>\r?\n[\s\S]+?\r?\n<\/[^>]+?>\r?$|^\//gmu,
+      )) {
+        if (match[0] === "/")
+          escaped.add(offset + paragraphOffset + match.index);
+      }
     }
+    if (!closingQuote) break;
+    offset += closingQuote.index + closingQuote[0].length;
   }
   return body.replace(/^\//gmu, (slash, offset: number) =>
     escaped.has(offset) ? `\\${slash}` : slash,

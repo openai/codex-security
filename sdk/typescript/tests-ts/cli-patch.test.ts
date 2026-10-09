@@ -2248,7 +2248,18 @@ describe("scan and patch workflow", () => {
         ">>>",
         "Multiline quote",
         "/close",
+        ">>>>",
+        "",
+        ">>>>",
+        "Longer quote fence",
         ">>>",
+        "/close",
+        ">>>>>",
+        "",
+        ">>>",
+        "```text",
+        ">>>>",
+        "/label ~after-quote",
         "",
         " /close",
         "  /close",
@@ -2321,6 +2332,7 @@ describe("scan and patch workflow", () => {
         gitlab
           ? savedBody
               .replace("/label ~reviewed", "\\/label ~reviewed")
+              .replace("/label ~after-quote", "\\/label ~after-quote")
               .replace("/assign @reviewer", "\\/assign @reviewer")
           : savedBody,
       );
