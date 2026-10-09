@@ -407,55 +407,60 @@ test("abstains without a model call when locations do not identify committed reg
   ).toBe(true);
 });
 
-test("matches committed filename bytes without aliasing replacement characters", async () => {
-  const repo = await repository();
-  const path = "name-�.ts";
-  if (process.platform !== "win32") {
-    await writeFile(
-      Buffer.concat([
-        Buffer.from(join(repo.path, "name-")),
-        Buffer.from([0xff]),
-        Buffer.from(".ts"),
-      ]),
-      "export const unrelated = 1;\n",
-    );
-    await repo.git("add", ".");
-    await repo.git("commit", "-qm", "Add raw-byte filename");
-  }
-  const { codex, calls } = fakeCodex();
-  const input = [{ ...finding, locations: [{ path, startLine: 1 }] }];
-  const missing = await suggestOwners(repo.path, input, { codex });
-  expect(missing.results[0]!.status).toBe("abstained");
-  expect(missing.results[0]!.limitations).toContain(
-    `Not a regular file at HEAD: ${path}`,
-  );
-  expect(calls).toHaveLength(0);
+// Keep Unicode coverage even where raw-byte fixture names are unsupported.
+for (const rawByteNames of [false, true]) {
+  test.skipIf(rawByteNames && ["win32", "darwin"].includes(process.platform))(
+    `matches committed ${rawByteNames ? "raw-byte" : "Unicode"} filenames without aliasing replacement characters`,
+    async () => {
+      const repo = await repository();
+      const path = "name-�.ts";
+      if (rawByteNames) {
+        await writeFile(
+          Buffer.concat([
+            Buffer.from(join(repo.path, "name-")),
+            Buffer.from([0xff]),
+            Buffer.from(".ts"),
+          ]),
+          "export const unrelated = 1;\n",
+        );
+        await repo.git("add", ".");
+        await repo.git("commit", "-qm", "Add raw-byte filename");
+      }
+      const { codex, calls } = fakeCodex();
+      const input = [{ ...finding, locations: [{ path, startLine: 1 }] }];
+      const missing = await suggestOwners(repo.path, input, { codex });
+      expect(missing.results[0]!.status).toBe("abstained");
+      expect(missing.results[0]!.limitations).toContain(
+        `Not a regular file at HEAD: ${path}`,
+      );
+      expect(calls).toHaveLength(0);
 
-  await writeFile(
-    join(repo.path, path),
-    "export const actualUnicodeFile = 2;\n",
-  );
-  await repo.git("add", ".");
-  await repo.git("commit", "-qm", "Add Unicode filename");
-  const report = await suggestOwners(repo.path, input, { codex });
-  expect(report.results[0]!.status).toBe("identified");
-  expect(
-    calls[0]!.context.evidence.find(({ kind }) => kind === "source")!.content,
-  ).toBe("1: export const actualUnicodeFile = 2;");
-  const malformed = await suggestOwners(
-    repo.path,
-    [{ ...finding, locations: [{ path: "name-\ud800.ts" }] }],
-    { codex },
-  );
-  expect(malformed.results[0]!.status).toBe("abstained");
-  expect(calls).toHaveLength(1);
+      await writeFile(
+        join(repo.path, path),
+        "export const actualUnicodeFile = 2;\n",
+      );
+      await repo.git("add", ".");
+      await repo.git("commit", "-qm", "Add Unicode filename");
+      const report = await suggestOwners(repo.path, input, { codex });
+      expect(report.results[0]!.status).toBe("identified");
+      expect(
+        calls[0]!.context.evidence.find(({ kind }) => kind === "source")!
+          .content,
+      ).toBe("1: export const actualUnicodeFile = 2;");
+      const malformed = await suggestOwners(
+        repo.path,
+        [{ ...finding, locations: [{ path: "name-\ud800.ts" }] }],
+        { codex },
+      );
+      expect(malformed.results[0]!.status).toBe("abstained");
+      expect(calls).toHaveLength(1);
 
-  if (process.platform === "win32") return;
-  const tools = await temporaryDirectory();
-  const diagnostic = "Permission denied: café/東/😀";
-  await writeFile(
-    join(tools, "git"),
-    `#!/bin/sh
+      if (process.platform === "win32") return;
+      const tools = await temporaryDirectory();
+      const diagnostic = "Permission denied: café/東/😀";
+      await writeFile(
+        join(tools, "git"),
+        `#!/bin/sh
 for argument; do
   if [ "$argument" = ls-tree ]; then
     printf '%s\\n' "$SYNTHETIC_GIT_DIAGNOSTIC" >&2
@@ -464,20 +469,22 @@ for argument; do
 done
 exec "$SYNTHETIC_REAL_GIT" "$@"
 `,
-    { mode: 0o700 },
+        { mode: 0o700 },
+      );
+      await expect(
+        suggestOwners(repo.path, input, {
+          codex,
+          environment: {
+            ...process.env,
+            PATH: `${tools}${delimiter}${process.env["PATH"] ?? ""}`,
+            SYNTHETIC_REAL_GIT: Bun.which("git")!,
+            SYNTHETIC_GIT_DIAGNOSTIC: diagnostic,
+          },
+        }),
+      ).rejects.toThrow(diagnostic);
+    },
   );
-  await expect(
-    suggestOwners(repo.path, input, {
-      codex,
-      environment: {
-        ...process.env,
-        PATH: `${tools}${delimiter}${process.env["PATH"] ?? ""}`,
-        SYNTHETIC_REAL_GIT: Bun.which("git")!,
-        SYNTHETIC_GIT_DIAGNOSTIC: diagnostic,
-      },
-    }),
-  ).rejects.toThrow(diagnostic);
-});
+}
 
 test("keeps renamed-file blame citations at HEAD and inherits SDK model settings", async () => {
   const repo = await repository();
@@ -609,4 +616,57 @@ test("propagates cancellation", async () => {
       signal: controller.signal,
     }),
   ).rejects.toThrow("Canceled by caller");
+});
+
+test("subdirectory roots retain repository-relative paths when filenames collide", async () => {
+  const repo = await repository();
+  const subdir = join(repo.path, "src");
+  await mkdir(subdir);
+  await writeFile(
+    join(subdir, "handler.ts"),
+    "// Subdirectory handler\nexport function readOther(id) {\n  return other[id];\n}\n",
+  );
+  await repo.git("add", "src/handler.ts");
+  await repo.git(
+    "-c",
+    "user.name=Casey Example",
+    "-c",
+    "user.email=casey@example.test",
+    "commit",
+    "-qm",
+    "Add subdirectory handler",
+  );
+  const { codex, calls } = fakeCodex((context) => {
+    const identityIndex = context.identities.findIndex(
+      (identity) =>
+        identity.email ===
+        (context.evidence[0]!.path.startsWith("src/")
+          ? "casey@example.test"
+          : "alex@example.test"),
+    );
+    return {
+      identityIndex,
+      reason: "Author of the affected committed lines.",
+      evidenceIds: context.evidence
+        .filter((item) => item.identityIndex === identityIndex)
+        .map((item) => item.id),
+    };
+  });
+  const report = await suggestOwners(
+    subdir,
+    [
+      finding,
+      {
+        ...finding,
+        findingId: "subdirectory-finding",
+        locations: [{ path: "src/handler.ts", startLine: 2, endLine: 3 }],
+      },
+    ],
+    { codex },
+  );
+  expect(report.results.map((result) => result.owner?.email)).toEqual([
+    "alex@example.test",
+    "casey@example.test",
+  ]);
+  expect(calls).toHaveLength(2);
 });

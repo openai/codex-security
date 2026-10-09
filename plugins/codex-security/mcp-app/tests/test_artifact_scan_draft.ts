@@ -2255,7 +2255,7 @@ try {
     },
   );
 
-  if (process.platform !== "win32") {
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
     const beforePermissionFailure = await snapshotScanDraft(root);
     for (const [file, mode, message] of [
       [hardeningDirectory, 0o600, /artifact path cannot be inspected.*EACCES/],
