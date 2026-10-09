@@ -1,0 +1,85 @@
+{
+  "run": {
+    "jsonrpc": "2.0",
+    "id": "run",
+    "method": "run",
+    "params": {
+      "version": 2,
+      "repository": "/workspace/repository",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": {
+        "paths": ["service-a", "service-b"]
+      },
+      "outputDirectory": "/scan/output",
+      "stateDirectory": "/scan/state",
+      "model": "fixture-model",
+      "reasoningEffort": "medium",
+      "identity": {
+        "runId": "run-1",
+        "attemptId": "attempt-1",
+        "buildId": "fixture-build"
+      }
+    }
+  },
+  "execution": {
+    "jsonrpc": "2.0",
+    "id": "request-1",
+    "method": "execution.run",
+    "params": {
+      "version": 2,
+      "repository": "/workspace/repository",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": {
+        "paths": ["service-a", "service-b"]
+      },
+      "identity": {
+        "runId": "run-1",
+        "attemptId": "attempt-1",
+        "buildId": "fixture-build"
+      },
+      "model": "fixture-model",
+      "reasoningEffort": "medium",
+      "requestId": "request-1",
+      "scanId": "scan-1",
+      "prompt": "Scan the selected paths.",
+      "runtime": {
+        "pluginRoot": "/opt/runtime/cli/_bundled_plugin",
+        "pluginVersion": "0.1.95",
+        "stateDirectory": "/scan/state",
+        "outputDirectory": "/scan/output",
+        "environment": {
+          "CODEX_SECURITY_STATE_DIR": "/scan/state"
+        }
+      }
+    }
+  },
+  "progress": {
+    "jsonrpc": "2.0",
+    "method": "execution.progress",
+    "params": {
+      "requestId": "request-1",
+      "event": {
+        "type": "progress",
+        "progress": {
+          "phase": "discovery",
+          "filesCompleted": 1,
+          "filesTotal": 2
+        }
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "request-1",
+    "result": {
+      "requestId": "request-1",
+      "status": "completed",
+      "sessionId": "session-1",
+      "usage": {
+        "input_tokens": 12,
+        "output_tokens": 6,
+        "cached_input_tokens": 0
+      }
+    }
+  }
+}

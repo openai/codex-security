@@ -4,6 +4,20 @@ export type {
   ArtifactExportResult,
 } from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
+export {
+  runHostedScan,
+  HostedScanInputSchema,
+  HostedScanPreparationError,
+} from "./hosted-scan.js";
+export type { HostedScanInput } from "./hosted-scan.js";
+export { ScanExecutionError } from "./scan-executor.js";
+export type {
+  HostedScanExecution,
+  ScanExecutor,
+  ScanExecutionRequest,
+  ScanExecutionResult,
+  ScanExecutionEvent,
+} from "./scan-executor.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {
   ResolvedProjectConfig,

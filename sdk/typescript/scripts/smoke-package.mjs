@@ -800,6 +800,11 @@ try {
     ],
     { cwd: consumer },
   );
+  run(
+    process.execPath,
+    [join(packageRoot, "scripts", "smoke-hosted-package.mjs"), installedRoot],
+    { cwd: consumer },
+  );
   const selectedPlugin = join(consumer, "compatibility-selected-plugin");
   await cp(join(installedRoot, "_bundled_plugin"), selectedPlugin, {
     recursive: true,
@@ -840,7 +845,7 @@ try {
   );
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, hosted scans, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {
