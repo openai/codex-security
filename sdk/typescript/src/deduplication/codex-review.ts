@@ -4,6 +4,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, win32 } from "node:path";
@@ -708,10 +709,17 @@ export class CodexReviewRunner {
       } finally {
         lines.close();
         child.stdin.end();
-        if (source !== undefined && this.signal?.aborted)
-          stopSourceChildren(child);
-        if (child.exitCode === null) child.kill();
-        await closed;
+        const canceledSource = source !== undefined && this.signal?.aborted;
+        let force = Boolean(canceledSource);
+        try {
+          // Stopping stdio children lets native startup unwind and reap them.
+          // HTTP startup has no child and must be stopped in the app-server.
+          if (canceledSource) force = stopSourceChildren(child) === 0;
+        } finally {
+          if (child.exitCode === null)
+            child.kill(force ? "SIGKILL" : "SIGTERM");
+          await closed;
+        }
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -721,13 +729,13 @@ export class CodexReviewRunner {
 
 // Native MCP children create their own process groups. Stop owned descendants
 // while the app-server is alive so it can reap them and finish canceled startup.
-function stopSourceChildren(child: ChildProcessWithoutNullStreams): void {
+function stopSourceChildren(child: ChildProcessWithoutNullStreams): number {
   if (
     child.pid === undefined ||
     child.exitCode !== null ||
     child.signalCode !== null
   )
-    return;
+    return 0;
   if (process.platform === "win32") {
     const result = spawnSync(
       win32.join(
@@ -739,9 +747,56 @@ function stopSourceChildren(child: ChildProcessWithoutNullStreams): void {
       { stdio: "ignore", windowsHide: true },
     );
     if (result.error) throw result.error;
-    return;
+    return 0;
   }
-  const result = spawnSync("ps", ["-A", "-o", "pid=", "-o", "ppid="], {
+  const children = sourceProcessChildren(child.pid);
+  let stopped = 0;
+  const stop = (pid: number): void => {
+    for (const descendant of children.get(pid) ?? []) {
+      stop(descendant);
+      try {
+        if (process.kill(descendant, "SIGKILL")) stopped++;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+  };
+  stop(child.pid);
+  return stopped;
+}
+
+function sourceProcessChildren(parentPid: number): Map<number, number[]> {
+  const children = new Map<number, number[]>();
+  if (process.platform === "linux") {
+    const collect = (pid: number): void => {
+      try {
+        // A native worker thread can spawn MCP children. Linux records them
+        // under the spawning thread, not just the process's main thread.
+        const tasks = `/proc/${pid}/task`;
+        const pids = new Set<number>();
+        for (const task of readdirSync(tasks)) {
+          try {
+            for (const child of readFileSync(
+              `${tasks}/${task}/children`,
+              "utf8",
+            )
+              .trim()
+              .split(/\s+/u))
+              if (child) pids.add(Number(child));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+        }
+        children.set(pid, [...pids]);
+        for (const child of pids) collect(child);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    };
+    collect(parentPid);
+    return children;
+  }
+  const result = spawnSync("/bin/ps", ["-A", "-o", "pid=", "-o", "ppid="], {
     encoding: "utf8",
   });
   if (result.error) throw result.error;
@@ -749,21 +804,10 @@ function stopSourceChildren(child: ChildProcessWithoutNullStreams): void {
     throw new Error(
       result.stderr || "Could not inspect source review children.",
     );
-  const children = new Map<number, number[]>();
   for (const line of result.stdout.trim().split("\n")) {
     const [pid, parent] = line.trim().split(/\s+/u).map(Number);
     if (pid === undefined || parent === undefined) continue;
     children.set(parent, [...(children.get(parent) ?? []), pid]);
   }
-  const stop = (pid: number): void => {
-    for (const descendant of children.get(pid) ?? []) {
-      stop(descendant);
-      try {
-        process.kill(descendant, "SIGKILL");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      }
-    }
-  };
-  stop(child.pid);
+  return children;
 }

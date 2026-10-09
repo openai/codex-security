@@ -1470,10 +1470,21 @@ test.skipIf(process.platform !== "win32")(
   },
 );
 
-test.each(["local", "executor"])(
+test.each([
+  "local",
+  "executor",
+  "http",
+  ...(process.platform === "win32" ? [] : ["missing-ps", "failing-ps"]),
+])(
   "canceling required %s MCP startup reaps its children without stopping another review",
   async (kind) => {
+    const originalPath = process.env["PATH"];
+    const isHttp = kind === "http";
     const home = await temporaryDirectory();
+    const noPs = join(home, "no-ps");
+    await mkdir(noPs);
+    if (kind === "failing-ps")
+      await writeFile(join(noPs, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     const repository = await sourceCheckout();
     const sourceScript = join(home, "stalled-source.mjs");
     await writeFile(
@@ -1503,6 +1514,22 @@ setInterval(() => {}, 1000);
           );
           response.end();
         });
+      } else if (request.url?.startsWith("/mcp/")) {
+        const index = Number(request.url.slice("/mcp/".length));
+        if (request.method !== "POST" || !children[index]) {
+          response.writeHead(503).end("Synthetic unavailable");
+          return;
+        }
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          if (JSON.parse(body).method === "initialize")
+            ready[index]!.resolve(0);
+          // Leave initialization waiting until the review is canceled.
+        });
       } else {
         if (request.url?.includes("responses")) modelRequests++;
         response
@@ -1518,6 +1545,7 @@ setInterval(() => {}, 1000);
     const sourcePids: number[] = [];
     const results: Promise<unknown>[] = [];
     const alive = (pid: number): boolean => {
+      if (!pid) return false;
       try {
         process.kill(pid, 0);
         return true;
@@ -1562,9 +1590,13 @@ setInterval(() => {}, 1000);
           },
           mcp_servers: {
             source: {
-              command: process.execPath,
-              args: [sourceScript, url],
-              cwd: repository,
+              ...(isHttp
+                ? { url: `${url}/mcp/config` }
+                : {
+                    command: process.execPath,
+                    args: [sourceScript, url],
+                    cwd: repository,
+                  }),
               startup_timeout_sec: 60,
               ...(kind === "executor"
                 ? { environment_id: "source-executor" }
@@ -1593,7 +1625,9 @@ setInterval(() => {}, 1000);
               ...source,
               server: {
                 ...source.server,
-                env: { SOURCE_REQUEST: String(index) },
+                ...(isHttp
+                  ? { url: `${url}/mcp/${index}` }
+                  : { env: { SOURCE_REQUEST: String(index) } }),
               },
             },
           )
@@ -1612,13 +1646,20 @@ setInterval(() => {}, 1000);
         ...(await Promise.all(ready.map(({ promise }) => promise))),
       );
       const cancellation = new Error("synthetic source startup cancellation");
-      controllers[0]!.abort(cancellation);
-      expect(await results[0]).toBe(cancellation);
+      if (kind === "missing-ps" || kind === "failing-ps")
+        process.env["PATH"] = noPs;
+      try {
+        controllers[0]!.abort(cancellation);
+        expect(await results[0]).toBe(cancellation);
+      } finally {
+        if (originalPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = originalPath;
+      }
       expect(alive(sourcePids[0]!)).toBe(false);
       expect(
         children[0]!.exitCode !== null || children[0]!.signalCode !== null,
       ).toBe(true);
-      expect(alive(sourcePids[1]!)).toBe(true);
+      expect(alive(sourcePids[1]!)).toBe(!isHttp);
       expect(alive(children[1]!.pid!)).toBe(true);
       controllers[1]!.abort(cancellation);
       expect(await results[1]).toBe(cancellation);
@@ -1628,6 +1669,8 @@ setInterval(() => {}, 1000);
       ).toBe(true);
       expect(modelRequests).toBe(0);
     } finally {
+      if (originalPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = originalPath;
       for (const controller of controllers)
         controller.abort(new Error("fixture cleanup"));
       await Promise.all(results);
