@@ -232,6 +232,10 @@ test.each([
           unified_exec: false,
           view_image: index === 0,
         };
+        const shellPolicy = {
+          inherit: "none",
+          set: { SYNTHETIC_WORKER_VALUE: `shell-value-${index}` },
+        };
         const providerEnvironment = {
           SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
           SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
@@ -244,6 +248,8 @@ test.each([
               codexOverrides: {
                 model_provider: "openrouter",
                 web_search: selection === "root" ? webSearch : "live",
+                shell_environment_policy:
+                  selection === "root" ? shellPolicy : { inherit: "all" },
                 features: selection === "root" ? featureOverrides : {},
                 ...(selection === "profile only"
                   ? {}
@@ -271,6 +277,7 @@ test.each([
                         selected: {
                           features: featureOverrides,
                           web_search: webSearch,
+                          shell_environment_policy: shellPolicy,
                           ...(selection === "null profile"
                             ? {
                                 model_provider: null,
@@ -338,6 +345,7 @@ test.each([
                   );
                   expect(preflight).not.toContain("synthetic-key-");
                   expect(preflight).not.toContain("synthetic-header-");
+                  expect(preflight).not.toContain("shell-value-");
                   const workerSnapshotPath =
                     environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
                   const workerSnapshot = parseToml(
@@ -345,10 +353,14 @@ test.each([
                   );
                   expect(workerSnapshot["worker_runtime"]).toMatchObject({
                     environment: providerEnvironment,
+                    shell_environment_policy: shellPolicy,
                     features: featureOverrides,
                     web_search: webSearch,
                   });
                   expect(options.config!["web_search"]).toBe(webSearch);
+                  expect(options.config!["shell_environment_policy"]).toEqual(
+                    shellPolicy,
+                  );
                   expect(options.config!["features"]).toMatchObject(
                     featureOverrides,
                   );
@@ -374,6 +386,9 @@ test.each([
                     featureOverrides,
                   );
                   expect(settings.config["web_search"]).toBe(webSearch);
+                  expect(settings.config["shell_environment_policy"]).toEqual(
+                    shellPolicy,
+                  );
                   expect(settings.config["model_provider"]).toBe("openrouter");
                   expect(settings.nativeProfile).toBeDefined();
                   expect(settings.nativeProfile).toBe(options.nativeProfile);
@@ -721,7 +736,7 @@ const legacyScanCases: Array<
     ],
   ),
   [
-    "deep with a filtered profile and readable snapshot",
+    "deep with a resolved profile and readable snapshot",
     "deep",
     {
       profile: "selected.profile",
@@ -730,8 +745,6 @@ const legacyScanCases: Array<
     {
       capability: true,
       inherited: "synthetic.system",
-      reads: true,
-      rejects: true,
     },
   ],
 ];
