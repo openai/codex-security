@@ -449,6 +449,13 @@ export async function publishScanInternal(
     result.indeterminate = true;
     result.warnings = [
       `The Linear publication outcome is indeterminate; local history may not include every created issue. ${recoveryMessage}`,
+      ...evidence.flatMap((item) =>
+        item.source === "handoff" &&
+        item.status === "invalid" &&
+        item.ownerFindingId === undefined
+          ? [item.error]
+          : [],
+      ),
     ];
     await preserveConnectorEvents();
     if (eventLogNotice !== undefined) result.warnings.push(eventLogNotice);
@@ -526,7 +533,6 @@ export async function publishScanInternal(
       `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
     ];
   }
-  options.signal?.throwIfAborted();
   reportPublicationProgress(progressObserver, {
     type: "completed",
     created: result.counts.created,
@@ -923,7 +929,21 @@ async function collectPublicationHandoffEvidence(
   file: string,
   publication: PreparedScanPublication,
 ): Promise<PublicationHandoffEvidence[]> {
-  const content = await readPublicationHandoff(file);
+  let content: string;
+  try {
+    content = await readFile(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return [
+      {
+        source: "handoff",
+        status: "invalid",
+        possibleMutation: true,
+        resolution: resolveClaims([]),
+        error: `Could not read the Linear publication handoff: ${errorMessage(error)}`,
+      },
+    ];
+  }
 
   const expectedIssues = new Map(publication.issues.map(findingEntry));
   return content

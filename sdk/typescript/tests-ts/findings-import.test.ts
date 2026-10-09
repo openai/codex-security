@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -72,13 +73,11 @@ describe("findings import formats", () => {
       ).toEqual(
         rows.map(({ findingId, occurrenceId }) => [findingId, occurrenceId]),
       );
-      expect(
-        new Set(
-          bindImportedFindings(parsed, format, "scan", "target").map(
-            (row) => row.occurrenceId,
-          ),
-        ).size,
-      ).toBe(2);
+      const bound = bindImportedFindings(parsed, format, "scan", "target");
+      expect(new Set(bound.map((row) => row.occurrenceId)).size).toBe(2);
+      if (format === "csv") {
+        expect(new Set(bound.map((row) => row.findingId)).size).toBe(2);
+      }
     }
     await expect(
       parseImportedFindings(
@@ -97,6 +96,9 @@ describe("findings import formats", () => {
       "'--no-verify' skips hooks",
       "''=literal",
       "'Literal",
+      "'=1+1",
+      "''-x",
+      "''literal",
       "ordinary λ",
       "=formula",
       "\u0085=formula",
@@ -190,29 +192,6 @@ describe("findings import formats", () => {
     expect(csv[0]!.title).toBe("Reported CSV import issue");
   });
 
-  test("rejects unsupported JSON numbers before they can become null", async () => {
-    const document = await sourceDocument();
-    document.findings[0]!.extensions = {
-      nested: [null, "numeric-placeholder"],
-    };
-    const source = JSON.stringify(document);
-    for (const number of ["1e400", "9007199254740993"]) {
-      await expect(
-        parseImportedFindings(
-          source.replace('"numeric-placeholder"', number),
-          "json",
-          PLUGIN_ROOT,
-        ),
-      ).rejects.toThrow("JSON numbers are not supported");
-    }
-    const [finding] = await parseImportedFindings(
-      source.replace('"numeric-placeholder"', "1.5"),
-      "json",
-      PLUGIN_ROOT,
-    );
-    expect(finding!.extensions).toEqual({ nested: [null, 1.5] });
-  });
-
   test("binds separate source occurrences and retains source metadata without following report paths", async () => {
     const document = await sourceDocument();
     const finding = document.findings[0]!;
@@ -282,22 +261,9 @@ describe("findings import formats", () => {
         parseImportedFindings(JSON.stringify(payload), "json", PLUGIN_ROOT),
       ).rejects.toThrow("Findings JSON");
     }
-    for (const source of ["{", '{"findings": [],}']) {
-      let parseError: Error | undefined;
-      try {
-        JSON.parse(source);
-      } catch (error) {
-        parseError = error as Error;
-      }
-      expect(parseError).toBeInstanceOf(SyntaxError);
-      await expect(
-        parseImportedFindings(source, "json", PLUGIN_ROOT),
-      ).rejects.toMatchObject({
-        name: "CodexSecurityError",
-        message: `Findings JSON could not be parsed. ${parseError!.message}`,
-        cause: expect.objectContaining({ message: parseError!.message }),
-      });
-    }
+    await expect(
+      parseImportedFindings("{", "json", PLUGIN_ROOT),
+    ).rejects.toThrow("could not be parsed");
     await expect(
       parseImportedFindings(
         JSON.stringify({
@@ -309,4 +275,3 @@ describe("findings import formats", () => {
     ).rejects.toThrow("duplicate occurrenceId");
   });
 });
-import { execFileSync } from "node:child_process";

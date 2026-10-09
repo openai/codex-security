@@ -661,6 +661,8 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
     timestamp = now()
     target_path = args.target_path if optional_text(args.target_path, maximum=4096) else None
     default_scope = args.scope if optional_text(args.scope, maximum=4096) else "."
+    if any(len(value) > 4096 for value in (target_path, default_scope) if value is not None):
+        raise SystemExit("Text value must be no longer than 4096 characters.")
     diff_target_kind = args.diff_target_kind if args.mode == "diff" else None
     diff_base_revision = (
         optional_text(args.diff_base_revision, maximum=512) if args.mode == "diff" else None
