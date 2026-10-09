@@ -4,12 +4,7 @@ import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { z } from "incur";
 import Papa from "papaparse";
-import {
-  CodexSecurityError,
-  ContractValidationError,
-  errorMessage,
-} from "./errors.js";
-import { parseJsonNumbers } from "./json-numbers.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { Finding, FindingsDocument } from "./models.js";
 
 export const CSV_TARGET_ID = "codex-security-csv-import";
@@ -114,20 +109,15 @@ export async function parseImportedFindings(
   pluginRoot: string,
 ): Promise<Finding[]> {
   if (format === "csv") {
-    return parseFindingsCsv(source).map((row) => ({
-      ...csvRowFinding(row, "import"),
-      findingId: row.finding_id,
-      occurrenceId: row.occurrence_id,
-    }));
+    return parseFindingsCsv(source).map(csvRowFinding);
   }
 
   let payload: unknown;
   try {
     // Exported findings files often start with a UTF-8 byte order mark, which
     // the CSV parser already skips.
-    payload = parseJsonNumbers(source.replace(/^\uFEFF/u, ""), "Findings JSON");
+    payload = JSON.parse(source.replace(/^\uFEFF/u, ""));
   } catch (error) {
-    if (error instanceof ContractValidationError) throw error;
     throw new CodexSecurityError(
       `Findings JSON could not be parsed. ${errorMessage(error)}`,
       { cause: error },
@@ -283,18 +273,15 @@ function decodeExportedCsvCell(value: string): string {
   return EXPORTED_CSV_ESCAPE.test(value) ? value.slice(1) : value;
 }
 
-export function csvRowFinding(row: CsvFindingRow, scanId: string): Finding {
+export function csvRowFinding(row: CsvFindingRow): Finding {
   const ruleId = "import.csv";
   const anchor = row.occurrence_id;
   const fingerprint = `codex-security/v1:sha256:${sha256(
     ["codex-security/v1", CSV_TARGET_ID, ruleId, anchor, ""].join("\0"),
   )}`;
   return {
-    findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
-    occurrenceId: `occ_${sha256([scanId, fingerprint].join("\0")).slice(
-      0,
-      24,
-    )}`,
+    findingId: row.finding_id,
+    occurrenceId: row.occurrence_id,
     ruleId,
     identity: { anchor },
     fingerprints: {

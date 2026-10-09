@@ -8,7 +8,6 @@ import copy
 import csv
 import errno
 import hashlib
-import importlib.util
 import io
 import json
 import math
@@ -23,9 +22,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 from urllib.parse import quote, urlsplit
 
-# Some hosts load this script with Python's safe-path isolation enabled.
+# Keep sibling helpers importable when Python starts in isolated mode.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench.json_numbers import is_json_integer
+import report_projection
+import threat_model_projection
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -65,6 +65,7 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
 )
+REMOTE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 GITHUB_HASH_BLOCK_SIZE = 100
 GITHUB_HASH_MOD = 37
 GITHUB_HASH_MASK = (1 << 64) - 1
@@ -129,26 +130,10 @@ def _generate_report_projection(
     findings: dict[str, Any],
     coverage: dict[str, Any],
 ) -> bytes:
-    script = Path(__file__).resolve().parent / "report_projection.py"
-    spec = importlib.util.spec_from_file_location("codex_security_report_projection", script)
-    if spec is None or spec.loader is None:
-        raise ContractError(f"could not load report projection helper: {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     try:
-        return module.generate_report_markdown(manifest, findings, coverage)
+        return report_projection.generate_report_markdown(manifest, findings, coverage)
     except ValueError as exc:
         raise ContractError(f"report projection failed: {exc}") from exc
-
-
-def _threat_model_renderer() -> Any:
-    script = Path(__file__).resolve().with_name("threat_model_projection.py")
-    spec = importlib.util.spec_from_file_location("codex_security_threat_model_projection", script)
-    if spec is None or spec.loader is None:
-        raise ContractError(f"could not load threat model projection helper: {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def threat_model_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -181,7 +166,7 @@ def threat_model_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def _render_threat_model(model: dict[str, Any], provenance: dict[str, Any]) -> bytes:
     try:
-        return _threat_model_renderer().render_threat_model(model, provenance)
+        return threat_model_projection.render_threat_model(model, provenance)
     except (TypeError, ValueError) as exc:
         raise ContractError(f"threat model projection failed: {exc}") from exc
 
@@ -503,22 +488,11 @@ def _descriptor_relative_writes_available() -> bool:
     )
 
 
-_WINDOWS_SCAN_LOCAL_FILES: Any | None = None
-
-
 def _windows_scan_local_files() -> Any:
     """Load the Win32 backend and shared stream comparison lazily."""
+    import windows_scan_local_files
 
-    global _WINDOWS_SCAN_LOCAL_FILES
-    if _WINDOWS_SCAN_LOCAL_FILES is None:
-        script = Path(__file__).resolve().with_name("windows_scan_local_files.py")
-        spec = importlib.util.spec_from_file_location("codex_security_windows_scan_files", script)
-        if spec is None or spec.loader is None:
-            raise ContractError(f"could not load Windows scan-local file helper: {script}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _WINDOWS_SCAN_LOCAL_FILES = module
-    return _WINDOWS_SCAN_LOCAL_FILES
+    return windows_scan_local_files
 
 
 def _open_verified_scan_directory(
@@ -893,6 +867,8 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 
 
 def _validate_remote(remote: str, context: str) -> None:
+    if REMOTE_CONTROL_RE.search(remote):
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
     parsed = urlsplit(remote)
     if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
@@ -960,9 +936,9 @@ def _validate_location(location: dict[str, Any], context: str) -> None:
     _require_safe_relative_path(_require_str(location, "path", context), f"{context}.path")
     start = location.get("startLine")
     end = location.get("endLine", start)
-    if not is_json_integer(start) or start < 1:
+    if not isinstance(start, int) or start < 1:
         raise ContractError(f"{context}.startLine: expected a positive integer")
-    if not is_json_integer(end) or end < start:
+    if not isinstance(end, int) or end < start:
         raise ContractError(f"{context}.endLine: expected an integer >= startLine")
     role = location.get("role")
     if role is not None and (not isinstance(role, str) or not role):
@@ -1304,6 +1280,8 @@ def _recover_unsealed_coverage(
                         item["disposition"] = "needs_follow_up"
                         partial = True
 
+                if field == "deferred":
+                    _validate_deferred_paths(item, context)
                 _validate_schema_node(item, item_schema, context)
             except ContractError as exc:
                 warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
@@ -1601,6 +1579,11 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
                 raise ContractError(f"{evidence_context}.id: duplicate code-evidence id")
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
+            if evidence_key == "codeEvidence":
+                _require_safe_relative_path(
+                    _require_str(evidence, "path", evidence_context),
+                    f"{evidence_context}.path",
+                )
 
     referenced_sections = [
         (section_name, finding.get(section_name))
@@ -1661,6 +1644,15 @@ def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
         resolved.add(closure_id)
 
 
+def _validate_deferred_paths(deferred: dict[str, Any], context: str) -> None:
+    if "paths" not in deferred:
+        return
+    for index, path in enumerate(_require_list(deferred, "paths", context)):
+        if not isinstance(path, str):
+            raise ContractError(f"{context}.paths[{index}]: expected a string")
+        _require_safe_relative_path(path, f"{context}.paths[{index}]", allow_dot=True)
+
+
 def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_dir: Path) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
@@ -1709,6 +1701,9 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    for index, deferred in enumerate(coverage.get("deferred", [])):
+        if isinstance(deferred, dict):
+            _validate_deferred_paths(deferred, f"coverage.deferred[{index}]")
     _validate_resolved_deferred(coverage)
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
@@ -1794,7 +1789,7 @@ def _schema_type_matches(value: Any, expected: str) -> bool:
     return {
         "array": isinstance(value, list),
         "boolean": isinstance(value, bool),
-        "integer": is_json_integer(value),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
         "number": isinstance(value, (int, float)) and not isinstance(value, bool),
         "object": isinstance(value, dict),
         "string": isinstance(value, str),
@@ -2360,7 +2355,12 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     for evidence in _merged_code_evidence(finding):
         path = evidence.get("path")
         start_line = evidence.get("startLine")
-        if not isinstance(path, str) or not is_json_integer(start_line) or start_line < 1:
+        if (
+            not isinstance(path, str)
+            or not isinstance(start_line, int)
+            or isinstance(start_line, bool)
+            or start_line < 1
+        ):
             continue
         try:
             path = _require_safe_relative_path(path, "SARIF evidence location")
@@ -2372,7 +2372,8 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
                 "startLine": start_line,
                 "endLine": (
                     evidence["endLine"]
-                    if is_json_integer(evidence.get("endLine"))
+                    if isinstance(evidence.get("endLine"), int)
+                    and not isinstance(evidence["endLine"], bool)
                     and evidence["endLine"] >= start_line
                     else start_line
                 ),
@@ -2449,8 +2450,8 @@ def _sarif_location(location: dict[str, Any]) -> dict[str, Any]:
                 "uri": quote(location["path"], safe="/"),
             },
             "region": {
-                "startLine": int(location["startLine"]),
-                "endLine": int(location.get("endLine", location["startLine"])),
+                "startLine": location["startLine"],
+                "endLine": location.get("endLine", location["startLine"]),
             },
         }
     }
@@ -2608,16 +2609,9 @@ def _validate_existing_seal(
             raise ContractError(f"{context}: sealed artifact changed or is missing")
 
 
-def _read_sealed_scan(
-    scan_dir: Path, schema_dir: Path | None, required_for: str
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bytes]:
-    scan_dir = _require_scan_directory(scan_dir)
-    schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
-    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
-    scan = _require_dict(manifest, "scan", "manifest")
-    _validate_contract_refs(scan)
-    if scan.get("sealedAt") is None or scan.get("artifacts") is None:
-        raise ContractError(f"manifest.scan: {required_for} requires a sealed scan")
+def _read_sealed_artifacts(
+    scan_dir: Path, scan: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
     findings, findings_bytes = _read_scan_local_json_bytes(
         scan_dir, scan["findingsRef"], scan["findingsRef"]
     )
@@ -2632,6 +2626,20 @@ def _read_sealed_scan(
             scan["coverageRef"]: coverage_bytes,
         },
     )
+    return findings, coverage, findings_bytes
+
+
+def _read_sealed_scan(
+    scan_dir: Path, schema_dir: Path | None, required_for: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bytes]:
+    scan_dir = _require_scan_directory(scan_dir)
+    schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
+    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
+    scan = _require_dict(manifest, "scan", "manifest")
+    _validate_contract_refs(scan)
+    if scan.get("sealedAt") is None or scan.get("artifacts") is None:
+        raise ContractError(f"manifest.scan: {required_for} requires a sealed scan")
+    findings, coverage, findings_bytes = _read_sealed_artifacts(scan_dir, scan)
     _validate_manifest(manifest)
     findings_for_validation = _legacy_sealed_findings_for_validation(findings)
     _validate_findings(manifest, findings_for_validation)
@@ -2732,18 +2740,7 @@ def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
 def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    deep_scan = coverage.get("mode") == "deep_repository" or (
-        coverage.get("mode") == "scoped_path"
-        and any(
-            isinstance(finding.get("extensions"), dict)
-            and any(
-                isinstance(finding["extensions"].get(field), str)
-                and finding["extensions"][field].strip()
-                for field in ("candidateId", "reportId")
-            )
-            for finding in findings["findings"]
-        )
-    )
+    deep_scan = report_projection.uses_deep_presentation(coverage, findings["findings"])
     writer.writerow(finding_csv_columns(deep_scan))
     for finding in findings["findings"]:
         location = _sarif_primary_location(finding)
@@ -2761,8 +2758,8 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
                 "",
                 csv_cell(finding["remediation"]),
                 csv_cell(location["path"]),
-                int(location["startLine"]),
-                int(location.get("endLine", location["startLine"])),
+                location["startLine"],
+                location.get("endLine", location["startLine"]),
             )
         )
     return output.getvalue().encode("utf-8")

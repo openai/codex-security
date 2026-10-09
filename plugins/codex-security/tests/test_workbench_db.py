@@ -45,6 +45,7 @@ from workbench_test_support import (
     update_progress,
     workspace_command,
     write_completed_contract,
+    write_remediation_patch,
 )
 
 HEAD_CHANGED_WARNING = (
@@ -913,7 +914,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (46,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -1039,15 +1040,7 @@ def test_completed_finding_triage_and_remediation_persist(
     )
     assert "pending remediation operation" in str(pending_close["stderr"])
     patch_path = scan_dir / patch_name
-    patch_path.write_text(
-        "diff --git a/source.txt b/source.txt\n"
-        "--- a/source.txt\n"
-        "+++ b/source.txt\n"
-        "@@ -1 +1 @@\n"
-        "-vulnerable\n"
-        "+fixed\n",
-        newline="\n",
-    )
+    write_remediation_patch(patch_path, newline="\n")
     if patch_name.startswith(" "):
         (scan_dir / patch_name.strip()).write_text("different patch contents\n")
     generated = set_remediation(
@@ -1520,9 +1513,7 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
     ).strip()
     nested_repository = target / "untracked-repository"
     initialize_git_repository(nested_repository)
-    workspace_id = str(uuid.uuid4())
-    create_workspace(state_dir, workspace_id, "--target-path", str(target))
-    save_workspace(state_dir, workspace_id, str(target), ".", "standard")
+    workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     started = start_delivered_scan(
         state_dir,
         "--workspace-id",
@@ -2029,7 +2020,7 @@ def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: st
     assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
 
 
-@pytest.mark.parametrize("blank", ["", " \t\n"])
+@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000])
 def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
     state_dir = tmp_path / "state"
     workspace_id = str(uuid.uuid4())
@@ -2041,6 +2032,31 @@ def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: st
     saved = save_workspace(state_dir, workspace_id, str(target), blank, "standard")
     assert saved["targetPath"] == str(target)
     assert saved["scope"] == "."
+
+
+@pytest.mark.parametrize("field", ["scope", "target-path"])
+@pytest.mark.parametrize("leading", [False, True])
+def test_workspace_checks_retained_literal_path_length(tmp_path: Path, field: str, leading: bool):
+    state_dir = tmp_path / "state"
+    value = " " * 5000 + "src" if leading else "src" + " " * 5000
+    result = run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        str(uuid.uuid4()),
+        f"--{field}={value}",
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert result["stderr"] == "Text value must be no longer than 4096 characters.\n"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
+
+
+def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
+    scope = " " * 4093 + "src"
+    created = create_workspace(tmp_path / "state", str(uuid.uuid4()), "--scope", scope)
+    assert created["scope"] == scope
 
 
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:

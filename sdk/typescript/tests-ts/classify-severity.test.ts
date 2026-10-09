@@ -33,7 +33,6 @@ const finding: SeverityClassificationFinding = {
     "A documented lower-trust caller can read bounded operational metadata.",
   severity: { level: "high", rationale: "Original assessment" },
   evidence: "The response contains counters and no protected content.",
-  extensions: { values: [null, false, 0, "", 0.125, Number.MAX_SAFE_INTEGER] },
 };
 const assessed = {
   findingId: finding.findingId,
@@ -107,9 +106,6 @@ test("supplies complete evidence and separate policy/context to a restricted str
   expect(result.knowledgeBaseSha256).toMatch(/^[a-f0-9]{64}$/u);
   expect(calls).toHaveLength(1);
   expect(calls[0]!.prompt).toContain(String(finding["evidence"]));
-  expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).finding).toEqual(
-    finding,
-  );
   expect(calls[0]!.prompt).toContain("The counters contain no customer data.");
   expect(calls[0]!.thread).toMatchObject({
     threadSource: "security_severity_classification",
@@ -233,29 +229,4 @@ test("cancellation and invalid inputs cannot produce a successful classification
     "must not be empty",
   );
   expect((await classifySeverity([])).assessments).toEqual([]);
-});
-
-test("rejects unsupported numeric evidence before classification or hash verification", async () => {
-  const rubricPath = await document("Apply the supplied policy.");
-  const { codex, calls } = fakeCodex(assessed);
-  const nullEvidence = { ...finding, evidence: { values: [null] } };
-  const result = await classifySeverity([nullEvidence]);
-  for (const value of [
-    NaN,
-    Infinity,
-    -Infinity,
-    Number.MAX_SAFE_INTEGER + 1,
-    -Number.MAX_SAFE_INTEGER - 1,
-  ]) {
-    const invalid = { ...finding, evidence: { values: [value] } };
-    for (const options of [{}, { rubricPath, codex }]) {
-      await expect(classifySeverity([invalid], options)).rejects.toThrow(
-        "JSON numbers are not supported",
-      );
-    }
-    expect(() => validateSeverityClassification(result, [invalid])).toThrow(
-      "JSON numbers are not supported",
-    );
-  }
-  expect(calls).toHaveLength(0);
 });

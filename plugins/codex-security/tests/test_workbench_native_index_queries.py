@@ -495,14 +495,11 @@ def test_scan_pages_compare_exact_updates_and_preserve_ties(
         )
     before = list(connection.iterdump())
     query = workbench_api["scan_history"].list_scans
-    # Repeated helpers share a connection, potentially with an unrelated reader.
+    # Repeated helpers share a connection.
     for _ in range(2):
-        cursor = connection.execute("SELECT id FROM scans ORDER BY id")
-        next(cursor)
         pages = [query(connection, query_args(limit=1, offset=index)) for index in range(3)]
         scan = connection.execute("SELECT * FROM scans LIMIT 1").fetchone()
         assert workbench_api["get_scan_feedback"](connection, scan)["falsePositives"] == []
-        cursor.close()
         assert [page["scans"][0]["scanId"] for page in pages] == [
             SCAN_IDS[index] for index in order
         ]
@@ -510,4 +507,53 @@ def test_scan_pages_compare_exact_updates_and_preserve_ties(
             timestamps[index] for index in order
         ]
         assert [page["nextOffset"] for page in pages] == [1, 2, None]
+    assert list(connection.iterdump()) == before
+
+
+@pytest.mark.parametrize(
+    ("older", "newer", "equal"),
+    [
+        ("2026-10-08T01:00:00Z", "2026-10-08T01:00:00.100000Z", False),
+        ("2026-10-08T03:00:00+02:00", "2026-10-08T01:00:00.100000Z", False),
+        ("2026-10-08T01:00:00.000000001Z", "2026-10-08T01:00:00.000000002Z", False),
+        ("2026-10-08T03:00:00.100000+02:00", "2026-10-08t01:00:00.1z", True),
+    ],
+)
+def test_scan_start_chronology_keeps_latest_and_first_seen_queries_consistent(
+    workbench_api, indexed_collections, older, newer, equal
+):
+    connection, targets = indexed_collections
+    target_id = stable_target_id(targets[0])
+    for scan_id, timestamp in zip(SCAN_IDS[:2], (older, newer)):
+        connection.execute(
+            "UPDATE scans SET target_id = ?, started_at = ?, updated_at = ? WHERE id = ?",
+            (target_id, timestamp, "2026-10-08T04:00:00Z", scan_id),
+        )
+        connection.execute(
+            "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
+            ("2026-10-08T04:00:00Z", scan_id),
+        )
+    connection.execute(
+        "UPDATE finding_occurrences SET finding_id = 'finding-0' WHERE id = 'occurrence-1'"
+    )
+    connection.execute(
+        "INSERT INTO finding_occurrences "
+        "(id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) "
+        "SELECT 'latest-only', 'finding-1', scan_id, title, summary, severity, confidence, remediation, details_json, created_at "
+        "FROM finding_occurrences WHERE id = 'occurrence-1'"
+    )
+    before = list(connection.iterdump())
+    indexes = workbench_api["native_indexes"]
+    findings = {finding["finding_id"]: finding for finding in indexes._indexed_findings(connection)}
+    assert findings["finding-1"]["confirmed_in_latest_scan"] is True
+    assert findings["finding-0"]["known_since"] == older
+    assert findings["finding-0"]["known_scan_ids"] == SCAN_IDS[:2]
+    repository = indexes.list_repositories(connection, query_args(target_id=target_id))[
+        "repositories"
+    ][0]
+    assert repository["latestScan"]["scanId"] == SCAN_IDS[1]
+    history = workbench_api["scan_history"].list_scans(connection, query_args(target_id=target_id))[
+        "scans"
+    ]
+    assert [scan["scanId"] for scan in history] == (SCAN_IDS[:2] if equal else SCAN_IDS[1::-1])
     assert list(connection.iterdump()) == before

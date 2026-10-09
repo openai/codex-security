@@ -125,11 +125,11 @@ for (const surface of ["review", "feedback"] as const) {
           settled = true;
         });
         const deadline = new AbortController();
-        const bounded = <T>(operation: Promise<T>): Promise<T> =>
+        const bounded = <T>(operation: Promise<T>, phase: string): Promise<T> =>
           Promise.race([
             operation,
             delay(5000, undefined, { signal: deadline.signal }).then(() => {
-              throw new Error("Process did not settle before holder release");
+              throw new Error(`${phase} did not settle before holder release`);
             }),
           ]);
         try {
@@ -141,17 +141,18 @@ for (const surface of ["review", "feedback"] as const) {
                   throw outcome.error ?? new Error("Fixture did not start");
                 }),
               ]),
+              "fixture readiness",
             );
             if (mode === "active") {
               controller.abort(reason);
-              await bounded(ignored.promise);
+              await bounded(ignored.promise, "SIGTERM observation");
               expect(child!.exitCode).toBeNull();
               expect(child!.signalCode).toBeNull();
               expect(child!.stdout.destroyed).toBe(false);
               expect(child!.stderr.destroyed).toBe(false);
               if (surface === "review") child!.kill("SIGKILL");
             }
-            await bounded(exited.promise);
+            await bounded(exited.promise, "direct child exit");
             if (mode === "active" && surface === "feedback")
               expect(child!.signalCode).toBe("SIGKILL");
           }
@@ -162,7 +163,7 @@ for (const surface of ["review", "feedback"] as const) {
             expect(child!.stderr.destroyed).toBe(false);
             await writeFile(release, "released");
           }
-          const outcome = await bounded(result);
+          const outcome = await bounded(result, "operation completion");
           if (mode === "success") {
             expect(outcome.value).toMatchObject(
               surface === "feedback"
@@ -175,9 +176,7 @@ for (const surface of ["review", "feedback"] as const) {
                 ? (outcome.error as Error).message
                 : retryDiagnostic,
             ).toContain("late café 日本語 😀");
-          } else if (mode === "spawn-error") {
-            expect((outcome.error as Error).message).toContain("ENOENT");
-          } else {
+          } else if (mode !== "spawn-error") {
             expect(outcome.error).toBe(reason);
           }
           expect(starts).toBe(1);
@@ -190,9 +189,16 @@ for (const surface of ["review", "feedback"] as const) {
               signal: controlAbort.signal,
               stdio: "ignore",
             });
-            control.once("error", () => {});
+            let controlError: Error | undefined;
+            control.once("error", (error: Error) => {
+              controlError = error;
+            });
             await new Promise<void>((resolve) =>
               control.once("close", resolve),
+            );
+            expect(controlError).toBeInstanceOf(Error);
+            expect((outcome.error as Error).message).toContain(
+              controlError!.message,
             );
             expect(remaining).toHaveLength(
               getEventListeners(controlAbort.signal, "abort").length,
@@ -216,6 +222,7 @@ for (const surface of ["review", "feedback"] as const) {
                   while (!existsSync(`${release}.done`))
                     await delay(10, undefined, { signal: deadline.signal });
                 })(),
+                "holder cleanup",
               );
           } finally {
             deadline.abort();

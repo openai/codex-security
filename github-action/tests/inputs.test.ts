@@ -6,7 +6,7 @@ const parse = (values: Record<string, string> = {}) => parseInputs(key => values
 test('defaults are stable across events', () => {
   const input = parse();
   assert.deepEqual(input, {
-    repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard',
+    repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard', cyberAccessProgram: undefined,
     model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
     verbose: true, dryRun: false, summary: true, annotations: true,
     uploadArtifacts: false, artifactName: 'codex-security', retentionDays: 7,
@@ -16,6 +16,16 @@ test('defaults are stable across events', () => {
   assert.ok(!args.includes('--max-time-hours'));
   assert.ok(!args.includes('--fail-on-severity'));
   assert.ok(!args.includes('--python'));
+  assert.ok(!args.includes('--cyber-access-program'));
+});
+test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {
+  for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
+    const args = scanArguments(parse({mode, 'cyber-access-program':program}), {repository:'/checkout'}, '/results');
+    assert.equal(args[args.indexOf('--cyber-access-program') + 1], program);
+  }
+  const blank = scanArguments(parse({'cyber-access-program':'  '}), {repository:'/checkout'}, '/results');
+  assert.ok(!blank.includes('--cyber-access-program'));
+  assert.throws(() => parse({'cyber-access-program':'unsupported'}), /cyber-access-program must be one of/);
 });
 test('Deep scans forward an explicit discovery budget and selected repository paths', () => {
   const input = parse({mode:'deep', paths:'./src/\nlib', 'max-time-hours':'1.5'});
