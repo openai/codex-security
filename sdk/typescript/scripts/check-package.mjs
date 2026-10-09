@@ -192,6 +192,7 @@ const allowedFiles = new Set([
     "mock-scan",
     "owner-evidence",
     "patch-tui",
+    "patch-publication",
     "publication",
     "publication-events",
     "publication-store",
