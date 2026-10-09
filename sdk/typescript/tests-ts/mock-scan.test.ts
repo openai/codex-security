@@ -57,6 +57,9 @@ async function fixture() {
 test("mock scans seal real artifacts and index shared and unique findings without Codex", async () => {
   const { repository, client, environment, python } = await fixture();
   const callbacks: string[] = [];
+  const registrations: Array<
+    Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0]
+  > = [];
   try {
     const first = await client.run(repository, {
       mock: true,
@@ -64,10 +67,20 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       maxCostUsd: 0.01,
       failureSeverity: "informational",
       onAuthentication: () => callbacks.push("authentication"),
+      onScanRegistered: (scan) => {
+        callbacks.push("registered");
+        registrations.push(scan);
+      },
       onScanStarted: () => callbacks.push("started"),
     });
     const second = await client.run(repository, { mock: true });
-    expect(callbacks).toEqual(["started"]);
+    expect(callbacks).toEqual(["registered", "started"]);
+    expect(registrations).toEqual([
+      {
+        scanId: first.manifest.scan.id,
+        scanDir: first.scanDir,
+      },
+    ]);
     expect(first.findings.findings).toHaveLength(12);
     expect(first.coverage.completeness).toBe("complete");
     expect(first.manifest.scan.status).toBe("completed");

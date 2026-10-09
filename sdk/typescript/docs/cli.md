@@ -1067,6 +1067,24 @@ least eight characters.
 | `findings list [REPOSITORY]`                          | List open findings.                                        |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
 
+Without an ID, `scans show` selects the latest completed scan, while `scans logs`
+selects the latest scan of any status. After a successful scan followed by a
+failed or active scan, these defaults refer to different runs. Human output
+identifies the selected run and gives matching commands with its full scan ID:
+
+```bash
+codex-security scans show SCAN_ID
+codex-security scans logs SCAN_ID
+```
+
+Completion summaries include that ID and the saved results directory. Failure
+summaries include the same navigation when the current run was registered, plus
+the last observed phase when available. A failure before registration has no
+scan ID. The handoff uses that run's registration receipt without querying scan
+history. Inspect its saved status before choosing resume or rerun, and supply
+the original custom prompt files for reruns. Structured history and log output
+and command selection defaults are unchanged.
+
 Recipes save settings and authentication choice, not credentials. Reruns use the
 current checkout/context files and do not reload project files. Supply replacement
 scan and custom-validation prompts when the original used them:

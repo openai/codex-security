@@ -4032,7 +4032,8 @@ describe("CLI", () => {
     expect(await runCli(["scan"], dependencies({ result }))).toBe(0);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Scan complete · 12345678");
-    expect(stderr.text()).not.toContain(result.manifest.scan.id);
+    expect(stderr.text()).toContain(`scans show ${result.manifest.scan.id}`);
+    expect(stderr.text()).toContain(`scans logs ${result.manifest.scan.id}`);
     expect(stderr.text()).toContain(
       [
         `  REPORT    ${result.reportPath}`,
