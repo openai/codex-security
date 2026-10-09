@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -28,6 +29,7 @@ if (role === "holder") {
     {
       // The holder must outlive the direct child on Windows.
       detached: process.platform === "win32",
+      cwd: dirname(fileURLToPath(import.meta.url)),
       stdio: ["ignore", 1, 2, "ipc"],
     },
   );
