@@ -14,6 +14,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -57,7 +58,7 @@ async function testDeepScanStdioLifecycle() {
     "fake-codex-signal-checkpoint-control.txt",
   );
   const fakeCodexPath = path.join(fixtureRoot, "fake-codex.mjs");
-  const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper.mjs");
+  const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper ");
   const cancelFailureControlPath = path.join(
     fixtureRoot,
     "fail-next-cancel-scan",
@@ -126,7 +127,8 @@ profile = "selected"
 model_reasoning_summary = "none"
 `,
   );
-  await writePythonWrapper(pythonWrapperPath);
+  await writePythonWrapper(`${pythonWrapperPath}.mjs`);
+  await symlink(`${pythonWrapperPath}.mjs`, pythonWrapperPath);
   await buildServer(serverBundlePath, { target: "node20" });
 
   const environment = {
@@ -140,6 +142,7 @@ model_reasoning_summary = "none"
     CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
+    CODEX_SECURITY_PYTHON_COMMAND: pythonWrapperPath,
     REAL_PYTHON: process.env.PYTHON?.trim() || "python3",
     FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL: cancelFailureControlPath,
     FAKE_WORKBENCH_CANCEL_LOG: cancelLogPath,
