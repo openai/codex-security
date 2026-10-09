@@ -194,6 +194,111 @@ describe("live scan dashboard", () => {
     },
   );
 
+  test.each(
+    [false, true].flatMap((coalesced) =>
+      [1, 2, 3].map((escapes) => ({ coalesced, escapes })),
+    ),
+  )(
+    "cancels the budget before navigation coalesced=$coalesced escapes=$escapes",
+    async ({ coalesced, escapes }) => {
+      jest.useFakeTimers();
+      for (const navigation of [
+        "\u001B[A",
+        "\u001B[B",
+        "\u001B[H",
+        "\u001B[F",
+        "\u001B[1~",
+        "\u001B[4~",
+        "\u001B[5~",
+        "\u001B[6~",
+        "\u001BOA",
+        "\u001BOB",
+        "\u001B[1;3A",
+        "\u001B[1;5A",
+      ]) {
+        const input = new DashboardTestInput();
+        const dashboard = createDashboard(capture(true).stream, { input });
+        dashboard.start();
+        try {
+          const answer = dashboard.requestBudgetIncrease({
+            maxCostUsd: 20,
+            cost: fakeResult([], "complete", {
+              input_tokens: 100,
+              output_tokens: 1,
+            }).cost!,
+            signal: new AbortController().signal,
+          });
+          input.emit("data", "30");
+          const prefix = "\u001B".repeat(escapes);
+          const chunks = coalesced
+            ? [prefix + navigation]
+            : [prefix, navigation];
+          for (const chunk of chunks) input.emit("data", Buffer.from(chunk));
+          input.emit("data", "\r");
+          await expect(answer).resolves.toBeUndefined();
+        } finally {
+          dashboard.stop();
+          await Promise.resolve();
+        }
+        expect(jest.getTimerCount()).toBe(0);
+      }
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((coalesced) =>
+      [1, 2, 3].map((escapes) => ({ coalesced, escapes })),
+    ),
+  )(
+    "returns from a component before navigation coalesced=$coalesced escapes=$escapes",
+    async ({ coalesced, escapes }) => {
+      jest.useFakeTimers();
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(stderr.stream, {
+        input,
+        presentation: "components",
+      });
+      const components: ComponentReceipt[] = ["API", "Web"].map(
+        (name, index) => ({
+          id: `component-${index}`,
+          name,
+          paths: [`src/${name}`],
+          status: "started",
+          outputDir: `/synthetic/results/${index}`,
+        }),
+      );
+      dashboard.start();
+      try {
+        dashboard.setComponents(components);
+        for (const component of components)
+          dashboard.recordComponentEvent({
+            componentId: component.id,
+            type: "activity",
+            value: {
+              id: component.id,
+              kind: "message",
+              status: "completed",
+              description: `${component.name} activity`,
+              paths: [],
+            },
+          });
+        input.emit("data", "\r");
+        expect(lastFrame(stderr)).toContain("API activity");
+        const prefix = "\u001B".repeat(escapes);
+        const chunks = coalesced ? [prefix + "\u001B[B"] : [prefix, "\u001B[B"];
+        for (const chunk of chunks) input.emit("data", Buffer.from(chunk));
+        input.emit("data", "\r");
+        expect(lastFrame(stderr)).toContain("Web activity");
+        expect(lastFrame(stderr)).not.toContain("API activity");
+      } finally {
+        dashboard.stop();
+        await Promise.resolve();
+      }
+      expect(jest.getTimerCount()).toBe(0);
+    },
+  );
+
   test("discards pasted keys and partial sequences after a budget answer", async () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
