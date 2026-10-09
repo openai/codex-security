@@ -194,6 +194,7 @@
 - frame terminal input and skip unused activity ([#1511](https://github.com/openai/codex-security/pull/1511))
 - parse complete triage JSON before fenced content ([#1512](https://github.com/openai/codex-security/pull/1512))
 - remove legacy message and plugin compatibility ([#1548](https://github.com/openai/codex-security/pull/1548))
+- share candidate ledger updates ([#1490](https://github.com/openai/codex-security/pull/1490))
 
 <!-- release-section: highlights:end -->
 
