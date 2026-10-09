@@ -3092,6 +3092,38 @@ def commit_source_fixture(target: Path, source: bytes) -> str:
 
 
 @pytest.mark.parametrize(
+    ("mode", "kind", "dirty", "has_excerpt"),
+    [
+        ("standard", None, False, True),
+        ("diff", None, False, False),
+        ("diff", "working_tree", True, False),
+        ("diff", "working_tree", False, True),
+        ("diff", "commit", True, True),
+        ("diff", "range", True, True),
+    ],
+)
+def test_source_excerpt_requires_known_diff_content(
+    tmp_path: Path, mode: str, kind: str | None, dirty: bool, has_excerpt: bool
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    target = tmp_path / "target"
+    revision = commit_source_fixture(target, b"committed source\n")
+    if dirty:
+        (target / "README.md").write_text("uncommitted source\n")
+    scan = {
+        "mode": mode,
+        "diff_target_kind": kind,
+        "target_revision": revision,
+        "target_snapshot_digest": None,
+        "diff_content_digest": namespace["worktree_content_digest"](target),
+    }
+    excerpt = namespace["finding_source_excerpt"](
+        scan, target, [{"path": "README.md", "startLine": 1, "endLine": 1}]
+    )
+    assert excerpt == ("1  committed source" if has_excerpt else None)
+
+
+@pytest.mark.parametrize(
     "separator", ["\f", "\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
 )
 def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator: str) -> None:
@@ -3107,7 +3139,12 @@ def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator:
     )
 
     excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
+        {
+            "mode": "standard",
+            "target_revision": revision,
+            "target_snapshot_digest": None,
+            "diff_target_kind": None,
+        },
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
     )
@@ -3129,7 +3166,12 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
     )
 
     excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
+        {
+            "mode": "standard",
+            "target_revision": revision,
+            "target_snapshot_digest": None,
+            "diff_target_kind": None,
+        },
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
     )
@@ -3159,7 +3201,12 @@ def test_source_excerpt_preserves_final_lines(
     finding_source_excerpt = namespace["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(target, source)
-    scan = {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None}
+    scan = {
+        "mode": "standard",
+        "target_revision": revision,
+        "target_snapshot_digest": None,
+        "diff_target_kind": None,
+    }
 
     excerpt = finding_source_excerpt(
         scan,
