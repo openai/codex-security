@@ -3786,7 +3786,9 @@ async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
   }
 }
 
-async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
+async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
+  replaced = false,
+) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     stopAfterNoNew: 2,
@@ -3798,18 +3800,54 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
   executor.dedupGate = Promise.withResolvers<void>();
   const updateWorker = store.updateWorker.bind(store);
   const rejectedCancellations = new Set();
+  fixture.run.coordinatorGeneration = store.run.coordinatorGeneration = 2;
+  let ownershipReads = 0;
+  const persisted = new WorkbenchDeepScanStore(async (args: string[]) => {
+    if (args[0] === "claim-deep-scan-coordinator")
+      return { deepScan: store.run, coordinatorDisposition: "claimed" };
+    if (args[0] === "get-deep-scan") {
+      ownershipReads += 1;
+      if (ownershipReads > 1)
+        throw new Error("sqlite3.OperationalError: database is locked");
+      return {
+        deepScan: {
+          ...store.run,
+          status: "succeeded",
+          coordinatorGeneration: 3,
+          terminalReason: "capped",
+        },
+      };
+    }
+    throw new Error(
+      "Deep Scan coordinator lease belongs to a newer generation.",
+    );
+  });
+  if (replaced) {
+    await persisted.claimCoordinator({
+      scanId: fixture.run.scanId,
+      threadId: "fixture-thread",
+    });
+    store.get = persisted.get.bind(persisted);
+  }
   store.updateWorker = async (update) => {
     if (update.kind === "discovery" && update.status === "canceled") {
       assert.equal(executor.dedupSignal?.aborted, true);
       assert.equal(store.run.noNewStreak, 2);
       rejectedCancellations.add(update.id);
+      if (replaced) return await persisted.updateWorker(update);
       throw new Error("fixture cancellation persistence failure");
     }
     return updateWorker(update);
   };
   const completed: ScanDraftInput[] = [];
   const coordinator = createCoordinator(fixture, store, executor, {
-    onComplete: async (draft) => void completed.push(structuredClone(draft)),
+    threadId: "fixture-thread",
+    heartbeatIntervalMs: 60_000,
+    onComplete: async (draft) => {
+      if (replaced)
+        throw new Error("Only a running scan can update artifacts.");
+      completed.push(structuredClone(draft));
+    },
   });
   coordinator.start();
   await executor.dedupStarted.promise;
@@ -3825,6 +3863,15 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
     "the redundant discoveries reached the failing cancellation write",
   );
   assert.equal(terminal?.status, "succeeded", terminal?.error);
+  if (replaced) {
+    assert.equal(terminal.coordinatorGeneration, 3);
+    assert.equal(terminal.terminalReason, "capped");
+    assert.equal(store.failureMessages.length, 0);
+    assert.equal(store.finishCalls.length, 0);
+    assert.equal(completed.length, 0);
+    assert.equal(executor.runningDiscovery, 0);
+    return;
+  }
   assert.equal(terminal.terminalReason, "saturated");
   assert.equal(store.failureMessages.length, 0);
   assert.equal(store.finishCalls.length, 1);
@@ -4156,6 +4203,7 @@ try {
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
   await testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
+  await testSaturationIgnoresDiscoveryCancellationWriteFailure(true);
   await testPublicationUsesAcceptedReducerSnapshot();
   await testDirectReducerCannotDropAcceptedFinding();
   await testSaturationDrainsBufferedAndCancelsInflight();
