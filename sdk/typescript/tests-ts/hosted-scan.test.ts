@@ -427,16 +427,12 @@ test.each([
 });
 
 test.each([false, true])(
-  "built CLI pipes support hosted execution and cancellation (%p)",
+  "CLI pipes support hosted execution and cancellation (%p)",
   async (cancel) => {
     const input = await fixture();
     const child = spawn(
-      process.execPath.includes("bun") ? "node" : process.execPath,
-      [
-        join(import.meta.dirname, "../bin/codex-security.mjs"),
-        "scan",
-        "--host",
-      ],
+      process.execPath,
+      [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
       {
         env: {
           PATH: process.env["PATH"],
@@ -470,7 +466,13 @@ test.each([false, true])(
         if (message.method === "execution.run") {
           executions++;
           if (cancel) {
-            child.kill("SIGTERM");
+            child.stdin.write(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                method: "cancel",
+                params: { id: "run" },
+              }) + "\n",
+            );
             continue;
           }
           await writeDraft(message.params);
@@ -485,11 +487,23 @@ test.each([false, true])(
               },
             }) + "\n",
           );
+        } else if (message.method === "execution.cancel") {
+          child.stdin.write(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.params.requestId,
+              result: {
+                requestId: message.params.requestId,
+                status: "canceled",
+                sessionId: "fake-host",
+              },
+            }) + "\n",
+          );
         } else if (message.id === "run") final = message;
       }
-      expect(await closed, stderr).toBe(cancel ? 143 : 0);
+      expect(await closed, stderr).toBe(cancel ? 1 : 0);
       expect(executions).toBe(1);
-      if (!cancel) expect(final.result.status).toBe("completed");
+      expect(final.result.status).toBe(cancel ? "canceled" : "completed");
     } finally {
       child.kill();
     }
