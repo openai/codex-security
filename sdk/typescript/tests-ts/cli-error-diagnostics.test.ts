@@ -51,7 +51,7 @@ test("scans list retains actual SQLite diagnostics and recovery advice", async (
     );
     expect(stderr.text()).toContain(database);
     expect(stderr.text()).toContain("SQLite journal files are writable");
-    expect(stderr.text()).toContain("CODEX_SECURITY_STATE_DIR");
+    expect(stderr.text().match(/CODEX_SECURITY_STATE_DIR/gu)).toHaveLength(1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
