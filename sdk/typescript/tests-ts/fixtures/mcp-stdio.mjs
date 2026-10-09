@@ -1,6 +1,6 @@
 import { setImmediate } from "node:timers/promises";
 import { z } from "incur";
-import { serveScanMcp } from "../../src/cli-mcp.ts";
+import { serveCliMcp } from "../../src/cli-mcp.ts";
 
 const write = process.stdout.write;
 process.stdout.write = function (...args) {
@@ -11,9 +11,12 @@ process.stdout.write = function (...args) {
 };
 
 async function main() {
-  const exitCode = await serveScanMcp({
+  const exitCode = await serveCliMcp({
     input: process.stdin,
     output: process.stdout,
+    errorOutput: process.stderr,
+    commands: [],
+    runCommand: async () => ({ exitCode: 0 }),
     dependencies: {
       addSignalListener: (signal, listener) => process.on(signal, listener),
       removeSignalListener: (signal, listener) => process.off(signal, listener),

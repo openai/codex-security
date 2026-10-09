@@ -2,13 +2,18 @@ import type {
   StandardSchemaWithJSON,
   Transport,
 } from "@modelcontextprotocol/server";
-import type { Readable, Writable } from "node:stream";
+import { Writable, type Readable } from "node:stream";
+import type {
+  CliMcpCommand,
+  CliMcpInput,
+  CliMcpResult,
+} from "./cli-mcp-commands.js";
 import { z } from "incur";
 import { listenForAbort } from "./cli-signals.js";
 import { VERSION } from "./version.js";
 
-export const scanMcpInstructions =
-  "Use info for SDK metadata and scan to run security scans. Scans use local credentials, can make billable model calls, and write artifacts. Only scan repositories the user has authorized. Patching and other commands remain CLI-only.";
+export const cliMcpInstructions =
+  "Use info for SDK metadata and scan to run security scans. Other command tools accept args and options matching the CLI. Commands use local credentials and can make billable model calls, modify files or scan history, and publish external issues or pull requests. Only perform operations the user has authorized. Supply explicit inputs for commands that otherwise use a terminal picker. Authentication setup and CLI integration installers remain local operator actions.";
 export const scanMcpAnnotations = {
   readOnlyHint: false,
   destructiveHint: true,
@@ -22,13 +27,16 @@ interface ScanOutcome {
   error?: string;
 }
 
-export async function serveScanMcp<
+export async function serveCliMcp<
   ScanInput extends Record<string, unknown>,
   InfoInput extends Record<string, unknown>,
 >({
   input,
   output,
   dependencies,
+  commands,
+  runCommand,
+  errorOutput,
   scanInputSchema,
   infoInputSchema,
   infoOutputSchema,
@@ -37,6 +45,14 @@ export async function serveScanMcp<
 }: {
   input: Readable;
   output: Writable;
+  errorOutput: { write(chunk: string): unknown };
+  commands: CliMcpCommand[];
+  runCommand(
+    command: CliMcpCommand,
+    input: CliMcpInput,
+    signal: AbortSignal,
+    forceSignal: AbortSignal,
+  ): Promise<CliMcpResult>;
   dependencies: Parameters<typeof listenForAbort>[0] & {
     forceExit(signal: "SIGINT" | "SIGTERM"): void;
   };
@@ -46,18 +62,39 @@ export async function serveScanMcp<
   runScan(input: ScanInput, signal: AbortSignal): Promise<ScanOutcome>;
   readInfo(input: InfoInput): Promise<Record<string, unknown>>;
 }): Promise<number> {
-  const [{ McpServer }, { StdioServerTransport }] = await Promise.all([
-    import("@modelcontextprotocol/server"),
-    import("@modelcontextprotocol/server/stdio"),
-  ]);
+  const [{ McpServer, fromJsonSchema }, { StdioServerTransport }] =
+    await Promise.all([
+      import("@modelcontextprotocol/server"),
+      import("@modelcontextprotocol/server/stdio"),
+    ]);
   const server = new McpServer(
     { name: "codex-security", version: VERSION },
-    { instructions: scanMcpInstructions },
+    { instructions: cliMcpInstructions },
   );
-  const pending = new Set<Promise<ScanOutcome>>();
+  const pending = new Set<Promise<unknown>>();
+  const forceShutdown = new AbortController();
   // The pinned SDK ignores request IDs 0 and "" when handling cancellation.
   // Track them before async input validation so immediate cancellation works.
-  const scanCancellation = new Map<string | number, AbortController>();
+  const requestCancellation = new Map<string | number, AbortController>();
+  const requestSignal = (id: string | number, signal: AbortSignal) => {
+    const cancellation = requestCancellation.get(id);
+    return cancellation
+      ? AbortSignal.any([signal, cancellation.signal])
+      : signal;
+  };
+  const trackedResult = async (operation: Promise<CliMcpResult>) => {
+    pending.add(operation);
+    try {
+      const outcome = await operation;
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(outcome) }],
+        structuredContent: { ...outcome },
+        ...(outcome.exitCode === 0 ? {} : { isError: true }),
+      };
+    } finally {
+      pending.delete(operation);
+    }
+  };
   server.registerTool(
     "info",
     {
@@ -92,25 +129,39 @@ export async function serveScanMcp<
       }),
       annotations: scanMcpAnnotations,
     },
-    async (input, context) => {
-      const cancellation = scanCancellation.get(context.mcpReq.id);
-      const signal = cancellation
-        ? AbortSignal.any([context.mcpReq.signal, cancellation.signal])
-        : context.mcpReq.signal;
-      const operation = runScan(input, signal);
-      pending.add(operation);
-      try {
-        const outcome = await operation;
-        return {
-          content: [{ type: "text", text: JSON.stringify(outcome) }],
-          structuredContent: { ...outcome },
-          ...(outcome.exitCode === 0 ? {} : { isError: true }),
-        };
-      } finally {
-        pending.delete(operation);
-      }
-    },
+    (input, context) =>
+      trackedResult(
+        runScan(input, requestSignal(context.mcpReq.id, context.mcpReq.signal)),
+      ),
   );
+  const commandOutput = z.object({
+    exitCode: z.number(),
+    data: z.unknown().optional(),
+    output: z.string().optional(),
+    error: z.string().optional(),
+    diagnostics: z.string().optional(),
+  });
+  for (const command of commands) {
+    server.registerTool(
+      command.name,
+      {
+        description: command.description,
+        inputSchema: fromJsonSchema<CliMcpInput>(command.inputSchema),
+        outputSchema: commandOutput,
+        annotations: command.annotations,
+      },
+      (input, context) =>
+        trackedResult(
+          runCommand(
+            command,
+            input,
+            requestSignal(context.mcpReq.id, context.mcpReq.signal),
+            forceShutdown.signal,
+          ),
+        ),
+    );
+  }
+
   const stdio = new StdioServerTransport(input, output);
   const transport: Transport = {
     async start() {
@@ -119,17 +170,16 @@ export async function serveScanMcp<
           "id" in message &&
           (message.id === 0 || message.id === "") &&
           "method" in message &&
-          message.method === "tools/call" &&
-          message.params?.["name"] === "scan"
+          message.method === "tools/call"
         ) {
-          scanCancellation.set(message.id, new AbortController());
+          requestCancellation.set(message.id, new AbortController());
         } else if (
           "method" in message &&
           message.method === "notifications/cancelled"
         ) {
           const requestId = message.params?.["requestId"];
           if (requestId === 0 || requestId === "") {
-            scanCancellation.get(requestId)?.abort();
+            requestCancellation.get(requestId)?.abort();
           }
         }
         transport.onmessage?.(message);
@@ -145,8 +195,8 @@ export async function serveScanMcp<
         message.id !== undefined &&
         message.id !== null
       ) {
-        const cancellation = scanCancellation.get(message.id);
-        scanCancellation.delete(message.id);
+        const cancellation = requestCancellation.get(message.id);
+        requestCancellation.delete(message.id);
         if (cancellation?.signal.aborted) return;
       }
       await stdio.send(message);
@@ -164,11 +214,10 @@ export async function serveScanMcp<
   };
   const shutdown = new AbortController();
   shutdown.signal.addEventListener("abort", stop, { once: true });
-  const removeSignals = listenForAbort(
-    dependencies,
-    shutdown,
-    dependencies.forceExit,
-  );
+  const removeSignals = listenForAbort(dependencies, shutdown, (signal) => {
+    forceShutdown.abort(signal);
+    dependencies.forceExit(signal);
+  });
   // The SDK stdio transport does not close itself on EOF.
   input.once("end", stop);
   input.once("close", stop);
@@ -179,6 +228,14 @@ export async function serveScanMcp<
   });
   // Buffered writes can fail after EOF or after main returns.
   output.on("error", stop);
+  if (errorOutput instanceof Writable) {
+    // Diagnostic writes can finish after a command or the server returns.
+    const ignoreDiagnosticError = (): void => {};
+    errorOutput.on("error", ignoreDiagnosticError);
+    errorOutput.once("close", () =>
+      errorOutput.off("error", ignoreDiagnosticError),
+    );
+  }
   try {
     await server.connect(transport);
     await closed;

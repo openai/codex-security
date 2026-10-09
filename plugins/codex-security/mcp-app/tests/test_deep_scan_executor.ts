@@ -1698,8 +1698,24 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           ]),
         ),
       );
+      const selectedExecutables = await Promise.all(
+        settings.map(async (_settings, index) => {
+          if (process.platform === "win32") {
+            return { codex: process.execPath, python: `${python}-${index}` };
+          }
+          const runtime = path.join(fixture.root, `runtime-${index}`);
+          const linked = path.join(fixture.root, `runtime-link-${index}`);
+          await mkdir(path.join(runtime, "child"), { recursive: true });
+          await symlink(path.join(runtime, "child"), linked, "dir");
+          await symlink(process.execPath, path.join(runtime, "codex"));
+          // The CLI anchors these paths before a tool changes working directory.
+          return {
+            codex: `${linked}/../codex`,
+            python: `${linked}/../python`,
+          };
+        }),
+      );
       await writeFile(promptPath, "synthetic worker configuration fixture");
-      process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = codexHome;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
       process.env.CODEX_SECURITY_PLUGIN_ROOT = path.join(
@@ -1734,8 +1750,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         launches.push({ command, args, environment, markerPath });
         return originalSpawn(
           command,
-          command === process.execPath ||
-            command === path.toNamespacedPath(process.execPath)
+          selectedExecutables.some(
+            ({ codex }) =>
+              command === codex || command === path.toNamespacedPath(codex),
+          )
             ? [fixture.executablePath, ...args]
             : args,
           { ...options, env: environment },
@@ -1762,6 +1780,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           await Promise.all(
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
+              process.env.CODEX_CLI_PATH = selectedExecutables[index].codex;
+              process.env.PYTHON = selectedExecutables[index].python;
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
               process.env.CODEX_SECURITY_KNOWLEDGE_BASE =
@@ -1821,12 +1841,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               workerLaunch.command,
               process.platform === "win32"
-                ? path.toNamespacedPath(process.execPath)
-                : process.execPath,
+                ? path.toNamespacedPath(selectedExecutables[index].codex)
+                : selectedExecutables[index].codex,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_CLI_PATH,
-              process.execPath,
+              selectedExecutables[index].codex,
+            );
+            assert.equal(
+              workerLaunch.environment!.PYTHON,
+              selectedExecutables[index].python,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_HOME,
@@ -2000,7 +2024,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             for (const [name, value] of Object.entries(gitEnvironment)) {
               assert.equal(process.env[name], value);
             }
-            assert.equal(invocation.python, python);
+            assert.equal(
+              invocation.codexPath,
+              selectedExecutables[index].codex,
+            );
+            assert.equal(invocation.python, selectedExecutables[index].python);
             assertConfigOverrides(invocation.argv, {
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
               "mcp_servers.cs_artifacts.args.0": path.join(
@@ -2014,7 +2042,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
                 kind === "dedup" ? "reducer" : "worker",
             });
-            assert.equal(process.env.PYTHON, python);
+            assert.equal(
+              process.env.PYTHON,
+              selectedExecutables.at(-1)!.python,
+            );
+            assert.equal(
+              process.env.CODEX_CLI_PATH,
+              selectedExecutables.at(-1)!.codex,
+            );
             assert.equal(
               invocation.deepConfigPath,
               workerConfigurations[index].workerConfigPath,
@@ -2061,6 +2096,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider,
               "worker preflight must use the same scan environment",
             );
+            const executable =
+              selectedExecutables[
+                workerConfigurations.indexOf(selectedProvider)
+              ];
+            assert.equal(
+              launch.command,
+              process.platform === "win32"
+                ? path.toNamespacedPath(executable.codex)
+                : executable.codex,
+            );
+            assert.equal(preflight.codexPath, executable.codex);
+            assert.equal(preflight.python, executable.python);
             assert.equal(
               preflight.providerKey,
               selectedProvider.environment?.SYNTHETIC_GATEWAY_KEY,
@@ -3270,7 +3317,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), codexPath: process.env.CODEX_CLI_PATH, python: process.env.PYTHON, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -3321,7 +3368,7 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), codexPath: process.env.CODEX_CLI_PATH, stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

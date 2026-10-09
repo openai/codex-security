@@ -46,7 +46,12 @@ import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
-import { scanMcpInstructions, scanMcpAnnotations } from "./cli-mcp.js";
+import { cliMcpInstructions, scanMcpAnnotations } from "./cli-mcp.js";
+import {
+  mcpCommandMetadata,
+  type CliMcpManifest,
+  type runCliMcpCommand,
+} from "./cli-mcp-commands.js";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
@@ -196,7 +201,9 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  anchorExecutablePath,
   executablePathForSpawn,
+  expandExecutableHome,
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
@@ -1103,6 +1110,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 
 interface CliDependencies {
   mcpInput?: Readable;
+  runMcpCommand?: typeof runCliMcpCommand;
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
@@ -1954,7 +1962,7 @@ export async function main(
   }).command("false-positive", {
     description: "Mark a finding as a false positive for future scans.",
     destructive: true,
-    mcp: false,
+    mcp: mcpCommandMetadata("findings false-positive"),
     args: z.object({
       occurrenceId: z
         .string()
@@ -1987,7 +1995,7 @@ export async function main(
   });
   findingFeedback.command("list", {
     description: "List open findings for a repository across its scans.",
-    mcp: false,
+    mcp: mcpCommandMetadata("findings list"),
     args: z.object({
       repository: z
         .string()
@@ -2054,7 +2062,7 @@ export async function main(
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
-      mcp: false,
+      mcp: mcpCommandMetadata("scans list"),
       args: z.object({
         repository: z
           .string()
@@ -2099,7 +2107,7 @@ export async function main(
     })
     .command("show", {
       description: "Show the results and saved configuration for a scan.",
-      mcp: false,
+      mcp: mcpCommandMetadata("scans show"),
       args: z.object({
         scanId: z
           .string()
@@ -2141,7 +2149,7 @@ export async function main(
     })
     .command("logs", {
       description: "Show saved activity for a scan and its workers.",
-      mcp: false,
+      mcp: mcpCommandMetadata("scans logs"),
       args: z.object({
         scanId: z
           .string()
@@ -2269,7 +2277,7 @@ export async function main(
       description: "Rerun a saved scan with its original configuration.",
       hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("scans rerun"),
       args: z.object({
         scanId: z
           .string()
@@ -2416,7 +2424,7 @@ export async function main(
     .command("match", {
       description: "Match findings by root cause across saved scans.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("scans match"),
       args: z.object({
         beforeId: z
           .string()
@@ -2463,7 +2471,7 @@ export async function main(
     .command("compare", {
       description: "Match and compare findings and coverage between scans.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("scans compare"),
       args: z.object({
         beforeId: z
           .string()
@@ -2520,7 +2528,7 @@ export async function main(
       "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
       "  codex-security publish scan --to custom --scan latest --findings-url http://localhost:3000",
     destructive: true,
-    mcp: false,
+    mcp: mcpCommandMetadata("publish scan"),
     args: z.object({
       scanDir: z
         .string()
@@ -3133,7 +3141,7 @@ export async function main(
   publication.command("check", {
     description:
       "Check saved scan history and Linear access without creating issues.",
-    mcp: false,
+    mcp: mcpCommandMetadata("publish check"),
     args: z.object({
       scanDir: z.string().describe("Completed scan directory."),
     }),
@@ -3165,7 +3173,7 @@ export async function main(
     description: "Read GitHub code scanning alerts without changing GitHub.",
     hint: "To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
-    mcp: false,
+    mcp: mcpCommandMetadata("import github"),
     args: z.object({
       repository: z
         .string()
@@ -3499,7 +3507,7 @@ export async function main(
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
       tools: { discovery: "direct" },
-      instructions: scanMcpInstructions,
+      instructions: cliMcpInstructions,
     },
   })
     .command("policy", {
@@ -3719,7 +3727,7 @@ export async function main(
       description: "Install an advisory Git pre-commit check.",
       hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("install-hook"),
       args: z.object({
         repository: z
           .string()
@@ -4144,7 +4152,7 @@ export async function main(
     .command("scan-components", {
       description: "Scan project components and combine results.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("scan-components"),
       alias: { config: "c" },
       args: z.object({
         repository: z
@@ -4394,7 +4402,7 @@ export async function main(
     .command("bulk-scan", {
       description: "Discover and scan multiple repositories.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("bulk-scan"),
       alias: { config: "c" },
       args: z.object({
         input: z
@@ -4719,7 +4727,7 @@ export async function main(
         "Use --export-format for artifact format. The global --format option controls\n" +
         "framework output such as --schema; it does not change exported files.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("export"),
       args: z.object({
         scanDir: z
           .string()
@@ -4850,7 +4858,7 @@ export async function main(
     .command("validate", {
       description: "Validate one or more candidate security findings.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("validate"),
       args: z.object({
         "findings...": z
           .string()
@@ -4882,7 +4890,7 @@ export async function main(
       description:
         "Verify existing security fixes without changing the repository.",
       destructive: false,
-      mcp: false,
+      mcp: mcpCommandMetadata("verify-fix"),
       args: z.object({
         "findings...": z
           .string()
@@ -5093,7 +5101,7 @@ export async function main(
     .command("patch", {
       description: "Patch one or more security issues.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("patch"),
       args: z.object({
         "issues...": z
           .string()
@@ -5471,7 +5479,7 @@ export async function main(
         "  Keep SSH connected until login finishes.\n" +
         "Docs: https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("login"),
       args: z.object({
         action: z
           .enum(["status"])
@@ -5572,7 +5580,7 @@ export async function main(
     .command("logout", {
       description: "Remove the stored sign-in.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("logout"),
       async run() {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           dependencies.environment,
@@ -5746,7 +5754,53 @@ export async function main(
 
   if (argv.includes("--mcp")) {
     // Incur does not pass MCP request cancellation through to command handlers.
-    const { serveScanMcp } = await import("./cli-mcp.js");
+    const [{ serveCliMcp }, commands] = await Promise.all([
+      import("./cli-mcp.js"),
+      import("./cli-mcp-commands.js"),
+    ]);
+    let manifest = "";
+    await cli.serve(["--llms-full", "--format", "json"], {
+      env: dependencies.environment,
+      stdout: (value) => {
+        manifest += value;
+      },
+      exit: (code) => {
+        throw new Error(`CLI command discovery exited with status ${code}.`);
+      },
+    });
+    const serverDirectory = dependencies.currentDirectory();
+    const commandEnvironment = { ...dependencies.environment };
+    for (const [name, value] of Object.entries(commandEnvironment)) {
+      const configured = value?.trim();
+      const key = name.toUpperCase();
+      const executable =
+        key === "CODEX_CLI_PATH" ||
+        (key === "PYTHON" &&
+          (configured?.includes("/") || configured?.includes("\\")));
+      if (
+        configured &&
+        (executable ||
+          [
+            "CODEX_SECURITY_STATE_DIR",
+            "CODEX_SECURITY_PROJECT_CONFIG",
+            "CODEX_HOME",
+          ].includes(key))
+      ) {
+        // Tool working directories must not change the server's state or runtime.
+        commandEnvironment[name] = executable
+          ? anchorExecutablePath(
+              expandExecutableHome(configured, dependencies.environment),
+              serverDirectory,
+            )
+          : resolve(
+              serverDirectory,
+              expandHome(
+                key === "CODEX_HOME" ? value! : configured,
+                dependencies.environment,
+              ),
+            );
+      }
+    }
     const protocolOutput =
       output instanceof NodeWritable
         ? output
@@ -5755,10 +5809,30 @@ export async function main(
               writeCliOutput(output, chunk).then(() => callback(), callback);
             },
           });
-    return serveScanMcp({
+    return serveCliMcp({
       input: dependencies.mcpInput ?? process.stdin,
       output: protocolOutput,
       dependencies,
+      errorOutput,
+      commands: commands.buildCliMcpCommands(
+        JSON.parse(manifest) as CliMcpManifest,
+      ),
+      runCommand: (command, input, signal, forceSignal) =>
+        (dependencies.runMcpCommand ?? commands.runCliMcpCommand)(
+          command,
+          input,
+          {
+            executable: process.execPath,
+            entrypoint: fileURLToPath(import.meta.url),
+            cwd: resolveCliPath(serverDirectory, input.workingDirectory ?? "."),
+            environment: commandEnvironment,
+            signal,
+            forceSignal,
+            onStderr: (chunk) => {
+              errorOutput.write(chunk);
+            },
+          },
+        ),
       infoInputSchema: z.object({ config: PROJECT_CONFIG_OPTION }),
       infoOutputSchema: infoOutput,
       readInfo: metadata,

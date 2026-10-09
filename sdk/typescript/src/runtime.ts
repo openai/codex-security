@@ -2791,12 +2791,7 @@ export function resolveCodexCommand(
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
   ) {
     return {
-      command:
-        process.platform === "win32"
-          ? resolve(expanded)
-          : isAbsolute(expanded)
-            ? expanded
-            : `${process.cwd()}${sep}${expanded}`,
+      command: anchorExecutablePath(expanded),
     };
   }
 
@@ -3616,7 +3611,19 @@ export function sameFile(left: string, right: string): Promise<boolean> {
   );
 }
 
-function expandExecutableHome(
+/** @internal Preserve executable traversal when anchoring it to another cwd. */
+export function anchorExecutablePath(
+  value: string,
+  directory?: string,
+): string {
+  return process.platform === "win32"
+    ? resolve(directory ?? "", value)
+    : isAbsolute(value)
+      ? value
+      : `${directory ?? process.cwd()}${sep}${value}`;
+}
+
+export function expandExecutableHome(
   value: string,
   environment: ProcessEnvironment,
 ): string {
