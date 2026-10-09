@@ -29,12 +29,10 @@ from finalize_scan_contract import (
 
 
 def linear_publication_input(
-    db: Any,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
     *,
     recording: bool,
 ) -> tuple[dict[str, Any], dict[str, str], list[dict[str, str]]]:
-    payload = db.read_json_object(Path(args.input_file))
     required = {"scanId", "scanDirectory", "destination", "findings"}
     if recording:
         required.add("publications")
@@ -140,9 +138,9 @@ def verify_linear_publication_scan(
 
 def inspect_linear_publication(
     db: Any,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=False)
+    payload, destination, findings = linear_publication_input(payload, recording=False)
     database_uri = f"file:{quote(str(db.database_path()), safe='')}?mode=ro"
     with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
         connection.row_factory = sqlite3.Row
@@ -190,9 +188,9 @@ def inspect_linear_publication(
 def prepare_linear_publication(
     db: Any,
     connection: sqlite3.Connection,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=False)
+    payload, destination, findings = linear_publication_input(payload, recording=False)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
@@ -207,9 +205,9 @@ def prepare_linear_publication(
 def record_linear_publications(
     db: Any,
     connection: sqlite3.Connection,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=True)
+    payload, destination, findings = linear_publication_input(payload, recording=True)
     publications = payload["publications"]
     if not isinstance(publications, list):
         raise SystemExit("Linear publication results must be an array.")

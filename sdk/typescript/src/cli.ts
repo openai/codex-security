@@ -155,6 +155,7 @@ import {
   AuthenticationRequiredError,
   ConfigurationError,
   InvalidTargetError,
+  IncompleteScanError,
   LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -9026,6 +9027,7 @@ const LOCAL_SYSCALL_CODES = new Set([
 ]);
 
 function isLocalScanFailure(error: unknown): boolean {
+  if (error instanceof IncompleteScanError) error = error.cause;
   if (
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
@@ -9134,13 +9136,19 @@ function scanFailureMessage(
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
   )?.[0];
-  if (nativeRefreshRecovery !== undefined) return nativeRefreshRecovery;
+  if (nativeRefreshRecovery !== undefined)
+    return error instanceof IncompleteScanError
+      ? diagnosticValue(error)
+      : nativeRefreshRecovery;
+  const detail =
+    error instanceof IncompleteScanError ? `${diagnosticValue(error)}\n` : "";
   if (
     /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
       message,
     )
   ) {
     return (
+      detail +
       "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
       "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. " +
       "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
@@ -9149,18 +9157,18 @@ function scanFailureMessage(
   }
   switch (classification) {
     case "unauthorized":
-      return authenticationFailureMessage(authentication);
+      return detail + authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
-        return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
+        return `${detail}The configured Codex provider denied access. Check the command credentials and provider permissions.`;
       }
       return authentication?.method === "api_key"
-        ? `The API key from ${authentication.source} cannot access the configured model. ` +
+        ? `${detail}The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
-        : "The stored ChatGPT credentials cannot access the configured model. " +
+        : `${detail}The stored ChatGPT credentials cannot access the configured model. ` +
             "Use an account or API key with model access.";
     case "rate_limited":
-      return "The configured account reached its rate limit. Wait and retry.";
+      return `${detail}The configured account reached its rate limit. Wait and retry.`;
     case "network_error":
     case "timeout":
     case "unknown":

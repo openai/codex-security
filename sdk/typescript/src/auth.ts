@@ -147,7 +147,9 @@ export class CodexLoginHandle {
         };
         this.#settleInstructionWaiters(result);
         if (result.success) {
-          Promise.resolve(onSuccess()).then(() => resolve(result), reject);
+          Promise.resolve()
+            .then(onSuccess)
+            .then(() => resolve(result), reject);
         } else {
           resolve(result);
         }

@@ -1,9 +1,11 @@
-import { rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { readCodexHomeConfig } from "../src/auth.js";
 import { main } from "../src/cli.js";
+import { IncompleteScanError } from "../src/errors.js";
 import { parseImportedFindings } from "../src/findings-import.js";
+import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -15,6 +17,45 @@ const escapedDetail =
   "Synthetic sk-proj-SYNTHETIC_KEY_123  ]52;c;U1lOVEhFVElD  2J\nsecond diagnostic line";
 const escapedSingleLineDetail =
   "Synthetic sk-proj-SYNTHETIC_KEY_123  ]52;c;U1lOVEhFVElD  2J second diagnostic line";
+
+test("scans list retains actual SQLite diagnostics and recovery advice", async () => {
+  const root = await temporaryDirectory("history-database-diagnostic-", true);
+  const stateDirectory = join(root, "state");
+  const database = join(stateDirectory, "workbench.sqlite3");
+  try {
+    await mkdir(database, { recursive: true });
+    const environment = {
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["scans", "list"],
+        dependencies({
+          currentDirectory: root,
+          environment,
+          onWorkbench: (args, input, signal) =>
+            runWorkbench(
+              { pluginRoot: PLUGIN_ROOT, environment, signal },
+              args,
+              input,
+            ),
+        }),
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Traceback");
+    expect(stderr.text()).toContain(
+      "sqlite3.OperationalError: unable to open database file",
+    );
+    expect(stderr.text()).toContain(database);
+    expect(stderr.text()).toContain("SQLite journal files are writable");
+    expect(stderr.text().match(/CODEX_SECURITY_STATE_DIR/gu)).toHaveLength(1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("feedback escapes real config diagnostics only at the text output boundary", async () => {
   const root = await temporaryDirectory("feedback-config-diagnostic-", true);
@@ -104,6 +145,96 @@ for (const scenario of [
     expect(failure.cause).toBe(cause);
   });
 }
+
+test.each([
+  {
+    label: "filesystem",
+    diagnostic:
+      "EACCES: permission denied, open /synthetic/scan/artifacts/candidates.jsonl",
+    advice: "cannot access the configured model",
+  },
+  {
+    label: "wrapped filesystem",
+    diagnostic:
+      "EACCES: permission denied, mkdtemp /synthetic/codex-output-schema",
+    causeCode: "EACCES",
+    advice: undefined,
+  },
+  {
+    label: "native refresh recovery",
+    diagnostic:
+      "Synthetic context: your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again. Synthetic artifact recovery failed.",
+    advice: "Please sign in again.",
+  },
+  {
+    label: "expired native refresh",
+    diagnostic:
+      "Synthetic context: your access token could not be refreshed because your refresh token has expired. Please log out and sign in again. Synthetic artifact recovery failed.",
+    advice: "stored ChatGPT sign-in could not be refreshed",
+  },
+  {
+    label: "authentication",
+    diagnostic: "401 synthetic unauthorized request",
+    advice: "Authentication failed",
+  },
+  {
+    label: "authorization",
+    diagnostic: "403 synthetic model access denied",
+    advice: "cannot access the configured model",
+  },
+  {
+    label: "rate limit",
+    diagnostic: "429 synthetic quota exceeded",
+    advice: "reached its rate limit",
+  },
+])(
+  "retains incomplete worker $label diagnostics",
+  async ({ diagnostic, advice, ...scenario }) => {
+    const cause = Object.assign(new Error("Synthetic worker cause"), {
+      code: "causeCode" in scenario ? scenario.causeCode : undefined,
+    });
+    const failure = new IncompleteScanError(`${diagnostic}; ${detail}`, {
+      cause,
+    });
+    for (const json of [false, true]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies({
+        onRun: () => {
+          throw failure;
+        },
+      });
+      expect(
+        await runCli(["scan", ".", ...(json ? ["--json"] : [])], deps),
+      ).toBe(2);
+      const expected = `${diagnostic}; ${escapedSingleLineDetail}`;
+      expect(stderr.text()).toContain(expected);
+      if (advice === undefined) {
+        expect(stderr.text()).not.toContain(
+          "cannot access the configured model",
+        );
+      } else {
+        expect(stderr.text()).toContain(advice);
+        expect(stderr.text().split(advice)).toHaveLength(2);
+      }
+      expect(stderr.text()).not.toContain(controls);
+      if (json) {
+        const output = JSON.parse(stdout.text());
+        expect(output).toMatchObject({ status: "failed", code: "SCAN_FAILED" });
+        expect(output.message).toContain(expected);
+        if (advice === undefined) {
+          expect(output.message).not.toContain(
+            "cannot access the configured model",
+          );
+        } else {
+          expect(output.message).toContain(advice);
+          expect(output.message.split(advice)).toHaveLength(2);
+        }
+      } else expect(stdout.text()).toBe("");
+      expect(failure.message).toBe(`${diagnostic}; ${detail}`);
+      expect(failure.cause).toBe(cause);
+    }
+  },
+);
 
 test("successful raw exports preserve terminal controls as artifact bytes", async () => {
   const deps = dependencies();
