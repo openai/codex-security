@@ -151,6 +151,7 @@ const allowedFiles = new Set([
     "bulk-scan-discovery",
     "cli",
     "cli-help",
+    "cli-mcp",
     "cli-scan-logs-json",
     "cli-signals",
     "classify-severity",

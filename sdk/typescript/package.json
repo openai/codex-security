@@ -77,6 +77,7 @@
   "dependencies": {
     "@inquirer/prompts": "8.7.2",
     "@linear/sdk": "97.0.0",
+    "@modelcontextprotocol/server": "2.0.0-beta.4",
     "@octokit/core": "7.0.8",
     "@openai/codex": "0.162.0",
     "@openai/codex-sdk": "0.162.0",

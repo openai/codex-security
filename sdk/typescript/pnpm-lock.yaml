@@ -22,6 +22,9 @@ importers:
       '@linear/sdk':
         specifier: 97.0.0
         version: 97.0.0(graphql@17.0.2)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.4
+        version: 2.0.0-beta.4
       '@octokit/core':
         specifier: 7.0.8
         version: 7.0.8
@@ -686,8 +689,16 @@ packages:
     resolution: {integrity: sha512-ntgZI06I37DTp/XULYTPbOg1t7vJRo72JRSkMjdgG+GbUEHdSkYsUjN0dR42go/2LvLRKWJD3jVehm0wE5haEg==}
     engines: {node: ^20.19.0 || >=22.12.0}
 
+  '@modelcontextprotocol/core@2.0.0-beta.4':
+    resolution: {integrity: sha512-nsMXd4wQBKzmph6r+WOhum+mXjDYljTAqwY/XUg3hLtvNOQ8+JVqBSJOVCMJvx9lXhTpTOPrGZ3BuNiaNPjSvg==}
+    engines: {node: '>=20'}
+
   '@modelcontextprotocol/server@2.0.0-alpha.4':
     resolution: {integrity: sha512-/KEo3ZJ50HlagHp0lz2vPgfBZFtXHu6zTBXT9XqPc+4O9i4+IbBVWKq/a9yAfv/ifp0u3+mRo8SUk5kMKzhN8A==}
+    engines: {node: '>=20'}
+
+  '@modelcontextprotocol/server@2.0.0-beta.4':
+    resolution: {integrity: sha512-pjMZcNEt1dOq0aJCcY3b7w1Ayh+qmQN2xlfTELcGV9yiAjEGIczBPBLWWW0k0zzo5T8kiv15jtKPsWeHGxLvLg==}
     engines: {node: '>=20'}
 
   '@napi-rs/canvas-android-arm64@1.0.8':
@@ -3625,8 +3636,17 @@ snapshots:
     transitivePeerDependencies:
       - graphql
 
+  '@modelcontextprotocol/core@2.0.0-beta.4':
+    dependencies:
+      zod: 4.6.5
+
   '@modelcontextprotocol/server@2.0.0-alpha.4':
     dependencies:
+      zod: 4.6.5
+
+  '@modelcontextprotocol/server@2.0.0-beta.4':
+    dependencies:
+      '@modelcontextprotocol/core': 2.0.0-beta.4
       zod: 4.6.5
 
   '@napi-rs/canvas-android-arm64@1.0.8':

@@ -46,6 +46,7 @@ import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
+import { scanMcpInstructions, scanMcpAnnotations } from "./cli-mcp.js";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
@@ -1101,6 +1102,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 }
 
 interface CliDependencies {
+  mcpInput?: Readable;
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
@@ -3239,10 +3241,214 @@ export async function main(
       }
     },
   });
+  const scanArgsSchema = z.object({
+    repository: z
+      .string()
+      .optional()
+      .describe("Repository root to scan (default: current directory)."),
+  });
+  const scanOptionsSchema = z
+    .object({
+      config: PROJECT_CONFIG_OPTION,
+      workflowId: optionValue("--workflow-id")
+        .optional()
+        .describe("Reuse completed work in the named local findings workflow."),
+      cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
+      auth: ScanSettingsSchema.shape.auth.describe(
+        "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+      ),
+      verbose: z
+        .boolean()
+        .default(false)
+        .describe("Print additional scan diagnostics to stderr."),
+      safetyIdentifier: optionValue("--safety-identifier")
+        .optional()
+        .describe(
+          "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+        ),
+      path: z
+        .array(optionValue("--path"))
+        .optional()
+        .meta({ default: [] })
+        .describe(
+          "Scan only PATH; repeat for multiple repository-relative paths.",
+        ),
+      knowledgeBase: z
+        .array(optionValue("--knowledge-base"))
+        .optional()
+        .meta({ default: [] })
+        .describe(
+          "Add security-context files or directories; repeat for multiple paths.",
+        ),
+      scanPromptFile: optionValue("--scan-prompt-file")
+        .optional()
+        .describe("Append scan instructions from FILE."),
+      validationPromptFile: optionValue("--validation-prompt-file")
+        .optional()
+        .describe(
+          "Replace final validation with the workflow in FILE (not Deep).",
+        ),
+      postScanPromptFile: optionValue("--post-scan-prompt-file")
+        .optional()
+        .describe("Run FILE after each scan, including failures."),
+      diff: optionValue("--diff")
+        .optional()
+        .describe("Scan committed Git changes from BASE to --head."),
+      workingTree: z
+        .boolean()
+        .optional()
+        .meta({ default: false })
+        .describe("Scan staged and unstaged changes against --base."),
+      head: optionValue("--head")
+        .optional()
+        .describe("Git head ref for --diff (default: HEAD)."),
+      base: optionValue("--base")
+        .optional()
+        .describe("Git base ref for --working-tree (default: HEAD)."),
+      mode: ScanSettingsSchema.shape.mode.describe(
+        "Scan mode (default: standard); deep supports repository and path targets.",
+      ),
+      ...DEEP_SCAN_OPTION_SCHEMAS,
+      ...modelOptions(
+        `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+      ).shape,
+      provider: PROVIDER_OPTION,
+      outputDir: optionValue("--output-dir")
+        .optional()
+        .describe(
+          "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+        ),
+      archiveExisting: z
+        .boolean()
+        .default(false)
+        .describe("Archive existing results; requires --output-dir."),
+      ...RUNTIME_OPTION_SCHEMAS,
+      failOnSeverity: FailureSeveritySchema.optional().describe(
+        "Exit 1 for findings at or above LEVEL.",
+      ),
+      patch: z
+        .boolean()
+        .default(false)
+        .describe("Patch and verify confirmed findings after the scan."),
+      patchSeverity: z
+        .enum(REPORTABLE_SEVERITIES)
+        .optional()
+        .describe("Patch findings at or above LEVEL; requires --patch."),
+      createPr: CREATE_PR_OPTION.describe(
+        "Create a draft pull request or merge request after verified patches; requires --patch.",
+      ),
+      maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+        "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
+      ),
+      showCost: SHOW_COST_OPTION,
+      headless: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Use plain text progress instead of the interactive dashboard.",
+        ),
+      dryRun: z
+        .boolean()
+        .default(false)
+        .describe("Validate local scan inputs without starting a scan."),
+      mock: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Save synthetic Standard scan findings without calling an LLM.",
+        ),
+    })
+    .refine((options) => options.patchSeverity === undefined || options.patch, {
+      message: "--patch-severity requires --patch.",
+    })
+    .refine((options) => !options.createPr || options.patch, {
+      message: "--create-pr requires --patch.",
+    })
+    .refine((options) => !options.patch || !options.dryRun, {
+      message: "--patch cannot be combined with --dry-run.",
+    })
+    .refine((options) => !options.mock || (!options.dryRun && !options.patch), {
+      message: "--mock cannot be combined with --dry-run or --patch.",
+    });
+  const runScanCommand = async (
+    repository: string | undefined,
+    options: z.infer<typeof scanOptionsSchema>,
+    interactive: boolean,
+    signal?: AbortSignal,
+  ): Promise<ScanOutcome> => {
+    try {
+      const directory = dependencies.currentDirectory();
+      const project = await selectedProjectConfig(options.config, dependencies);
+      const scope = resolveCliScope(project?.input.scan?.scope, {
+        paths: options.path,
+        diff: options.diff,
+        workingTree: options.workingTree,
+        head: options.head,
+        base: options.base,
+      });
+      const {
+        config,
+        options: settings,
+        projectConfig: provenance,
+      } = resolveScanSettings(
+        project,
+        {
+          ...pickScanSettings(options),
+          target: scope.target,
+          knowledgeBasePaths: options.knowledgeBase,
+          failureSeverity: options.failOnSeverity,
+          maxCostUsd: options.maxCost,
+          codexOverrides: parseCodexOverrides(
+            options.codex,
+            options.model,
+            options.effort,
+            options.provider,
+            project?.input.codex,
+          ),
+        },
+        directory,
+        scope.sources,
+      );
+      if (options.archiveExisting && settings.outputDir === undefined) {
+        throw new CodexSecurityError(
+          "--archive-existing requires --output-dir.",
+        );
+      }
+      return await runScan(
+        {
+          ...settings,
+          codexOverrides: config.codexOverrides,
+          projectConfig: provenance,
+          workflowId: options.workflowId,
+          safetyIdentifier: options.safetyIdentifier,
+          verbose: options.verbose,
+          repository,
+          archiveExisting: options.archiveExisting,
+          pluginPath: options.pluginPath,
+          pythonPath: options.python,
+          patch: options.patch,
+          patchSeverity: options.patchSeverity,
+          createPr: options.createPr,
+          showCost: options.showCost,
+          headless: options.headless,
+          dryRun: options.dryRun,
+          mock: options.mock,
+        },
+        errorOutput,
+        dependencies,
+        interactive,
+        signal,
+      );
+    } catch (error) {
+      const message = errorMessage(error);
+      errorOutput.write(`${diagnosticLines(message)}\n`);
+      return { exitCode: 2, error: message };
+    }
+  };
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
-    scanMcp: z.literal(false),
+    scanMcp: z.literal(true),
     cancellationNote: z.string(),
     cliVersion: z.string(),
     codexVersion: z.string(),
@@ -3252,7 +3458,40 @@ export async function main(
     nextStep: z.string(),
     configuration: z.record(z.string(), z.unknown()),
   });
-
+  const metadata = async (options: { config?: string }) => {
+    const directory = dependencies.currentDirectory();
+    const project = await selectedProjectConfig(options.config, dependencies);
+    const resolved = resolveScanSettings(project, {}, directory);
+    const codex = await mergedCodexConfig(resolved.config);
+    const deep =
+      resolved.options.mode === "deep"
+        ? await resolveDeepScanConfig(
+            resolved.options,
+            join(
+              scanCodexHome(dependencies.environment),
+              "codex-security",
+              "config.toml",
+            ),
+          )
+        : undefined;
+    return {
+      sdkVersion: VERSION,
+      bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
+      scanMcp: true as const,
+      cancellationNote:
+        "MCP request cancellation and client disconnects stop active scans and preserve partial output.",
+      cliVersion: VERSION,
+      codexVersion: CODEX_EXECUTABLE_VERSION,
+      codexSdkVersion: CODEX_SDK_VERSION,
+      ...scanModelConfiguration(codex),
+      nextStep: "codex-security scan . --dry-run",
+      configuration: {
+        ...(project?.path === undefined ? {} : { path: project.path }),
+        settings: { ...resolved.options, ...deep?.settings },
+        sources: configurationSources(resolved.sources, deep?.sources),
+      },
+    };
+  };
   const cli = Cli.create("codex-security", {
     aliases: ["cs"],
     description: "Find, review, and fix security issues in your code.",
@@ -3260,8 +3499,7 @@ export async function main(
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
       tools: { discovery: "direct" },
-      instructions:
-        "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
+      instructions: scanMcpInstructions,
     },
   })
     .command("policy", {
@@ -3446,145 +3684,10 @@ export async function main(
         "Use ./import to scan a repository named import.\n" +
         "Incomplete JSON/JSONL --full-output returns ok: false and keeps scan results under data.",
       destructive: true,
-      mcp: false,
+      mcp: { annotations: scanMcpAnnotations },
       alias: { config: "c" },
-      args: z.object({
-        repository: z
-          .string()
-          .optional()
-          .describe("Repository root to scan (default: current directory)."),
-      }),
-      options: z
-        .object({
-          config: PROJECT_CONFIG_OPTION,
-          workflowId: optionValue("--workflow-id")
-            .optional()
-            .describe(
-              "Reuse completed work in the named local findings workflow.",
-            ),
-          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
-          auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
-          ),
-          verbose: z
-            .boolean()
-            .default(false)
-            .describe("Print additional scan diagnostics to stderr."),
-          safetyIdentifier: optionValue("--safety-identifier")
-            .optional()
-            .describe(
-              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
-            ),
-          path: z
-            .array(optionValue("--path"))
-            .optional()
-            .meta({ default: [] })
-            .describe(
-              "Scan only PATH; repeat for multiple repository-relative paths.",
-            ),
-          knowledgeBase: z
-            .array(optionValue("--knowledge-base"))
-            .optional()
-            .meta({ default: [] })
-            .describe(
-              "Add security-context files or directories; repeat for multiple paths.",
-            ),
-          scanPromptFile: optionValue("--scan-prompt-file")
-            .optional()
-            .describe("Append scan instructions from FILE."),
-          validationPromptFile: optionValue("--validation-prompt-file")
-            .optional()
-            .describe(
-              "Replace final validation with the workflow in FILE (not Deep).",
-            ),
-          postScanPromptFile: optionValue("--post-scan-prompt-file")
-            .optional()
-            .describe("Run FILE after each scan, including failures."),
-          diff: optionValue("--diff")
-            .optional()
-            .describe("Scan committed Git changes from BASE to --head."),
-          workingTree: z
-            .boolean()
-            .optional()
-            .meta({ default: false })
-            .describe("Scan staged and unstaged changes against --base."),
-          head: optionValue("--head")
-            .optional()
-            .describe("Git head ref for --diff (default: HEAD)."),
-          base: optionValue("--base")
-            .optional()
-            .describe("Git base ref for --working-tree (default: HEAD)."),
-          mode: ScanSettingsSchema.shape.mode.describe(
-            "Scan mode (default: standard); deep supports repository and path targets.",
-          ),
-          ...DEEP_SCAN_OPTION_SCHEMAS,
-          ...modelOptions(
-            `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-          ).shape,
-          provider: PROVIDER_OPTION,
-          outputDir: optionValue("--output-dir")
-            .optional()
-            .describe(
-              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
-            ),
-          archiveExisting: z
-            .boolean()
-            .default(false)
-            .describe("Archive existing results; requires --output-dir."),
-          ...RUNTIME_OPTION_SCHEMAS,
-          failOnSeverity: FailureSeveritySchema.optional().describe(
-            "Exit 1 for findings at or above LEVEL.",
-          ),
-          patch: z
-            .boolean()
-            .default(false)
-            .describe("Patch and verify confirmed findings after the scan."),
-          patchSeverity: z
-            .enum(REPORTABLE_SEVERITIES)
-            .optional()
-            .describe("Patch findings at or above LEVEL; requires --patch."),
-          createPr: CREATE_PR_OPTION.describe(
-            "Create a draft pull request or merge request after verified patches; requires --patch.",
-          ),
-          maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
-            "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
-          ),
-          showCost: SHOW_COST_OPTION,
-          headless: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Use plain text progress instead of the interactive dashboard.",
-            ),
-          dryRun: z
-            .boolean()
-            .default(false)
-            .describe("Validate local scan inputs without starting a scan."),
-          mock: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Save synthetic Standard scan findings without calling an LLM.",
-            ),
-        })
-        .refine(
-          (options) => options.patchSeverity === undefined || options.patch,
-          {
-            message: "--patch-severity requires --patch.",
-          },
-        )
-        .refine((options) => !options.createPr || options.patch, {
-          message: "--create-pr requires --patch.",
-        })
-        .refine((options) => !options.patch || !options.dryRun, {
-          message: "--patch cannot be combined with --dry-run.",
-        })
-        .refine(
-          (options) => !options.mock || (!options.dryRun && !options.patch),
-          {
-            message: "--mock cannot be combined with --dry-run or --patch.",
-          },
-        ),
+      args: scanArgsSchema,
+      options: scanOptionsSchema,
       output: scanOutputSchema("SCAN_FAILED"),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
@@ -3594,77 +3697,11 @@ export async function main(
           exitCode = 2;
           return;
         }
-        let outcome: ScanOutcome;
-        try {
-          const directory = dependencies.currentDirectory();
-          const project = await selectedProjectConfig(
-            options.config,
-            dependencies,
-          );
-          const scope = resolveCliScope(project?.input.scan?.scope, {
-            paths: options.path,
-            diff: options.diff,
-            workingTree: options.workingTree,
-            head: options.head,
-            base: options.base,
-          });
-          const {
-            config,
-            options: settings,
-            projectConfig: provenance,
-          } = resolveScanSettings(
-            project,
-            {
-              ...pickScanSettings(options),
-              target: scope.target,
-              knowledgeBasePaths: options.knowledgeBase,
-              failureSeverity: options.failOnSeverity,
-              maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
-                options.codex,
-                options.model,
-                options.effort,
-                options.provider,
-                project?.input.codex,
-              ),
-            },
-            directory,
-            scope.sources,
-          );
-          if (options.archiveExisting && settings.outputDir === undefined) {
-            throw new CodexSecurityError(
-              "--archive-existing requires --output-dir.",
-            );
-          }
-          outcome = await runScan(
-            {
-              ...settings,
-              codexOverrides: config.codexOverrides,
-              projectConfig: provenance,
-              workflowId: options.workflowId,
-              safetyIdentifier: options.safetyIdentifier,
-              verbose: options.verbose,
-              repository: args.repository,
-              archiveExisting: options.archiveExisting,
-              pluginPath: options.pluginPath,
-              pythonPath: options.python,
-              patch: options.patch,
-              patchSeverity: options.patchSeverity,
-              createPr: options.createPr,
-              showCost: options.showCost,
-              headless: options.headless,
-              dryRun: options.dryRun,
-              mock: options.mock,
-            },
-            errorOutput,
-            dependencies,
-            format !== "json" && format !== "jsonl",
-          );
-        } catch (error) {
-          const message = errorMessage(error);
-          errorOutput.write(`${diagnosticLines(message)}\n`);
-          outcome = { exitCode: 2, error: message };
-        }
+        const outcome = await runScanCommand(
+          args.repository,
+          options,
+          format !== "json" && format !== "jsonl",
+        );
 
         if (
           outcome.error === undefined &&
@@ -5704,44 +5741,49 @@ export async function main(
         },
       },
       output: infoOutput,
-      async run({ options }) {
-        const directory = dependencies.currentDirectory();
-        const project = await selectedProjectConfig(
-          options.config,
-          dependencies,
+      run: ({ options }) => metadata(options),
+    });
+
+  if (argv.includes("--mcp")) {
+    // Incur does not pass MCP request cancellation through to command handlers.
+    const { serveScanMcp } = await import("./cli-mcp.js");
+    const protocolOutput =
+      output instanceof NodeWritable
+        ? output
+        : new NodeWritable({
+            write(chunk, _encoding, callback) {
+              writeCliOutput(output, chunk).then(() => callback(), callback);
+            },
+          });
+    return serveScanMcp({
+      input: dependencies.mcpInput ?? process.stdin,
+      output: protocolOutput,
+      dependencies,
+      infoInputSchema: z.object({ config: PROJECT_CONFIG_OPTION }),
+      infoOutputSchema: infoOutput,
+      readInfo: metadata,
+      scanInputSchema: z
+        .object(scanOptionsSchema.shape)
+        .omit({ patch: true, patchSeverity: true, createPr: true })
+        .extend(scanArgsSchema.shape)
+        .strict(),
+      runScan: async (input, signal) => {
+        const parsed = scanOptionsSchema.safeParse(input);
+        if (!parsed.success)
+          return {
+            exitCode: 2,
+            error: parsed.error.issues.map((issue) => issue.message).join(" "),
+          };
+        const { exitCode, data, error, coverageError } = await runScanCommand(
+          input.repository,
+          parsed.data,
+          false,
+          signal,
         );
-        const resolved = resolveScanSettings(project, {}, directory);
-        const codex = await mergedCodexConfig(resolved.config);
-        const deep =
-          resolved.options.mode === "deep"
-            ? await resolveDeepScanConfig(
-                resolved.options,
-                join(
-                  scanCodexHome(dependencies.environment),
-                  "codex-security",
-                  "config.toml",
-                ),
-              )
-            : undefined;
-        return {
-          sdkVersion: VERSION,
-          bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
-          scanMcp: false as const,
-          cancellationNote:
-            "Scans are CLI-only because the MCP transport cannot cancel active commands.",
-          cliVersion: VERSION,
-          codexVersion: CODEX_EXECUTABLE_VERSION,
-          codexSdkVersion: CODEX_SDK_VERSION,
-          ...scanModelConfiguration(codex),
-          nextStep: "codex-security scan . --dry-run",
-          configuration: {
-            ...(project?.path === undefined ? {} : { path: project.path }),
-            settings: { ...resolved.options, ...deep?.settings },
-            sources: configurationSources(resolved.sources, deep?.sources),
-          },
-        };
+        return { exitCode, data, error: error ?? coverageError };
       },
     });
+  }
 
   const commands = Cli.toCommands.get(cli)!;
   const valueOptions = cliValueOptions(commands);
@@ -8107,9 +8149,10 @@ async function runScan(
   errorOutput: Writable,
   dependencies: CliDependencies,
   interactive = true,
+  signal?: AbortSignal,
 ): Promise<ScanOutcome> {
   return await withTerminalErrorsHandled(errorOutput, () =>
-    executeScan(arguments_, errorOutput, dependencies, interactive),
+    executeScan(arguments_, errorOutput, dependencies, interactive, signal),
   );
 }
 
@@ -8144,6 +8187,7 @@ async function executeScan(
   errorOutput: Writable,
   dependencies: CliDependencies,
   interactive = true,
+  signal?: AbortSignal,
 ): Promise<ScanOutcome> {
   let scanDir: string | null = null;
   const scanInput = dependencies.scanInput ?? process.stdin;
@@ -8193,6 +8237,7 @@ async function executeScan(
     });
   };
   const preparationAbortController = new AbortController();
+  const scanSignal = signal ?? preparationAbortController.signal;
   const stopPresentation = (): void => {
     try {
       dashboard?.stop();
@@ -8233,7 +8278,8 @@ async function executeScan(
   const removeSignalListeners = (): void => {
     signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
   };
-  signalHandlers(dependencies, "add", onInterrupt, onTerminate);
+  if (signal === undefined)
+    signalHandlers(dependencies, "add", onInterrupt, onTerminate);
 
   let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
     null;
@@ -8251,6 +8297,7 @@ async function executeScan(
   let failed = false;
   let failure: unknown;
   try {
+    scanSignal.throwIfAborted();
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
     const target = arguments_.target;
@@ -8285,7 +8332,7 @@ async function executeScan(
               auth: arguments_.auth,
               provider,
               command: "scan",
-              signal: preparationAbortController.signal,
+              signal: scanSignal,
             },
             errorOutput,
             dependencies,
@@ -8474,7 +8521,7 @@ async function executeScan(
           `Moved existing results to: ${errorMessage(archiveDir)}\n`,
         );
       },
-      signal: preparationAbortController.signal,
+      signal: scanSignal,
       onOutputDirReady: (path) => {
         scanDir = path;
         diagnostic("scan.output_ready", { scan_dir: path });
@@ -8721,6 +8768,15 @@ async function executeScan(
     removeSignalListeners();
   }
 
+  if (signal?.aborted) {
+    errorOutput.write("Scan canceled.\n");
+    if (scanDir !== null) {
+      errorOutput.write(
+        `Partial output was kept at ${errorMessage(scanDir)}.\n`,
+      );
+    }
+    return { exitCode: 130, error: "Scan canceled." };
+  }
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,

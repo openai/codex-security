@@ -1,0 +1,852 @@
+import { writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { join, resolve } from "node:path";
+import { createInterface } from "node:readline";
+import { build } from "esbuild";
+import Ajv2020 from "ajv/dist/2020.js";
+import { nodeCommand } from "./support/shell.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { PassThrough, Writable } from "node:stream";
+import { setImmediate } from "node:timers/promises";
+import { afterEach, describe, expect, test } from "bun:test";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
+import { main } from "../src/cli.js";
+import { ConfigurationError } from "../src/errors.js";
+import type { ScanOptions } from "../src/api.js";
+import {
+  capture,
+  dependencies,
+  fakePreflight,
+  fakeResult,
+  FakeSignals,
+} from "./cli-fixtures.js";
+import { BUNDLED_PLUGIN_VERSION, VERSION } from "../src/version.js";
+
+const { temporaryDirectory, cleanup } = createApiTestFixtures("cli-mcp-");
+afterEach(cleanup);
+
+async function connect(
+  deps = dependencies(),
+  finishWrite: (callback: (error?: Error | null) => void) => void = (
+    callback,
+  ) => callback(),
+) {
+  const input = new PassThrough();
+  const stderr = capture(true);
+  const responses = new Map<string | number, unknown>();
+  const waiting = new Map<string | number, (result: unknown) => void>();
+  let partial = "";
+  const output = new Writable({
+    write(chunk, _encoding, callback) {
+      partial += chunk.toString();
+      let newline: number;
+      while ((newline = partial.indexOf("\n")) !== -1) {
+        // Every stdout line must be protocol JSON, even while scans report progress.
+        const response = JSON.parse(partial.slice(0, newline));
+        partial = partial.slice(newline + 1);
+        if (
+          typeof response.id === "number" ||
+          typeof response.id === "string"
+        ) {
+          responses.set(response.id, response.result ?? response.error);
+          waiting.get(response.id)?.(response.result ?? response.error);
+          waiting.delete(response.id);
+        }
+      }
+      finishWrite(callback);
+    },
+  });
+  const serving = main(["--mcp"], output, stderr.stream, {
+    ...deps,
+    mcpInput: input,
+  });
+  let id = 0;
+  const send = (message: object) => input.write(JSON.stringify(message) + "\n");
+  const request = <T>(
+    method: string,
+    params: object = {},
+    requestId: string | number = ++id,
+  ) => {
+    const result = new Promise<T>((resolve) => {
+      waiting.set(requestId, (value) => resolve(value as T));
+    });
+    send({ jsonrpc: "2.0", id: requestId, method, params });
+    return { id: requestId, result };
+  };
+  await request("initialize", {
+    protocolVersion: "2025-11-25",
+    capabilities: {},
+    clientInfo: { name: "codex-security-test", version: "1.0.0" },
+  }).result;
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const { tools } = await request<{ tools: Tool[] }>("tools/list").result;
+  const validator = new Ajv2020();
+  return {
+    input,
+    output,
+    stderr,
+    serving,
+    responses,
+    request,
+    call: (name: string, args: object = {}, requestId?: string | number) => {
+      const call = request<CallToolResult>(
+        "tools/call",
+        { name, arguments: args },
+        requestId,
+      );
+      return {
+        ...call,
+        result: call.result.then((result) => {
+          if (result.structuredContent !== undefined) {
+            const schema = tools.find(
+              (tool) => tool.name === name,
+            )?.outputSchema;
+            expect(schema).toBeDefined();
+            expect(
+              validator.validate(schema!, result.structuredContent),
+              validator.errorsText(),
+            ).toBe(true);
+          }
+          return result;
+        }),
+      };
+    },
+    cancel: (requestId: string | number) =>
+      send({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: { requestId, reason: "test cancellation" },
+      }),
+    close: async () => {
+      input.end();
+      expect(await serving).toBe(0);
+      expect(partial).toBe("");
+    },
+  };
+}
+
+describe("CLI MCP scans", () => {
+  for (const shutdown of ["SIGINT", "SIGTERM", "EOF", "flowing"] as const) {
+    // Windows uses synchronous stdout pipes and does not deliver POSIX signals.
+    test.skipIf(process.platform === "win32" && shutdown !== "flowing")(
+      `handles Node stdout during ${shutdown} shutdown`,
+      async () => {
+        const root = await temporaryDirectory();
+        const fixture = join(root, "mcp-stdio.cjs");
+        await build({
+          entryPoints: [join(import.meta.dir, "fixtures/mcp-stdio.mjs")],
+          outfile: fixture,
+          bundle: true,
+          platform: "node",
+          format: "cjs",
+          define: {
+            "import.meta.url": JSON.stringify(
+              new URL("../src/version.ts", import.meta.url).href,
+            ),
+          },
+        });
+        const child = spawn(nodeCommand().command, [fixture, shutdown], {
+          stdio: ["pipe", "pipe", "pipe", "ipc"],
+          timeout: 10_000,
+          killSignal: "SIGKILL",
+          windowsHide: true,
+        });
+        const exited = once(child, "exit");
+        const closed = once(child, "close");
+        const stderr = capture();
+        child.stderr!.setEncoding("utf8").on("data", stderr.stream.write);
+        const lines = createInterface({ input: child.stdout! });
+        const responses = lines[Symbol.asyncIterator]();
+        const send = (
+          id: number | undefined,
+          method: string,
+          params: object = {},
+        ) =>
+          child.stdin!.write(
+            JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
+          );
+        try {
+          send(1, "initialize", {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "stdio-test", version: "1" },
+          });
+          expect(JSON.parse((await responses.next()).value!).id).toBe(1);
+          send(undefined, "notifications/initialized");
+          if (shutdown === "SIGINT" || shutdown === "SIGTERM") {
+            const started = once(child, "message");
+            send(2, "tools/call", {
+              name: "scan",
+              arguments: { waitForAbort: true },
+            });
+            expect((await started)[0]).toEqual({ event: "scan-started" });
+          }
+          const paused = shutdown !== "flowing";
+          if (paused) lines.pause();
+          const buffered = paused ? once(child, "message") : undefined;
+          send(3, "tools/call", { name: "scan", arguments: {} });
+          if (buffered)
+            expect((await buffered)[0]).toEqual({ event: "backpressure" });
+          let response = paused
+            ? undefined
+            : JSON.parse((await responses.next()).value!);
+          const returned = once(child, "message");
+          if (shutdown === "EOF" || shutdown === "flowing") {
+            child.stdin!.end();
+            expect((await returned)[0]).toMatchObject({
+              event: "returned",
+              exitCode: 0,
+            });
+            // EOF still allows queued responses to drain in full.
+            if (paused) {
+              lines.resume();
+              response = JSON.parse((await responses.next()).value!);
+            }
+            expect(response.id).toBe(3);
+            expect(response.result.structuredContent.data.payload).toBe(
+              "x".repeat(1024 * 1024),
+            );
+          } else {
+            child.kill(shutdown);
+            expect((await returned)[0]).toEqual({
+              event: "cleanup-started",
+              outputDestroyed: false,
+            });
+            const cleaned = once(child, "message");
+            child.send("finish-cleanup");
+            expect((await cleaned)[0]).toEqual({ event: "cleanup-finished" });
+          }
+          expect(await exited, stderr.text()).toEqual(
+            shutdown === "EOF" || shutdown === "flowing"
+              ? [0, null]
+              : [null, shutdown],
+          );
+        } finally {
+          if (child.exitCode === null && child.signalCode === null)
+            child.kill("SIGKILL");
+          child.stdout!.resume();
+          await closed;
+          lines.close();
+        }
+      },
+      30_000,
+    );
+  }
+
+  test("advertises scan-only inputs and read-only metadata", async () => {
+    const session = await connect();
+    try {
+      const { tools } = await session.request<{ tools: Tool[] }>("tools/list")
+        .result;
+      expect(tools.map((tool) => tool.name).sort()).toEqual(["info", "scan"]);
+      const scan = tools.find((tool) => tool.name === "scan")!;
+      expect(scan.inputSchema.properties).toMatchObject({
+        repository: { type: "string" },
+        path: { type: "array", default: [] },
+        auth: { default: "auto" },
+        mode: { default: "standard" },
+        dryRun: { type: "boolean", default: false },
+        mock: { type: "boolean", default: false },
+        workflowId: { type: "string" },
+      });
+      for (const name of ["patch", "patchSeverity", "createPr"]) {
+        expect(scan.inputSchema.properties).not.toHaveProperty(name);
+      }
+      expect(scan.annotations).toMatchObject({
+        readOnlyHint: false,
+        openWorldHint: true,
+      });
+      expect(
+        tools.find((tool) => tool.name === "info")?.annotations,
+      ).toMatchObject({
+        readOnlyHint: true,
+        idempotentHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      });
+      const info = await session.call("info").result;
+      expect(info.structuredContent).toMatchObject({
+        sdkVersion: VERSION,
+        bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
+        scanMcp: true,
+      });
+      expect(JSON.parse((info.content[0] as { text: string }).text)).toEqual(
+        info.structuredContent,
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("runs scans with shared options, noninteractive auth and protocol-safe progress", async () => {
+    const calls: unknown[] = [];
+    let closed = 0;
+    const deps = dependencies({
+      onTurn: (repository, options) => calls.push({ repository, options }),
+      onClose: () => {
+        closed++;
+      },
+      costUpdates: [
+        {
+          model: "gpt-5.6-sol",
+          estimatedUsd: 1,
+          inputTokens: 1,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 1,
+        },
+      ],
+    });
+    deps.scanAuthenticationPrompt = {
+      isInteractive: () => true,
+      select: async () => {
+        throw new Error("MCP must not prompt");
+      },
+    };
+    deps.hasStoredChatGPTSignIn = async () => true;
+    const session = await connect(deps);
+    try {
+      const result = await session.call("scan", {
+        repository: "/synthetic/repo",
+        auth: "chatgpt",
+        path: ["src"],
+        mode: "deep",
+        workers: 2,
+        maxCost: 5,
+        outputDir: "/synthetic/results",
+        model: "gpt-5.6-terra",
+        effort: "high",
+      }).result;
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        exitCode: 0,
+        data: { scanDir: "/tmp/scan" },
+      });
+      expect(calls).toEqual([
+        expect.objectContaining({
+          repository: "/synthetic/repo",
+          options: expect.objectContaining({
+            auth: "chatgpt",
+            mode: "deep",
+            workers: 2,
+            maxCostUsd: 5,
+            onBudgetApproaching: undefined,
+            outputDir: resolve("/synthetic/results"),
+          }),
+        }),
+      ]);
+      expect(closed).toBe(1);
+      expect(session.stderr.text()).toContain("Scan complete");
+      expect(session.stderr.text()).not.toContain("\u001b[");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("passes mock scans and workflow reuse through to the SDK", async () => {
+    const calls: unknown[] = [];
+    const session = await connect(
+      dependencies({ onTurn: (_repository, options) => calls.push(options) }),
+    );
+    try {
+      const result = await session.call("scan", {
+        repository: "/synthetic/repo",
+        mock: true,
+        workflowId: "synthetic-workflow",
+      }).result;
+      expect(result.isError).not.toBe(true);
+      expect(calls).toEqual([
+        expect.objectContaining({
+          mock: true,
+          workflowId: "synthetic-workflow",
+        }),
+      ]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("shares project settings and per-call overrides with scan and info", async () => {
+    const root = await temporaryDirectory();
+    const config = join(root, "scan.json");
+    await writeFile(
+      config,
+      JSON.stringify({
+        auth: "chatgpt",
+        scan: { mode: "deep", scope: { paths: ["src"] }, deep: { workers: 2 } },
+        limits: { max_cost_usd_per_scan: 7 },
+        codex: { model: "gpt-5.6-terra" },
+      }),
+    );
+    const calls: ScanOptions[] = [];
+    const session = await connect(
+      dependencies({
+        currentDirectory: root,
+        onTurn: (_repository, options) => calls.push(options),
+      }),
+    );
+    try {
+      const info = await session.call("info", { config }).result;
+      expect(info.structuredContent).toMatchObject({
+        scanMcp: true,
+        model: "gpt-5.6-terra",
+        configuration: {
+          path: config,
+          settings: {
+            auth: "chatgpt",
+            mode: "deep",
+            workers: 2,
+            maxCostUsd: 7,
+          },
+        },
+      });
+      expect(
+        (await session.call("scan", { config, workers: 3 }).result).isError,
+      ).not.toBe(true);
+      expect(calls[0]).toMatchObject({
+        auth: "chatgpt",
+        mode: "deep",
+        target: ["src"],
+        workers: 3,
+        maxCostUsd: 7,
+      });
+      expect((await session.call("scan", {}).result).isError).not.toBe(true);
+      expect(calls[1]).toMatchObject({ mode: "standard" });
+      expect(calls[1]?.workers).toBeUndefined();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("uses preflight for dry runs without starting a model", async () => {
+    const deps = dependencies({
+      onRun: () => {
+        throw new Error("must not scan");
+      },
+    });
+    const session = await connect(deps);
+    try {
+      const result = await session.call("scan", {
+        repository: "/synthetic/repo",
+        dryRun: true,
+      }).result;
+      expect(result.structuredContent).toMatchObject({
+        exitCode: 0,
+        data: { dryRun: true, repository: "/synthetic/repo" },
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("rejects invalid option combinations and unsupported mutations before scanning", async () => {
+    let started = 0;
+    const session = await connect(
+      dependencies({
+        onRun: () => {
+          started++;
+        },
+      }),
+    );
+    try {
+      for (const input of [
+        { path: ["src"], diff: "main" },
+        { workingTree: true, diff: "main" },
+        { head: "main" },
+        { base: "main" },
+        { archiveExisting: true },
+        { workers: 2 },
+        { maxCost: -1 },
+        { mock: true, dryRun: true },
+        { patch: true },
+        { patchSeverity: "high" },
+        { createPr: true },
+      ]) {
+        expect((await session.call("scan", input).result).isError).toBe(true);
+      }
+      expect(started).toBe(0);
+      expect(await session.call("patch").result).toMatchObject({
+        code: -32602,
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("preserves findings and per-call failure status without stopping the server", async () => {
+    for (const [result, input, exitCode] of [
+      [fakeResult(["high"]), { failOnSeverity: "high" }, 1],
+      [fakeResult(["high"], "partial"), {}, 2],
+      [
+        fakeResult(["high"], "partial", {
+          input_tokens: 1_250,
+          cached_input_tokens: 200,
+          output_tokens: 30,
+        }),
+        { mode: "deep", maxCost: 0.001 },
+        2,
+      ],
+    ] as const) {
+      const session = await connect(dependencies({ result }));
+      try {
+        const response = await session.call("scan", input).result;
+        expect(response.isError).toBe(true);
+        expect(response.structuredContent).toMatchObject({
+          exitCode,
+          data: JSON.parse(JSON.stringify(result.toJSON())),
+        });
+        if (result.coverage.completeness === "partial") {
+          const error = "Scan coverage is partial; results may be incomplete.";
+          expect(response.structuredContent).toMatchObject({ error });
+          expect(session.stderr.text()).toContain(error);
+        }
+        if ("maxCost" in input)
+          expect(session.stderr.text()).toContain("cost limit");
+        expect((await session.call("info").result).isError).not.toBe(true);
+      } finally {
+        await session.close();
+      }
+    }
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new ConfigurationError("synthetic configuration error");
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+    const session = await connect(deps);
+    try {
+      expect(
+        (await session.call("scan").result).structuredContent,
+      ).toMatchObject({
+        exitCode: 2,
+        error: expect.stringContaining("synthetic configuration error"),
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test.each([0, "", "0", 42])(
+    "cancels only scan request %j and waits for its cleanup",
+    async (requestId) => {
+      const started = Promise.withResolvers<void>();
+      const healthyStarted = Promise.withResolvers<AbortSignal>();
+      const finishHealthy = Promise.withResolvers<void>();
+      const stopped = Promise.withResolvers<void>();
+      const deps = dependencies();
+      deps.createSecurity = () => {
+        let canceledScan = false;
+        return {
+          run: async (repository, options) => {
+            canceledScan = repository === "/synthetic/cancel";
+            if (!canceledScan) {
+              healthyStarted.resolve(options!.signal!);
+              await finishHealthy.promise;
+              return fakeResult();
+            }
+            started.resolve();
+            await new Promise<void>((resolve) =>
+              options!.signal!.addEventListener("abort", () => resolve(), {
+                once: true,
+              }),
+            );
+            throw new DOMException("Canceled", "AbortError");
+          },
+          preflight: async () => fakePreflight(),
+          close: async () => {
+            if (canceledScan) stopped.resolve();
+          },
+        };
+      };
+      const session = await connect(deps);
+      try {
+        const canceled = session.call(
+          "scan",
+          {
+            repository: "/synthetic/cancel",
+          },
+          requestId,
+        );
+        const healthy = session.call(
+          "scan",
+          {
+            repository: "/synthetic/complete",
+          },
+          requestId === "0" ? 0 : "0",
+        );
+        await started.promise;
+        const healthySignal = await healthyStarted.promise;
+        session.cancel(canceled.id);
+        await stopped.promise;
+        expect(healthySignal.aborted).toBe(false);
+        finishHealthy.resolve();
+        const completed = await healthy.result;
+        expect(completed.structuredContent).toMatchObject({ exitCode: 0 });
+        expect(session.responses.has(canceled.id)).toBe(false);
+        expect((await session.call("info").result).isError).not.toBe(true);
+      } finally {
+        finishHealthy.resolve();
+        await session.close();
+      }
+    },
+  );
+
+  test.each([0, "", "0"])(
+    "honors immediate cancellation of request %j before starting a scan",
+    async (requestId) => {
+      let started = 0;
+      const session = await connect(
+        dependencies({
+          onRun: () => {
+            started++;
+          },
+        }),
+      );
+      try {
+        session.call("scan", {}, requestId);
+        session.cancel(requestId);
+        await session.call("info").result;
+        await setImmediate();
+        expect(started).toBe(0);
+        expect(session.responses.has(requestId)).toBe(false);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
+  test.each([0, ""])(
+    "ignores unknown and late cancellations of request %j",
+    async (requestId) => {
+      const session = await connect();
+      try {
+        session.cancel(requestId);
+        expect(
+          (await session.call("scan", {}, requestId).result).structuredContent,
+        ).toMatchObject({ exitCode: 0 });
+        session.cancel(requestId);
+        expect(
+          (await session.call("scan", {}, requestId).result).structuredContent,
+        ).toMatchObject({ exitCode: 0 });
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
+  test("handles a buffered stdout failure after EOF while scan cleanup is pending", async () => {
+    let bufferOutput = false;
+    const pendingWrite =
+      Promise.withResolvers<(error?: Error | null) => void>();
+    const started = Promise.withResolvers<void>();
+    const cleanupStarted = Promise.withResolvers<void>();
+    const finishCleanup = Promise.withResolvers<void>();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        started.resolve();
+        await new Promise<void>((resolve) =>
+          options!.signal!.addEventListener("abort", () => resolve(), {
+            once: true,
+          }),
+        );
+        throw new DOMException("Canceled", "AbortError");
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {
+        cleanupStarted.resolve();
+        await finishCleanup.promise;
+      },
+    });
+    const session = await connect(deps, (callback) => {
+      if (bufferOutput) pendingWrite.resolve(callback);
+      else callback();
+    });
+    try {
+      session.call("scan");
+      await started.promise;
+      bufferOutput = true;
+      session.call("info");
+      const finishWrite = await pendingWrite.promise;
+      session.input.end();
+      await cleanupStarted.promise;
+      finishWrite(new Error("synthetic broken pipe"));
+      await setImmediate();
+    } finally {
+      finishCleanup.resolve();
+      expect(await session.serving).toBe(0);
+    }
+    expect(session.output.listenerCount("error")).toBe(0);
+  });
+
+  test.each(["info", "scan"])(
+    "handles a buffered %s response failure after main returns",
+    async (name) => {
+      let bufferOutput = false;
+      let scansClosed = 0;
+      const pendingWrite =
+        Promise.withResolvers<(error?: Error | null) => void>();
+      const session = await connect(
+        dependencies({
+          onClose: () => {
+            scansClosed++;
+          },
+        }),
+        (callback) => {
+          if (bufferOutput) pendingWrite.resolve(callback);
+          else callback();
+        },
+      );
+      bufferOutput = true;
+      const response = session.call(name);
+      const finishWrite = await pendingWrite.promise;
+      expect((await response.result).isError).not.toBe(true);
+      session.input.end();
+      expect(await session.serving).toBe(0);
+      expect(scansClosed).toBe(name === "scan" ? 1 : 0);
+      expect(session.output.writableLength).toBeGreaterThan(0);
+      finishWrite(new Error("synthetic broken pipe after shutdown"));
+      await setImmediate();
+      expect(session.output.closed).toBe(true);
+      expect(session.output.listenerCount("error")).toBe(0);
+    },
+  );
+
+  test("disconnects abort preparation and active scans, preserve artifacts, and await cleanup", async () => {
+    for (const phase of [
+      "preparation",
+      "scan",
+      "preflight",
+      "output-close",
+      "output-error",
+    ] as const) {
+      const started = Promise.withResolvers<void>();
+      const canceled = Promise.withResolvers<void>();
+      const finishCleanup = Promise.withResolvers<void>();
+      const deps = dependencies();
+      const waitForCancellation = async (options: ScanOptions | undefined) => {
+        if (phase === "scan") options!.onOutputDirReady?.("/synthetic/partial");
+        started.resolve();
+        await new Promise<void>((resolve) =>
+          options!.signal!.addEventListener("abort", () => resolve(), {
+            once: true,
+          }),
+        );
+        canceled.resolve();
+        throw new DOMException("Canceled", "AbortError");
+      };
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => waitForCancellation(options),
+        preflight: async (_repository, options) => waitForCancellation(options),
+        close: async () => {
+          await finishCleanup.promise;
+        },
+      });
+      const session = await connect(deps);
+      session.call("scan", { dryRun: phase === "preflight" });
+      await started.promise;
+      let finished = false;
+      void session.serving.then(() => {
+        finished = true;
+      });
+      if (phase === "output-close") session.output.destroy();
+      else if (phase === "output-error")
+        session.output.destroy(new Error("synthetic broken pipe"));
+      else if (phase === "scan") session.input.destroy();
+      else session.input.end();
+      await canceled.promise;
+      expect(finished).toBe(false);
+      finishCleanup.resolve();
+      expect(await session.serving).toBe(0);
+      if (phase === "scan")
+        expect(session.stderr.text()).toContain(
+          "Partial output was kept at /synthetic/partial",
+        );
+    }
+  });
+
+  test("server signals cancel scans and remove signal handlers", async () => {
+    for (const [signal, exitCode] of [
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+    ] as const) {
+      const signals = new FakeSignals();
+      const started = Promise.withResolvers<void>();
+      const deps = dependencies({ signals });
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          started.resolve();
+          await new Promise<void>((resolve) =>
+            options!.signal!.addEventListener("abort", () => resolve(), {
+              once: true,
+            }),
+          );
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+      const session = await connect(deps);
+      session.call("scan");
+      await started.promise;
+      signals.emit(signal);
+      expect(await session.serving).toBe(exitCode);
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    }
+  });
+  test.each([
+    ["SIGINT", "SIGINT", 1_000, 130],
+    ["SIGTERM", "SIGTERM", 1_000, 143],
+    ["SIGINT", "SIGTERM", 100, 130],
+  ] as const)(
+    "a later %s/%s escapes blocked scan cleanup",
+    async (first, repeated, delay, exitCode) => {
+      const signals = new FakeSignals();
+      const started = Promise.withResolvers<void>();
+      const cleanupStarted = Promise.withResolvers<void>();
+      const finishCleanup = Promise.withResolvers<void>();
+      const forced: string[] = [];
+      let now = 0;
+      const deps = dependencies({ signals });
+      deps.now = () => now;
+      deps.forceExit = (signal) => forced.push(signal);
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          started.resolve();
+          await new Promise<void>((resolve) =>
+            options!.signal!.addEventListener("abort", () => resolve(), {
+              once: true,
+            }),
+          );
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {
+          cleanupStarted.resolve();
+          await finishCleanup.promise;
+        },
+      });
+      const session = await connect(deps);
+      try {
+        session.call("scan");
+        await started.promise;
+        signals.emit(first);
+        await cleanupStarted.promise;
+        signals.emit(first);
+        expect(forced).toEqual([]);
+        now = delay;
+        signals.emit(repeated);
+        expect(forced).toEqual([repeated]);
+        expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+        expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      } finally {
+        finishCleanup.resolve();
+        expect(await session.serving).toBe(exitCode);
+      }
+    },
+  );
+});
