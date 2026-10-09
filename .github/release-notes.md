@@ -153,6 +153,9 @@
 - bump ruff from 0.16.9 to 0.16.10 in /plugins/codex-security ([#1531](https://github.com/openai/codex-security/pull/1531))
 - share workbench migration repair instructions ([#1496](https://github.com/openai/codex-security/pull/1496))
 - use Bun native sharding ([#1479](https://github.com/openai/codex-security/pull/1479))
+- reuse scan contract readers and projection helpers ([#1480](https://github.com/openai/codex-security/pull/1480))
+- derive value options from command schemas ([#1477](https://github.com/openai/codex-security/pull/1477))
+- add cs alias and clarify onboarding ([#1415](https://github.com/openai/codex-security/pull/1415))
 
 <!-- release-section: highlights:end -->
 

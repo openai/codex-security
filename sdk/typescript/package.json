@@ -31,7 +31,8 @@
     "./schemas/project-config.schema.json": "./schemas/project-config.schema.json"
   },
   "bin": {
-    "codex-security": "./bin/codex-security.mjs"
+    "codex-security": "./bin/codex-security.mjs",
+    "cs": "./bin/codex-security.mjs"
   },
   "files": [
     "bin",
