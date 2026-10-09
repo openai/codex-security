@@ -1868,6 +1868,114 @@ describe("CodexSecurity finding validation", () => {
     },
   );
 
+  test.each([
+    ["cached", "source contents", "unchanged"],
+    ["cached", "recorded contents", "unchanged"],
+    ["cached", "source contents", "changed"],
+    ["cached", "recorded contents", "missing"],
+    ["fresh", "source contents", "unchanged"],
+    ["fresh", "recorded contents", "missing"],
+  ] as const)(
+    "rechecks %s validation %s after reading %s evidence",
+    async (phase, change, evidence) => {
+      const python = await resolvePluginPython();
+      let modelCalls = 0;
+      async function* events() {
+        modelCalls++;
+        await writeFile(
+          join(fixture.captured.thread!.workingDirectory!, "proof.txt"),
+          "Synthetic evidence.\n",
+        );
+        yield* validationEvents();
+      }
+      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      const repository = fixture.options.repositoryPath;
+      const source = join(repository, "source.ts");
+      await writeFile(source, "export const value = 'original';\n");
+      const environment = {
+        CODEX_SECURITY_STATE_DIR: fixture.stateDirectory,
+      };
+      const scanDir = join(fixture.root, "scan");
+      await mkdir(scanDir, { mode: 0o700 });
+      const registration = await runWorkbench(
+        { python, pluginRoot: PLUGIN_ROOT, environment },
+        [
+          "register-cli-scan",
+          "--repository",
+          repository,
+          "--scan-dir",
+          scanDir,
+          "--recipe-json",
+          JSON.stringify({
+            repository,
+            mode: "standard",
+            target: { kind: "repository", paths: [] },
+            config: {},
+          }),
+        ],
+      );
+      const workflowId = "evidence-validation-recheck";
+      await new FindingWorkflow(
+        workflowId,
+        environment,
+        runWorkbench,
+        python,
+      ).bind({ repositoryPath: repository });
+      let changeDuringEvidence = false;
+      let changed = false;
+      let savedReviews = 0;
+      fixture.workbench.mockImplementation(async (options, args, input) => {
+        const payload =
+          args[0] === "finding-workflow" ? JSON.parse(input!) : undefined;
+        const changeNow =
+          changeDuringEvidence &&
+          !changed &&
+          payload?.action === "source" &&
+          payload.evidence === true;
+        if (changeNow && evidence === "changed")
+          await writeFile(
+            join(payload.repository, "proof.txt"),
+            "Changed evidence.\n",
+          );
+        if (changeNow && evidence === "missing")
+          await rm(payload.repository, { recursive: true });
+        const response = await runWorkbench(options, args, input);
+        if (changeNow) {
+          await writeFile(source, "export const value = 'changed';\n");
+          changed = true;
+        }
+        if (payload?.action === "save-review") savedReviews++;
+        return response;
+      });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId,
+        ...(change === "recorded contents"
+          ? { scanId: registration["scanId"] as string }
+          : {}),
+      };
+      const first = await client.validate(request);
+      expect(await client.validate(request)).toEqual(first);
+      expect(modelCalls).toBe(1);
+      changeDuringEvidence = true;
+      await expect(
+        client.validate({
+          ...request,
+          ...(phase === "fresh" ? { finding: "Another candidate" } : {}),
+        }),
+      ).rejects.toThrow(
+        change === "source contents"
+          ? "Repository changed during validation"
+          : "Scan target contents changed",
+      );
+      expect(changed).toBe(true);
+      expect(modelCalls).toBe(phase === "fresh" ? 2 : 1);
+      expect(savedReviews).toBe(1);
+    },
+  );
+
   test.each(["canonical", "repository alias"])(
     "validates an unchanged recorded Git target with %s tool paths",
     async (kind) => {

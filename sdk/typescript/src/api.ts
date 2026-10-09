@@ -945,6 +945,24 @@ export class CodexSecurity {
           const reviewKey = workflowDigest(binding);
           const saved = await workflow.getReview(reviewKey);
           if (saved !== null) {
+            let reusable: ValidationResult | undefined;
+            const cached = cachedValidationSchema.safeParse(saved);
+            if (
+              cached.success &&
+              (inputs.outputDir === null ||
+                inputs.outputDir === cached.data.assessment.outputDir) &&
+              (await canCache())
+            ) {
+              const evidence = await workflow.sourceSnapshot(
+                cached.data.assessment.outputDir,
+                { optional: true, evidence: true },
+              );
+              if (
+                evidence !== null &&
+                workflowDigest(evidence) === cached.data.evidenceDigest
+              )
+                reusable = cached.data.assessment;
+            }
             await checkTarget();
             const current = await workflow.sourceSnapshot(inputs.repository, {
               optional: true,
@@ -956,23 +974,7 @@ export class CodexSecurity {
                   "Repository changed during validation.",
                 );
               }
-              const cached = cachedValidationSchema.safeParse(saved);
-              if (
-                cached.success &&
-                (inputs.outputDir === null ||
-                  inputs.outputDir === cached.data.assessment.outputDir) &&
-                (await canCache())
-              ) {
-                const evidence = await workflow.sourceSnapshot(
-                  cached.data.assessment.outputDir,
-                  { optional: true, evidence: true },
-                );
-                if (
-                  evidence !== null &&
-                  workflowDigest(evidence) === cached.data.evidenceDigest
-                )
-                  return cached.data.assessment;
-              }
+              if (reusable !== undefined) return reusable;
             }
           }
           checkpoint = {
@@ -1050,10 +1052,19 @@ export class CodexSecurity {
           "Finding validation returned an invalid result.",
         );
       }
+      const cache =
+        checkpoint !== undefined && (await canCache()) ? checkpoint : undefined;
+      const evidence =
+        cache === undefined
+          ? null
+          : await cache.workflow.sourceSnapshot(outputDir, {
+              optional: true,
+              evidence: true,
+            });
       await checkTarget();
       const assessment = { ...result, outputDir, threadId };
-      if (checkpoint !== undefined && (await canCache())) {
-        const { workflow, binding, key, replace } = checkpoint;
+      if (cache !== undefined) {
+        const { workflow, binding, key, replace } = cache;
         const current = await workflow.sourceSnapshot(inputs.repository, {
           optional: true,
           privateStatePaths,
@@ -1064,10 +1075,6 @@ export class CodexSecurity {
               "Repository changed during validation.",
             );
           }
-          const evidence = await workflow.sourceSnapshot(outputDir, {
-            optional: true,
-            evidence: true,
-          });
           if (evidence !== null)
             await workflow.saveReview(
               key,
