@@ -116,6 +116,9 @@ importers:
       json-schema-to-typescript:
         specifier: 16.0.0
         version: 16.0.0
+      json5:
+        specifier: 2.2.3
+        version: 2.2.3
       katex:
         specifier: 0.19.0
         version: 0.19.0
