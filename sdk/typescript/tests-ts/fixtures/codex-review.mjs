@@ -136,6 +136,38 @@ for await (const line of createInterface({ input: process.stdin })) {
         thread: { id: "review-thread", ephemeral: true, path: null },
       },
     });
+  } else if (message.method === "mcpServerStatus/list") {
+    assert.deepEqual(message.params, {
+      threadId: "review-thread",
+      serverName: "sourcegraph",
+      detail: "toolsAndAuthOnly",
+    });
+    send({
+      id: message.id,
+      result: {
+        data:
+          scenario === "source-unavailable"
+            ? []
+            : [
+                {
+                  name: "sourcegraph",
+                  runtimeStatus:
+                    scenario === "source-disabled"
+                      ? "disabled"
+                      : scenario === "source-failed"
+                        ? "failed"
+                        : "connected",
+                  ...(scenario === "source-failed"
+                    ? {
+                        toolsError:
+                          "Synthetic source transport error: token synthetic-source-auth",
+                      }
+                    : {}),
+                },
+              ],
+        nextCursor: null,
+      },
+    });
   } else if (message.method === "turn/start") {
     turns++;
     turnId = `review-turn-${turns}`;

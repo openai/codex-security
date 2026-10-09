@@ -96,6 +96,11 @@ interface Message {
   result?: {
     thread?: { id: string; ephemeral: boolean; path: string | null };
     turn?: { id: string };
+    data?: {
+      name: string;
+      runtimeStatus?: string | null;
+      toolsError?: string | null;
+    }[];
   };
   params?: {
     [key: string]: unknown;
@@ -627,6 +632,27 @@ export class CodexReviewRunner {
               event: "review.event",
               details: { method: "thread/started", threadId },
             });
+            if (source)
+              send({
+                id: "source-status",
+                method: "mcpServerStatus/list",
+                params: {
+                  threadId,
+                  serverName: source.name,
+                  detail: "toolsAndAuthOnly",
+                },
+              });
+            else startTurn(review.prompt);
+          } else if (message.id === "source-status" && source) {
+            const status = message.result?.data?.find(
+              (server) => server.name === source.name,
+            );
+            if (status?.runtimeStatus !== "connected")
+              throw new ReviewAttemptError(
+                "transport",
+                `Required source MCP server ${JSON.stringify(source.name)} is not connected (${status?.runtimeStatus ?? "unavailable"}).${status?.toolsError ? ` ${status.toolsError}` : ""}`,
+                "The required source MCP server is not connected.",
+              );
             startTurn(review.prompt);
           } else if (message.id === 3 + state.attempts) {
             turnId = message.result?.turn?.id ?? turnId;

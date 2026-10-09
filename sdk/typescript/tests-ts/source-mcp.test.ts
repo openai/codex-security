@@ -1195,15 +1195,21 @@ test.each(["C:\\repos\\project", "C:/repos/project"])(
   },
 );
 
-test.each([
-  "local-source",
-  "source-executor",
-  "executor-source",
-  "local-home",
-  ...(process.platform === "win32" ? [] : ["local-script", "executor-script"]),
-])(
-  "checkpoints follow native launch selection for %s and preserve effective overrides",
-  async (kind) => {
+test.each(
+  [
+    "local-source",
+    "source-executor",
+    "executor-source",
+    "local-home",
+    ...(process.platform === "win32"
+      ? []
+      : ["local-script", "executor-script"]),
+  ].flatMap((kind) =>
+    (["inherited", "overridden"] as const).map((mode) => [kind, mode] as const),
+  ),
+)(
+  "checkpoints follow native launch selection for %s with %s settings",
+  async (kind, mode) => {
     const home = await temporaryDirectory();
     const repository = await sourceCheckout();
     const captured = join(home, "selected-source.txt");
@@ -1290,13 +1296,11 @@ process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { 
         validate: (value) => value as { source: string },
       };
       const digests: string[] = [];
-      for (const phase of [
-        "first",
-        "second",
-        "fixed-first",
-        "fixed-second",
-        "unrelated",
-      ] as const) {
+      const phases =
+        mode === "inherited"
+          ? (["first", "second"] as const)
+          : (["fixed-first", "fixed-second", "unrelated"] as const);
+      for (const phase of phases) {
         const fixed = phase.startsWith("fixed-") || phase === "unrelated";
         const environment = {
           [process.platform === "win32" ? "Path" : "PATH"]:
@@ -1432,10 +1436,13 @@ process.exit(spawnSync(process.argv[3], ["exec-server", "--listen", "stdio"], { 
         );
         expect(await checkpoint.run(review)).toEqual({ source: selected });
       }
-      expect(digests[0]).not.toBe(digests[1]);
-      expect(digests[2]).toBe(digests[3]);
-      expect(digests[3]).toBe(digests[4]);
-      expect(calls).toBe(3);
+      if (mode === "inherited") {
+        expect(digests[0]).not.toBe(digests[1]);
+        expect(calls).toBe(2);
+      } else {
+        expect(new Set(digests).size).toBe(1);
+        expect(calls).toBe(1);
+      }
       expect(modelRequests).toBe(0);
     } finally {
       endpoint.closeAllConnections();

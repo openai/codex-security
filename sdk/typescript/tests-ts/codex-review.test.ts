@@ -240,6 +240,12 @@ const failureReasons: Record<string, string> = {
   "unknown-turn": "Unknown model failure",
   "request-error": "Authentication required",
   "credential-error": "Authentication failed: Bearer synthetic-review-key",
+  "source-disabled":
+    'Required source MCP server "sourcegraph" is not connected (disabled).',
+  "source-unavailable":
+    'Required source MCP server "sourcegraph" is not connected (unavailable).',
+  "source-failed":
+    'Required source MCP server "sourcegraph" is not connected (failed). Synthetic source transport error: token synthetic-source-auth',
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
   "required-source-error":
@@ -330,7 +336,14 @@ const transportCases: {
     ...Object.keys(failureReasons),
     "cancel-backoff",
     "cancel",
-  ].map((scenario) => ({ scenario })),
+  ].map((scenario) => ({
+    scenario,
+    ...(["source-disabled", "source-unavailable", "source-failed"].includes(
+      scenario,
+    )
+      ? { sourceMcp: "http" as const }
+      : {}),
+  })),
   {
     scenario: "correction",
     name: "lowercase Windows environment",
@@ -694,9 +707,15 @@ for (const {
                   ? "Codex review turn failed."
                   : reportsBlocker
                     ? "A required review check could not be completed."
-                    : ["request-error", "credential-error"].includes(scenario)
-                      ? "Codex rejected the review request."
-                      : "Codex review transport failed.",
+                    : [
+                          "source-disabled",
+                          "source-unavailable",
+                          "source-failed",
+                        ].includes(scenario)
+                      ? "The required source MCP server is not connected."
+                      : ["request-error", "credential-error"].includes(scenario)
+                        ? "Codex rejected the review request."
+                        : "Codex review transport failed.",
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
@@ -776,6 +795,17 @@ for (const {
         expect(args.join(" ")).not.toContain("synthetic-static-auth");
         expect(request.params.approvalPolicy).toBe("on-request");
         expect(request.params.approvalsReviewer).toBe("auto_review");
+        const methods = transcriptText
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).method);
+        expect(methods.indexOf("mcpServerStatus/list")).toBeGreaterThan(
+          methods.indexOf("thread/start"),
+        );
+        if (scenario === "correction")
+          expect(methods.indexOf("turn/start")).toBeGreaterThan(
+            methods.indexOf("mcpServerStatus/list"),
+          );
         if (sourceMcp === "http")
           expect(
             request.params.config.shell_environment_policy.exclude,
@@ -848,6 +878,9 @@ for (const {
                       "credential-error",
                       "policy-request",
                       "policy-request-code",
+                      "source-disabled",
+                      "source-unavailable",
+                      "source-failed",
                     ].includes(scenario)
                   ? 0
                   : 1) * sessions,
