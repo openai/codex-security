@@ -13,6 +13,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -371,25 +372,159 @@ async function assertUnavailableUserInputFallback() {
   }
 }
 
-async function assertWorkspaceWorksWithoutUiCapability() {
+async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
+  const fixtureRoot = await temporaryDirectory("workbench-text-target-");
+  const targetPath = path.join(
+    fixtureRoot,
+    process.platform === "win32" ? "target" : "target ",
+  );
+  await mkdir(targetPath);
+  const alias = path.join(fixtureRoot, "alias");
+  if (process.platform !== "win32") {
+    await mkdir(path.join(fixtureRoot, "target"));
+    await symlink(targetPath, alias, "dir");
+  }
+  await mkdir(path.join(targetPath, scope));
+  if (scope !== scope.trim() && scope.trim() !== "./")
+    await mkdir(path.join(targetPath, scope.trim()));
+  await writeFile(path.join(targetPath, scope, "source.py"), "pass\n");
+  await writeFile(path.join(targetPath, "outside.py"), "pass\n");
+  const userContext = "--data\nUnicode Ä 日本語\n".repeat(200).trim();
   const nonUiStateDir = path.join(tmpdir(), randomUUID());
   const nonUiServer = startTestServer({
     cwd: pluginRoot,
-    env: { CODEX_SECURITY_STATE_DIR: nonUiStateDir },
+    env: {
+      CODEX_SECURITY_STATE_DIR: nonUiStateDir,
+      CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
+    },
   });
   try {
     assertNoError(await nonUiServer.initialize("codex-security-non-ui-smoke"));
+    const inspected = await nonUiServer.callTool(10, {
+      name: "inspect_codex_security_target",
+      arguments: {
+        targetPath: process.platform === "win32" ? targetPath : alias,
+      },
+    });
+    assertNoError(inspected);
+    const canonicalTarget =
+      inspected.result.structuredContent.target.targetPath;
+    assert.equal(canonicalTarget, await realpath(targetPath));
+    const reinspected = await nonUiServer.callTool(11, {
+      name: "inspect_codex_security_target",
+      arguments: { targetPath: canonicalTarget },
+    });
+    assertNoError(reinspected);
+    assert.equal(
+      reinspected.result.structuredContent.target.targetPath,
+      canonicalTarget,
+    );
     const response = await nonUiServer.callTool(2, {
       name: "open_codex_security_workspace",
-      arguments: { targetPath: target, mode: "standard", scope: "." },
+      arguments: {
+        targetPath: canonicalTarget,
+        mode: "standard",
+        scope: `./${scope}`,
+        targetTitle: "--user-context",
+        targetSummary: "--fixture-summary",
+        userContext,
+      },
       _meta: { "openai/threadId": "fixture-non-ui-thread" },
     });
     assertNoError(response);
     const workspace = response.result.structuredContent.workspace;
     assert.match(workspace.id, /^[0-9a-f-]{36}$/);
-    assert.equal(workspace.targetPath, await realpath(target));
+    assert.equal(workspace.targetPath, await realpath(targetPath));
     assert.equal(workspace.mode, "standard");
-    assert.equal(workspace.scope, ".");
+    assert.equal(workspace.scope, scope);
+    assert.equal(workspace.targetTitle, "--user-context");
+    assert.equal(workspace.targetSummary, "--fixture-summary");
+    assert.equal(workspace.userContext, userContext);
+    const saved = await nonUiServer.callTool(3, {
+      name: "submit_codex_security_setup",
+      arguments: {
+        sessionId: workspace.id,
+        targetPath: workspace.targetPath,
+        scope: workspace.scope,
+        mode: workspace.mode,
+        targetSummary: "",
+      },
+    });
+    assertNoError(saved);
+    assert.equal(saved.result.structuredContent.workspace.scope, scope);
+    assert.equal(saved.result.structuredContent.workspace.targetSummary, null);
+    assertNoError(
+      await nonUiServer.callTool(4, {
+        name: "list_codex_security_scans",
+        arguments: { query: "-sub" },
+      }),
+    );
+    const setup = await nonUiServer.callTool(12, {
+      name: "inspect_codex_security_setup",
+      arguments: {
+        targetPath: workspace.targetPath,
+        scope: workspace.scope,
+        mode: workspace.mode,
+      },
+    });
+    assertNoError(setup);
+    assert.equal(setup.result.structuredContent.setup.scope, scope);
+    const started = await nonUiServer.callTool(13, {
+      name: "start_codex_security_scan",
+      arguments: { sessionId: workspace.id },
+    });
+    assertNoError(started);
+    assert.equal(
+      started.result.structuredContent.workspace.targetPath,
+      canonicalTarget,
+    );
+    assert.equal(started.result.structuredContent.workspace.scope, scope);
+    for (const [index, name] of [
+      "start_codex_security_prompt_only_scan",
+      "start_codex_security_standard_scan",
+    ].entries()) {
+      const launched = await nonUiServer.callTool(14 + index, {
+        name,
+        arguments: {
+          targetPath: canonicalTarget,
+          scope,
+          ...(index === 0 ? { mode: "standard" } : {}),
+        },
+        _meta: { "openai/threadId": `fixture-path-launch-${index}` },
+      });
+      assertNoError(launched);
+      assert.equal(
+        launched.result.structuredContent.scan.targetPath,
+        canonicalTarget,
+      );
+      assert.equal(launched.result.structuredContent.scan.scope, scope);
+      assert.deepEqual(
+        launched.result.structuredContent.scan.contract.scope
+          .requiredIncludePaths,
+        [scope],
+      );
+    }
+    const inventoryPath = path.join(fixtureRoot, "in_scope_files.txt");
+    execFileSync(process.env.PYTHON?.trim() || "python3", [
+      path.join(pluginRoot, "scripts", "generate_in_scope_files.py"),
+      "--repo",
+      canonicalTarget,
+      `--scope=${scope}`,
+      "--out",
+      inventoryPath,
+    ]);
+    assert.equal(await readFile(inventoryPath, "utf8"), `${scope}/source.py\n`);
+    for (const [index, blank] of ["", " \t\n"].entries()) {
+      const invalid = await nonUiServer.callTool(16 + index, {
+        name: "inspect_codex_security_setup",
+        arguments: {
+          targetPath: canonicalTarget,
+          scope: blank,
+          mode: "standard",
+        },
+      });
+      assert.equal(invalid.result.isError, true);
+    }
     assert.equal(workspace.setup.submitted, false);
     assert.ok(
       (await readFile(path.join(nonUiStateDir, "workbench.sqlite3"))).length >
@@ -398,6 +533,7 @@ async function assertWorkspaceWorksWithoutUiCapability() {
   } finally {
     await nonUiServer.stop();
     await rm(nonUiStateDir, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 }
 
@@ -570,7 +706,12 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
   const fixtureRoot = await temporaryDirectory(
     "codex-security-deep-inventory-",
   );
-  const fixtureTarget = path.join(fixtureRoot, "repository");
+  const fixtureTarget = path.join(
+    fixtureRoot,
+    process.platform === "win32" ? "repository" : "repository ",
+  );
+  if (process.platform !== "win32")
+    await mkdir(path.join(fixtureRoot, "repository"));
   const fixtureState = path.join(fixtureRoot, "state");
   const fixtureScanRoot = path.join(fixtureRoot, "scans");
   await mkdir(path.join(fixtureTarget, "app"), { recursive: true });
@@ -592,7 +733,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
 
     deepServer.sendRequest(2, "tools/call", {
       name: "start_codex_security_deep_scan",
-      arguments: { targetPath: fixtureTarget },
+      arguments: { targetPath: fixtureTarget, scope: fixtureTarget },
       _meta: {
         "openai/threadId": "fixture-deep-inventory-thread",
         "codex/sandbox-state-meta": parentSandboxState,
@@ -633,6 +774,8 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
           ),
         );
         assert.equal(deepScan.status, "running");
+        assert.equal(deepScan.targetPath, await realpath(fixtureTarget));
+        assert.equal(deepScan.scope, ".");
         startupErrorWorker = deepScan.workers.find(
           (worker: { status: string; error?: string }) =>
             worker.error?.includes("missing-deep-scan-codex"),
@@ -1297,7 +1440,12 @@ try {
   await assertMissingPythonError();
   await assertWorkbenchStdinFailureDoesNotCrashServer();
   await assertUnavailableUserInputFallback();
-  await assertWorkspaceWorksWithoutUiCapability();
+  for (const scope of [
+    "-sub",
+    " component",
+    ...(process.platform === "win32" ? [] : ["./ "]),
+  ])
+    await assertWorkspaceWorksWithoutUiCapability(scope);
   await assertHeadlessStandardScanWorksWithoutUiCapability();
   await assertDeepScanPersistsRetryableWorkerStartupError();
   await assertUserInputFailureLogging();
@@ -1315,68 +1463,35 @@ try {
     code: "ENOENT",
   });
 
-  const launcher = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "open_codex_security_workspace",
-  );
-  const startPromptOnlyScan = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "start_codex_security_prompt_only_scan",
-  );
+  const findTool = (name: string) =>
+    toolList.result.tools.find((tool: { name: string }) => tool.name === name);
+
+  const launcher = findTool("open_codex_security_workspace");
+  const startPromptOnlyScan = findTool("start_codex_security_prompt_only_scan");
   assert.match(
     startPromptOnlyScan.description,
     /Standard and diff scans save progress checkpoints before their final semantic draft/,
     "Prompt-only scan instructions must align Diff callers with checkpointed handoffs",
   );
-  const startHeadlessStandardScan = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "start_codex_security_standard_scan",
+  const startHeadlessStandardScan = findTool(
+    "start_codex_security_standard_scan",
   );
-  const getScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "get_codex_security_scan",
+  const getScan = findTool("get_codex_security_scan");
+  const recoverScanResults = findTool("recover_codex_security_scan_results");
+  const listScans = findTool("list_codex_security_scans");
+  const listGlobalFindings = findTool("list_codex_security_global_findings");
+  const listRepositories = findTool("list_codex_security_repositories");
+  const getScanContext = findTool("get_codex_security_scan_context");
+  const updateScanContext = findTool("update_codex_security_scan_context");
+  const updateScanContextFromApp = findTool(
+    "update_codex_security_scan_context_from_app",
   );
-  const recoverScanResults = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "recover_codex_security_scan_results",
-  );
-  const listScans = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "list_codex_security_scans",
-  );
-  const listGlobalFindings = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "list_codex_security_global_findings",
-  );
-  const listRepositories = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "list_codex_security_repositories",
-  );
-  const getScanContext = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "get_codex_security_scan_context",
-  );
-  const updateScanContext = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_context",
-  );
-  const updateScanContextFromApp = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_context_from_app",
-  );
-  const renameScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "rename_codex_security_scan",
-  );
+  const renameScan = findTool("rename_codex_security_scan");
   assert.deepEqual(renameScan._meta.ui.visibility, ["app"]);
-  const submit = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "submit_codex_security_setup",
-  );
-  const inspectTarget = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "inspect_codex_security_target",
-  );
-  const inspectSetup = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "inspect_codex_security_setup",
-  );
-  const requestUserInput = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_user_input",
-  );
+  const submit = findTool("submit_codex_security_setup");
+  const inspectTarget = findTool("inspect_codex_security_target");
+  const inspectSetup = findTool("inspect_codex_security_setup");
+  const requestUserInput = findTool("request_codex_security_user_input");
   assert.ok(
     requestUserInput,
     "Expected the Codex Security user-input fallback tool.",
@@ -1580,83 +1695,45 @@ try {
     assertNoError(response);
     assert.deepEqual(response.result.structuredContent, { status });
   }
-  const start = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "start_codex_security_scan",
+  const start = findTool("start_codex_security_scan");
+  const startDeepScan = findTool("start_codex_security_deep_scan");
+  const cancel = findTool("cancel_codex_security_scan");
+  const cancelFromApp = findTool("cancel_codex_security_scan_from_app");
+  const markHandoff = findTool("mark_codex_security_scan_handoff_delivered");
+  const claimHandoff = findTool("claim_codex_security_scan_handoff_delivery");
+  const releaseHandoff = findTool(
+    "release_codex_security_scan_handoff_delivery",
   );
-  const startDeepScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "start_codex_security_deep_scan",
+  const attachHandoff = findTool(
+    "attach_codex_security_scan_continuation_thread",
   );
-  const cancel = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "cancel_codex_security_scan",
+  const progress = findTool("update_codex_security_scan_progress");
+  const complete = findTool("complete_codex_security_scan");
+  const fail = findTool("fail_codex_security_scan");
+  const setFindingTriage = findTool("set_codex_security_finding_triage");
+  const requestFindingRemediation = findTool(
+    "request_codex_security_finding_remediation",
   );
-  const cancelFromApp = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "cancel_codex_security_scan_from_app",
+  const requestFindingRemediationAction = findTool(
+    "request_codex_security_finding_remediation_action",
   );
-  const markHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "mark_codex_security_scan_handoff_delivered",
+  const claimFindingRemediationResend = findTool(
+    "claim_codex_security_finding_remediation_resend",
   );
-  const claimHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "claim_codex_security_scan_handoff_delivery",
+  const releaseFindingRemediationClaim = findTool(
+    "release_codex_security_finding_remediation_claim",
   );
-  const releaseHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "release_codex_security_scan_handoff_delivery",
+  const cancelFindingRemediationRequest = findTool(
+    "cancel_codex_security_finding_remediation_request",
   );
-  const attachHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "attach_codex_security_scan_continuation_thread",
+  const markFindingRemediationDelivered = findTool(
+    "mark_codex_security_finding_remediation_delivered",
   );
-  const progress = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_progress",
+  const setFindingRemediation = findTool(
+    "set_codex_security_finding_remediation",
   );
-  const complete = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "complete_codex_security_scan",
-  );
-  const fail = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "fail_codex_security_scan",
-  );
-  const setFindingTriage = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "set_codex_security_finding_triage",
-  );
-  const requestFindingRemediation = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_finding_remediation",
-  );
-  const requestFindingRemediationAction = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_finding_remediation_action",
-  );
-  const claimFindingRemediationResend = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "claim_codex_security_finding_remediation_resend",
-  );
-  const releaseFindingRemediationClaim = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "release_codex_security_finding_remediation_claim",
-  );
-  const cancelFindingRemediationRequest = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "cancel_codex_security_finding_remediation_request",
-  );
-  const markFindingRemediationDelivered = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "mark_codex_security_finding_remediation_delivered",
-  );
-  const setFindingRemediation = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "set_codex_security_finding_remediation",
-  );
-  const exportFindings = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "export_codex_security_findings",
-  );
-  const listFindings = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "list_codex_security_findings",
-  );
+  const exportFindings = findTool("export_codex_security_findings");
+  const listFindings = findTool("list_codex_security_findings");
   assert.ok(launcher);
   assert.ok(startPromptOnlyScan);
   assert.ok(startHeadlessStandardScan);
@@ -2858,6 +2935,7 @@ try {
     rejectedPendingClose.result.content[0].text,
     /pending remediation operation/,
   );
+  const remediationPatchPath = " remediation.patch";
   const remediationPatch = `diff --git a/src/a.py b/src/a.py
 --- a/src/a.py
 +++ b/src/a.py
@@ -2866,8 +2944,12 @@ try {
 +fixed
 `;
   await writeFile(
-    path.join(initializedScanDir, "remediation.patch"),
+    path.join(initializedScanDir, remediationPatchPath),
     remediationPatch,
+  );
+  await writeFile(
+    path.join(initializedScanDir, remediationPatchPath.trim()),
+    "different patch contents\n",
   );
   const generatedPatch = await testServer.callTool(62, {
     name: "set_codex_security_finding_remediation",
@@ -2877,7 +2959,7 @@ try {
       requestId: remediationRequestId,
       expectedVersion: 1,
       state: "generated",
-      patchPath: "remediation.patch",
+      patchPath: remediationPatchPath,
       patchDigest: `sha256:${hash("sha256", remediationPatch)}`,
       summary: "Contain archive extraction under the output root.",
     },
@@ -2892,6 +2974,11 @@ try {
     generatedPatch.result.structuredContent.scan.findings[0].remediationState
       .patch,
     remediationPatch,
+  );
+  assert.equal(
+    generatedPatch.result.structuredContent.scan.findings[0].remediationState
+      .patchPath,
+    remediationPatchPath,
   );
 
   const applyActionToken = randomUUID();
@@ -2931,7 +3018,11 @@ try {
   );
   execFileSync(
     "git",
-    ["apply", "--no-index", path.join(initializedScanDir, "remediation.patch")],
+    [
+      "apply",
+      "--no-index",
+      path.join(initializedScanDir, remediationPatchPath),
+    ],
     {
       cwd: target,
     },
@@ -2946,6 +3037,9 @@ try {
       occurrenceId,
       requestId: remediationRequestId,
       state: "applied",
+      patchPath:
+        generatedPatch.result.structuredContent.scan.findings[0]
+          .remediationState.patchPath,
     },
   });
   assertNoError(appliedPatch);
@@ -3457,15 +3551,20 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   });
   assertNoError(rotatedProgress);
+  const failureMessage = "--failure\nline";
   const rotatedFailure = await testServer.callTool(2039, {
     name: "fail_codex_security_scan",
     arguments: {
       handoffClaimToken: rotatedFallbackClaimToken,
-      message: "rotated continuation stopped",
+      message: failureMessage,
       scanId: fallbackScanId,
     },
   });
   assertNoError(rotatedFailure);
+  assert.equal(
+    rotatedFailure.result.structuredContent.scan.failureMessage,
+    failureMessage,
+  );
   assert.equal(
     rotatedFailure.result.structuredContent.scan.progress.status,
     "failed",

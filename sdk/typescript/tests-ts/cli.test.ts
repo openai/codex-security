@@ -447,7 +447,7 @@ describe("CLI", () => {
   });
 
   test("marks findings as false positives without starting Codex", async () => {
-    const reason = "  Not reachable from untrusted input.  ";
+    const reason = "  --dry-run is an option in the sample.  ";
     const expectedReason = reason.trim();
     const response: JsonObject = {
       scan: {
@@ -497,8 +497,7 @@ describe("CLI", () => {
         "closed",
         "--close-reason",
         "false_positive",
-        "--note",
-        expectedReason,
+        `--note=${expectedReason}`,
       ],
     ]);
     expect(JSON.parse(stdout.text())).toEqual(response);
