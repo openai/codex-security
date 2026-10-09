@@ -3332,7 +3332,9 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-linear-publication":
-        result = publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
+        result = publication.inspect_linear_publication(
+            _WORKBENCH_PUBLICATION_CONTEXT, read_json_object(Path(args.input_file))
+        )
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
@@ -3394,7 +3396,12 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "export-findings": partial(publication.export_findings, _WORKBENCH_PUBLICATION_CONTEXT),
         }
         if handler := handlers.get(args.command):
-            result = handler(connection, args)
+            payload = (
+                read_json_object(Path(args.input_file))
+                if args.command in {"prepare-linear-publication", "record-linear-publications"}
+                else args
+            )
+            result = handler(connection, payload)
         elif args.command == "get-workspace":
             result = workspace_state(
                 connection,

@@ -1,7 +1,8 @@
 import { codexWithRun } from "./support/codex.js";
 import { createCliTest } from "./support/cli-run.js";
-import { gitText } from "./support/shell.js";
+import { gitText, nodeCommand } from "./support/shell.js";
 import { resolving } from "./support/promises.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
@@ -11,9 +12,11 @@ import {
   rename,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
 import { writeThreatModel } from "../src/artifact-export.js";
@@ -985,6 +988,100 @@ test("plans from a Git inventory without tools or ignored files", async () => {
       proposed,
     );
   }
+});
+
+// Windows and macOS do not support the synthetic 0xff filename fixture.
+for (const rawByteNames of [false, true]) {
+  test
+    .skipIf(rawByteNames && ["win32", "darwin"].includes(process.platform))
+    .each(["Git", "plain directory"])(
+    `preserves exact UTF-8 paths in a %s component inventory${rawByteNames ? " with raw-byte entries" : ""}`,
+    async (kind) => {
+      const repository = join(await temporaryDirectory(), "repository");
+      await mkdir(repository);
+      if (kind === "Git") execFileSync("git", ["-C", repository, "init", "-q"]);
+      const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts", "résumé.ts", "🙂.ts"];
+      for (const path of paths)
+        await writeFile(join(repository, path), "export {};\n");
+      const proposed = { components: [{ name: "Sources", paths }] };
+      const response = mock(() => proposed);
+      const options = { codex: fakeCodex(response) };
+      if (rawByteNames) {
+        const invalid = Buffer.concat([
+          Buffer.from(join(repository, "name-")),
+          Buffer.from([0xff]),
+          Buffer.from(".ts"),
+        ]);
+        await writeFile(invalid, "export {};\n");
+        await expect(
+          planComponents(repository, options),
+        ).rejects.toBeInstanceOf(TypeError);
+        expect(response).not.toHaveBeenCalled();
+        await unlink(invalid);
+        await symlink("missing.ts", invalid);
+      }
+      expect(await planComponents(repository, options)).toEqual(proposed);
+      expect(response).toHaveBeenCalledTimes(1);
+    },
+  );
+}
+
+test("plans Unicode files when directory entry types are unknown", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "plans Unicode files when directory entry types are unknown",
+    )
+  )
+    return;
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts", "résumé/🙂.ts"];
+  for (const path of [...paths, ".git/ignored.ts"]) {
+    await mkdir(dirname(join(repository, path)), { recursive: true });
+    await writeFile(join(repository, path), "export {};\n");
+  }
+  const source = new URL("../src/component-plan.ts", import.meta.url);
+  const built = await Bun.build({
+    entrypoints: [fileURLToPath(source)],
+    target: "node",
+    format: "esm",
+    define: { "import.meta.url": JSON.stringify(source.href) },
+  });
+  expect(built.success).toBe(true);
+  const module = join(root, "component-plan.mjs");
+  await writeFile(module, await built.outputs[0]!.text());
+  const proposed = { components: [{ name: "Sources", paths }] };
+  const output = execFileSync(
+    nodeCommand().command,
+    [
+      "--input-type=module",
+      "--eval",
+      `
+      import assert from "node:assert/strict";
+      const binding = process.binding("fs");
+      const original = binding.readdir;
+      let unknownEntries = 0;
+      binding.readdir = async function (...args) {
+        const result = await original.apply(this, args);
+        if (args[2] === true) {
+          unknownEntries += result[1].length;
+          result[1].fill(0);
+        }
+        return result;
+      };
+      const { planComponents } = await import(${JSON.stringify(pathToFileURL(module).href)});
+      const proposed = ${JSON.stringify(proposed)};
+      const plan = await planComponents(${JSON.stringify(repository)}, {
+        codex: { startThread: () => ({ run: async () => ({ finalResponse: JSON.stringify(proposed) }) }) },
+      });
+      assert.ok(unknownEntries > 0);
+      console.log(JSON.stringify(plan));
+    `,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(JSON.parse(output)).toEqual(proposed);
 });
 
 test.each(["directories", "manifests", "root files"])(

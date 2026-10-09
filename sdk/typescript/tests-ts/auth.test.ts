@@ -190,6 +190,24 @@ describe("Codex authentication process boundary", () => {
     expect(observeSucceeded).toHaveBeenCalled();
   });
 
+  test.each(["sync", "async"])(
+    "rejects wait when required login completion fails: %s",
+    async (mode) => {
+      const { command, environment } = await fakeCodex();
+      const failure = new Error("Synthetic credential persistence failed");
+      const handle = new CodexLoginHandle(
+        command,
+        ["login", "--device-auth"],
+        environment,
+        () => {
+          if (mode === "sync") throw failure;
+          return Promise.reject(failure);
+        },
+      );
+      await expect(handle.wait()).rejects.toBe(failure);
+    },
+  );
+
   test.each(["User code: RIGHT-CODE", "Code: RIGHT-CODE", "RIGHT-CODE"])(
     "ignores URL parameters when reading device instructions: %s",
     async (instruction) => {

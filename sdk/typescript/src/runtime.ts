@@ -1,5 +1,5 @@
 import { gitProtectionRoots } from "./targets.js";
-import { isNonEmptyString } from "./value.js";
+import { isNonEmptyString, notify } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -1596,6 +1596,22 @@ def before_archive():
 workbench["main"](before_archive=before_archive)
 `;
 
+// Internal publication callers use only the SDK's bundled workbench.
+const PUBLICATION_PROGRAM = String.raw`
+import json, runpy, sys
+from contextlib import closing
+workbench = runpy.run_path(sys.argv[1])
+context = workbench["_WORKBENCH_PUBLICATION_CONTEXT"]
+payload = json.load(sys.stdin, parse_constant=workbench["reject_non_finite_json"])
+handler = getattr(workbench["publication"], sys.argv[2].replace("-", "_"))
+if sys.argv[2] == "inspect-linear-publication":
+    result = handler(context, payload)
+else:
+    with closing(workbench["connect"]()) as connection:
+        result = handler(context, connection, payload)
+print(json.dumps(result, allow_nan=False, sort_keys=True))
+`;
+
 const workbenchComparisonSupport = new Map<
   string,
   { stdin: boolean; related: boolean }
@@ -1647,10 +1663,22 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
+    const publicationInput =
+      input !== undefined &&
+      arguments_.length === 1 &&
+      [
+        "inspect-linear-publication",
+        "prepare-linear-publication",
+        "record-linear-publications",
+      ].includes(arguments_[0]!);
     // OS argv cannot carry NUL, but workbench text fields can.
     const framedArguments =
       !native && arguments_.some((argument) => argument.includes("\0"));
-    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
+    let program = archiveHandshake
+      ? ARCHIVE_REGISTRATION_PROGRAM
+      : publicationInput
+        ? PUBLICATION_PROGRAM
+        : undefined;
     if (framedArguments)
       program =
         WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
@@ -2154,11 +2182,7 @@ async function prepareOutputDirectory(
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
         await rename(path, archiveDir);
-        try {
-          void Promise.resolve(onOutputArchived?.(archiveDir)).catch(
-            () => undefined,
-          );
-        } catch {}
+        notify(() => onOutputArchived?.(archiveDir));
         existing = null;
       }
     }
