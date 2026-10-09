@@ -37,7 +37,7 @@ class FindingsHttpError extends CodexSecurityError {
       ?.trim()
       .toLowerCase();
     let body: unknown;
-    if (mediaType === "application/json") {
+    if (mediaType === "application/json" || mediaType?.endsWith("+json")) {
       body = await response.json().catch(() => undefined);
     } else {
       void response.body?.cancel().catch(() => undefined);
