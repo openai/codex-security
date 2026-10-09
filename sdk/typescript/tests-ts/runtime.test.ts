@@ -6,6 +6,7 @@ import {
 } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
+import { Codex } from "@openai/codex-sdk";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
@@ -2801,6 +2802,64 @@ ${directNode ? "}" : ""}
     );
   });
 
+  testPosix(
+    "launches the configured executable through symlink parent components",
+    async () => {
+      const root = await temporaryDirectory();
+      const release = join(root, "release with spaces");
+      const childDirectory = join(root, "worker");
+      await mkdir(join(release, "child"), { recursive: true });
+      await mkdir(childDirectory);
+      await symlink(join(release, "child"), join(root, "linked"), "dir");
+      const executable = join(release, "codex");
+      const script = (id: string) =>
+        `#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '${JSON.stringify({ type: "thread.started", thread_id: id })}' '${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } })}'\n`;
+      await writeFile(executable, script("intended"), { mode: 0o755 });
+      for (const siblingPresent of [true, false]) {
+        if (siblingPresent)
+          await writeFile(join(root, "codex"), script("wrong executable"), {
+            mode: 0o755,
+          });
+        else await rm(join(root, "codex"));
+        for (const configured of [
+          executable,
+          `${root}/linked/../codex`,
+          `${relative(process.cwd(), root)}/linked/../codex`,
+          "~/linked/../codex",
+          "~\\linked\\..\\codex",
+        ]) {
+          const environment = {
+            PATH: process.env["PATH"],
+            HOME: root,
+            CODEX_CLI_PATH: configured,
+          };
+          const command = resolveCodexCommand(environment);
+          const codex = new Codex({
+            codexPathOverride: command.command,
+            env: { PATH: process.env["PATH"] ?? "" },
+          });
+          const thread = codex.startThread({
+            workingDirectory: childDirectory,
+            skipGitRepoCheck: true,
+          });
+          await thread.run("Synthetic executable selection");
+          expect(thread.id).toBe("intended");
+          const worker = spawnSync(
+            pluginExecutionEnvironment("/synthetic/python", environment)[
+              "CODEX_CLI_PATH"
+            ]!,
+            [],
+            { cwd: childDirectory, input: "synthetic", encoding: "utf8" },
+          );
+          expect(worker.status, worker.stderr).toBe(0);
+          expect(JSON.parse(worker.stdout.split("\n")[0]!).thread_id).toBe(
+            "intended",
+          );
+        }
+      }
+    },
+  );
+
   test("uses an explicit Codex executable override", () => {
     const executable = process.platform === "win32" ? "codex.exe" : "codex";
     const configured = join(tmpdir(), "custom codex", executable);
@@ -2811,9 +2870,6 @@ ${directNode ? "}" : ""}
     expect(resolveCodexCommand({ CODEX_CLI_PATH: "   " })).toEqual(
       resolveCodexCommand({}),
     );
-    expect(
-      resolveCodexCommand({ CODEX_CLI_PATH: `./bin/${executable}` }),
-    ).toEqual({ command: join(process.cwd(), "bin", executable) });
     expect(
       resolveCodexCommand({ CODEX_CLI_PATH: `~/bin/${executable}` }),
     ).toEqual({
@@ -2984,6 +3040,9 @@ ${directNode ? "}" : ""}
       resolveCodexCommand().command,
     );
     expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
+    expect(workerEnvironment["CODEX_SECURITY_PYTHON_COMMAND"]).toBe(
+      process.execPath,
+    );
     const globalCodex = spawnSync("codex", ["--version"], {
       encoding: "utf8",
       env: workerEnvironment,
@@ -3009,12 +3068,14 @@ ${directNode ? "}" : ""}
     expect(
       pluginExecutionEnvironment("/managed/python", {
         CODEX_CLI_PATH: ` ${configured} `,
+        CODEX_SECURITY_PYTHON_COMMAND: "stale-ambient-python",
         PATH: "",
       }),
     ).toEqual({
       CODEX_CLI_PATH: configured,
       PATH: "",
       PYTHON: "/managed/python",
+      CODEX_SECURITY_PYTHON_COMMAND: "/managed/python",
       PYTHONUTF8: "1",
     });
     expect(
@@ -6454,6 +6515,7 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
       PYTHON: managed,
+      CODEX_SECURITY_PYTHON_COMMAND: managed,
       PYTHONUTF8: "1",
       CODEX_CLI_PATH: resolveCodexCommand().command,
     });

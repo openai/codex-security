@@ -197,10 +197,11 @@ test("the SDK launches long Windows paths with the native namespace prefix", asy
 });
 
 test("the SDK executable override preserves bundled tools at the child boundary", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "eval-tools-test-"));
+  const directory = await temporaryDirectory("eval-tools-test-", true);
   t.after(() => rm(directory, { recursive: true, force: true }));
   const executable = join(directory, "bin", "codex");
   const tools = join(directory, "codex-path");
+  await mkdir(dirname(executable));
   await mkdir(tools);
   const inherited = {
     Path: [tools, join(directory, "other tools"), tools].join(delimiter),

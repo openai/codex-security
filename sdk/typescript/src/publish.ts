@@ -1086,23 +1086,24 @@ function reconcilePublicationEvidence(
   const byOwner = Map.groupBy(evidence, (item) => item.ownerFindingId);
   const claimLedger = new Map<
     string,
-    {
-      kinds: Set<PublicationClaim["kind"]>;
-      owners: Set<string | undefined>;
-    }
+    { kind: PublicationClaim["kind"]; owner: string | undefined }
   >();
-
+  const collidingOwners = new Set<string>();
   for (const item of evidence) {
     for (const claim of item.resolution.claims) {
       for (const alias of publicationClaimAliases(claim)) {
-        const key = alias.value;
-        const reservation = claimLedger.get(key) ?? {
-          kinds: new Set<PublicationClaim["kind"]>(),
-          owners: new Set<string | undefined>(),
-        };
-        reservation.kinds.add(alias.kind);
-        reservation.owners.add(item.ownerFindingId);
-        claimLedger.set(key, reservation);
+        const reservation = claimLedger.get(alias.value);
+        const owner = item.ownerFindingId;
+        if (reservation === undefined) {
+          claimLedger.set(alias.value, { kind: alias.kind, owner });
+        } else if (
+          reservation.kind !== alias.kind ||
+          reservation.owner !== owner
+        ) {
+          if (reservation.owner !== undefined)
+            collidingOwners.add(reservation.owner);
+          if (owner !== undefined) collidingOwners.add(owner);
+        }
       }
     }
   }
@@ -1112,14 +1113,6 @@ function reconcilePublicationEvidence(
   );
   let indeterminate = outcomes.some((outcome) => outcome.indeterminate);
 
-  const collidingOwners = new Set<string>();
-  for (const reservation of claimLedger.values()) {
-    if (reservation.kinds.size > 1 || reservation.owners.size > 1) {
-      for (const owner of reservation.owners) {
-        if (owner !== undefined) collidingOwners.add(owner);
-      }
-    }
-  }
   for (const outcome of outcomes) {
     if (!collidingOwners.has(outcome.issue.findingId)) continue;
     outcome.created = undefined;
