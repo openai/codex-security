@@ -6,6 +6,7 @@ import argparse
 import codecs
 import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
@@ -292,6 +293,80 @@ def git_command(
         # any other failed Git probe so the target falls back to a directory snapshot.
         empty_output = "" if text else b""
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
+
+
+def candidate_source_lines(
+    target: Path,
+    diff_target: dict[str, str],
+    paths: list[str],
+    locations: list[str],
+    case_insensitive: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Resolve candidate sources in the same selected view as the diff inventory."""
+    from generate_rank_input import git_changed_paths
+
+    base, head = diff_target["baseRevision"], diff_target["headRevision"]
+    local = diff_target["kind"] == "working_tree"
+    changed = {
+        path.relative_to(target).as_posix(): status
+        for path, status in git_changed_paths(
+            target, base, head, "local-patch" if local else "revisions"
+        )
+    }
+    selected_names = set(changed)
+    aliases: dict[str, str | None] = {}
+    if case_insensitive:
+        if not local:
+            tree = git_command(target, "ls-tree", "-r", "-t", "-z", "--name-only", head, text=False)
+            tree.check_returncode()
+            selected_names.update(os.fsdecode(name) for name in tree.stdout.split(b"\0") if name)
+        for name in selected_names:
+            key = name.lower()
+            aliases[key] = None if key in aliases and aliases[key] != name else name
+    location_set = set(locations)
+    result: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    for raw in dict.fromkeys([*paths, *locations]):
+        path = PurePosixPath(raw)
+        if not raw or path.is_absolute() or ".." in path.parts or "\0" in raw:
+            raise ValueError("path: expected a repository-relative path without traversal")
+        name = path.as_posix()
+        if case_insensitive and name not in selected_names:
+            selected = aliases.get(name.lower(), name)
+            if selected is None:
+                result[raw] = {"error": "missing"}
+                continue
+            name = selected
+        deleted = changed.get(name) == "D"
+        if local and not deleted:
+            continue
+        revision = base if deleted else head
+        if name not in changed:
+            entry = git_command(target, "ls-tree", "-z", revision, "--", name, text=False)
+            entry.check_returncode()
+            metadata = next(
+                (
+                    row.partition(b"\t")[0].split()
+                    for row in entry.stdout.split(b"\0")
+                    if row.partition(b"\t")[2] == os.fsencode(name)
+                ),
+                [],
+            )
+            if not metadata or not metadata[0].startswith(b"100"):
+                result[raw] = {"error": "not_file" if metadata else "missing"}
+                continue
+        source: dict[str, Any] = {"path": name}
+        if raw in location_set:
+            if name not in counts:
+                blob = git_command(target, "cat-file", "blob", f"{revision}:{name}", text=False)
+                blob.check_returncode()
+                data = blob.stdout
+                counts[name] = len(re.split(rb"\r\n|[\r\n]", data)) - int(
+                    not data or data.endswith((b"\r", b"\n"))
+                )
+            source["lineCount"] = counts[name]
+        result[raw] = source
+    return result
 
 
 def _update_digest_field_header(digest: Any, label: bytes, value_size: int) -> None:

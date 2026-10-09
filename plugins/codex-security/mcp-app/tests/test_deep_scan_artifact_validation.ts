@@ -390,6 +390,79 @@ async function testReducerValidation(root: string) {
     ),
     [previousCollisionA.summary, previousCollisionB.summary],
   );
+  const referenced = (original: Record<string, unknown>, refs: string[]) => ({
+    ...original,
+    provenance: { source: "local_plugin", sourceFindingIds: refs },
+  });
+  for (const [label, previous, output, expected] of [
+    [
+      "independent",
+      [previousCollisionA],
+      [
+        referenced(collidingOriginalA, ["origin:a"]),
+        referenced(collidingOriginalB, ["fresh:0"]),
+      ],
+      1,
+    ],
+    [
+      "repeat",
+      [previousCollisionA],
+      [referenced(collidingOriginalA, ["origin:a", "fresh:0"])],
+      0,
+    ],
+    [
+      "consolidate",
+      [previousCollisionA, previousCollisionB],
+      [
+        referenced(collidingOriginalA, ["origin:a", "origin:b"]),
+        referenced(collidingOriginalB, ["fresh:0"]),
+      ],
+      1,
+    ],
+    [
+      "legacy",
+      [
+        {
+          ...referenced(collidingOriginalA, ["legacy-id-without-body"]),
+          summary: "Previously accepted legacy evidence.",
+        },
+      ],
+      [
+        referenced(collidingOriginalB, ["fresh:0"]),
+        referenced(collidingOriginalA, ["previous:0"]),
+      ],
+      1,
+    ],
+  ] as const) {
+    const snapshot = {
+      discoveries: [{ workerId: "fresh", result: draft([collidingOriginalB]) }],
+      previous: draft([...previous]),
+    };
+    await writeResult(resultPath, draft([...output]));
+    const accepted = await validateSnapshot(`dedup-${label}`, snapshot);
+    assert.equal(accepted.newFindings, expected, label);
+    if (label === "legacy") {
+      assert.equal(
+        accepted.result.findings[0].provenance.previousFindings,
+        undefined,
+      );
+      assert.equal(
+        accepted.result.findings[1].provenance.previousFindings[0].title,
+        collidingOriginalA.title,
+      );
+    }
+    // Reopening the accepted JSON keeps the same ancestry and adds no finding.
+    assert.equal(
+      (
+        await validateSnapshot(`resume-${label}`, {
+          discoveries: [],
+          previous: await readJson(resultPath),
+        })
+      ).newFindings,
+      0,
+      label,
+    );
+  }
   await writeResult(first.resultPath, draft([firstFinding]));
   await writeResult(resultPath, draft([firstFinding]));
 

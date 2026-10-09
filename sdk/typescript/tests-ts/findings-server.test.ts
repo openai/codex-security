@@ -1325,6 +1325,48 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
   ]);
 });
 
+test("rejects invalid UTF-8 before embedding or storing findings", async () => {
+  const { store } = await fixture();
+  const embed = mock(embedder.embed);
+  const base = await start(store, { embed });
+  const write = spyOn(store, "insert");
+  try {
+    const valid = { ...finding(), title: "Synthetic � 🧪" };
+    const body = Buffer.from(JSON.stringify({ findings: [valid] }));
+    const offset = body.indexOf(Buffer.from("�"));
+    for (const bytes of [Buffer.from([0xff]), Buffer.from([0xe2, 0x82])]) {
+      const response = await fetch(base + "/v1/bulk/findings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: Buffer.concat([
+          body.subarray(0, offset),
+          bytes,
+          body.subarray(offset + Buffer.byteLength("�")),
+        ]),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: "invalid_request" });
+    }
+    expect(
+      (
+        await fetch(base + "/v1/bulk/findings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]),
+        })
+      ).status,
+    ).toBe(400);
+    expect(embed).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect((await insert(base, [valid])).status).toBe(201);
+    expect((await store.list({ limit: 10, offset: 0 })).findings).toEqual([
+      valid,
+    ]);
+  } finally {
+    write.mockRestore();
+  }
+});
+
 test("dashboard can sort and search a stored title with an unpaired surrogate", async () => {
   const { store } = await fixture();
   const base = await start(store);

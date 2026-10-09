@@ -110,6 +110,14 @@ const profileScenarios = [
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 
+function sampleUsage() {
+  return {
+    input_tokens: 1_250,
+    cached_input_tokens: 200,
+    output_tokens: 30,
+  };
+}
+
 async function multiscanInventory(root: string): Promise<void> {
   const repository = join(root, "repository");
   for (const args of [
@@ -449,7 +457,7 @@ describe("CLI", () => {
   });
 
   test("marks findings as false positives without starting Codex", async () => {
-    const reason = "  Not reachable from untrusted input.  ";
+    const reason = "  --dry-run is an option in the sample.  ";
     const expectedReason = reason.trim();
     const response: JsonObject = {
       scan: {
@@ -499,8 +507,7 @@ describe("CLI", () => {
         "closed",
         "--close-reason",
         "false_positive",
-        "--note",
-        expectedReason,
+        `--note=${expectedReason}`,
       ],
     ]);
     expect(JSON.parse(stdout.text())).toEqual(response);
@@ -1995,11 +2002,7 @@ describe("CLI", () => {
     ]) {
       const { stderr, runCli } = createCliTest(main, { stderr: isTTY });
 
-      const result = fakeResult([], "complete", {
-        input_tokens: 1_250,
-        cached_input_tokens: 200,
-        output_tokens: 30,
-      });
+      const result = fakeResult([], "complete", sampleUsage());
       const setIntervalMock = mock(fakeInterval);
       const deps = dependencies({
         environment,
@@ -2325,11 +2328,7 @@ describe("CLI", () => {
   test("omits stage and file counts from interactive Deep scan dashboards", async () => {
     const { stderr, runCli } = createCliTest(main, { stderr: true });
 
-    const result = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult([], "complete", sampleUsage());
 
     expect(
       await runCli(
@@ -3125,11 +3124,7 @@ describe("CLI", () => {
   test("emits verbose scan lifecycle diagnostics without changing JSON output", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const result = fakeResult(["high"], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult(["high"], "complete", sampleUsage());
     const deps = dependencies({
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_SECRET_123" },
     });
@@ -4152,11 +4147,7 @@ describe("CLI", () => {
   test("prints only the completion summary for default scans", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const result = fakeResult(["high"], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult(["high"], "complete", sampleUsage());
     result.manifest.scan.id = "12345678-abcd-4567-abcd-1234567890ab";
     result.manifest.scan.completedAt = "2026-01-01T00:06:37Z";
 
@@ -4550,11 +4541,7 @@ describe("CLI", () => {
   test("shows live stage, files, workers, tokens, and opt-in cost without a budget", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const result = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult([], "complete", sampleUsage());
 
     expect(
       await runCli(
@@ -4621,11 +4608,7 @@ describe("CLI", () => {
     const result = fakeResult(
       ["critical", "high", "high", "informational"],
       "complete",
-      {
-        input_tokens: 1250,
-        cached_input_tokens: 200,
-        output_tokens: 30,
-      },
+      sampleUsage(),
     );
 
     expect(
@@ -4696,11 +4679,7 @@ describe("CLI", () => {
   test("reports a cost range while preserving the short-context scan budget", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const result = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult([], "complete", sampleUsage());
 
     expect(
       await runCli(
@@ -4745,11 +4724,7 @@ describe("CLI", () => {
   test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const cost = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    }).cost!;
+    const cost = fakeResult([], "complete", sampleUsage()).cost!;
 
     expect(
       await runCli(
@@ -4780,11 +4755,7 @@ describe("CLI", () => {
 
   test("accepts a scan at its estimated cost limit", async () => {
     const stdout = captureCli(main, "stdout");
-    const result = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult([], "complete", sampleUsage());
 
     expect(
       await stdout.run(

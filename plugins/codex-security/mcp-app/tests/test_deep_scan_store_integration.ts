@@ -27,6 +27,7 @@ export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-dr
   },
 });
 
+await testFreeformFailureMessagesAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench(true);
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
@@ -63,6 +64,39 @@ function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
     });
     return JSON.parse(stdout);
   };
+}
+
+async function testFreeformFailureMessagesAgainstRealWorkbench() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-error-transport-",
+  );
+  const store = new WorkbenchDeepScanStore(createWorkbenchRunner(environment));
+  try {
+    const run = await store.begin({
+      targetPath,
+      threadId: "error-owner",
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId: "error-owner",
+    });
+    const worker = await createWorkerFixture(run, "discovery", "discovery");
+    await store.updateWorker({ ...worker, status: "running" });
+    const message = "--provider-error=café\nretry the request";
+    const failed = await store.updateWorker({
+      ...worker,
+      status: "failed",
+      error: message,
+    });
+    assert.equal(failed.error, message);
+    assert.equal((await store.fail(run.scanId, message)).error, message);
+    const reloaded = await store.get(run.scanId, "error-owner");
+    assert.equal(reloaded.error, message);
+    assert.equal(reloaded.persistedWorkers[0].error, message);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 async function testRecoveredPublicationRejectsLateFailure() {
@@ -154,7 +188,7 @@ async function testNoopStoppedRefreshRetainsPublicationFailure() {
       "noop-publication-owner",
     ]);
     const message =
-      "Saved result publication failed: fixture no-op publication failure";
+      "--publication-error=café\nSaved result publication failed.";
     await store.recordStoppedPublicationFailure(
       run.scanId,
       message,

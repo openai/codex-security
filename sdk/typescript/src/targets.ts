@@ -770,6 +770,7 @@ export async function gitOutput(
   signal?: AbortSignal,
   environment: NodeJS.ProcessEnv = {},
   workingDirectory = repository,
+  encoding: BufferEncoding = "utf8",
 ): Promise<string> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
@@ -786,7 +787,7 @@ export async function gitOutput(
     command.executable,
     ["-c", "core.fsmonitor=false", "-C", workingDirectory, ...args],
     {
-      encoding: "utf8",
+      encoding,
       signal,
       env: { ...command.environment, ...environment },
       maxBuffer: Infinity,

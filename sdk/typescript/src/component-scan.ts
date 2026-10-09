@@ -1,3 +1,4 @@
+import { notify } from "./value.js";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, relative, sep } from "node:path";
@@ -425,12 +426,6 @@ async function deduplicateFindings(
     matching.related = matching.related.filter(remainSeparate);
   }
   return { findings, ...matching, ...(error === undefined ? {} : { error }) };
-}
-
-function notify(callback: () => unknown): void {
-  try {
-    void Promise.resolve(callback()).catch(() => {});
-  } catch {}
 }
 
 function mergeFindingGroups(
