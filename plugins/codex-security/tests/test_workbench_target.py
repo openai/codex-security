@@ -223,6 +223,75 @@ def test_reviewed_patch_preserves_readonly_junction(
         os.chmod(junction, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
 
 
+@pytest.mark.parametrize("scope", [".", "component"])
+@pytest.mark.parametrize("populated", [False, True])
+def test_versioned_reviewed_patch_preserves_nested_junctions(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+    populated: bool,
+) -> None:
+    import workbench_db
+
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    target = repository / scope
+    target.mkdir(exist_ok=True)
+    (target / "app.txt").write_text("before\n")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add target"], cwd=repository, check=True)
+    nested = target / "nested"
+    initialize_git_repository(nested)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if populated:
+        (outside / "external.txt").write_text("outside contents\n")
+    junction = nested / "linked"
+    junction_factory(junction, outside)
+    relative_junction = junction.relative_to(repository)
+    original_command = workbench_db.git_command
+    original_restore = workbench_db.restore_directory_junctions
+    reversed_roots: list[Path] = []
+    restored: list[Path] = []
+
+    def command(path, *args, **kwargs):
+        if args[0] == "apply":
+            copied = kwargs["work_tree"]
+            placeholder = copied / relative_junction
+            assert placeholder.is_dir()
+            assert not getattr(placeholder.lstat(), "st_reparse_tag", 0)
+            assert list(placeholder.iterdir()) == []
+        result = original_command(path, *args, **kwargs)
+        if args[0] == "apply" and result.returncode == 0:
+            reversed_roots.append(copied)
+        return result
+
+    def restore(source, destination, junctions):
+        assert source == repository
+        assert reversed_roots == [destination]
+        assert relative_junction in junctions
+        original_restore(source, destination, junctions)
+        restored.append(destination)
+
+    monkeypatch.setattr(workbench_db, "git_command", command)
+    monkeypatch.setattr(workbench_db, "restore_directory_junctions", restore)
+    assert_reviewed_change(
+        target,
+        tmp_path,
+        "app.txt",
+        "before\n",
+        "after\n",
+        revision=workbench_db.git_revision(target),
+    )
+    assert len(restored) == 1
+    assert sorted(path.name for path in outside.iterdir()) == (
+        ["external.txt"] if populated else []
+    )
+    if populated:
+        assert (outside / "external.txt").read_text() == "outside contents\n"
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -299,6 +368,7 @@ def assert_reviewed_change(
     after: str,
     *,
     newline: str | None = None,
+    revision: str = "unversioned",
 ) -> None:
     import workbench_db
 
@@ -319,7 +389,7 @@ def assert_reviewed_change(
     scan = {
         "target_path": str(source),
         "target_inode": source.stat().st_ino,
-        "target_revision": "unversioned",
+        "target_revision": revision,
         "scan_dir": str(scan_dir),
     }
     (source / relative).write_text(before, newline=newline)
@@ -812,6 +882,40 @@ def test_git_output_removes_only_the_record_terminator(
     assert git_output(tmp_path, "rev-parse", "--show-toplevel") == expected
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("noglob", ["0", "1"])
+def test_windows_directory_query_preserves_exclusions_with_inherited_noglob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, noglob: str
+) -> None:
+    import workbench_target
+
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    (repository / ".gitignore").write_text("locally-ignored/\n")
+    excludes = tmp_path / "global-excludes"
+    excludes.write_text("globally-ignored/\n")
+    for directory in ["src", "locally-ignored", "globally-ignored"]:
+        source = repository / "pkg" / directory
+        source.mkdir(parents=True)
+        (source / "app.py").write_text("source fixture\n")
+    monkeypatch.setattr(workbench_target, "_WINDOWS", True)
+    monkeypatch.setenv("GIT_NOGLOB_PATHSPECS", noglob)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.excludesFile")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(excludes))
+    environment = os.environ.copy()
+
+    paths = workbench_target.git_directory_snapshot_paths(repository)
+
+    assert paths is not None
+    assert {path.relative_to(repository).as_posix() for path in paths} == {
+        ".gitignore",
+        "README.md",
+        "pkg/src/app.py",
+    }
+    assert dict(os.environ) == environment
+
+
 def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_unborn_git_repository(target)
@@ -1238,7 +1342,9 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
     copy = WORKBENCH_TARGET["copy_git_worktree_files"]
     calls = []
 
-    def checked_copy(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:
+    def checked_copy(
+        source: Path, destination: Path, excluded: tuple[Path, ...]
+    ) -> tuple[Path, list[Path]]:
         assert not source.samefile(submodule), "An excluded uninitialized gitlink was traversed"
         calls.append(source)
         return copy(source, destination, excluded)
@@ -1247,8 +1353,9 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
     selected_exclusions = tuple(path for path, _ in entries)
     for index, excluded in enumerate({selected_exclusions, (submodule,)}):
         calls.clear()
-        copied = checked_copy(selected, tmp_path / f"copied-{index}", excluded)
+        copied, junctions = checked_copy(selected, tmp_path / f"copied-{index}", excluded)
         assert len(calls) == 1
+        assert junctions == []
         assert (copied / "fixture.py").read_text() == "synthetic = True\n"
         assert not (copied / "submodule").exists()
 

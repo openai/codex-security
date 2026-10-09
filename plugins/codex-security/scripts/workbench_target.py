@@ -248,6 +248,7 @@ def git_command(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
     stdout_file: BinaryIO | None = None,
+    pathspec_environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -255,6 +256,8 @@ def git_command(
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
+    if pathspec_environment is not None:
+        environment.update(pathspec_environment)
     executable = trusted_git_executable(target)
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
@@ -778,6 +781,9 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 input_data=b"\0".join(candidates) + b"\0",
                 git_dir=Path(git_directory),
                 work_tree=repository,
+                pathspec_environment={
+                    "GIT_NOGLOB_PATHSPECS": "0",
+                },
             )
             if ignored.returncode not in (0, 1):
                 raise SystemExit("Could not inspect directories in the selected Git working tree.")
@@ -932,7 +938,9 @@ def restore_directory_junctions(source: Path, destination: Path, junctions: list
         copy_directory_junction(source / path, placeholder)
 
 
-def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:
+def copy_git_worktree_files(
+    source: Path, destination: Path, excluded: tuple[Path, ...]
+) -> tuple[Path, list[Path]]:
     repository, pathspec = git_worktree_context(source)
     listed = git_bytes(
         repository,
@@ -957,14 +965,27 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
                 continue
         excluded_relative.append(relative_path)
     destination.mkdir()
+    junctions: set[Path] = set()
+    nested_worktrees: list[Path] = []
+    linked_prefixes: dict[str, bool] = {}
+    copied: set[Path] = set()
     for raw_path in sorted(path for path in listed.split(b"\0") if path):
         relative = Path(os.fsdecode(raw_path))
         if any(relative.is_relative_to(path) for path in excluded_relative):
             continue
         source_path = repository / relative
         try:
+            if _WINDOWS:
+                source_path = _directory_link_boundary(repository, source_path, linked_prefixes)
+                relative = source_path.relative_to(repository)
             metadata = source_path.lstat()
         except FileNotFoundError:
+            continue
+        if relative in copied:
+            continue
+        copied.add(relative)
+        if stat.S_ISDIR(metadata.st_mode) and getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+            junctions.add(relative)
             continue
         destination_path = destination / relative
         destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -976,13 +997,30 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
             nested_git_dir = git_output(source_path, "rev-parse", "--absolute-git-dir")
             if nested_git_dir is None:
                 raise SystemExit(f"Could not inspect nested Git working tree: {relative}")
-            copy_git_worktree_files(source_path, destination_path, excluded)
+            _, nested_junctions = copy_git_worktree_files(source_path, destination_path, excluded)
+            junctions.update(relative / path for path in nested_junctions)
+            nested_worktrees.append(relative)
             (destination_path / ".git").write_text(f"gitdir: {nested_git_dir}\n", encoding="utf-8")
         else:
             raise SystemExit(f"Unsupported Git working-tree file type: {relative}")
+    if _WINDOWS:
+        for path in git_directory_snapshot_paths(source) or []:
+            relative = Path(pathspec) / path.relative_to(source)
+            if any(
+                relative.is_relative_to(root) for root in [*excluded_relative, *nested_worktrees]
+            ):
+                continue
+            metadata = path.lstat()
+            if (
+                stat.S_ISDIR(metadata.st_mode)
+                and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            ):
+                junctions.add(relative)
+    for path in junctions:
+        (destination / path).mkdir(parents=True, exist_ok=True)
     copied_target = destination if pathspec == "." else destination / pathspec
     copied_target.mkdir(parents=True, exist_ok=True)
-    return copied_target
+    return copied_target, sorted(junctions)
 
 
 def git_revision(target: Path) -> str:

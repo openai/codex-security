@@ -2412,9 +2412,10 @@ def require_reviewed_patch_applied(
     excluded = (Path(scan["scan_dir"]),)
     # Unborn repositories still need their config while metadata junctions are deferred.
     git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
+    repository = target
     pathspec = None
     if not unversioned:
-        _, pathspec = git_worktree_context(target)
+        repository, pathspec = git_worktree_context(target)
         if git_dir is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
         excluded += tuple(path for path, _ in git_submodule_entries(target))
@@ -2433,7 +2434,7 @@ def require_reviewed_patch_applied(
             checkout = checkout_root
             junctions = copy_directory_excluding(target, checkout, excluded)
         else:
-            copy_git_worktree_files(target, checkout_root, excluded)
+            _, junctions = copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
         if unversioned:
             arguments.append("--no-index")
@@ -2451,8 +2452,11 @@ def require_reviewed_patch_applied(
             raise SystemExit(
                 "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
             )
-        if unversioned:
-            restore_directory_junctions(target, checkout, junctions)
+        restore_directory_junctions(
+            target if unversioned else repository,
+            checkout if unversioned else checkout_root,
+            junctions,
+        )
         reverted_digest = (
             directory_content_digest(checkout)
             if unversioned
