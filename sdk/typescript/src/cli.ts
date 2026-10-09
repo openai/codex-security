@@ -7568,11 +7568,14 @@ async function parsePatchReviewSubject(
     head,
   );
   if (typeof context.base === "string") {
-    const prefix = await context.dependencies.runRepositoryCommand(
-      "git",
-      ["rev-parse", "--show-prefix"],
-      context.directory,
-    );
+    const prefix = (
+      await context.dependencies.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--show-prefix"],
+        context.directory,
+        { trim: false },
+      )
+    ).replace(/\r?\n$/u, "");
     context.paths = context.paths.map((file) => posix.relative(prefix, file));
     context.baseline = { tree: context.base, head };
   }

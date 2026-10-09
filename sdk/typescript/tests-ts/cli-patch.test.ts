@@ -2572,7 +2572,7 @@ describe("scan and patch workflow", () => {
     async ({ emptyFirstReport, renameFix, nested }) => {
       const root = await temporaryDirectory("codex-security-reviewed-patch-");
       const gitRoot = join(root, "repository");
-      const repository = nested ? join(gitRoot, "package") : gitRoot;
+      const repository = nested ? join(gitRoot, " package ") : gitRoot;
       const remote = join(root, "remote.git");
       await mkdir(join(repository, "src"), { recursive: true });
       const git = repositoryGit(gitRoot);
@@ -2689,11 +2689,14 @@ describe("scan and patch workflow", () => {
           expectedFiles,
         );
         expect(
-          git("show", "--format=", "--name-only", "--no-renames", "HEAD").split(
-            "\n",
-          ),
+          gitText(
+            ["show", "--format=", "--name-only", "--no-renames", "-z", "HEAD"],
+            { cwd: gitRoot },
+          )
+            .split("\0")
+            .filter(Boolean),
         ).toEqual(
-          expectedFiles.map((file) => (nested ? `package/${file}` : file)),
+          expectedFiles.map((file) => (nested ? ` package /${file}` : file)),
         );
         expect(git("status", "--porcelain")).toBe("");
       } finally {
