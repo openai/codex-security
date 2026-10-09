@@ -2226,6 +2226,22 @@ describe("scan and patch workflow", () => {
         "/close",
         "` content.",
         "",
+        "Example ``const path = `",
+        "/srv/example",
+        "`;``",
+        "/label ~after-inline",
+        "",
+        "Example ```literal `` and `",
+        "/close",
+        "` and `` end```.",
+        "",
+        "*Nested ``literal `",
+        "/close",
+        "` end`` emphasis.*",
+        "",
+        "Unmatched ` delimiter",
+        "/label ~after-unmatched",
+        "",
         "> Quoted example",
         "/close",
         "",
@@ -2332,6 +2348,8 @@ describe("scan and patch workflow", () => {
         gitlab
           ? savedBody
               .replace("/label ~reviewed", "\\/label ~reviewed")
+              .replace("/label ~after-inline", "\\/label ~after-inline")
+              .replace("/label ~after-unmatched", "\\/label ~after-unmatched")
               .replace("/label ~after-quote", "\\/label ~after-quote")
               .replace("/assign @reviewer", "\\/assign @reviewer")
           : savedBody,

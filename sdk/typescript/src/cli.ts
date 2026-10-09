@@ -6983,14 +6983,33 @@ function gitlabPatchDescription(body: string): string {
       }
       if (node.type !== "paragraph") continue;
 
-      // Match GitLab's top-level paragraph and inline-code/HTML exclusions.
+      // Preserve code spans using their parsed boundaries, including nested
+      // formatting and backtick runs shorter than the opening delimiter.
+      const inlineCodeRanges: [number, number][] = [];
+      const inlineNodes = [...node.children];
+      for (const inline of inlineNodes) {
+        if (inline.type === "inlineCode")
+          inlineCodeRanges.push([
+            inline.position!.start.offset!,
+            inline.position!.end.offset!,
+          ]);
+        else if ("children" in inline) inlineNodes.push(...inline.children);
+      }
+
+      // Match GitLab's top-level paragraph and HTML exclusions.
       const paragraphOffset = start.offset! - start.column + 1;
       const paragraph = markdown.slice(paragraphOffset, end.offset);
       for (const match of paragraph.matchAll(
-        /`[\s\S]+?`|^<[^>]+?>\r?\n[\s\S]+?\r?\n<\/[^>]+?>\r?$|^\//gmu,
+        /^<[^>]+?>\r?\n[\s\S]+?\r?\n<\/[^>]+?>\r?$|^\//gmu,
       )) {
-        if (match[0] === "/")
-          escaped.add(offset + paragraphOffset + match.index);
+        const slashOffset = paragraphOffset + match.index;
+        if (
+          match[0] === "/" &&
+          !inlineCodeRanges.some(
+            ([start, end]) => slashOffset >= start && slashOffset < end,
+          )
+        )
+          escaped.add(offset + slashOffset);
       }
     }
     if (!closingQuote) break;
