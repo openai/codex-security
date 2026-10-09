@@ -662,8 +662,7 @@ export class DeepScanCoordinator {
     let lastReplaceableFailure:
       Extract<DiscoveryOutcome, { status: "failed" }> | undefined;
 
-    const errorLimit =
-      config.stopAfterConsecutiveErrors ?? config.stopAfterNoNew;
+    const errorLimit = config.stopAfterConsecutiveErrors;
     let reducerFailures = persistedReducerFailureStreak(
       this.state.persistedWorkers ?? [],
     );
