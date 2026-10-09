@@ -160,8 +160,10 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         findings.append(
             {
                 **dict(latest),
-                "confirmed_in_latest_scan": latest_scan_by_target.get(latest["target_id"])
-                == latest["scan_id"],
+                "confirmed_in_latest_scan": any(
+                    row["scan_id"] == latest_scan_by_target.get(row["target_id"])
+                    for row in occurrences
+                ),
                 "known_since": scans[0][0],
                 "known_scan_ids": [scan_id for _, scan_id in scans],
                 "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),

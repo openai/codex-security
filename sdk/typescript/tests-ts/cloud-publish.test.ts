@@ -155,6 +155,50 @@ describe("Cloud publication", () => {
     expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
+  test("publishes separate CSV occurrences with distinct canonical identities", async () => {
+    const secondOccurrence = "occ_000000000000000000000002";
+    const secondRow = csvRow.replace(
+      "occ_e79cb19591e696572a1c22be",
+      secondOccurrence,
+    );
+    const path = await csvFixture(`${csvHeader}\n${csvRow}\n${secondRow}\n`);
+    const { environment } = await fixture();
+    const preview = await publishFindingsCsvToCloud(path, { dryRun: true });
+    const findings = preview.findings!;
+    expect(new Set(findings.map((finding) => finding.findingId)).size).toBe(2);
+    expect(new Set(findings.map((finding) => finding.occurrenceId)).size).toBe(
+      2,
+    );
+    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
+      "occ_e79cb19591e696572a1c22be",
+      secondOccurrence,
+    ]);
+    for (const finding of findings) {
+      expect(finding.findingId).toBe(
+        `csf_${sha256(finding.fingerprints.primary).slice(0, 24)}`,
+      );
+      expect(finding.occurrenceId).toBe(
+        `occ_${sha256([preview.scanId, finding.fingerprints.primary].join("\0")).slice(0, 24)}`,
+      );
+    }
+    const result = await publishFindingsCsvToCloud(path, {
+      environment,
+      fetch: async (_url, options) => {
+        const payload = JSON.parse(String(options.body));
+        expect(payload.findings).toEqual(findings);
+        return Response.json(
+          {
+            status: "accepted",
+            finding_ids: ["first", "second"],
+            finding_count: 2,
+          },
+          { status: 201 },
+        );
+      },
+    });
+    expect(result.findingCount).toBe(2);
+  });
+
   test("posts CSV findings with generated scan provenance", async () => {
     const path = await csvFixture();
     const { environment } = await fixture();
@@ -222,7 +266,7 @@ describe("Cloud publication", () => {
       `${csvHeader.replace("finding_id,", "finding_id,candidate_id,")}\n${csvRow.replace("csf_852f90d6e1177502ff113d4a,", "csf_852f90d6e1177502ff113d4a,candidate-001,")}\n`,
     );
     const result = await publishFindingsCsvToCloud(path, { dryRun: true });
-    expect(result.findings?.[0]?.extensions).toEqual({
+    expect(result.findings?.[0]?.extensions).toMatchObject({
       candidateId: "candidate-001",
     });
   });

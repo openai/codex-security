@@ -13,20 +13,24 @@ describe("CLI launcher", () => {
     const root = await temporaryDirectory("codex-security-cli-bin-");
     try {
       const launcher = join(packageRoot, "src", "cli.ts");
-      const bin =
-        process.platform === "win32" ? launcher : join(root, "codex-security");
-      if (process.platform !== "win32") {
-        await symlink(launcher, bin);
-      }
-      const { status, stdout, stderr } = await runCommand(
-        process.execPath,
-        [bin, "--version"],
-        { timeout: 30_000 },
-      );
+      const bins =
+        process.platform === "win32"
+          ? [launcher]
+          : ["codex-security", "cs"].map((name) => join(root, name));
+      for (const bin of bins) {
+        if (process.platform !== "win32") {
+          await symlink(launcher, bin);
+        }
+        const { status, stdout, stderr } = await runCommand(
+          process.execPath,
+          [bin, "--version"],
+          { timeout: 30_000 },
+        );
 
-      expect(status, stderr).toBe(0);
-      expect(stderr).toBe("");
-      expect(stdout).toBe(`${VERSION}\n`);
+        expect(status, stderr).toBe(0);
+        expect(stderr).toBe("");
+        expect(stdout).toBe(`${VERSION}\n`);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
