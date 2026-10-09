@@ -188,6 +188,7 @@
 - validate artifact requests at tool boundaries ([#1489](https://github.com/openai/codex-security/pull/1489))
 - align Action publication with CLI releases ([#1418](https://github.com/openai/codex-security/pull/1418))
 - keep expected answers hidden and preserve each case’s settings ([#1261](https://github.com/openai/codex-security/pull/1261))
+- remove the local findings serve command ([#1340](https://github.com/openai/codex-security/pull/1340))
 
 <!-- release-section: highlights:end -->
 
@@ -198,5 +199,6 @@
 Review migration steps for these breaking changes:
 
 - move findings and dashboard helpers to Node ([#1408](https://github.com/openai/codex-security/pull/1408))
+- remove the local findings serve command ([#1340](https://github.com/openai/codex-security/pull/1340))
 
 <!-- release-section: upgrades:end -->

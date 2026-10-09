@@ -3,11 +3,11 @@
   "baseCommit": "4949af70fcfadff154f6e8fdf100faa5bf2f8169",
   "sections": {
     "highlights": {
-      "generatedHash": "fa46f833420d3bf44c73fd4ef69052b71879e111f96193d35cc765b037872e0f",
+      "generatedHash": "24661951eab748d2450109446bfa0a2197a4c9f7f5ede936e4e6a85dbb89deb5",
       "humanOwned": false
     },
     "upgrades": {
-      "generatedHash": "c635016fb5676007d00fcdf4d6570c29b25b332564264cc0727d27bbabde5139",
+      "generatedHash": "ab6c693b1c8d16531d5bd547d012f5f254362b8e96006570ed9b66ece39c70a7",
       "humanOwned": false
     }
   }

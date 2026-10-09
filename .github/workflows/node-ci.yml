@@ -69,7 +69,7 @@ jobs:
                 .dockerignore | .github/workflows/native-*.yml | \
                   .github/actions/download-native/* | Dockerfile | \
                   Dockerfile.dockerignore | compose.yaml | compose.apparmor.yaml | \
-                  compose.findings.yaml | compose.runner.yaml | docker/* | \
+                  compose.runner.yaml | docker/* | \
                   plugins/codex-security/* | sdk/typescript/* | \
                   .github/workflows/container-ci.yml | .github/workflows/container-release.yml | \
                   .github/workflows/container-validate.yml)
