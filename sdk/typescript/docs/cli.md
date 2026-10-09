@@ -575,6 +575,55 @@ patching and verification preserve ambient project trust.
 For filesystem and approval behavior, see the
 [local security model](../README.md#local-security-model).
 
+### Source access during dedupe
+
+Add `--source-mcp NAME` to use a configured native Codex MCP server for source
+reads during dedupe. For example, configure Sourcegraph in your user
+`~/.codex/config.toml` (or `$CODEX_HOME/config.toml`):
+
+```toml
+[mcp_servers.sourcegraph]
+url = "https://sourcegraph.example.com/.api/mcp"
+env_http_headers = { Authorization = "SOURCEGRAPH_AUTHORIZATION" }
+```
+
+Set `SOURCEGRAPH_AUTHORIZATION` to the complete `token <access-token>` value
+through your usual secret manager, then run:
+
+```bash
+codex-security dedupe --scan SCAN_ID --findings-url http://localhost:3000 --source-mcp sourcegraph
+```
+
+The SDK option is `deduplicateScan(scanId, { sourceMcp: "sourcegraph" })`;
+add `findingsUrl` to use a findings service. The selected server must be
+configured in host Codex settings, authenticated, enabled, and available. A
+repository-local definition or override of the selected server is rejected
+before connecting. Dedupe uses finding-cited
+revisions when supplied, with the local checkout's origin and revision as
+repository context. Omitting the option preserves existing source access.
+
+Codex handles MCP transport and tool approval. HTTP environment credentials stay
+outside model shell access and cannot override the review’s Codex settings. Static headers and stdio environment settings retain
+native precedence: explicit `env` values override inherited `env_vars` only in
+the MCP child. Local stdio paths are resolved from the caller's directory;
+executor-owned paths retain native handling.
+Environment-backed HTTP headers resolve on the host. Bearer-token variables for
+executor-backed HTTP connections use native executor lookup when supported,
+with native host fallback for older executors.
+
+When stored authentication selects another Codex home, any same-named server and
+its executor must have matching definitions in both homes. OAuth credentials are
+not copied between homes. Configure the source connection in the review's
+credential home before using it. Local HTTP servers need no local executor.
+
+Resume checkpoints include the selected connection, referenced environment
+values, executor configuration, and caller directory when an executor inherits
+it. Effective executable search paths and home directories used by local source
+programs and executors also participate in checkpoints. Changed source settings cause saved reviews to be checked again. Completed
+results and pending writes can resume without reconnecting to the source. Native
+resource reads retain Codex behavior and the server's repository permissions.
+Canceling a review also stops source processes waiting for MCP initialization.
+
 ### Environment variables
 
 | Variable                                                                    | Effect                                                             |

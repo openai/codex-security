@@ -3926,6 +3926,11 @@ export async function main(
       destructive: true,
       mcp: false,
       options: z.object({
+        sourceMcp: optionValue("--source-mcp")
+          .optional()
+          .describe(
+            "Require a configured Codex MCP server for source reads during dedupe.",
+          ),
         concurrency: z
           .number()
           .int()
@@ -4022,6 +4027,9 @@ export async function main(
             )(
               scanId,
               {
+                ...(options.sourceMcp === undefined
+                  ? {}
+                  : { sourceMcp: options.sourceMcp }),
                 findingsUrl: options.findingsUrl,
                 concurrency: options.concurrency,
                 ...(options.workflowId === undefined

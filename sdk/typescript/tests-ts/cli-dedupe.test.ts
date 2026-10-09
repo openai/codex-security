@@ -161,6 +161,7 @@ test.each([
   deps.deduplicateScan = async (scanId, options) => {
     expect(scanId).toBe("exact-scan");
     expect(options.workflowId).toBe("workflow-example");
+    expect(options.sourceMcp).toBe("sourcegraph");
     return {
       scanId,
       uniqueFindingIds: [],
@@ -173,6 +174,8 @@ test.each([
     await stdout.run(
       [
         "dedupe",
+        "--source-mcp",
+        "sourcegraph",
         workflowFlag,
         "workflow-example",
         findingsFlag,
@@ -345,4 +348,18 @@ test("dedupe forwards cancellation and removes signal handlers", async () => {
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   }
+});
+
+test("source MCP is a dedupe-only flag", async () => {
+  for (const command of ["dedupe", "scan"]) {
+    const stdout = captureCli(main, "stdout");
+    expect(await stdout.run([command, "--help"], dependencies())).toBe(0);
+    if (command === "dedupe") expect(stdout.text()).toContain("--source-mcp");
+    else expect(stdout.text()).not.toContain("--source-mcp");
+  }
+  const stderr = captureCli(main, "stderr");
+  expect(
+    await stderr.run(["scan", "--source-mcp", "sourcegraph"], dependencies()),
+  ).not.toBe(0);
+  expect(stderr.text()).toContain("source-mcp");
 });

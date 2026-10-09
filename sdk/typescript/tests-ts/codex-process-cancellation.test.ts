@@ -1,4 +1,5 @@
 import {
+  execFileSync,
   spawn,
   type ChildProcessWithoutNullStreams,
   type SpawnOptions,
@@ -14,6 +15,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { resolveSourceMcp } from "../src/deduplication/source-mcp.js";
 import { sendFeedback } from "../src/feedback.js";
 import { nodeCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -25,16 +27,25 @@ const fixture = fileURLToPath(
 );
 const node = nodeCommand().command;
 
-for (const surface of ["review", "feedback"] as const) {
-  for (const mode of [
-    "abandoned",
-    "success",
-    "error",
-    "unterminated",
-    "late",
-    "active",
-    "spawn-error",
-  ]) {
+for (const surface of [
+  "review",
+  "source-review",
+  "source-config",
+  "feedback",
+] as const) {
+  for (const mode of surface === "source-review"
+    ? ["abandoned", "late", "late-stderr"]
+    : surface === "source-config"
+      ? ["abandoned", "late", "late-stderr", "active", "spawn-error", "success"]
+      : [
+          "abandoned",
+          "success",
+          "error",
+          "unterminated",
+          "late",
+          "active",
+          "spawn-error",
+        ]) {
     test.skipIf(mode === "active" && process.platform === "win32")(
       `${surface} settles inherited pipes: ${mode}`,
       async () => {
@@ -50,11 +61,35 @@ for (const surface of ["review", "feedback"] as const) {
           OPENAI_API_KEY: "synthetic-review-key",
         };
         await mkdir(environment.CODEX_HOME, { mode: 0o700 });
+        if (surface === "source-review") {
+          execFileSync("git", ["init", "-q", repository]);
+          execFileSync("git", [
+            "-C",
+            repository,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "source fixture",
+          ]);
+          execFileSync("git", [
+            "-C",
+            repository,
+            "remote",
+            "add",
+            "origin",
+            "https://git.example.com/team/repo.git",
+          ]);
+        }
         const controller = new AbortController();
         const reason = mode === "active" ? "synthetic interruption" : { mode };
         const ready = Promise.withResolvers<void>();
         const ignored = Promise.withResolvers<void>();
         const exited = Promise.withResolvers<void>();
+        const stdoutEnded = Promise.withResolvers<void>();
         let child: ChildProcessWithoutNullStreams | undefined;
         let holderStarted = false;
         let holderPid: number | undefined;
@@ -77,6 +112,7 @@ for (const surface of ["review", "feedback"] as const) {
             [fixture, mode, release],
             nativeSpawnOptions,
           ) as ChildProcessWithoutNullStreams;
+          child.stdout.once("end", () => stdoutEnded.resolve());
           child.on("message", (message) => {
             if (
               message &&
@@ -93,7 +129,8 @@ for (const surface of ["review", "feedback"] as const) {
           if (mode !== "spawn-error")
             child.once("exit", () => {
               exited.resolve();
-              if (!["late", "active"].includes(mode)) controller.abort(reason);
+              if (!mode.startsWith("late") && mode !== "active")
+                controller.abort(reason);
             });
           return child;
         };
@@ -109,29 +146,47 @@ for (const surface of ["review", "feedback"] as const) {
                 },
                 start,
               )
-            : new CodexReviewRunner(
-                environment,
-                start,
-                controller.signal,
-                repository,
-                {
-                  wait: async () => {
-                    retries++;
-                    throw new Error("Stop the synthetic transport retry");
+            : surface === "source-config"
+              ? resolveSourceMcp(
+                  "source",
+                  environment,
+                  controller.signal,
+                  repository,
+                  start,
+                )
+              : new CodexReviewRunner(
+                  environment,
+                  start,
+                  controller.signal,
+                  repository,
+                  {
+                    wait: async () => {
+                      retries++;
+                      throw new Error("Stop the synthetic transport retry");
+                    },
                   },
-                },
-                (event) => {
-                  if (event.event === "review.retry")
-                    retryDiagnostic = event.message;
-                },
-              ).run({
-                stage: "pair-review",
-                model: "synthetic-model",
-                effort: "high",
-                prompt: "Review synthetic findings.",
-                schema: { type: "object" },
-                validate: (value) => value,
-              });
+                  (event) => {
+                    if (event.event === "review.retry")
+                      retryDiagnostic = event.message;
+                  },
+                  undefined,
+                  surface === "source-review"
+                    ? {
+                        name: "source",
+                        configPath: join(environment.CODEX_HOME, "config.toml"),
+                        server: {},
+                        environment: {},
+                        credentialNames: [],
+                      }
+                    : undefined,
+                ).run({
+                  stage: "pair-review",
+                  model: "synthetic-model",
+                  effort: "high",
+                  prompt: "Review synthetic findings.",
+                  schema: { type: "object" },
+                  validate: (value) => value,
+                });
         let settled = false;
         const result = task.then(
           (value) => ({ value, error: undefined }),
@@ -170,18 +225,24 @@ for (const surface of ["review", "feedback"] as const) {
               if (surface === "review") child!.kill("SIGKILL");
             }
             await bounded(exited.promise, "direct child exit");
-            if (mode === "active" && surface === "feedback")
+            if (mode === "active" && surface !== "review")
               expect(child!.signalCode).toBe("SIGKILL");
           }
-          if (mode === "late") {
+          if (mode.startsWith("late")) {
+            if (mode === "late-stderr")
+              await bounded(stdoutEnded.promise, "stdout EOF");
             await nextTurn();
             expect(settled).toBe(false);
-            expect(child!.stdout.destroyed).toBe(false);
+            if (mode === "late") expect(child!.stdout.destroyed).toBe(false);
             expect(child!.stderr.destroyed).toBe(false);
             await writeFile(release, "released");
           }
           const outcome = await bounded(result, "operation completion");
-          if (mode === "success") {
+          if (mode === "success" && surface === "source-config") {
+            expect((outcome.error as Error).message).toContain(
+              'Source MCP server "source" is disabled.',
+            );
+          } else if (mode === "success") {
             expect(outcome).toMatchObject({
               value:
                 surface === "feedback"
@@ -189,9 +250,9 @@ for (const surface of ["review", "feedback"] as const) {
                   : { decision: "SAME" },
               error: undefined,
             });
-          } else if (mode === "late") {
+          } else if (mode.startsWith("late")) {
             expect(
-              surface === "feedback"
+              surface === "feedback" || surface === "source-config"
                 ? (outcome.error as Error).message
                 : retryDiagnostic,
             ).toContain("late café 日本語 😀");
@@ -199,7 +260,12 @@ for (const surface of ["review", "feedback"] as const) {
             expect(outcome.error).toBe(reason);
           }
           expect(starts).toBe(1);
-          expect(retries).toBe(mode === "late" && surface === "review" ? 1 : 0);
+          expect(retries).toBe(
+            mode.startsWith("late") &&
+              ["review", "source-review"].includes(surface)
+              ? 1
+              : 0,
+          );
           const remaining = getEventListeners(controller.signal, "abort");
           if (mode === "spawn-error") {
             // Compare native ownership without depending on its callback identities.

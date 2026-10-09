@@ -39,6 +39,7 @@ import {
   CheckpointedReviewRunner,
   reviewSettingsDigest,
 } from "./checkpointed-review.js";
+import { resolveSourceMcp } from "./source-mcp.js";
 import { normalizeRepository } from "../targets.js";
 import { LocalDeduplication, type FindingEmbeddingBinding } from "./local.js";
 import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
@@ -54,6 +55,8 @@ import {
 } from "./diagnostics.js";
 
 export interface DeduplicateScanOptions {
+  /** Require this configured Codex MCP server for source review. */
+  sourceMcp?: string;
   /** Resume the named findings workflow; remote mode includes custom publication. */
   workflowId?: string;
   /** Optional Findings API. Omit to prepare and deduplicate findings in local SQLite. */
@@ -285,6 +288,15 @@ async function deduplicateResolvedScan(
       await client.storeDedupeGroups(saved.pendingWrite.groups);
       return saved.result as DeduplicateScanResult;
     }
+    const sourceMcp =
+      options.sourceMcp === undefined
+        ? undefined
+        : await resolveSourceMcp(
+            options.sourceMcp,
+            environment,
+            options.signal,
+            repositoryPath,
+          );
     const reviewEnvironment = dependencies.reviewer
       ? environment
       : await (dependencies.resolveReviewEnvironment ?? comparisonEnvironment)(
@@ -309,6 +321,7 @@ async function deduplicateResolvedScan(
         undefined,
         options.onDiagnostic,
         dependencies.surface ?? "sdk",
+        sourceMcp,
       );
     const privateStatePaths: string[] = [];
     if (workflow && !dependencies.reviewer) {
@@ -335,7 +348,17 @@ async function deduplicateResolvedScan(
           runner,
           source!,
           scope,
-          await reviewSettingsDigest(reviewEnvironment, reviewConfiguration),
+          await reviewSettingsDigest(
+            reviewEnvironment,
+            reviewConfiguration,
+            sourceMcp === undefined
+              ? undefined
+              : {
+                  mcp: sourceMcp,
+                  repository: repositoryPath,
+                  signal: options.signal,
+                },
+          ),
           options.onDiagnostic,
         )
       : undefined;

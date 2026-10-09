@@ -749,7 +749,7 @@ export async function gitHistoryIdentity(
   return { commonDirectory, origin };
 }
 
-async function gitOutput(
+export async function gitOutput(
   repository: string,
   args: readonly string[],
   signal?: AbortSignal,

@@ -1,5 +1,9 @@
 import { parseJsonLines } from "./support/json.js";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  execFileSync,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -7,6 +11,7 @@ import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
+import { resolveSourceMcp } from "../src/deduplication/source-mcp.js";
 import {
   CodexReviewRunner,
   type CodexReview,
@@ -235,6 +240,14 @@ const failureReasons: Record<string, string> = {
   "unknown-turn": "Unknown model failure",
   "request-error": "Authentication required",
   "credential-error": "Authentication failed: Bearer synthetic-review-key",
+  "source-disabled":
+    'Required source MCP server "sourcegraph" is not connected (disabled).',
+  "source-unavailable":
+    'Required source MCP server "sourcegraph" is not connected (unavailable).',
+  "source-failed":
+    'Required source MCP server "sourcegraph" is not connected (failed). Synthetic source transport error: token synthetic-source-auth',
+  "source-disconnected-correction":
+    'Required source MCP server "sourcegraph" is not connected (failed). Synthetic source transport error: token synthetic-source-auth',
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
   "required-source-error":
@@ -286,6 +299,7 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
   commandAuth?: "direct" | "ambient";
+  sourceMcp?: "http" | "stdio";
   windowsConfig?: JsonObject;
   expectedWindowsSandbox?: string;
   surface?: CodexSecuritySurface;
@@ -314,6 +328,18 @@ const transportCases: {
     windowsConfig: { features: { elevated_windows_sandbox: true } },
     expectedWindowsSandbox: "elevated",
   },
+  { scenario: "correction", name: "HTTP source MCP", sourceMcp: "http" },
+  { scenario: "correction", name: "stdio source MCP", sourceMcp: "stdio" },
+  {
+    scenario: "source-cancel-output",
+    name: "source MCP shutdown drains output",
+    sourceMcp: "http",
+  },
+  {
+    scenario: "text-only-correction",
+    name: "source MCP corrective turn",
+    sourceMcp: "http",
+  },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
   { scenario: "accepted-no-replay" },
@@ -325,7 +351,10 @@ const transportCases: {
     ...Object.keys(failureReasons),
     "cancel-backoff",
     "cancel",
-  ].map((scenario) => ({ scenario })),
+  ].map((scenario) => ({
+    scenario,
+    ...(scenario.startsWith("source-") ? { sourceMcp: "http" as const } : {}),
+  })),
   {
     scenario: "correction",
     name: "lowercase Windows environment",
@@ -360,6 +389,7 @@ for (const {
   extraEnvironment,
   windowsOnly = false,
   commandAuth,
+  sourceMcp,
   windowsConfig,
   expectedWindowsSandbox,
   surface,
@@ -385,8 +415,69 @@ for (const {
         refresh_interval_ms: 1234,
         ...(commandAuth === "ambient" ? { cwd: modelHome } : {}),
       };
+      if (sourceMcp) {
+        execFileSync("git", ["init", "-q", checkout]);
+        execFileSync("git", [
+          "-C",
+          checkout,
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.com",
+          "commit",
+          "--allow-empty",
+          "-qm",
+          "source fixture",
+        ]);
+        execFileSync("git", [
+          "-C",
+          checkout,
+          "remote",
+          "add",
+          "origin",
+          "https://git.example.com/team/repo.git",
+        ]);
+      }
       const configuration = stringify({
-        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...(sourceMcp
+          ? { projects: { [checkout]: { trust_level: "trusted" } } }
+          : {}),
+        mcp_servers: {
+          synthetic: { command: "synthetic-unused-command" },
+          ...(sourceMcp
+            ? {
+                sourcegraph: {
+                  tools: {
+                    inherited_read: {
+                      approval_mode: "approve",
+                      output_token_limit: 432,
+                    },
+                  },
+                  ...(sourceMcp === "http"
+                    ? {
+                        url: "https://source.example.com/.api/mcp",
+                        http_headers: {
+                          Authorization: "token synthetic-static-auth",
+                        },
+                        env_http_headers: { Authorization: "SOURCE_AUTH" },
+                      }
+                    : {
+                        command: "synthetic-source-command",
+                        env: {
+                          OPENAI_API_KEY: "synthetic-source-only-key",
+                          CODEX_HOME: join(modelHome, "source-only-home"),
+                          OPTIONAL_SOURCE: "synthetic-fallback",
+                        },
+                        env_vars: [
+                          "OPTIONAL_SOURCE",
+                          "MISSING_SOURCE",
+                          "INHERITED_SOURCE",
+                        ],
+                      }),
+                },
+              }
+            : {}),
+        },
         responses_api_metadata: {
           synthetic_caller: "preserved",
           codex_security_surface: "previous",
@@ -426,6 +517,7 @@ for (const {
           CODEX_SECURITY_STATE_DIR: join(modelHome, "state"),
           [ghName]: ghConfig,
           ...extraEnvironment,
+          ...(sourceMcp ? { SOURCE_AUTH: "token synthetic-source-auth" } : {}),
         },
         (command, commandArgs, options) => {
           starts++;
@@ -436,6 +528,10 @@ for (const {
               : selected,
           );
           args = commandArgs;
+          if (sourceMcp)
+            expect(options.env!["SOURCE_AUTH"]).toBe(
+              "token synthetic-source-auth",
+            );
           directory = options.cwd as string;
           expect(options.env!["CODEX_SQLITE_HOME"]).toBeUndefined();
           expect(
@@ -462,7 +558,9 @@ for (const {
             child.once("spawn", () =>
               controller.abort("synthetic cancellation"),
             );
-          if (scenario === "cancel-continuation")
+          if (
+            ["cancel-continuation", "source-cancel-output"].includes(scenario)
+          )
             child.stderr.once("data", () =>
               controller.abort("synthetic cancellation"),
             );
@@ -482,6 +580,20 @@ for (const {
         },
         undefined,
         surface,
+        sourceMcp
+          ? await resolveSourceMcp(
+              "sourcegraph",
+              {
+                CODEX_HOME: modelHome,
+                OPENAI_API_KEY: "synthetic-review-key",
+                CODEX_SECURITY_STATE_DIR: join(modelHome, "state"),
+                SOURCE_AUTH: "token synthetic-source-auth",
+                INHERITED_SOURCE: "synthetic-inherited",
+              },
+              undefined,
+              checkout,
+            )
+          : undefined,
       );
       const validate = mock((value: unknown) => {
         if (
@@ -558,7 +670,12 @@ for (const {
         });
         expect(validate).toHaveBeenCalledTimes(1);
       } else if (
-        ["cancel", "cancel-continuation", "cancel-backoff"].includes(scenario)
+        [
+          "cancel",
+          "cancel-continuation",
+          "cancel-backoff",
+          "source-cancel-output",
+        ].includes(scenario)
       ) {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
@@ -595,6 +712,7 @@ for (const {
               "invalid-submission",
               "text-only",
               "required-source-error-after-text",
+              "source-disconnected-correction",
             ].includes(scenario)
               ? 2
               : 1) * sessions,
@@ -608,9 +726,16 @@ for (const {
                   ? "Codex review turn failed."
                   : reportsBlocker
                     ? "A required review check could not be completed."
-                    : ["request-error", "credential-error"].includes(scenario)
-                      ? "Codex rejected the review request."
-                      : "Codex review transport failed.",
+                    : [
+                          "source-disabled",
+                          "source-unavailable",
+                          "source-failed",
+                          "source-disconnected-correction",
+                        ].includes(scenario)
+                      ? "The required source MCP server is not connected."
+                      : ["request-error", "credential-error"].includes(scenario)
+                        ? "Codex rejected the review request."
+                        : "Codex review transport failed.",
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
@@ -651,6 +776,79 @@ for (const {
         expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
+      if (sourceMcp) {
+        const transcriptText = await readFile(transcript, "utf8");
+        expect(transcriptText).not.toContain("token synthetic-source-auth");
+        const request = transcriptText
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+          .find((message) => message.method === "thread/start");
+        expect(request.params.config.mcp_servers.sourcegraph).toMatchObject({
+          required: false,
+          enabled: true,
+          default_tools_approval_mode: "prompt",
+          tools: {
+            inherited_read: {
+              approval_mode: "prompt",
+              output_token_limit: 432,
+            },
+          },
+          ...(sourceMcp === "http"
+            ? {
+                http_headers: { Authorization: "token synthetic-static-auth" },
+                env_http_headers: { Authorization: expect.any(String) },
+              }
+            : {
+                env: {
+                  OPENAI_API_KEY: "synthetic-source-only-key",
+                  CODEX_HOME: join(modelHome, "source-only-home"),
+                  OPTIONAL_SOURCE: "synthetic-fallback",
+                  INHERITED_SOURCE: "synthetic-inherited",
+                },
+              }),
+        });
+        expect(request.params.config.mcp_servers.sourcegraph.env_vars).toEqual(
+          sourceMcp === "http" ? undefined : [],
+        );
+        expect(args.join(" ")).not.toContain("synthetic-source-only-key");
+        expect(args.join(" ")).not.toContain("synthetic-static-auth");
+        expect(request.params.approvalPolicy).toBe("on-request");
+        expect(request.params.approvalsReviewer).toBe("auto_review");
+        const methods = transcriptText
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).method);
+        expect(methods.indexOf("mcpServerStatus/list")).toBeGreaterThan(
+          methods.indexOf("thread/start"),
+        );
+        if (scenario === "correction")
+          expect(methods.indexOf("turn/start")).toBeGreaterThan(
+            methods.indexOf("mcpServerStatus/list"),
+          );
+        if (
+          ["text-only-correction", "source-disconnected-correction"].includes(
+            scenario,
+          )
+        ) {
+          expect(
+            methods.filter((method) => method === "mcpServerStatus/list"),
+          ).toHaveLength(2);
+          expect(
+            methods.filter((method) => method === "turn/start"),
+          ).toHaveLength(scenario === "text-only-correction" ? 2 : 1);
+        }
+        if (sourceMcp === "http")
+          expect(
+            request.params.config.shell_environment_policy.exclude,
+          ).toContain("SOURCE_AUTH");
+        expect(request.params.developerInstructions).toContain(
+          "git.example.com/team/repo",
+        );
+        expect(request.params.developerInstructions).toContain(
+          "cited immutable revision",
+        );
+      }
       expect(
         parse(args.find((value) => value.startsWith("windows="))!)["windows"],
       ).toEqual({
@@ -712,6 +910,10 @@ for (const {
                       "credential-error",
                       "policy-request",
                       "policy-request-code",
+                      "source-disabled",
+                      "source-unavailable",
+                      "source-failed",
+                      "source-cancel-output",
                     ].includes(scenario)
                   ? 0
                   : 1) * sessions,
@@ -725,6 +927,7 @@ for (const {
       );
       expect(existsSync(join(modelHome, "auth.json"))).toBe(false);
       expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
+      if (sourceMcp) expect(child!.exitCode).toBe(0);
       expect(existsSync(directory!)).toBe(false);
       expect(existsSync(checkout)).toBe(true);
     } finally {

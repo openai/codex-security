@@ -14,7 +14,7 @@ if (role === "holder") {
   const interval = setInterval(() => {
     if (!existsSync(release)) return;
     clearInterval(interval);
-    if (mode !== "late") finish();
+    if (!mode.startsWith("late")) finish();
     const diagnostic = Buffer.from("late café 日本語 😀\n");
     process.stderr.write(diagnostic.subarray(0, 9), () => {
       setImmediate(() => {
@@ -30,7 +30,7 @@ if (role === "holder") {
       // The holder must outlive the direct child on Windows.
       detached: process.platform === "win32",
       cwd: dirname(fileURLToPath(import.meta.url)),
-      stdio: ["ignore", 1, 2, "ipc"],
+      stdio: ["ignore", mode === "late-stderr" ? "ignore" : 1, 2, "ipc"],
     },
   );
   await new Promise((resolve) => holder.once("message", resolve));
@@ -40,7 +40,7 @@ if (role === "holder") {
   });
   process.send({ holderPid: holder.pid });
   process.send("ready");
-  if (mode === "abandoned" || mode === "late") process.exit(0);
+  if (mode === "abandoned" || mode.startsWith("late")) process.exit(0);
   setInterval(() => {}, 1000);
   const send = (message, completeLine = true) => {
     process.stdout.write(
@@ -55,6 +55,18 @@ if (role === "holder") {
     const message = JSON.parse(line);
     if (["initialize", "account/login/start"].includes(message.method)) {
       send({ id: message.id, result: {} });
+    } else if (message.method === "config/read") {
+      send({
+        id: message.id,
+        result: {
+          config: {
+            mcp_servers: {
+              source: { enabled: false, url: "http://127.0.0.1:1" },
+            },
+          },
+          layers: [],
+        },
+      });
     } else if (message.method === "feedback/upload") {
       send(
         mode === "error"

@@ -225,6 +225,7 @@ const allowedFiles = new Set([
     "deduplication/deduplication-reviewer",
     "deduplication/diagnostics",
     "deduplication/scan",
+    "deduplication/source-mcp",
     "deduplication/local",
     "deduplication/finding-schema",
     "deduplication/records",
