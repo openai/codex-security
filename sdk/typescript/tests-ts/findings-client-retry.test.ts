@@ -10,6 +10,131 @@ const neighborhood = {
   potentialDuplicates: [],
 };
 
+test("lookup preserves the service error code and explanation", async () => {
+  const message = "No current embedding exists in the requested repository.";
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    undefined,
+    async () =>
+      Response.json({ error: "finding_not_indexed", message }, { status: 404 }),
+  );
+  await expect(
+    client.potentialDuplicates("synthetic", scope),
+  ).rejects.toMatchObject({
+    code: "finding_not_indexed",
+    status: 404,
+    message: expect.stringContaining(message),
+  });
+});
+
+test("publishing preserves conflict details without retrying", async () => {
+  const message = "The finding belongs to another repository.";
+  let requests = 0;
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    undefined,
+    async () => {
+      requests++;
+      return Response.json(
+        { error: "finding_conflict", message },
+        { status: 409 },
+      );
+    },
+  );
+  await expect(client.publish([], scope.repositoryId)).rejects.toMatchObject({
+    code: "finding_conflict",
+    status: 409,
+    message: expect.stringContaining(message),
+  });
+  expect(requests).toBe(1);
+});
+
+test("publishing preserves cancellation while reading an error response", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Synthetic caller cancellation");
+  const request = mock(async (_url: URL, init: RequestInit) => {
+    expect(init.signal).toBe(controller.signal);
+    const response = new Response(null, { status: 409 });
+    response.json = async () => {
+      controller.abort(reason);
+      throw new DOMException("Synthetic aborted body read", "AbortError");
+    };
+    return response;
+  });
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    controller.signal,
+    request,
+  );
+  await expect(client.publish([], scope.repositoryId)).rejects.toBe(reason);
+  expect(request).toHaveBeenCalledTimes(1);
+});
+
+test.each([
+  "<html>Gateway unavailable</html>",
+  '{"error":',
+  "null",
+  '{"error":"finding_conflict","message":123}',
+])(
+  "keeps the HTTP diagnostic for a non-contract response: %s",
+  async (body) => {
+    const client = new FindingsClient(
+      "http://synthetic.test",
+      undefined,
+      async () => new Response(body, { status: 409 }),
+    );
+    await expect(client.storeDedupeGroups([["a", "b"]])).rejects.toMatchObject({
+      status: 409,
+      code: undefined,
+      message: "Findings API POST /v1/dedupe-groups failed (HTTP 409).",
+    });
+  },
+);
+
+test("preserves an error code when the service omits a message", async () => {
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    undefined,
+    async () => Response.json({ error: "not_found" }, { status: 404 }),
+  );
+  await expect(client.publish([], scope.repositoryId)).rejects.toMatchObject({
+    code: "not_found",
+    status: 404,
+    message: "Findings API POST /v1/bulk/findings failed (HTTP 404).",
+  });
+});
+
+test("structured errors preserve retries and Retry-After", async () => {
+  const delays: number[] = [];
+  let requests = 0;
+  const message = "Embedding credentials are unavailable.";
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    undefined,
+    async () => {
+      requests++;
+      return Response.json(
+        { error: "embedding_unavailable", message },
+        { status: 503, headers: { "Retry-After": "12" } },
+      );
+    },
+    {
+      wait: async (delay) => {
+        delays.push(delay);
+      },
+      random: () => 0,
+    },
+  );
+  await expect(client.storeDedupeGroups([["a", "b"]])).rejects.toMatchObject({
+    code: "embedding_unavailable",
+    status: 503,
+    retryAfter: "12",
+    message: expect.stringContaining(message),
+  });
+  expect(requests).toBe(3);
+  expect(delays).toEqual([12000, 12000]);
+});
+
 test("lookup retries rate limits and honors Retry-After before continuing", async () => {
   let requests = 0;
   const delays = mock(async (_delay: number) => {});
@@ -168,13 +293,24 @@ test("Retry-After accepts an HTTP date", async () => {
 });
 
 test.each(["lookup", "publish", "groups"] as const)(
-  "%s delivers HTTP failures without waiting for response cleanup",
+  "%s consumes error bodies and preserves diagnostics through retries",
   async (operation) => {
-    const cancel = mock(() => new Promise<void>(() => {}));
+    const responses: Response[] = [];
     const client = new FindingsClient(
       "http://synthetic.test",
       undefined,
-      async () => new Response(new ReadableStream({ cancel }), { status: 503 }),
+      async () => {
+        for (const response of responses) expect(response.bodyUsed).toBe(true);
+        const response = Response.json(
+          {
+            error: "embedding_unavailable",
+            message: `Synthetic service failure ${responses.length + 1}.`,
+          },
+          { status: 503 },
+        );
+        responses.push(response);
+        return response;
+      },
       { wait: async () => {} },
     );
     const result =
@@ -183,8 +319,16 @@ test.each(["lookup", "publish", "groups"] as const)(
         : operation === "publish"
           ? client.publish([], scope.repositoryId)
           : client.storeDedupeGroups([["synthetic-a", "synthetic-b"]]);
-    await expect(result).rejects.toThrow("HTTP 503");
-    expect(cancel).toHaveBeenCalledTimes(operation === "publish" ? 1 : 3);
+    const attempts = operation === "publish" ? 1 : 3;
+    await expect(result).rejects.toMatchObject({
+      status: 503,
+      code: "embedding_unavailable",
+      message: expect.stringContaining(
+        `Synthetic service failure ${attempts}.`,
+      ),
+    });
+    expect(responses).toHaveLength(attempts);
+    for (const response of responses) expect(response.bodyUsed).toBe(true);
   },
 );
 

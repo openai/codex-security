@@ -13,20 +13,24 @@ describe("CLI launcher", () => {
     const root = await temporaryDirectory("codex-security-cli-bin-");
     try {
       const launcher = join(packageRoot, "src", "cli.ts");
-      const bin =
-        process.platform === "win32" ? launcher : join(root, "codex-security");
-      if (process.platform !== "win32") {
-        await symlink(launcher, bin);
-      }
-      const { status, stdout, stderr } = await runCommand(
-        process.execPath,
-        [bin, "--version"],
-        { timeout: 30_000 },
-      );
+      const bins =
+        process.platform === "win32"
+          ? [launcher]
+          : ["codex-security", "cs"].map((name) => join(root, name));
+      for (const bin of bins) {
+        if (process.platform !== "win32") {
+          await symlink(launcher, bin);
+        }
+        const { status, stdout, stderr } = await runCommand(
+          process.execPath,
+          [bin, "--version"],
+          { timeout: 30_000 },
+        );
 
-      expect(status, stderr).toBe(0);
-      expect(stderr).toBe("");
-      expect(stdout).toBe(`${VERSION}\n`);
+        expect(status, stderr).toBe(0);
+        expect(stderr).toBe("");
+        expect(stdout).toBe(`${VERSION}\n`);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -68,7 +72,8 @@ describe("CLI launcher", () => {
           join(packageRoot, "bin", "codex-security.mjs"),
           launcher,
         );
-        const detail = `EACCES: failed ${SYNTHETIC_CREDENTIALS}\u001b[31m\nnext line`;
+        const detail = `EACCES: failed ${SYNTHETIC_CREDENTIALS}\u001b[31m\rnext\nline café 🔒\u001b]52;c;U1lOVEhFVElD\u0007 C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end`;
+        const display = `EACCES: failed ${SYNTHETIC_CREDENTIALS} [31m next\nline café 🔒 ]52;c;U1lOVEhFVElD  C1   2J H 52;c;U1lOVEhFVElD   end`;
         if (scenario !== "missing")
           await writeFile(
             join(root, "dist", "cli.js"),
@@ -91,7 +96,7 @@ describe("CLI launcher", () => {
           expect(child.stderr).toContain(join(root, "dist", "cli.js"));
         } else
           expect(child.stderr).toBe(
-            `codex-security: Failed to start Codex Security: ${detail}\n`,
+            `codex-security: Failed to start Codex Security: ${display}\n`,
           );
       } finally {
         await rm(root, { recursive: true, force: true });

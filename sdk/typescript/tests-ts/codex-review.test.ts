@@ -21,6 +21,8 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
 import { isReviewRefusal } from "../src/deduplication/refusal.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import type { CodexSecuritySurface } from "../src/api.js";
+import { VERSION } from "../src/version.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
 import { readCodexHomeConfig } from "../src/auth.js";
 import {
@@ -283,7 +285,13 @@ const transportCases: {
   commandAuth?: "direct" | "ambient";
   windowsConfig?: JsonObject;
   expectedWindowsSandbox?: string;
+  surface?: CodexSecuritySurface;
 }[] = [
+  {
+    scenario: "recover-server-error",
+    name: "CLI attribution survives a retried review session",
+    surface: "cli",
+  },
   {
     scenario: "correction",
     name: "command auth without an API key",
@@ -351,6 +359,7 @@ for (const {
   commandAuth,
   windowsConfig,
   expectedWindowsSandbox,
+  surface,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
@@ -375,6 +384,11 @@ for (const {
       };
       const configuration = stringify({
         mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        responses_api_metadata: {
+          synthetic_caller: "preserved",
+          codex_security_surface: "previous",
+          codex_security_command: "previous",
+        },
         ...windowsConfig,
         ...(commandAuth
           ? {
@@ -463,6 +477,8 @@ for (const {
             }
           },
         },
+        undefined,
+        surface,
       );
       const validate = mock((value: unknown) => {
         if (
@@ -651,7 +667,10 @@ for (const {
       if (scenario !== "cancel") {
         const messages = parseJsonLines<{
           method?: string;
-          params?: { apiKey?: string };
+          params?: {
+            apiKey?: string;
+            config?: { responses_api_metadata?: Record<string, string> };
+          };
         }>(await readFile(transcript, "utf8"));
         const loginRequest = messages.find(
           (message) => message.method === "account/login/start",
@@ -659,6 +678,16 @@ for (const {
         expect(
           messages.filter((message) => message.method === "thread/start"),
         ).toHaveLength(sessions);
+        for (const message of messages.filter(
+          (message) => message.method === "thread/start",
+        )) {
+          expect(message.params?.config?.responses_api_metadata).toEqual({
+            synthetic_caller: "preserved",
+            codex_security_surface: surface ?? "sdk",
+            codex_security_command: "dedupe",
+            codex_security_package_version: VERSION,
+          });
+        }
         expect(
           messages.filter((message) => message.method === "turn/start"),
         ).toHaveLength(

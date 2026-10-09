@@ -5,8 +5,7 @@ import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
 import {
   createCandidateNormalizer,
   stableJson,
-  relativeFile,
-  pathKey,
+  candidateRelativePath,
   type CandidateSource,
 } from "./helpers/normalize-candidates.js";
 import type * as z from "zod/v4";
@@ -188,21 +187,18 @@ async function diffCandidateSources(
     )
     .filter(Boolean)
     .map(nativePath);
-  const locations = candidates.flatMap((candidate) =>
-    candidate.locations.map((location) => nativePath(location.path)),
-  );
-  const aliases = new Map<string, string>();
-  if (process.platform === "win32") {
-    for (const value of new Set([...paths, ...locations])) {
-      try {
-        const [name] = relativeFile(value, context.repoRoot);
-        if (value !== name && pathKey(value) === pathKey(name))
-          aliases.set(value, name);
-      } catch {
-        // The selected revision may contain a file absent from this checkout.
-      }
+  const locations = candidates.flatMap((candidate, index) => {
+    try {
+      return candidate.locations.map((location) =>
+        candidateRelativePath(location.path),
+      );
+    } catch (error) {
+      throw new Error(
+        `${discoveryLabel}: candidate input row ${index + 1}: ${(error as Error).message}`,
+        { cause: error },
+      );
     }
-  }
+  });
   const python = context.pythonCommand ?? (await resolvePythonCommand());
   const output = await runPythonWithInput(
     python,
@@ -226,27 +222,15 @@ except subprocess.CalledProcessError as error:
     ],
     JSON.stringify({
       diff_target: target,
-      paths: [...paths, ...aliases.values()],
-      locations: locations.flatMap((value) =>
-        aliases.has(value) ? [value, aliases.get(value)!] : [value],
-      ),
+      paths,
+      locations,
+      case_insensitive: process.platform === "win32",
     }),
     "Diff source reader",
   );
-  const sources = new Map(
+  return new Map(
     Object.entries(JSON.parse(output) as Record<string, CandidateSource>),
   );
-  for (const [value, name] of aliases) {
-    const source = sources.get(value);
-    if (
-      source &&
-      "error" in source &&
-      source.error === "missing" &&
-      sources.has(name)
-    )
-      sources.set(value, sources.get(name)!);
-  }
-  return sources;
 }
 
 /** Read the actual compact ledger, including records added by later shared phases. */
