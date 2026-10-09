@@ -45,6 +45,7 @@ interface SourceSnapshotOptions {
   optional?: boolean;
   gitDisabled?: boolean;
   privateStatePaths?: readonly string[];
+  evidence?: boolean;
 }
 
 export function workflowDigest(value: unknown): string {
@@ -167,6 +168,7 @@ export class FindingWorkflow {
         repository,
         ...(options.optional ? { optional: true } : {}),
         ...(options.gitDisabled ? { gitDisabled: true } : {}),
+        ...(options.evidence ? { evidence: true } : {}),
         ...(options.privateStatePaths?.length
           ? { privateStatePaths: options.privateStatePaths }
           : {}),
@@ -182,8 +184,15 @@ export class FindingWorkflow {
     key: string,
     binding: object,
     result: unknown,
+    options: { replace?: boolean } = {},
   ): Promise<void> {
-    await this.request({ action: "save-review", key, binding, result });
+    await this.request({
+      action: "save-review",
+      key,
+      binding,
+      result,
+      ...(options.replace ? { replace: true } : {}),
+    });
   }
 
   async prepareDedupe(

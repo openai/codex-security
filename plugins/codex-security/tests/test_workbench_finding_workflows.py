@@ -217,6 +217,30 @@ def test_review_checkpoints_keep_the_first_valid_result_and_enforce_workflow_own
     assert row["settings_digest"] == binding["settingsDigest"]
     assert json.loads(row["result_json"]) == result
 
+    replacement = {"assessment": {"report": "Regenerated validation"}, "evidenceDigest": "new"}
+    workflow(
+        workbench_api,
+        workbench_db,
+        "save-review",
+        key="review-1",
+        binding=binding,
+        result=replacement,
+        replace=True,
+    )
+    assert workflow(workbench_api, workbench_db, "get-review", key="review-1") == {"review": result}
+    workflow(
+        workbench_api,
+        workbench_db,
+        "save-review",
+        key="review-1",
+        binding={**binding, "stage": "scan-validation"},
+        result=replacement,
+        replace=True,
+    )
+    assert workflow(workbench_api, workbench_db, "get-review", key="review-1") == {
+        "review": replacement
+    }
+
 
 @pytest.mark.parametrize(
     "payload",
@@ -475,3 +499,129 @@ def test_optional_review_snapshot_disables_cache_for_unreadable_entries(
         workflow(
             workbench_api, workbench_db, "source", repository=str(target / "missing"), optional=True
         )
+
+
+def test_optional_evidence_snapshot_includes_git_metadata(workbench_api, workbench_db, tmp_path):
+    evidence = tmp_path / "evidence"
+    metadata = evidence / ".git"
+    metadata.mkdir(parents=True)
+    (evidence / "proof.txt").write_text("Original proof.\n")
+    head = metadata / "HEAD"
+    head.write_text("Synthetic metadata.\n")
+    source = workflow(workbench_api, workbench_db, "source", repository=str(evidence))
+    before = workflow(
+        workbench_api,
+        workbench_db,
+        "source",
+        repository=str(evidence),
+        evidence=True,
+        optional=True,
+    )
+    head.write_text("Changed metadata.\n")
+    assert workflow(workbench_api, workbench_db, "source", repository=str(evidence)) == source
+    assert (
+        workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(evidence),
+            evidence=True,
+            optional=True,
+        )
+        != before
+    )
+    if hasattr(os, "mkfifo"):
+        pipe = metadata / "pipe"
+        os.mkfifo(pipe)
+        try:
+            assert workflow(
+                workbench_api,
+                workbench_db,
+                "source",
+                repository=str(evidence),
+                evidence=True,
+                optional=True,
+            ) == {"source": None}
+        finally:
+            pipe.unlink()
+
+
+def test_optional_evidence_snapshot_does_not_follow_directory_links(
+    workbench_api, workbench_db, tmp_path
+):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = outside / "proof.txt"
+    source.write_text("Outside contents.\n")
+    linked = evidence / "linked"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        if os.name == "nt":
+            pytest.skip("Directory symlinks are unavailable on this Windows filesystem")
+        raise
+    before = workflow(
+        workbench_api,
+        workbench_db,
+        "source",
+        repository=str(evidence),
+        evidence=True,
+        optional=True,
+    )
+    source.write_text("Changed outside contents.\n")
+    assert (
+        workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(evidence),
+            evidence=True,
+            optional=True,
+        )
+        == before
+    )
+    evidence.rename(tmp_path / "original")
+    evidence.symlink_to(outside, target_is_directory=True)
+    assert workflow(
+        workbench_api,
+        workbench_db,
+        "source",
+        repository=str(evidence),
+        evidence=True,
+        optional=True,
+    ) == {"source": None}
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "unreadable"])
+def test_optional_evidence_snapshot_unavailable_roots(workbench_api, workbench_db, tmp_path, kind):
+    evidence = tmp_path / "evidence"
+    if kind == "file":
+        evidence.write_text("Not a directory.\n")
+    if kind == "unreadable":
+        if os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0:
+            pytest.skip("Mode permissions require a non-root Unix user")
+        evidence.mkdir()
+        evidence.chmod(0)
+    try:
+        assert workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(evidence),
+            evidence=True,
+            optional=True,
+        ) == {"source": None}
+        if kind == "missing":
+            with pytest.raises(FileNotFoundError):
+                workflow(
+                    workbench_api,
+                    workbench_db,
+                    "source",
+                    repository=str(evidence),
+                    optional=True,
+                )
+    finally:
+        if kind == "unreadable":
+            evidence.chmod(0o700)

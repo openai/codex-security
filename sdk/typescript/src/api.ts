@@ -389,6 +389,11 @@ const validationResultSchema = validationResponseSchema.extend({
   threadId: z.string().nullable(),
 });
 
+const cachedValidationSchema = z.object({
+  assessment: validationResultSchema,
+  evidenceDigest: z.string(),
+});
+
 export type ScanAuthentication =
   | { method: "command"; verified: false }
   | {
@@ -768,7 +773,12 @@ export class CodexSecurity {
         target: "openapi-3.0",
       });
       let checkpoint:
-        | { workflow: FindingWorkflow; binding: JsonObject; key: string }
+        | {
+            workflow: FindingWorkflow;
+            binding: JsonObject;
+            key: string;
+            replace: boolean;
+          }
         | undefined;
       const privateStatePaths: string[] = [];
       const outputRoot =
@@ -870,7 +880,7 @@ export class CodexSecurity {
           const model = scanModelConfiguration(session.effectiveConfig);
           const binding = {
             // Increment when the standalone validation prompt or execution contract changes.
-            version: 2,
+            version: 3,
             codexVersion: CODEX_EXECUTABLE_VERSION,
             source,
             scope: {},
@@ -942,10 +952,26 @@ export class CodexSecurity {
                   "Repository changed during validation.",
                 );
               }
-              if (await canCache()) return validationResultSchema.parse(saved);
+              const cached = cachedValidationSchema.safeParse(saved);
+              if (cached.success && (await canCache())) {
+                const evidence = await workflow.sourceSnapshot(
+                  cached.data.assessment.outputDir,
+                  { optional: true, evidence: true },
+                );
+                if (
+                  evidence !== null &&
+                  workflowDigest(evidence) === cached.data.evidenceDigest
+                )
+                  return cached.data.assessment;
+              }
             }
           }
-          checkpoint = { workflow, binding, key: reviewKey };
+          checkpoint = {
+            workflow,
+            binding,
+            key: reviewKey,
+            replace: saved !== null,
+          };
         }
       }
       outputDir = await prepareOutputDir(
@@ -1018,7 +1044,7 @@ export class CodexSecurity {
       await checkTarget();
       const assessment = { ...result, outputDir, threadId };
       if (checkpoint !== undefined && (await canCache())) {
-        const { workflow, binding, key } = checkpoint;
+        const { workflow, binding, key, replace } = checkpoint;
         const current = await workflow.sourceSnapshot(inputs.repository, {
           optional: true,
           privateStatePaths,
@@ -1029,7 +1055,17 @@ export class CodexSecurity {
               "Repository changed during validation.",
             );
           }
-          await workflow.saveReview(key, binding, assessment);
+          const evidence = await workflow.sourceSnapshot(outputDir, {
+            optional: true,
+            evidence: true,
+          });
+          if (evidence !== null)
+            await workflow.saveReview(
+              key,
+              binding,
+              { assessment, evidenceDigest: workflowDigest(evidence) },
+              { replace },
+            );
         }
       }
       return assessment;

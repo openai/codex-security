@@ -4623,14 +4623,9 @@ describe("CLI", () => {
           const result = fakeResult(["high"], completeness);
           const stdout = capture();
           const stderr = capture();
-          const deps = dependencies();
-          deps.createSecurity = () => ({
-            run: async (_repository, options) => {
-              options?.onWarning?.(warning, { kind: "target_changed" });
-              return result;
-            },
-            close: async () => {},
-            preflight: async () => fakePreflight(),
+          const deps = scanDependencies(async (_repository, options) => {
+            options?.onWarning?.(warning, { kind: "target_changed" });
+            return result;
           });
           expect(
             await main(

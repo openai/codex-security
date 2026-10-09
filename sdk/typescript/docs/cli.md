@@ -338,7 +338,11 @@ not that every finding was confirmed. A scan with no findings needs no second
 pass.
 
 With `--workflow-id`, retries reuse completed assessments for unchanged findings,
-source, and validation settings. Earlier reports and evidence remain available.
+source, validation settings, and saved evidence. Missing or changed evidence
+causes validation to run again, as do older assessments without recorded evidence
+fingerprints. By default, regeneration uses a new evidence directory. An explicit
+SDK validation `outputDir` must be empty when regenerating; existing files are
+never overwritten.
 When `--knowledge-base` is supplied, the scan and all follow-up assessments use
 one captured copy of those documents. A workflow retry must use the same document
 contents. Use a new workflow ID if they changed or if the workflow was created

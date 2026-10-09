@@ -899,7 +899,11 @@ describe("CodexSecurity finding validation", () => {
       fixture.workbench.mockImplementation(async (options, args, input) => {
         if (args[0] === "finding-workflow" && input !== undefined) {
           const request = JSON.parse(input) as JsonObject;
-          if (request["action"] === "source") snapshots.push(request);
+          if (
+            request["action"] === "source" &&
+            request["repository"] === repository
+          )
+            snapshots.push(request);
         }
         return await runWorkbench(options, args, input);
       });
@@ -932,6 +936,160 @@ describe("CodexSecurity finding validation", () => {
         ).rejects.toThrow("Repository changed during validation.");
         expect(modelCalls).toBe(2);
       }
+    },
+  );
+
+  test.each(["unchanged", "deleted", "modified", "git metadata", "unbound"])(
+    "checks saved validation evidence before cache reuse: %s",
+    async (change) => {
+      const python = await resolvePluginPython();
+      let modelCalls = 0;
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        modelCalls++;
+        const directory = fixture.captured.thread!.workingDirectory!;
+        await writeFile(
+          join(directory, "proof.txt"),
+          `Synthetic evidence ${modelCalls}.\n`,
+        );
+        await mkdir(join(directory, ".git"));
+        await writeFile(
+          join(directory, ".git", "HEAD"),
+          "Synthetic Git metadata.\n",
+        );
+        yield* validationEvents();
+      }
+      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      let unbound = change === "unbound";
+      fixture.workbench.mockImplementation(async (options, args, input) => {
+        if (args[0] === "finding-workflow" && input !== undefined) {
+          const payload = JSON.parse(input);
+          if (unbound && payload.action === "save-review") {
+            payload.result = payload.result.assessment ?? payload.result;
+            input = JSON.stringify(payload);
+            unbound = false;
+          }
+        }
+        return await runWorkbench(options, args, input);
+      });
+      const workflow = new FindingWorkflow(
+        "validation-evidence",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId: workflow.id,
+      };
+      const first = await client.validate(request);
+      expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
+        "Synthetic evidence 1.\n",
+      );
+      if (change === "deleted") await rm(first.outputDir, { recursive: true });
+      if (change === "modified")
+        await writeFile(
+          join(first.outputDir, "proof.txt"),
+          "Changed evidence.\n",
+        );
+      if (change === "git metadata")
+        await writeFile(
+          join(first.outputDir, ".git", "HEAD"),
+          "Changed metadata.\n",
+        );
+      const second = await client.validate(request);
+      expect(modelCalls).toBe(change === "unchanged" ? 1 : 2);
+      expect(await readFile(join(second.outputDir, "proof.txt"), "utf8")).toBe(
+        `Synthetic evidence ${modelCalls}.\n`,
+      );
+      expect(await client.validate(request)).toEqual(second);
+      expect(modelCalls).toBe(change === "unchanged" ? 1 : 2);
+    },
+  );
+
+  test("does not overwrite explicit validation output after evidence changes", async () => {
+    const python = await resolvePluginPython();
+    let modelCalls = 0;
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      modelCalls++;
+      await writeFile(
+        join(fixture.captured.thread!.workingDirectory!, "proof.txt"),
+        "Original evidence.\n",
+      );
+      yield* validationEvents();
+    }
+    const fixture = await validationClient(events, PLUGIN_ROOT, python);
+    await using client = fixture.client;
+    fixture.workbench.mockImplementation(runWorkbench);
+    const workflow = new FindingWorkflow(
+      "explicit-validation-evidence",
+      { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+      runWorkbench,
+      python,
+    );
+    await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+    const request = { ...fixture.options, workflowId: workflow.id };
+    const first = await client.validate(request);
+    await writeFile(join(first.outputDir, "proof.txt"), "Changed evidence.\n");
+    await expect(client.validate(request)).rejects.toBeInstanceOf(
+      OutputDirectoryError,
+    );
+    expect(modelCalls).toBe(1);
+    expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
+      "Changed evidence.\n",
+    );
+  });
+
+  test.each(["unavailable", "aborted"] as const)(
+    "handles %s evidence fingerprints without caching an invalid result",
+    async (mode) => {
+      const python = await resolvePluginPython();
+      const controller = new AbortController();
+      let modelCalls = 0;
+      let saved = 0;
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        modelCalls++;
+        yield* validationEvents();
+      }
+      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      fixture.workbench.mockImplementation(async (options, args, input) => {
+        if (args[0] === "finding-workflow" && input !== undefined) {
+          const payload = JSON.parse(input);
+          if (payload.action === "save-review") saved++;
+          if (payload.action === "source" && payload.evidence === true) {
+            if (mode === "unavailable") return { source: null };
+            controller.abort();
+          }
+        }
+        return await runWorkbench(options, args, input);
+      });
+      const workflow = new FindingWorkflow(
+        "optional-validation-evidence",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId: workflow.id,
+        signal: controller.signal,
+      };
+      if (mode === "aborted") {
+        await expect(client.validate(request)).rejects.toBeInstanceOf(
+          ScanInterruptedError,
+        );
+        expect(modelCalls).toBe(1);
+      } else {
+        expect((await client.validate(request)).disposition).toBe("reportable");
+        expect((await client.validate(request)).disposition).toBe("reportable");
+        expect(modelCalls).toBe(2);
+      }
+      expect(saved).toBe(0);
     },
   );
 

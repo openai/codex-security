@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -129,7 +130,24 @@ def finding_workflow(
     if payload["action"] == "get":
         return {"workflow": read_workflow(connection, workflow_id)}
     if payload["action"] == "source":
-        target = Path(payload["repository"]).resolve(strict=True)
+        evidence = payload.get("evidence") is True
+        if evidence:
+            try:
+                target = Path(payload["repository"])
+                metadata = target.lstat()
+                if (
+                    not target.is_absolute()
+                    or not stat.S_ISDIR(metadata.st_mode)
+                    or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+                    or target.resolve(strict=True) != target
+                ):
+                    raise UnreadableLocalFile("The validation evidence directory was replaced.")
+            except (OSError, RuntimeError, UnreadableLocalFile):
+                if payload.get("optional") is True:
+                    return {"source": None}
+                raise
+        else:
+            target = Path(payload["repository"]).resolve(strict=True)
         private_paths = payload.get("privateStatePaths", [])
         if not isinstance(private_paths, list) or any(
             not isinstance(path, str) or not Path(path).is_absolute() for path in private_paths
@@ -140,7 +158,12 @@ def finding_workflow(
         if target in excluded:
             raise SystemExit("Private runtime storage must not exclude the repository root.")
         try:
-            content = directory_content_digest(target, excluded=excluded, include_ignored=True)
+            content = directory_content_digest(
+                target,
+                excluded=excluded,
+                include_ignored=True,
+                include_git_metadata=evidence,
+            )
         except (UnsupportedLocalFileType, UnreadableLocalFile, OSError):
             if payload.get("optional") is True:
                 return {"source": None}
@@ -148,10 +171,16 @@ def finding_workflow(
         return {
             "source": {
                 "repository": str(target),
-                "revision": "unversioned" if payload.get("gitDisabled") else git_revision(target),
+                "revision": (
+                    "unversioned"
+                    if evidence or payload.get("gitDisabled")
+                    else git_revision(target)
+                ),
                 "refsDigest": hashlib.sha256(
                     (
-                        "" if payload.get("gitDisabled") else (git_output(target, "show-ref") or "")
+                        ""
+                        if evidence or payload.get("gitDisabled")
+                        else (git_output(target, "show-ref") or "")
                     ).encode()
                 ).hexdigest(),
                 "content": content,
@@ -168,15 +197,20 @@ def finding_workflow(
         binding = payload["binding"]
         source = binding["source"]
         scope = binding["scope"]
+        on_conflict = (
+            "DO UPDATE SET result_json = excluded.result_json, created_at = excluded.created_at"
+            if payload.get("replace") is True and binding.get("stage") == "scan-validation"
+            else "DO NOTHING"
+        )
         with connection:
             connection.execute(
-                """INSERT INTO finding_workflow_reviews
+                f"""INSERT INTO finding_workflow_reviews
                 (workflow_id, review_key, review_contract_version, codex_version,
                  source_repository_path, source_revision, source_refs_digest, source_content_digest,
                  scope_repository_id, scope_all_repositories, model, effort, settings_digest,
                  prompt_digest, contract_digest, result_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(workflow_id, review_key) DO NOTHING""",
+                ON CONFLICT(workflow_id, review_key) {on_conflict}""",
                 (
                     workflow_id,
                     payload["key"],
