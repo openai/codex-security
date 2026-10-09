@@ -182,11 +182,13 @@ for (const surface of ["review", "feedback"] as const) {
           }
           const outcome = await bounded(result, "operation completion");
           if (mode === "success") {
-            expect(outcome.value).toMatchObject(
-              surface === "feedback"
-                ? { feedbackId: "synthetic-feedback" }
-                : { decision: "SAME" },
-            );
+            expect(outcome).toMatchObject({
+              value:
+                surface === "feedback"
+                  ? { feedbackId: "synthetic-feedback" }
+                  : { decision: "SAME" },
+              error: undefined,
+            });
           } else if (mode === "late") {
             expect(
               surface === "feedback"
