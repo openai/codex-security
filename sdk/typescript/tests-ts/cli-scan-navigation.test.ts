@@ -7,12 +7,30 @@ import { dependencies, fakeResult } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { writeJsonLines } from "./support/json.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import { runCommand } from "./support/shell.js";
 
 const completedId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const latestId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const startedAt = "2026-01-02T12:00:00Z";
 
 describe("scan navigation", () => {
+  test.each(["show", "logs"])(
+    "%s keeps saved output when optional navigation fails",
+    async (command) => {
+      for (const failure of ["sync", "EPIPE", "ENOSPC"]) {
+        const result = await runCommand(process.execPath, [
+          join(import.meta.dir, "fixtures", "scan-navigation-output.mts"),
+          command,
+          failure,
+        ]);
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({ status: 0 });
+        expect(JSON.parse(result.stdout).output).toContain(completedId);
+        expect(result.stderr).toBe("");
+      }
+    },
+  );
+
   test.each(["failed", "running"])(
     "identifies different default result and log selections when the latest scan is %s",
     async (status) => {

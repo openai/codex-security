@@ -1948,17 +1948,23 @@ export async function main(
     });
     return result;
   };
-  const showHistoryNavigation = (
+  const showHistoryNavigation = async (
     scan: JsonObject,
     format: string,
     selection?: string,
-  ): void => {
+  ): Promise<void> => {
     if (
       format !== "toon" ||
       argv.some((argument) => OUTPUT_OPTION.test(argument))
     )
       return;
-    printScanReference(scan, errorOutput, selection);
+    await withTerminalErrorsHandled(errorOutput, async () => {
+      try {
+        printScanReference(scan, errorOutput, selection);
+      } catch {
+        // Optional navigation must not prevent reading saved results or logs.
+      }
+    });
   };
   const findingFeedback = Cli.create("findings", {
     description: "Review saved findings (default: list).",
@@ -2152,9 +2158,9 @@ export async function main(
         }
         if (scanId === undefined) return;
         return presentHistory(
-          await history(["get-scan", "--scan-id", scanId], (value) => {
+          await history(["get-scan", "--scan-id", scanId], async (value) => {
             const { scan, recipe, parentScanId } = value;
-            showHistoryNavigation(
+            await showHistoryNavigation(
               scan as JsonObject,
               format,
               args.scanId === undefined ? "latest completed scan" : undefined,
@@ -2200,7 +2206,7 @@ export async function main(
           ["get-scan", "--scan-id", scanId],
           async (value) => {
             const scan = value["scan"] as ScanLogSource;
-            showHistoryNavigation(
+            await showHistoryNavigation(
               scan,
               format,
               args.scanId === undefined
