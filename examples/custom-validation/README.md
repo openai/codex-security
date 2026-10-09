@@ -10,6 +10,7 @@ The local SDK bundle requires the source-matched native payloads for all support
 
 ```bash
 pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm --dir sdk/typescript run build:plugin
 pnpm --dir sdk/typescript run build
 node examples/custom-validation/run.mjs
