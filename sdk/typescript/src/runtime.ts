@@ -36,6 +36,7 @@ import {
   basename,
   dirname,
   extname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -2791,12 +2792,21 @@ export function resolveCodexCommand(
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
   const expanded =
-    configured === undefined ? undefined : expandHome(configured, environment);
+    configured === undefined
+      ? undefined
+      : expandExecutableHome(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
   ) {
-    return { command: resolve(expanded) };
+    return {
+      command:
+        process.platform === "win32"
+          ? resolve(expanded)
+          : isAbsolute(expanded)
+            ? expanded
+            : `${process.cwd()}${sep}${expanded}`,
+    };
   }
 
   const platform = process.platform === "android" ? "linux" : process.platform;
@@ -3248,6 +3258,7 @@ export function pluginExecutionEnvironment(
   return {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
+    CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
 }
@@ -3558,7 +3569,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandHome(candidate, environment)
+      ? expandExecutableHome(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3612,6 +3623,17 @@ export function sameFile(left: string, right: string): Promise<boolean> {
       leftMetadata.ino === rightMetadata.ino,
     () => false,
   );
+}
+
+function expandExecutableHome(
+  value: string,
+  environment: ProcessEnvironment,
+): string {
+  const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
+  // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
+  return path.startsWith("~/")
+    ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
+    : expandHome(path, environment);
 }
 
 export function expandHome(
