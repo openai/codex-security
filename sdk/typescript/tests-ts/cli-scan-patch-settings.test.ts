@@ -104,6 +104,7 @@ async function inlinePatch(
           model: "gpt-6.1-sol",
           reasoningEffort: "low",
         },
+        onRepositoryCommand: () => "",
         onCodex: async (args, output, selectedEnvironment) => {
           await beforeChild?.();
           return runCodexSkillCommand(
