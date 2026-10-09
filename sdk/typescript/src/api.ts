@@ -1454,10 +1454,12 @@ export class CodexSecurity {
       }
       const skillName = skillNameFor(normalized, mode);
       // Native no-turn resume retains saved permissions; exec refreshes them.
-      // Keep the parent turn when it may need the ChatGPT access advisory.
+      // Keep the parent for its ChatGPT advisory and configured Node launcher.
       const directDeepScan =
         mode === "deep" &&
         options.resumeScanId === undefined &&
+        environmentValue(runtime.environment, "CODEX_MCP_NODE_PATH") ===
+          undefined &&
         (modelProvider === "amazon-bedrock" ||
           authentication.method === "api_key" ||
           (authentication.method === "stored_credentials" &&
