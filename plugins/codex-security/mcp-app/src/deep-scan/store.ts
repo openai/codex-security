@@ -284,7 +284,7 @@ export class WorkbenchDeepScanStore {
           ? ["--result-manifest-path", update.resultManifestPath]
           : []),
         ...(update.threadId ? ["--sdk-thread-id", update.threadId] : []),
-        ...(update.error ? ["--error-message", update.error] : []),
+        ...(update.error ? [`--error-message=${update.error}`] : []),
         ...(update.replaceableFailureKind
           ? ["--replaceable-failure-kind", update.replaceableFailureKind]
           : []),
@@ -399,8 +399,7 @@ export class WorkbenchDeepScanStore {
         "--scan-id",
         scanId,
         ...this.coordinatorLeaseArgs(scanId),
-        "--message",
-        message,
+        `--message=${message}`,
         ...(manifestPath ? ["--manifest-path", manifestPath] : []),
         ...(stagedManifestPath
           ? ["--staged-manifest-path", stagedManifestPath]
@@ -424,8 +423,7 @@ export class WorkbenchDeepScanStore {
           ...(coordinatorGeneration === undefined
             ? this.coordinatorLeaseArgs(scanId)
             : ["--coordinator-generation", String(coordinatorGeneration)]),
-          "--message",
-          message,
+          `--message=${message}`,
         ],
         true,
       ),

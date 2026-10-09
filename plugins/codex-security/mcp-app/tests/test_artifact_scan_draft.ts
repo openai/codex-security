@@ -27,6 +27,7 @@ import {
   claimToken,
   draftApi,
   draftFixture,
+  recordCodexSecurityScanDraft,
   scanId,
   surfaceDisposition,
 } from "./scan-draft-recovery-fixture.ts";
@@ -35,7 +36,6 @@ const {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
   parseScanDraft,
-  recordCodexSecurityScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
   saveScanDraftCheckpoint,
@@ -167,6 +167,20 @@ try {
     findings: [finding],
     coverage,
   };
+  const partialWorkerInput = (
+    deferred: Record<string, unknown>,
+    surfaces: Record<string, unknown>[] = [],
+  ) => ({
+    ...workerInput,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces,
+      deferred: [deferred],
+    },
+  });
   const workerResultPath = path.join(workerRoot, "result.json");
 
   const checkpointContext = await createWorkerContext("checkpoint-worker");
@@ -254,14 +268,14 @@ try {
     rejectedIncompleteContext,
     workerInput,
   );
-  await recordCodexSecurityWorkerScanDraft(rejectedIncompleteContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [
+  await recordCodexSecurityWorkerScanDraft(
+    rejectedIncompleteContext,
+    partialWorkerInput(
+      {
+        candidateId: "late-incomplete-review",
+        reason: "This arrived after the worker completed.",
+      },
+      [
         {
           candidateId: finding.provenance.candidateId,
           label: "Archive extraction",
@@ -269,14 +283,8 @@ try {
           notes: "The incomplete writer rejected this candidate.",
         },
       ],
-      deferred: [
-        {
-          candidateId: "late-incomplete-review",
-          reason: "This arrived after the worker completed.",
-        },
-      ],
-    },
-  });
+    ),
+  );
   const acceptedHead = await readJson(
     rejectedIncompleteRoot,
     "checkpoint-head.json",
@@ -309,22 +317,13 @@ try {
     deferredDoesNotRejectContext,
     workerInput,
   );
-  await recordCodexSecurityWorkerScanDraft(deferredDoesNotRejectContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        {
-          candidateId: finding.provenance.candidateId,
-          reason: "A stale worker row still says validation is pending.",
-        },
-      ],
-    },
-  });
+  await recordCodexSecurityWorkerScanDraft(
+    deferredDoesNotRejectContext,
+    partialWorkerInput({
+      candidateId: finding.provenance.candidateId,
+      reason: "A stale worker row still says validation is pending.",
+    }),
+  );
   const deferredDoesNotReject = await readJson(
     deferredDoesNotRejectRoot,
     "result.json",
@@ -460,22 +459,16 @@ try {
       },
     ],
   };
-  await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: staleSurfaces,
-      deferred: [
-        {
-          candidateId: finding.provenance.candidateId,
-          reason: "Archive path traversal validation is pending.",
-        },
-      ],
-    },
-  });
+  await recordCodexSecurityWorkerScanDraft(
+    renamedProgressContext,
+    partialWorkerInput(
+      {
+        candidateId: finding.provenance.candidateId,
+        reason: "Archive path traversal validation is pending.",
+      },
+      staleSurfaces,
+    ),
+  );
   await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
     ...workerInput,
     complete: false,
@@ -530,19 +523,13 @@ try {
     complete: false,
     findings: [anchoredFinding],
   });
-  await recordCodexSecurityWorkerScanDraft(anchorContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        { id: anchor, reason: "An unrelated review item remains pending." },
-      ],
-    },
-  });
+  await recordCodexSecurityWorkerScanDraft(
+    anchorContext,
+    partialWorkerInput({
+      id: anchor,
+      reason: "An unrelated review item remains pending.",
+    }),
+  );
   const anchorResult = await readJson(anchorRoot, "result.json");
   assert.equal(anchorResult.findings.length, 1);
   assert.deepEqual(anchorResult.findings[0].identity, { anchor });
@@ -554,11 +541,15 @@ try {
     { ...context, root: parentCheckpointRoot },
     { ...input, complete: false },
   );
-  const parentSnapshot = await readJson(
-    parentCheckpointRoot,
-    "checkpoints",
-    (await readdir(path.join(parentCheckpointRoot, "checkpoints")))[0],
+  const parentSnapshots = await Promise.all(
+    (await readdir(path.join(parentCheckpointRoot, "checkpoints"))).map(
+      (name) => readJson(parentCheckpointRoot, "checkpoints", name),
+    ),
   );
+  const parentSnapshot = parentSnapshots.find(
+    (snapshot) => !snapshot.findings[0].identity,
+  );
+  assert.ok(parentSnapshot);
   assert.equal(parentSnapshot.handoffClaimToken, undefined);
   assert.equal(parentSnapshot.complete, false);
   assert.deepEqual(parentSnapshot.findings, [finding]);
@@ -911,23 +902,11 @@ try {
     summary: "An unvalidated archive extraction candidate.",
     evidence: "Original nested-worker source trace.",
   };
-  const pending = {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        {
-          candidateId: finding.provenance.candidateId,
-          reason: "Pending parent validation",
-          candidate,
-        },
-      ],
-    },
-  };
+  const pending = partialWorkerInput({
+    candidateId: finding.provenance.candidateId,
+    reason: "Pending parent validation",
+    candidate,
+  });
   await recordCodexSecurityWorkerScanDraft(pendingContext, pending);
   await recordCodexSecurityWorkerScanDraft(pendingContext, workerInput);
   const resolved = await readJson(pendingRoot, "result.json");
@@ -952,19 +931,12 @@ try {
     "undefined-candidate-worker",
   );
   const undefinedCandidateRoot = undefinedCandidateContext.root;
-  await recordCodexSecurityWorkerScanDraft(undefinedCandidateContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        { reason: "An unrelated anonymous review item remains pending." },
-      ],
-    },
-  });
+  await recordCodexSecurityWorkerScanDraft(
+    undefinedCandidateContext,
+    partialWorkerInput({
+      reason: "An unrelated anonymous review item remains pending.",
+    }),
+  );
   const literalUndefinedFinding = structuredClone(finding);
   literalUndefinedFinding.provenance.candidateId = "undefined";
   literalUndefinedFinding.extensions.candidateId = "undefined";
@@ -1619,7 +1591,7 @@ try {
   assert.deepEqual(await readdir(path.join(root, "drafts")), []);
 
   let conflictAttempts = 0;
-  const retried = await recordCodexSecurityScanDraft(
+  const retried = await recordCodexSecurityScanDraftViaWorkbench(
     context,
     input,
     async () => {
@@ -1633,6 +1605,7 @@ try {
   );
   assert.equal(conflictAttempts, 10);
   assert.equal(retried.status, "draft_written");
+  assert.deepEqual(await readdir(path.join(root, "drafts")), []);
 
   const conflictAbort = new AbortController();
   const abortedConflictAttempts = mock.fn(async () => {
@@ -1642,15 +1615,16 @@ try {
     });
   });
   await assert.rejects(
-    recordCodexSecurityScanDraft(
+    recordCodexSecurityScanDraftViaWorkbench(
       context,
       input,
       abortedConflictAttempts,
       conflictAbort.signal,
     ),
-    /draft publication canceled/,
+    (error) => error === conflictAbort.signal.reason,
   );
   assert.equal(abortedConflictAttempts.mock.callCount(), 1);
+  assert.deepEqual(await readdir(path.join(root, "drafts")), []);
 
   const monotonicRoot = path.join(root, "monotonic-final-draft");
   await mkdir(monotonicRoot);
@@ -1754,17 +1728,10 @@ try {
     candidateId: finding.provenance.candidateId,
     reason: "The later attempt demoted this candidate for more review.",
   };
-  await recordCodexSecurityWorkerScanDraft(archivedResolution, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [demotedCandidate],
-    },
-  });
+  await recordCodexSecurityWorkerScanDraft(
+    archivedResolution,
+    partialWorkerInput(demotedCandidate),
+  );
   await archiveFirstWorkerAttempt(archivedResolution.root);
   await recordCodexSecurityWorkerScanDraft(archivedResolution, {
     ...withoutScanContext(workerInput),
@@ -1792,17 +1759,10 @@ try {
     "checkpoints",
     findingCheckpointName,
   );
-  await recordCodexSecurityWorkerScanDraft(repeatedCheckpoint, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [demotedCandidate],
-    },
-  });
+  await recordCodexSecurityWorkerScanDraft(
+    repeatedCheckpoint,
+    partialWorkerInput(demotedCandidate),
+  );
   const demotionCheckpointName = (
     await readdir(path.join(repeatedCheckpoint.root, "checkpoints"))
   ).find((name) => name !== findingCheckpointName);
@@ -1959,23 +1919,14 @@ try {
   const partialDeferredFinding = {
     summary: "Partial evidence captured before validation.",
   };
-  await recordCodexSecurityWorkerScanDraft(partialDeferredContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        {
-          candidateId: finding.provenance.candidateId,
-          reason: "Validation is pending.",
-          finding: partialDeferredFinding,
-        },
-      ],
-    },
-  });
+  await recordCodexSecurityWorkerScanDraft(
+    partialDeferredContext,
+    partialWorkerInput({
+      candidateId: finding.provenance.candidateId,
+      reason: "Validation is pending.",
+      finding: partialDeferredFinding,
+    }),
+  );
   await recordCodexSecurityWorkerScanDraft(partialDeferredContext, workerInput);
   const resolvedPartialDeferred = await readJson(
     partialDeferredRoot,

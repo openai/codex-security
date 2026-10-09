@@ -14,7 +14,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
-import { draftFixture } from "./scan-draft-recovery-fixture.ts";
+import {
+  draftFixture,
+  recordCodexSecurityScanDraft,
+} from "./scan-draft-recovery-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const { readDeepReductionSources } = await importSource(
@@ -22,7 +25,6 @@ const { readDeepReductionSources } = await importSource(
 );
 const {
   recordCodexSecurityWorkerScanDraft,
-  recordCodexSecurityScanDraft,
   parsePersistedScanDraft,
   parseScanDraft,
   readArchivedWorkerCheckpoints,

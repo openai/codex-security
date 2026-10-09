@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   validateDiscoveryArtifacts,
@@ -159,22 +159,6 @@ export class DeepScanWorkerRunner {
       validate: async () => {
         await validateDiscoveryArtifacts(artifacts, resultPath, run.scanId);
         discoveryValidated = true;
-      },
-      beforeRetry: async (attempt, resuming) => {
-        const attemptRoot = join(
-          workerRoot,
-          "attempts",
-          `attempt-${String(attempt).padStart(2, "0")}`,
-        );
-        if (resuming) {
-          // Keep the conversation's files while preserving their host attempt.
-          await fs.cp(artifactDir, attemptRoot, {
-            recursive: true,
-            preserveTimestamps: true,
-          });
-        } else {
-          await archiveDirectory(artifactDir, attemptRoot);
-        }
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
@@ -337,15 +321,6 @@ export class DeepScanWorkerRunner {
           run.scanId,
         );
       },
-      beforeRetry: async (attempt, resuming) => {
-        if (resuming) return;
-        const attemptRoot = join(
-          reducerRoot,
-          "attempts",
-          `attempt-${String(attempt).padStart(2, "0")}`,
-        );
-        await archiveDirectory(artifactDir, attemptRoot);
-      },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
       await this.persistWorkerCancellation(
@@ -408,7 +383,6 @@ export class DeepScanWorkerRunner {
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
     validate: () => Promise<void>;
-    beforeRetry: (attempt: number, resuming?: boolean) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -565,7 +539,7 @@ export class DeepScanWorkerRunner {
         } else {
           resumableThreadId = undefined;
           continuationPrompt = undefined;
-          await input.beforeRetry(attempt);
+          await this.archiveWorkerAttempt(input.artifactDir, attempt);
           if (validationStarted && !validationCompleted) {
             executionPromptPath = await writeValidationRetryPrompt({
               kind: input.kind,
@@ -579,7 +553,8 @@ export class DeepScanWorkerRunner {
             });
           }
         }
-        if (resumableThreadId) await input.beforeRetry(attempt, true);
+        if (resumableThreadId && input.kind === "discovery")
+          await this.archiveWorkerAttempt(input.artifactDir, attempt, true);
         const delayMs = Math.ceil(
           this.options.retryDelaysMs[attempt - 1] *
             (1 + 0.3 * this.options.random()),
@@ -601,6 +576,27 @@ export class DeepScanWorkerRunner {
           throw sleepError;
         }
       }
+    }
+  }
+
+  private async archiveWorkerAttempt(
+    artifactDir: string,
+    attempt: number,
+    resuming = false,
+  ) {
+    const attemptRoot = join(
+      dirname(artifactDir),
+      "attempts",
+      `attempt-${String(attempt).padStart(2, "0")}`,
+    );
+    if (resuming) {
+      // Keep the conversation's files while preserving their host attempt.
+      await fs.cp(artifactDir, attemptRoot, {
+        recursive: true,
+        preserveTimestamps: true,
+      });
+    } else {
+      await archiveDirectory(artifactDir, attemptRoot);
     }
   }
 
