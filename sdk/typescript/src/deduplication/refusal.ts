@@ -13,7 +13,7 @@ export function isReviewRefusal(
     /\bflagged for potentially high-risk cyber activity\b/iu,
     /\bcyber[_\s-]?policy\b/iu,
     /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy[ _-]*(?:violation|refusal|refused)\b/iu,
-    /(?:^refusal|\b(?:request|review)\s+(?:refusal|(?:(?:is|was|has been)\s+)?(?:refused|blocked)))\s+(?:under|by|due to|because of|because (?:it|this request) violates|for violating)\s+(?:(?:the|a)\s+)?(?:cybersecurity|cyber|content|safety)[ _-]*policy\b/iu,
+    /(?:^refusal|\b(?:request|review)\s+(?:refusal|(?:(?:is|was|has been)\s+)?(?:refused|blocked)))\s+(?:under|by|due to|because of|because (?:it|this request) violates|for violating|in accordance with)\s+(?:(?:the|a)\s+)?(?:cybersecurity|cyber|content|safety)[ _-]*policy\b/iu,
     /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy\s+requires\s+(?:a\s+)?refusal\b/iu,
     /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy\s*:\s*(?:this|the|your) request (?:is|was|has been) (?:refused|blocked)\b/iu,
     /\bunder\s+(?:(?:the|a)\s+)?(?:cybersecurity|cyber|content|safety)[ _-]*policy[, :]\s*(?:this|the|your) request (?:is|was|has been) (?:refused|blocked)\b/iu,

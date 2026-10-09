@@ -13,6 +13,10 @@ const turnFailures = {
     message: "Request flagged for possible cybersecurity risk.",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
+  "policy-accordance-turn": {
+    message: "This request was refused in accordance with the safety policy.",
+    codexErrorInfo: "other",
+  },
   "failed-turn": {
     message: "Rate limit exceeded",
     codexErrorInfo: "usageLimitExceeded",
