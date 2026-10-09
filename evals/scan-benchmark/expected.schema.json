@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Security scan benchmark expectations v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "caseId",
+    "runtime",
+    "mode",
+    "findings"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "caseId": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "runtime": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "enum": [
+        "repository",
+        "deep_repository"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "presence",
+          "cwe",
+          "regions",
+          "severity"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "presence": {
+            "enum": [
+              "required",
+              "optional",
+              "absent"
+            ]
+          },
+          "cwe": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^CWE-[0-9]+$"
+            }
+          },
+          "regions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "startLine",
+                "endLine"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "startLine": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "evidenceRegions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "startLine",
+                "endLine"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "startLine": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "severity": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "informational"
+              ]
+            }
+          },
+          "allowedDuplicates": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

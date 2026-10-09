@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "caseId": "unsafe_deserialization",
+  "runtime": "Python >=3.10, standard library only",
+  "mode": "deep_repository",
+  "findings": [
+    {
+      "id": "unsafe",
+      "presence": "required",
+      "cwe": [
+        "CWE-502"
+      ],
+      "regions": [
+        {
+          "path": "service.py",
+          "startLine": 6,
+          "endLine": 6
+        }
+      ],
+      "evidenceRegions": [
+        {
+          "path": "service.py",
+          "startLine": 6,
+          "endLine": 6
+        }
+      ],
+      "severity": [
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    {
+      "id": "safe-control",
+      "presence": "absent",
+      "cwe": [
+        "CWE-502"
+      ],
+      "regions": [
+        {
+          "path": "service.py",
+          "startLine": 9,
+          "endLine": 10
+        }
+      ],
+      "severity": [
+        "informational",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    }
+  ]
+}

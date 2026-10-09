@@ -400,6 +400,12 @@ jobs:
       - name: Test source compatibility checker
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+      - name: Test scan benchmark scorer
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: |
+          python -m ruff check --config plugins/codex-security/pyproject.toml evals/scan-benchmark
+          python -m ruff format --check --config plugins/codex-security/pyproject.toml evals/scan-benchmark
+          python -m unittest discover -s evals/scan-benchmark -p 'test_*.py' -v
       - name: Test Python source contracts
         shell: bash
         env:
