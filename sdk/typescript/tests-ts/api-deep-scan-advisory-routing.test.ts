@@ -141,7 +141,7 @@ test.each(cases)(
       ...scenario.environment,
       CODEX_HOME: codexHome,
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      CODEX_MCP_NODE_PATH: join(root, "configured-node"),
+      XDG_CACHE_HOME: join(root, "cache"),
     };
     const configPath = join(codexHome, "scan-runtime.toml");
     const deepScanConfigPath = join(codexHome, "deep-scan.toml");
@@ -192,7 +192,7 @@ test.each(cases)(
             features: { api_key_cyber_access_programs: false },
           });
           expect(options.env).toMatchObject({
-            CODEX_MCP_NODE_PATH: environment.CODEX_MCP_NODE_PATH,
+            XDG_CACHE_HOME: environment.XDG_CACHE_HOME,
             CODEX_SECURITY_CONFIG_PATH: configPath,
             CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepScanConfigPath,
           });
