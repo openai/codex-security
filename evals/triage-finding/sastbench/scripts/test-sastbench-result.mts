@@ -31,29 +31,22 @@ assert.equal(
   extractTriageResult("```json\ninvalid\n```\n" + fenced).findings[0].verdict,
   "confirmed",
 );
-assert.throws(
-  () =>
-    extractTriageResult(
-      "```json\ninvalid\n```\n" + JSON.stringify(triageResult("confirmed")),
-    ),
-  { message: "Could not find a parseable triage-finding/v0 JSON result" },
-);
-const inlineSecond = triageResult("confirmed");
-inlineSecond.findings[0].evidence = [];
+for (const output of [
+  "```json\ninvalid\n```\n" + JSON.stringify(triageResult("confirmed")),
+  "Summary: " + JSON.stringify(triageResult("confirmed")),
+  "```json " + JSON.stringify(triageResult("confirmed")) + "```",
+]) {
+  assert.throws(() => extractTriageResult(output), {
+    message: "Could not find a parseable triage-finding/v0 JSON result",
+  });
+}
 for (const output of [
   JSON.stringify(triageResult("confirmed")),
   JSON.stringify(triageResult("confirmed"), null, 2),
-  '```json "invalid ``` ```json ' +
-    JSON.stringify(inlineSecond) +
-    "```\n```json\n" +
-    JSON.stringify(triageResult("not_actionable")) +
-    "\n```",
+  fenced.replace("```json", "```"),
   fenced.replaceAll("\n", "\r\n"),
   'Prose {"other": true}\n' + fenced.replaceAll("```", "   ```"),
   '```json\n"invalid\n```\n' + fenced,
-  'Prose {"other": true} ```json ' +
-    JSON.stringify(triageResult("confirmed")) +
-    "``` trailing prose",
 ]) {
   assert.equal(
     parseCaseOutcome(output, "sastbench-000000").verdict,
