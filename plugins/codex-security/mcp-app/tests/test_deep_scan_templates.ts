@@ -35,7 +35,19 @@ assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
 assert.match(rendered, /coverage\.deferred/);
 const discoveryContext = firstJsonBlock(rendered);
-assert.deepEqual(discoveryContext, discoveryInput);
+const { scope, ...expectedContext } = discoveryInput;
+assert.deepEqual(discoveryContext, {
+  ...expectedContext,
+  includePaths: [scope],
+});
+
+const scopedPaths = ["src/api", "background jobs/worker.py"];
+assert.deepEqual(
+  firstJsonBlock(
+    renderDiscoveryPrompt({ ...discoveryInput, includePaths: scopedPaths }),
+  ).includePaths,
+  scopedPaths,
+);
 
 const feedbackPath =
   "/fixture/scans/run/artifacts/01_context/false_positive_feedback.json";

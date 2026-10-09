@@ -6,6 +6,7 @@ export interface DiscoveryPromptInput {
   pluginRoot: string;
   targetPath: string;
   scope: string;
+  includePaths?: readonly string[];
   userContext?: string;
   workerLabel: string;
   subagents: number;
@@ -22,7 +23,7 @@ export function renderDiscoveryPrompt(
     scanId: input.scanId,
     pluginRoot: input.pluginRoot,
     targetPath: input.targetPath,
-    scope: input.scope,
+    includePaths: input.includePaths ?? [input.scope],
     userContext: input.userContext ?? null,
     workerLabel: input.workerLabel,
     subagents: input.subagents,
