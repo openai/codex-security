@@ -18,6 +18,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  stat,
   symlink,
   utimes,
   writeFile,
@@ -2538,10 +2539,13 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
     loader: { ".md": "text" },
   });
   await withWorkerFixture(async (fixture) => {
-    const saved = ["CODEX_HOME", "FAKE_CODEX_ARTIFACT_EVENT"].map(
-      (name) => [name, process.env[name]] as const,
-    );
+    const saved = [
+      "CODEX_HOME",
+      "CODEX_SECURITY_STATE_DIR",
+      "FAKE_CODEX_ARTIFACT_EVENT",
+    ].map((name) => [name, process.env[name]] as const);
     process.env.CODEX_HOME = fixture.root;
+    process.env.CODEX_SECURITY_STATE_DIR = path.join(fixture.root, "state");
     try {
       const targetPath = path.join(fixture.root, "target");
       await mkdir(targetPath);
@@ -2554,7 +2558,6 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
           executeWorkbench(
             process.env.PYTHON?.trim() || "python3",
             args,
-            path.join(fixture.root, "state"),
             input,
           ),
       );
@@ -2563,6 +2566,11 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
         threadId: "diagnostic-owner",
         scanRoot: path.join(fixture.root, "scans"),
       });
+      assert.ok(
+        (
+          await stat(path.join(fixture.root, "state", "workbench.sqlite3"))
+        ).isFile(),
+      );
       const { run } = await store.claimCoordinator({
         scanId: started.scanId,
         threadId: "diagnostic-owner",
