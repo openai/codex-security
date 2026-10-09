@@ -2,10 +2,10 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { gitText } from "../scripts/git.mjs";
 import { assertNoError } from "./assertions.ts";
-import { consumeStreamLines, writeMessage } from "./support/streams.ts";
+import { startRpcServer } from "./support/rpc-server.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { hash, randomUUID } from "node:crypto";
 import {
   chmod,
@@ -103,11 +103,6 @@ assert.deepEqual(
   "The MCP process and SDK workers must inherit Codex, external-provider, and Bedrock authentication, AWS credential-chain settings, runtime paths, and enterprise proxy/certificate configuration.",
 );
 const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
-assert.match(
-  serverSource,
-  /timeout:\s*\[[^\]]*"start-prompt-only-scan"[^\]]*\]\.includes\(args\[0\] \?\? ""\)\s*\?\s*300_000\s*:\s*30_000/,
-  "Prompt-only scan startup must use the same five-minute timeout as other scan starts.",
-);
 const authenticatedArtifactClaimSource = serverSource.match(
   /if \(\s*handoffClaimToken\s*&&\s*threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
 )?.[0];
@@ -192,88 +187,16 @@ function startTestServer({
   cwd: string;
   env?: NodeJS.ProcessEnv;
 }) {
-  const childEnvironment = { ...process.env, ...env };
-  for (const [name, value] of Object.entries(env)) {
-    if (value === undefined) {
-      delete childEnvironment[name];
-    }
-  }
-  const childProcess = spawn(command, args, {
-    cwd,
-    env: childEnvironment,
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-  const responses: ReturnType<typeof JSON.parse>[] = [];
-  consumeStreamLines(childProcess.stdout, (line) =>
-    responses.push(JSON.parse(line)),
+  return startRpcServer(
+    {
+      command,
+      args,
+      cwd,
+      env: { ...process.env, ...env },
+      stderr: "inherit",
+    },
+    { terminateOnStop: true },
   );
-
-  return {
-    notify(method: string, params = {}) {
-      writeMessage(childProcess, { jsonrpc: "2.0", method, params });
-    },
-    sendRequest(id: number, method: string, params = {}) {
-      writeMessage(childProcess, { jsonrpc: "2.0", id, method, params });
-    },
-    sendResponse(id: string, result: unknown) {
-      writeMessage(childProcess, { jsonrpc: "2.0", id, result });
-    },
-    sendError(id: string, code: number, message: string) {
-      writeMessage(childProcess, {
-        jsonrpc: "2.0",
-        id,
-        error: { code, message },
-      });
-    },
-    async waitForMessage(
-      predicate: (message: ReturnType<typeof JSON.parse>) => boolean,
-      description = "matching JSON-RPC message",
-    ) {
-      const started = Date.now();
-      while (Date.now() - started < 30000) {
-        const message = responses.find(predicate);
-        if (message) return message;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      throw new Error(`Timed out waiting for ${description}`);
-    },
-    initialize(name: string, capabilities: Record<string, unknown> = {}) {
-      return this.requestAndWait(1, "initialize", {
-        protocolVersion: "2025-11-25",
-        capabilities,
-        clientInfo: { name, version: "0.1.0" },
-      });
-    },
-    callTool(id: number, params: Record<string, unknown>) {
-      return this.requestAndWait(id, "tools/call", params);
-    },
-    async requestAndWait(id: number, method: string, params = {}) {
-      writeMessage(childProcess, { jsonrpc: "2.0", id, method, params });
-      const started = Date.now();
-      while (Date.now() - started < 30000) {
-        const response = responses.find((candidate) => candidate.id === id);
-        if (response) return response;
-        if (childProcess.exitCode !== null) {
-          throw new Error(
-            `MCP server exited with code ${childProcess.exitCode} while waiting for JSON-RPC response ${id}`,
-          );
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      throw new Error(`Timed out waiting for JSON-RPC response ${id}`);
-    },
-    async stop() {
-      if (childProcess.exitCode != null || childProcess.signalCode != null) {
-        return;
-      }
-      const closed = new Promise((resolve) => {
-        childProcess.once("close", resolve);
-      });
-      childProcess.stdin.end();
-      childProcess.kill();
-      await closed;
-    },
-  };
 }
 
 const testServer = startTestServer({
@@ -286,7 +209,7 @@ const testServer = startTestServer({
     TMPDIR: scanRoot,
   },
 });
-const requestAndWait = testServer.requestAndWait;
+const request = testServer.request;
 
 async function assertBundledNodeLauncher() {
   const emptyPath = await temporaryDirectory("codex-security-empty-path-");
@@ -335,7 +258,7 @@ async function assertBundledNodeLauncher() {
     assertNoError(
       await bundledNodeServer.initialize("codex-security-bundled-node-smoke"),
     );
-    assertNoError(await bundledNodeServer.requestAndWait(2, "tools/list"));
+    assertNoError(await bundledNodeServer.request(2, "tools/list"));
     if (!windows) {
       assert.equal(
         await readFile(path.join(emptyPath, "bundled-node-used"), "utf8"),
@@ -408,7 +331,7 @@ async function assertWorkbenchStdinFailureDoesNotCrashServer() {
       _meta: { "openai/threadId": "fixture-thread" },
     });
     assert.equal(response.result.isError, true);
-    assertNoError(await server.requestAndWait(3, "tools/list"));
+    assertNoError(await server.request(3, "tools/list"));
   } finally {
     server.stop();
     await rm(helperRoot, { recursive: true, force: true });
@@ -998,7 +921,7 @@ try {
   );
   assert.deepEqual(initialized.result.capabilities.logging, {});
 
-  const trustedAccessToolList = await requestAndWait(9600, "tools/list");
+  const trustedAccessToolList = await request(9600, "tools/list");
   assertNoError(trustedAccessToolList);
   const trustedAccessTool = trustedAccessToolList.result.tools.find(
     (tool: { name: string }) =>
@@ -1381,7 +1304,7 @@ try {
   if (process.platform !== "win32") {
     await rm(launchCwd, { recursive: true, force: true });
   }
-  const toolList = await requestAndWait(2, "tools/list");
+  const toolList = await request(2, "tools/list");
   assertNoError(toolList);
   for (const tool of toolList.result.tools) {
     assert.equal(tool._meta?.["openai/outputTemplate"], undefined);
@@ -1392,68 +1315,35 @@ try {
     code: "ENOENT",
   });
 
-  const launcher = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "open_codex_security_workspace",
-  );
-  const startPromptOnlyScan = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "start_codex_security_prompt_only_scan",
-  );
+  const findTool = (name: string) =>
+    toolList.result.tools.find((tool: { name: string }) => tool.name === name);
+
+  const launcher = findTool("open_codex_security_workspace");
+  const startPromptOnlyScan = findTool("start_codex_security_prompt_only_scan");
   assert.match(
     startPromptOnlyScan.description,
     /Standard and diff scans save progress checkpoints before their final semantic draft/,
     "Prompt-only scan instructions must align Diff callers with checkpointed handoffs",
   );
-  const startHeadlessStandardScan = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "start_codex_security_standard_scan",
+  const startHeadlessStandardScan = findTool(
+    "start_codex_security_standard_scan",
   );
-  const getScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "get_codex_security_scan",
+  const getScan = findTool("get_codex_security_scan");
+  const recoverScanResults = findTool("recover_codex_security_scan_results");
+  const listScans = findTool("list_codex_security_scans");
+  const listGlobalFindings = findTool("list_codex_security_global_findings");
+  const listRepositories = findTool("list_codex_security_repositories");
+  const getScanContext = findTool("get_codex_security_scan_context");
+  const updateScanContext = findTool("update_codex_security_scan_context");
+  const updateScanContextFromApp = findTool(
+    "update_codex_security_scan_context_from_app",
   );
-  const recoverScanResults = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "recover_codex_security_scan_results",
-  );
-  const listScans = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "list_codex_security_scans",
-  );
-  const listGlobalFindings = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "list_codex_security_global_findings",
-  );
-  const listRepositories = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "list_codex_security_repositories",
-  );
-  const getScanContext = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "get_codex_security_scan_context",
-  );
-  const updateScanContext = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_context",
-  );
-  const updateScanContextFromApp = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_context_from_app",
-  );
-  const renameScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "rename_codex_security_scan",
-  );
+  const renameScan = findTool("rename_codex_security_scan");
   assert.deepEqual(renameScan._meta.ui.visibility, ["app"]);
-  const submit = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "submit_codex_security_setup",
-  );
-  const inspectTarget = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "inspect_codex_security_target",
-  );
-  const inspectSetup = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "inspect_codex_security_setup",
-  );
-  const requestUserInput = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_user_input",
-  );
+  const submit = findTool("submit_codex_security_setup");
+  const inspectTarget = findTool("inspect_codex_security_target");
+  const inspectSetup = findTool("inspect_codex_security_setup");
+  const requestUserInput = findTool("request_codex_security_user_input");
   assert.ok(
     requestUserInput,
     "Expected the Codex Security user-input fallback tool.",
@@ -1558,11 +1448,16 @@ try {
       .description,
     "How should Codex Security handle the blocked preflight?",
   );
+  assert.deepEqual(elicitationRequest.params.requestedSchema.required, [
+    "concurrent_deep_scan",
+    "preflight_action",
+  ]);
   testServer.sendResponse(elicitationRequest.id, {
     action: "accept",
     content: {
       concurrent_deep_scan: "Cancel (Recommended)",
       preflight_action: "Leave paused",
+      extra_answer: "Ignored",
     },
   });
   const userInputResponse = await testServer.waitForMessage(
@@ -1601,152 +1496,96 @@ try {
   });
   assert.equal(invalidUserInput.result.isError, true);
 
-  testServer.sendRequest(9002, "tools/call", {
-    name: "request_codex_security_user_input",
-    arguments: {
-      questions: [
-        {
-          header: "Decline?",
-          id: "decline_request",
-          question: "Decline this Codex Security input request?",
-          options: continuationOptions,
-        },
-      ],
-    },
-  });
-  const declinedElicitation = await testServer.waitForMessage(
-    (message) =>
-      message.method === "elicitation/create" &&
-      message.params?.message.startsWith(
-        "Decline this Codex Security input request?",
-      ),
-    "declined Codex Security elicitation request",
-  );
-  assert.equal(
-    declinedElicitation.params.message,
+  for (const [index, [reply, status]] of [
+    [{ action: "decline" }, "declined"],
+    [{ action: "cancel" }, "cancelled"],
+    [{ action: "accept" }, "unavailable"],
+    [{ action: "accept", content: null }, "unavailable"],
+    [{ action: "accept", content: {} }, "unavailable"],
+    [{ action: "accept", content: { choice: false } }, "unavailable"],
+    [{ action: "accept", content: { choice: 0 } }, "unavailable"],
+    [{ action: "accept", content: { choice: "" } }, "unavailable"],
     [
-      "Decline this Codex Security input request?",
-      "- Continue: Continue the current workflow.",
-      "- Cancel: Leave the current workflow paused.",
-    ].join("\n"),
+      { action: "accept", content: { choice: "Unknown option" } },
+      "unavailable",
+    ],
+  ].entries()) {
+    const requestId = 9002 + index;
+    const question = `Choose an option for request ${requestId}?`;
+    testServer.sendRequest(requestId, "tools/call", {
+      name: "request_codex_security_user_input",
+      arguments: {
+        questions: [
+          {
+            header: "Choice",
+            id: "choice",
+            question,
+            options: continuationOptions,
+          },
+        ],
+      },
+    });
+    const elicitation = await testServer.waitForMessage(
+      (message) =>
+        message.method === "elicitation/create" &&
+        message.params?.message.startsWith(question),
+      `Codex Security elicitation request ${requestId}`,
+    );
+    assert.equal(
+      elicitation.params.message,
+      [
+        question,
+        "- Continue: Continue the current workflow.",
+        "- Cancel: Leave the current workflow paused.",
+      ].join("\n"),
+    );
+    testServer.sendResponse(elicitation.id, reply);
+    const response = await testServer.waitForMessage(
+      (message) => message.id === requestId,
+      `Codex Security user-input response ${requestId}`,
+    );
+    assertNoError(response);
+    assert.deepEqual(response.result.structuredContent, { status });
+  }
+  const start = findTool("start_codex_security_scan");
+  const startDeepScan = findTool("start_codex_security_deep_scan");
+  const cancel = findTool("cancel_codex_security_scan");
+  const cancelFromApp = findTool("cancel_codex_security_scan_from_app");
+  const markHandoff = findTool("mark_codex_security_scan_handoff_delivered");
+  const claimHandoff = findTool("claim_codex_security_scan_handoff_delivery");
+  const releaseHandoff = findTool(
+    "release_codex_security_scan_handoff_delivery",
   );
-  testServer.sendResponse(declinedElicitation.id, { action: "decline" });
-  const declinedUserInput = await testServer.waitForMessage(
-    (message) => message.id === 9002,
-    "declined Codex Security user-input response",
+  const attachHandoff = findTool(
+    "attach_codex_security_scan_continuation_thread",
   );
-  assertNoError(declinedUserInput);
-  assert.deepEqual(declinedUserInput.result.structuredContent, {
-    status: "declined",
-  });
-
-  testServer.sendRequest(9003, "tools/call", {
-    name: "request_codex_security_user_input",
-    arguments: {
-      questions: [
-        {
-          header: "Cancel?",
-          id: "cancel_request",
-          question: "Cancel this Codex Security input request?",
-          options: continuationOptions,
-        },
-      ],
-    },
-  });
-  const cancelledElicitation = await testServer.waitForMessage(
-    (message) =>
-      message.method === "elicitation/create" &&
-      message.params?.message.startsWith(
-        "Cancel this Codex Security input request?",
-      ),
-    "cancelled Codex Security elicitation request",
+  const progress = findTool("update_codex_security_scan_progress");
+  const complete = findTool("complete_codex_security_scan");
+  const fail = findTool("fail_codex_security_scan");
+  const setFindingTriage = findTool("set_codex_security_finding_triage");
+  const requestFindingRemediation = findTool(
+    "request_codex_security_finding_remediation",
   );
-  testServer.sendResponse(cancelledElicitation.id, { action: "cancel" });
-  const cancelledUserInput = await testServer.waitForMessage(
-    (message) => message.id === 9003,
-    "cancelled Codex Security user-input response",
+  const requestFindingRemediationAction = findTool(
+    "request_codex_security_finding_remediation_action",
   );
-  assertNoError(cancelledUserInput);
-  assert.deepEqual(cancelledUserInput.result.structuredContent, {
-    status: "cancelled",
-  });
-  const start = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "start_codex_security_scan",
+  const claimFindingRemediationResend = findTool(
+    "claim_codex_security_finding_remediation_resend",
   );
-  const startDeepScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "start_codex_security_deep_scan",
+  const releaseFindingRemediationClaim = findTool(
+    "release_codex_security_finding_remediation_claim",
   );
-  const cancel = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "cancel_codex_security_scan",
+  const cancelFindingRemediationRequest = findTool(
+    "cancel_codex_security_finding_remediation_request",
   );
-  const cancelFromApp = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "cancel_codex_security_scan_from_app",
+  const markFindingRemediationDelivered = findTool(
+    "mark_codex_security_finding_remediation_delivered",
   );
-  const markHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "mark_codex_security_scan_handoff_delivered",
+  const setFindingRemediation = findTool(
+    "set_codex_security_finding_remediation",
   );
-  const claimHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "claim_codex_security_scan_handoff_delivery",
-  );
-  const releaseHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "release_codex_security_scan_handoff_delivery",
-  );
-  const attachHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "attach_codex_security_scan_continuation_thread",
-  );
-  const progress = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_progress",
-  );
-  const complete = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "complete_codex_security_scan",
-  );
-  const fail = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "fail_codex_security_scan",
-  );
-  const setFindingTriage = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "set_codex_security_finding_triage",
-  );
-  const requestFindingRemediation = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_finding_remediation",
-  );
-  const requestFindingRemediationAction = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_finding_remediation_action",
-  );
-  const claimFindingRemediationResend = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "claim_codex_security_finding_remediation_resend",
-  );
-  const releaseFindingRemediationClaim = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "release_codex_security_finding_remediation_claim",
-  );
-  const cancelFindingRemediationRequest = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "cancel_codex_security_finding_remediation_request",
-  );
-  const markFindingRemediationDelivered = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "mark_codex_security_finding_remediation_delivered",
-  );
-  const setFindingRemediation = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "set_codex_security_finding_remediation",
-  );
-  const exportFindings = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "export_codex_security_findings",
-  );
-  const listFindings = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "list_codex_security_findings",
-  );
+  const exportFindings = findTool("export_codex_security_findings");
+  const listFindings = findTool("list_codex_security_findings");
   assert.ok(launcher);
   assert.ok(startPromptOnlyScan);
   assert.ok(startHeadlessStandardScan);

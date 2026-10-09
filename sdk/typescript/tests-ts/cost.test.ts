@@ -1,9 +1,10 @@
 import { jsonLines } from "./support/json.js";
 import { spawnSync } from "node:child_process";
+import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   estimateScanCost,
   ScanCostTracker,
@@ -812,6 +813,77 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([
+    ["EACCES", true],
+    ["EACCES", false],
+    ["EPERM", true],
+    ["EPERM", false],
+  ] as const)(
+    "retains and retries a %s worker when its parent appears later (already identified: %j)",
+    async (code, identified) => {
+      const home = await codexHome();
+      const usage = (input_tokens: number) => ({
+        input_tokens,
+        output_tokens: 0,
+      });
+      await writeSession(home, "scan-thread", usage(10));
+      const worker = await writeSession(home, "worker", usage(1), {
+        parent: "middle",
+      });
+      let denied = !identified;
+      let attempts = 0;
+      const opened = filesystem.open;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === worker && denied) {
+            attempts += 1;
+            throw Object.assign(new Error(`Synthetic ${code}`), {
+              code,
+              syscall: "open",
+              path: worker,
+            });
+          }
+          return await opened(...args);
+        },
+      );
+      const reported: number[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        onCost: (cost) => reported.push(cost.inputTokens),
+      });
+      tracker.start("scan-thread");
+      try {
+        if (identified) {
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(10);
+          denied = true;
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(10);
+        } else {
+          await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        }
+        await appendFile(
+          worker,
+          `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage(1_000_000) } } })}\n`,
+        );
+        await writeSession(home, "middle", usage(20), {
+          parent: "scan-thread",
+        });
+        await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        denied = false;
+        const snapshot = await tracker.stop();
+        expect(snapshot.cost?.inputTokens).toBe(1_000_030);
+        expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
+        expect(reported).toContain(1_000_030);
+        expect(attempts).toBeGreaterThanOrEqual(2);
+      } finally {
+        denied = false;
+        await tracker.stop().catch(() => {});
+        opening.mockRestore();
+      }
+    },
+  );
+
   test.each([...parentFields])(
     "counts independent Deep workers and %s descendants",
     async (parentField) => {
@@ -1299,6 +1371,10 @@ describe("live scan cost tracking", () => {
 
   test.each([
     [
+      "keeps an earlier-millisecond UUIDv7 turn in inherited history",
+      ["019f9e4d-b3b9-7000-8000-000000000001"],
+    ],
+    [
       "keeps a same-millisecond lower UUIDv7 turn in inherited history",
       [lowerUuid7Turn],
     ],
@@ -1351,6 +1427,14 @@ describe("live scan cost tracking", () => {
         : [];
     });
     expect(forwardedTurnIds).toEqual([higherUuid7Turn]);
+    const saved = await readScanLogs({
+      scanId: "scan-example",
+      threadId: childUuid7Thread,
+      codexHome: home,
+    });
+    const ownedEvents = [rollout[0]!, ...rollout.slice(-2)];
+    expect(forwardedEvents.map(({ event }) => event)).toEqual(ownedEvents);
+    expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
   });
 
   test("forwards actions from this scan's delegated workers only", async () => {

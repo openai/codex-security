@@ -14,6 +14,7 @@ import {
 } from "./scan-activity.js";
 import {
   isScanArtifactDirectory,
+  sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
@@ -388,7 +389,10 @@ export class ScanCostTracker {
   }
 }
 
-export async function* sessionFiles(directory: string): AsyncGenerator<string> {
+export async function* sessionFiles(
+  directory: string,
+  compressed = false,
+): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -399,8 +403,12 @@ export async function* sessionFiles(directory: string): AsyncGenerator<string> {
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      yield* sessionFiles(path);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      yield* sessionFiles(path, compressed);
+    } else if (
+      entry.isFile() &&
+      (entry.name.endsWith(".jsonl") ||
+        (compressed && entry.name.endsWith(".jsonl.zst")))
+    ) {
       yield path;
     }
   }
@@ -508,20 +516,12 @@ function readSessionEvent(
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
       if (usage !== null) session.inheritedUsage = usage;
     }
-    if (payload["type"] === "task_started") {
-      // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.
-      const threadOrder = uuid7Order(session.threadId);
-      const turnOrder = uuid7Order(payload["turn_id"]);
-      const owned =
-        threadOrder === null
-          ? typeof payload["started_at"] === "number" &&
-            session.startedAt !== null &&
-            payload["started_at"] >= Math.floor(session.startedAt / 1_000)
-          : turnOrder !== null && turnOrder >= threadOrder;
-      if (owned) {
-        session.replaying = false;
-        session.events?.push(event);
-      }
+    if (
+      payload["type"] === "task_started" &&
+      sessionOwnsTurn(session, payload)
+    ) {
+      session.replaying = false;
+      session.events?.push(event);
     }
     return;
   }
@@ -659,18 +659,6 @@ function readSessionEvent(
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) session.usage = ownUsage;
-}
-
-function uuid7Order(value: unknown): bigint | null {
-  if (
-    typeof value !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-      value,
-    )
-  ) {
-    return null;
-  }
-  return BigInt(`0x${value.replaceAll("-", "")}`);
 }
 
 function readSessionReasoning(

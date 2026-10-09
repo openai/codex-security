@@ -1,3 +1,4 @@
+import { runNodePython } from "./support/python-probe.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
@@ -12,6 +13,7 @@ import {
   link,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   readlink,
   realpath,
@@ -41,7 +43,6 @@ import { createInterface } from "node:readline";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -53,7 +54,9 @@ import {
   createMarketplace,
   extractPluginZip,
   importAmbientAuth,
+  LocalPluginBootstrapError,
   pluginExecutionEnvironment,
+  pluginMetadata,
   PluginBootstrapError,
   PluginPythonUnavailableError,
   prepareOutputDir,
@@ -78,6 +81,7 @@ import {
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
+  prepareScanRegistrationOutput,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -88,11 +92,12 @@ import {
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
   runWorkbench,
+  workbenchEnvironment,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -146,6 +151,20 @@ function windowsTestCommand(
     },
   );
 }
+
+function windowsUserSid() {
+  const identity = windowsTestCommand("whoami.exe", [
+    "/user",
+    "/fo",
+    "csv",
+    "/nh",
+  ]);
+  expect(identity.status).toBe(0);
+  const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
+  expect(sid).toBeDefined();
+  return sid;
+}
+
 function inspectWindowsTestAcl(
   statements: string[],
   environment: NodeJS.ProcessEnv,
@@ -340,12 +359,7 @@ describe("plugin runtime preparation", () => {
   });
 
   test("derives distinct finding identities from canonical candidate IDs", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-      ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const runtime = await loadBundledRuntime();
     const source =
       /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
         runtime,
@@ -400,22 +414,17 @@ describe("plugin runtime preparation", () => {
     expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
-    const generatorArguments = (destination: string) =>
-      [
-        "-I",
-        "-B",
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "--repo",
-        repository,
-        "--scope",
-        ".",
-        "--out",
-        destination,
-      ] as const;
+    const generatorArguments = (destination: string) => [
+      join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+      "--repo",
+      repository,
+      "--scope",
+      ".",
+      "--out",
+      destination,
+    ];
     for (const destination of [output, repeatedOutput]) {
-      const inventory = spawnSync(python!, generatorArguments(destination), {
-        encoding: "utf8",
-      });
+      const inventory = runNodePython(python!, generatorArguments(destination));
       expect(inventory.status, inventory.stderr).toBe(0);
     }
 
@@ -441,9 +450,7 @@ describe("plugin runtime preparation", () => {
       );
       await writeFile(join(repository, "literal:colon.txt"), "colon\n");
       const posixOutput = join(root, "inventory-posix-filenames.txt");
-      const inventory = spawnSync(python!, generatorArguments(posixOutput), {
-        encoding: "utf8",
-      });
+      const inventory = runNodePython(python!, generatorArguments(posixOutput));
       expect(inventory.status, inventory.stderr).toBe(0);
       const posixRows = (await readFile(posixOutput, "utf8"))
         .trimEnd()
@@ -471,40 +478,28 @@ describe("plugin runtime preparation", () => {
         process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
 
-      const inventory = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-          "--repo",
-          repository,
-          "--scope",
-          "source.ts:synthetic-stream",
-          "--out",
-          join(root, "inventory.txt"),
-        ],
-        { encoding: "utf8" },
-      );
+      const inventory = runNodePython(python!, [
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        "source.ts:synthetic-stream",
+        "--out",
+        join(root, "inventory.txt"),
+      ]);
       expect(inventory.status).toBe(2);
       expect(inventory.stderr).toContain("NTFS alternate data streams");
 
-      const rankInput = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-          "make-repo-rank-input",
-          "--repo",
-          repository,
-          "--scope",
-          "source.ts:synthetic-stream",
-          "--out",
-          join(root, "rank-input.jsonl"),
-        ],
-        { encoding: "utf8" },
-      );
+      const rankInput = runNodePython(python!, [
+        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+        "make-repo-rank-input",
+        "--repo",
+        repository,
+        "--scope",
+        "source.ts:synthetic-stream",
+        "--out",
+        join(root, "rank-input.jsonl"),
+      ]);
       expect(rankInput.status).toBe(1);
       expect(rankInput.stderr).toContain("NTFS alternate data stream");
     },
@@ -514,33 +509,27 @@ describe("plugin runtime preparation", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const target = await temporaryDirectory("codex-security-remounted-target-");
-    const verification = spawnSync(
-      python!,
+    const verification = runNodePython(python!, [
+      "-c",
       [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import runpy, sys",
-          "from pathlib import Path",
-          "target = Path(sys.argv[2])",
-          "metadata = target.stat()",
-          "scan = {'target_path': str(target), 'target_device': metadata.st_dev + 1, 'target_inode': metadata.st_ino}",
-          "require_identity = runpy.run_path(sys.argv[1])['require_scan_target_identity']",
-          "assert require_identity(scan) == target",
-          "scan['target_inode'] += 1",
-          "try:",
-          "    require_identity(scan)",
-          "except SystemExit:",
-          "    pass",
-          "else:",
-          "    raise AssertionError('A replaced checkout must remain unavailable')",
-        ].join("\n"),
-        join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
-        target,
-      ],
-      { encoding: "utf8" },
-    );
+        "import runpy, sys",
+        "from pathlib import Path",
+        "target = Path(sys.argv[2])",
+        "metadata = target.stat()",
+        "scan = {'target_path': str(target), 'target_device': metadata.st_dev + 1, 'target_inode': metadata.st_ino}",
+        "require_identity = runpy.run_path(sys.argv[1])['require_scan_target_identity']",
+        "assert require_identity(scan) == target",
+        "scan['target_inode'] += 1",
+        "try:",
+        "    require_identity(scan)",
+        "except SystemExit:",
+        "    pass",
+        "else:",
+        "    raise AssertionError('A replaced checkout must remain unavailable')",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+      target,
+    ]);
 
     expect(verification.status, verification.stderr).toBe(0);
   });
@@ -837,17 +826,46 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("preserves the local origin of plugin selection and manifest failures", async () => {
+    const root = await temporaryDirectory();
+    const workspace = join(root, "workspace");
+    const source = await plugin(root);
+    await mkdir(workspace);
+    await expect(
+      resolvePluginPath(join(root, "network-plugin"), workspace),
+    ).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+
+    const cause = new Error("Synthetic manifest read failure.");
+    const manifestRead = spyOn(fsPromises, "readFile").mockRejectedValue(cause);
+    try {
+      for (const operation of [
+        () => pluginMetadata(source),
+        () => resolvePluginPath(source, workspace),
+      ]) {
+        const result = operation();
+        await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+        await expect(result).rejects.toMatchObject({
+          message: `Invalid Codex plugin directory: ${source}`,
+          cause,
+        });
+      }
+    } finally {
+      manifestRead.mockRestore();
+    }
+  });
+
   test("honors cancellation while staging a configured plugin directory", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "bootstrap");
     await mkdir(workspace);
     const source = await plugin(root);
     const controller = new AbortController();
-    controller.abort(new DOMException("canceled", "AbortError"));
+    const reason = new DOMException("canceled", "AbortError");
+    controller.abort(reason);
 
     await expect(
       resolvePluginPath(source, workspace, controller.signal),
-    ).rejects.toMatchObject({ name: "AbortError" });
+    ).rejects.toBe(reason);
     expect(existsSync(join(workspace, "selected-plugin"))).toBe(false);
   });
 
@@ -874,6 +892,63 @@ describe("plugin runtime preparation", () => {
         ),
       ),
     ).toBeDefined();
+  });
+
+  test("keeps local marketplace failures separate from installer failures", async () => {
+    const root = await temporaryDirectory();
+    const selected = await plugin(root);
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    const installationFailure = new PluginBootstrapError(
+      "Codex plugin bootstrap failed: network ECONNRESET",
+    );
+    let installerCalls = 0;
+    const options = {
+      codexCommand: { command: join(root, "codex") },
+      environment: {},
+      runCodex: async () => {
+        installerCalls += 1;
+        throw installationFailure;
+      },
+    };
+
+    await mkdir(home);
+    await writeFile(marketplace, "local fixture");
+    await expect(
+      bootstrapPlugin(home, selected, options),
+    ).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+    await rm(marketplace);
+
+    await writeFile(join(selected, ".mcp.json"), "network failure");
+    const malformed = await bootstrapPlugin(home, selected, options).catch(
+      (error: unknown) => error,
+    );
+    expect(malformed).toBeInstanceOf(LocalPluginBootstrapError);
+    const failure = malformed as LocalPluginBootstrapError;
+    expect(failure.cause).toBeInstanceOf(SyntaxError);
+    expect(failure.message).toBe((failure.cause as Error).message);
+    await rm(join(selected, ".mcp.json"));
+
+    const cause = new PluginBootstrapError(
+      "Plugin projection failed for a local network directory.",
+    );
+    const copy = spyOn(fsPromises, "cp").mockRejectedValue(cause);
+    try {
+      const result = bootstrapPlugin(home, selected, options);
+      await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+      await expect(result).rejects.toMatchObject({
+        message: cause.message,
+        cause,
+      });
+    } finally {
+      copy.mockRestore();
+    }
+    expect(installerCalls).toBe(0);
+
+    await expect(bootstrapPlugin(home, selected, options)).rejects.toBe(
+      installationFailure,
+    );
+    expect(installerCalls).toBe(1);
   });
 
   test.each([
@@ -1067,6 +1142,8 @@ ${directNode ? "}" : ""}
       }
 
       const readRoot = async (pluginRoot?: string) => {
+        // Share credentials and plugin registration, not native session databases.
+        const sqliteHome = await mkdtemp(join(root, "sqlite-"));
         const child = childProcess.spawn(
           executablePathForSpawn(command.command),
           ["app-server", "--stdio"],
@@ -1075,6 +1152,7 @@ ${directNode ? "}" : ""}
             env: {
               ...environment,
               CODEX_HOME: home,
+              CODEX_SQLITE_HOME: sqliteHome,
               ...(pluginRoot === undefined
                 ? {}
                 : { CODEX_SECURITY_PLUGIN_ROOT: pluginRoot }),
@@ -1112,9 +1190,15 @@ ${directNode ? "}" : ""}
           await closed;
         }
       };
-      // Warm native session storage independently of this concurrent root check.
-      await readRoot(selected);
-      const servers = await Promise.all([readRoot(selected), readRoot(second)]);
+      // Drain both clients before fixture cleanup, including when one fails.
+      const results = await Promise.allSettled([
+        readRoot(selected),
+        readRoot(second),
+      ]);
+      const servers = results.map((result) => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
       const assertServer = async (
         server: Awaited<ReturnType<typeof readRoot>>,
         pluginRoot: string,
@@ -1431,7 +1515,7 @@ ${directNode ? "}" : ""}
     ).toBe(false);
   });
 
-  test("extracts a plugin in one top-level directory", async () => {
+  test("extracts a plugin in one top-level directory and preserves manifest failures", async () => {
     const root = await temporaryDirectory();
     const archive = join(root, "plugin.zip");
     await writeFile(
@@ -1444,6 +1528,35 @@ ${directNode ? "}" : ""}
     );
     const extracted = await extractPluginZip(archive, join(root, "extracted"));
     expect(extracted).toBe(join(root, "extracted", "release"));
+
+    const cause = new Error("Synthetic manifest read failure.");
+    const originalReadFile = fsPromises.readFile;
+    const manifestRead = spyOn(fsPromises, "readFile").mockImplementation(((
+      ...args: Parameters<typeof originalReadFile>
+    ) => {
+      if (
+        args[1] === "utf8" &&
+        String(args[0]).endsWith(join(".codex-plugin", "plugin.json"))
+      ) {
+        return Promise.reject(cause);
+      }
+      return Reflect.apply(originalReadFile, fsPromises, args);
+    }) as typeof originalReadFile);
+    try {
+      for (const operation of [
+        () => extractPluginZip(archive, join(root, "failed-extract")),
+        () => resolvePluginPath(archive, join(root, "bootstrap")),
+      ]) {
+        const result = operation();
+        await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+        await expect(result).rejects.toMatchObject({
+          message: expect.stringContaining("Invalid Codex plugin directory:"),
+          cause,
+        });
+      }
+    } finally {
+      manifestRead.mockRestore();
+    }
   });
 
   test("decodes flag-clear ZIP filenames with the legacy CP437 encoding", async () => {
@@ -4560,9 +4673,52 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "creates credential homes with a verified managed-compatible Windows ACL",
+    "initializes the workbench in an explicitly configured Windows drive root",
     async () => {
-      const { home } = await credentialHome(true);
+      const directory = await temporaryDirectory();
+      const drive = [..."ZYXWVUTSRQPONMLKJIHGFED"].find(
+        (letter) => !existsSync(`${letter}:\\`),
+      );
+      expect(drive).toBeDefined();
+      const volume = `${drive}:`;
+      const subst = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+        "subst.exe",
+      );
+      expect(spawnSync(subst, [volume, directory]).status).toBe(0);
+      try {
+        await runWorkbench(
+          {
+            pluginRoot: PLUGIN_ROOT,
+            environment: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: `${volume}\\`,
+            },
+          },
+          ["database-info"],
+        );
+        expect(
+          (await stat(join(directory, "workbench.sqlite3"))).isFile(),
+        ).toBe(true);
+      } finally {
+        expect(spawnSync(subst, [volume, "/d"]).status).toBe(0);
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "creates credential homes after database initialization with a verified Windows ACL",
+    async () => {
+      const root = await temporaryDirectory();
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      };
+      await runWorkbench({ pluginRoot: PLUGIN_ROOT, environment }, [
+        "database-info",
+      ]);
+      const home = await prepareCodexSecurityCredentialHome(environment);
       const powershell = join(
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",
@@ -4600,15 +4756,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
       await mkdir(state);
-      const user = windowsTestCommand("whoami.exe", [
-        "/user",
-        "/fo",
-        "csv",
-        "/nh",
-      ]);
-      expect(user.status).toBe(0);
-      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(user.stdout)?.[1];
-      expect(sid).toBeDefined();
+      const sid = windowsUserSid();
       const configured = windowsTestCommand("icacls.exe", [
         state,
         "/inheritance:r",
@@ -4735,15 +4883,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
       await mkdir(state);
-      const identity = windowsTestCommand("whoami.exe", [
-        "/user",
-        "/fo",
-        "csv",
-        "/nh",
-      ]);
-      expect(identity.status).toBe(0);
-      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
-      expect(sid).toBeDefined();
+      const sid = windowsUserSid();
       for (const ancestor of [root, state]) {
         const owned = windowsTestCommand("icacls.exe", [
           ancestor,
@@ -4795,15 +4935,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await writeFile(auth, '{"token":"synthetic-root"}\n');
       await writeFile(nestedAuth, '{"token":"synthetic-nested"}\n');
 
-      const identity = windowsTestCommand("whoami.exe", [
-        "/user",
-        "/fo",
-        "csv",
-        "/nh",
-      ]);
-      expect(identity.status).toBe(0);
-      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
-      expect(sid).toBeDefined();
+      const sid = windowsUserSid();
 
       for (const credential of [auth, nestedAuth]) {
         const unsafe = windowsTestCommand("icacls.exe", [
@@ -4930,11 +5062,9 @@ describe("runtime directories and plugin Python boundary", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const result = spawnSync(
+    const result = runNodePython(
       python!,
       [
-        "-I",
-        "-B",
         join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
         "--profile",
         "security_scan",
@@ -4952,7 +5082,6 @@ describe("runtime directories and plugin Python boundary", () => {
         "app-server",
       ],
       {
-        encoding: "utf8",
         env: {
           ...process.env,
           HOME: home,
@@ -5004,11 +5133,9 @@ describe("runtime directories and plugin Python boundary", () => {
       const python =
         process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
-      const result = spawnSync(
+      const result = runNodePython(
         python!,
         [
-          "-I",
-          "-B",
           join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
           "--profile",
           "security_scan",
@@ -5024,7 +5151,6 @@ describe("runtime directories and plugin Python boundary", () => {
           "app-server",
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             CODEX_HOME: codexHome,
@@ -5063,11 +5189,9 @@ describe("runtime directories and plugin Python boundary", () => {
       "security_scan",
       "deep_security_scan",
     ]) {
-      const result = spawnSync(
+      const result = runNodePython(
         python!,
         [
-          "-I",
-          "-B",
           join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
           "--profile",
           profile,
@@ -5076,7 +5200,7 @@ describe("runtime directories and plugin Python boundary", () => {
           "--cwd",
           root,
         ],
-        { encoding: "utf8", env: process.env },
+        { env: process.env },
       );
 
       expect(result.status, result.stderr).toBe(0);
@@ -5126,11 +5250,9 @@ describe("runtime directories and plugin Python boundary", () => {
       ["false", "blocked", 1],
       ["true", "ready", 0],
     ] as const) {
-      const result = spawnSync(
+      const result = runNodePython(
         python!,
         [
-          "-I",
-          "-B",
           join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
           "--registry",
           registry,
@@ -5144,13 +5266,56 @@ describe("runtime directories and plugin Python boundary", () => {
             ? []
             : ["--runtime-check", `required_available=${value}`]),
         ],
-        { encoding: "utf8", env: process.env },
+        { env: process.env },
       );
 
       expect(result.status, result.stderr).toBe(exitCode);
       expect(JSON.parse(result.stdout)).toMatchObject({ status });
     }
   });
+
+  testPosix.each(["absolute", "relative"])(
+    "shares literal CODEX_HOME paths with plugin storage (%s)",
+    async (kind) => {
+      const root = await temporaryDirectory();
+      const home = join(root, " selected home ");
+      const pluginRoot = join(root, "fixture-plugin");
+      await mkdir(home);
+      await mkdir(join(root, " selected home"));
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      const script = join(pluginRoot, "scripts", "workbench_db.py");
+      await writeFile(
+        script,
+        [
+          "import json, runpy",
+          `storage = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench", "storage.py"))})`,
+          "print(json.dumps({'stateDir': str(storage['state_dir']())}))",
+        ].join("\n"),
+      );
+      const python = await resolvePluginPython();
+      const environment = {
+        PATH: process.env["PATH"],
+        CODEX_HOME: kind === "absolute" ? home : relative(process.cwd(), home),
+      };
+      const direct = runNodePython(python, [script], { env: environment });
+      expect(direct.status, direct.stderr).toBe(0);
+      const expected = {
+        stateDir: join(home, "state", "plugins", "codex-security"),
+      };
+      expect(JSON.parse(direct.stdout)).toEqual(expected);
+      expect(
+        await runWorkbench(
+          {
+            python,
+            pluginRoot,
+            environment: workbenchEnvironment(environment),
+          },
+          ["test-command"],
+        ),
+      ).toEqual(expected);
+      expect(codexSecurityStateDirectory(environment)).toBe(expected.stateDir);
+    },
+  );
 
   test("runs workbench commands without output limits, credentials, or generated bytecode", async () => {
     const root = await temporaryDirectory();
@@ -5405,43 +5570,37 @@ describe("runtime directories and plugin Python boundary", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const fixture = spawnSync(
-      python!,
+    const fixture = runNodePython(python!, [
+      "-c",
       [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import sqlite3, sys",
-          "from pathlib import Path",
-          "sys.path.insert(0, sys.argv[1])",
-          "from workbench_schema import MIGRATIONS, sql_statements",
-          "repository = Path(sys.argv[2])",
-          "connection = sqlite3.connect(Path(sys.argv[3]) / 'workbench.sqlite3')",
-          "connection.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)')",
-          "timestamp = '2026-07-09T00:00:00Z'",
-          "for version, name, migration in MIGRATIONS:",
-          "    if version > 10: break",
-          "    for statement in sql_statements(migration): connection.execute(statement)",
-          "    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, timestamp))",
-          "for table in ('workspaces', 'scans'):",
-          "    connection.execute(f'ALTER TABLE {table} ADD COLUMN execution_model TEXT CHECK (execution_model IS NULL OR length(execution_model) BETWEEN 1 AND 128)')",
-          "    connection.execute(f'ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT CHECK ((reasoning_effort IS NULL OR length(reasoning_effort) BETWEEN 1 AND 64) AND ((execution_model IS NULL) = (reasoning_effort IS NULL)))')",
-          "connection.executemany('INSERT INTO schema_migrations VALUES (?, ?, ?)', [(11, 'scan execution profiles', timestamp), (12, 'dynamic scan execution profiles', timestamp)])",
-          "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'\")",
-          "connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (25, 'persist scan completion warnings', timestamp))",
-          "connection.execute('INSERT INTO workspaces (id, target_path, thread_id, execution_model, reasoning_effort, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', ('legacy-workspace', str(repository), 'legacy-thread', 'gpt-workspace', 'medium', timestamp, timestamp))",
-          "connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, execution_model, reasoning_effort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('legacy-scan', 'legacy-workspace', str(repository), 'legacy-revision', '.', 'standard', str(repository / 'legacy-scan'), 'complete', 'reporting', timestamp, timestamp, timestamp, 'gpt-legacy', 'high'))",
-          "connection.execute('UPDATE scans SET completion_warnings_json = ? WHERE id = ?', ('[\"legacy warning\"]', 'legacy-scan'))",
-          "connection.commit()",
-          "connection.close()",
-        ].join("\n"),
-        join(PLUGIN_ROOT, "scripts"),
-        repository,
-        stateDirectory,
-      ],
-      { encoding: "utf8" },
-    );
+        "import sqlite3, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "from workbench_schema import MIGRATIONS, sql_statements",
+        "repository = Path(sys.argv[2])",
+        "connection = sqlite3.connect(Path(sys.argv[3]) / 'workbench.sqlite3')",
+        "connection.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)')",
+        "timestamp = '2026-07-09T00:00:00Z'",
+        "for version, name, migration in MIGRATIONS:",
+        "    if version > 10: break",
+        "    for statement in sql_statements(migration): connection.execute(statement)",
+        "    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, timestamp))",
+        "for table in ('workspaces', 'scans'):",
+        "    connection.execute(f'ALTER TABLE {table} ADD COLUMN execution_model TEXT CHECK (execution_model IS NULL OR length(execution_model) BETWEEN 1 AND 128)')",
+        "    connection.execute(f'ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT CHECK ((reasoning_effort IS NULL OR length(reasoning_effort) BETWEEN 1 AND 64) AND ((execution_model IS NULL) = (reasoning_effort IS NULL)))')",
+        "connection.executemany('INSERT INTO schema_migrations VALUES (?, ?, ?)', [(11, 'scan execution profiles', timestamp), (12, 'dynamic scan execution profiles', timestamp)])",
+        "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'\")",
+        "connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (25, 'persist scan completion warnings', timestamp))",
+        "connection.execute('INSERT INTO workspaces (id, target_path, thread_id, execution_model, reasoning_effort, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', ('legacy-workspace', str(repository), 'legacy-thread', 'gpt-workspace', 'medium', timestamp, timestamp))",
+        "connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, execution_model, reasoning_effort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('legacy-scan', 'legacy-workspace', str(repository), 'legacy-revision', '.', 'standard', str(repository / 'legacy-scan'), 'complete', 'reporting', timestamp, timestamp, timestamp, 'gpt-legacy', 'high'))",
+        "connection.execute('UPDATE scans SET completion_warnings_json = ? WHERE id = ?', ('[\"legacy warning\"]', 'legacy-scan'))",
+        "connection.commit()",
+        "connection.close()",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      repository,
+      stateDirectory,
+    ]);
     expect(fixture.status).toBe(0);
     expect(fixture.stderr).toBe("");
 
@@ -5458,32 +5617,26 @@ describe("runtime directories and plugin Python boundary", () => {
     );
     expect(registration["scanId"]).toBeString();
 
-    const upgraded = spawnSync(
-      python!,
+    const upgraded = runNodePython(python!, [
+      "-c",
       [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import json, sqlite3, sys",
-          "connection = sqlite3.connect(sys.argv[1])",
-          "connection.row_factory = sqlite3.Row",
-          "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
-          "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 25, 26)')}",
-          "profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()",
-          "workspace_profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort FROM workspaces WHERE id = ?', ('legacy-workspace',)).fetchone()",
-          "warnings = connection.execute('SELECT completion_warnings_json FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()[0]",
-          "connection.execute('UPDATE scans SET model = ?, reasoning_effort = NULL WHERE id = ?', ('gpt-current', sys.argv[2]))",
-          "connection.execute('UPDATE scans SET reasoning_effort = ? WHERE id = ?', ('high', sys.argv[2]))",
-          "current_profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
-          "deep_scan_tables = connection.execute(\"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deep_scan_runs'\").fetchone()",
-          "print(json.dumps({'columns': sorted(columns & {'deep_scan_owner_thread_id', 'continuation_thread_id', 'model', 'reasoning_effort', 'completion_warnings_json', 'legacy_execution_model', 'legacy_reasoning_effort'}), 'migrations': migrations, 'profile': dict(profile), 'workspaceProfile': dict(workspace_profile), 'warnings': json.loads(warnings), 'currentProfile': dict(current_profile), 'deepScanTables': deep_scan_tables is not None}))",
-        ].join("\n"),
-        join(stateDirectory, "workbench.sqlite3"),
-        String(registration["scanId"]),
-      ],
-      { encoding: "utf8" },
-    );
+        "import json, sqlite3, sys",
+        "connection = sqlite3.connect(sys.argv[1])",
+        "connection.row_factory = sqlite3.Row",
+        "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
+        "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 25, 26)')}",
+        "profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()",
+        "workspace_profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort FROM workspaces WHERE id = ?', ('legacy-workspace',)).fetchone()",
+        "warnings = connection.execute('SELECT completion_warnings_json FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()[0]",
+        "connection.execute('UPDATE scans SET model = ?, reasoning_effort = NULL WHERE id = ?', ('gpt-current', sys.argv[2]))",
+        "connection.execute('UPDATE scans SET reasoning_effort = ? WHERE id = ?', ('high', sys.argv[2]))",
+        "current_profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
+        "deep_scan_tables = connection.execute(\"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deep_scan_runs'\").fetchone()",
+        "print(json.dumps({'columns': sorted(columns & {'deep_scan_owner_thread_id', 'continuation_thread_id', 'model', 'reasoning_effort', 'completion_warnings_json', 'legacy_execution_model', 'legacy_reasoning_effort'}), 'migrations': migrations, 'profile': dict(profile), 'workspaceProfile': dict(workspace_profile), 'warnings': json.loads(warnings), 'currentProfile': dict(current_profile), 'deepScanTables': deep_scan_tables is not None}))",
+      ].join("\n"),
+      join(stateDirectory, "workbench.sqlite3"),
+      String(registration["scanId"]),
+    ]);
     expect(upgraded.status).toBe(0);
     expect(upgraded.stderr).toBe("");
     expect(JSON.parse(upgraded.stdout)).toEqual({
@@ -5638,38 +5791,33 @@ describe("runtime directories and plugin Python boundary", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const result = spawnSync(
-      python!,
+    const result = runNodePython(python!, [
+      "-c",
       [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import argparse, json, sqlite3, sys",
-          "from pathlib import Path",
-          "sys.path.insert(0, sys.argv[1])",
-          "from workbench_scan_start import archive_scan",
-          "scan_dir = Path(sys.argv[2])",
-          "archived_scan_dir = Path(sys.argv[3])",
-          "connection = sqlite3.connect(':memory:')",
-          "connection.row_factory = sqlite3.Row",
-          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
-          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
-          "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
-          "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
-          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
-          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
-          "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
-          "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
-          "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
-        ].join("\n"),
-        join(PLUGIN_ROOT, "scripts"),
-        scanDir,
-        archivedScanDir,
-      ],
-      { encoding: "utf8" },
-    );
+        "import argparse, json, sqlite3, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "from workbench_scan_start import archive_scan",
+        "scan_dir = Path(sys.argv[2])",
+        "archived_scan_dir = Path(sys.argv[3])",
+        "connection = sqlite3.connect(':memory:')",
+        "connection.row_factory = sqlite3.Row",
+        "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+        "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+        "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+        "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
+        "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
+        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
+        "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
+        "    pass",
+        "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
+        "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
+        "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      scanDir,
+      archivedScanDir,
+    ]);
 
     expect(result.status).toBe(0);
     expect(result.stderr).toBe("");
@@ -5691,32 +5839,27 @@ describe("runtime directories and plugin Python boundary", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const result = spawnSync(
-      python!,
+    const result = runNodePython(python!, [
+      "-c",
       [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import argparse, sqlite3, sys",
-          "from pathlib import Path",
-          "sys.path.insert(0, sys.argv[1])",
-          "from workbench_scan_start import archive_scan",
-          "scan_dir = Path(sys.argv[2])",
-          "connection = sqlite3.connect(':memory:')",
-          "connection.row_factory = sqlite3.Row",
-          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
-          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
-          "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
-          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
-          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
-        ].join("\n"),
-        join(PLUGIN_ROOT, "scripts"),
-        scanDir,
-      ],
-      { encoding: "utf8" },
-    );
+        "import argparse, sqlite3, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "from workbench_scan_start import archive_scan",
+        "scan_dir = Path(sys.argv[2])",
+        "connection = sqlite3.connect(':memory:')",
+        "connection.row_factory = sqlite3.Row",
+        "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+        "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+        "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+        "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
+        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
+        "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
+        "    pass",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      scanDir,
+    ]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
@@ -5857,7 +6000,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).not.toThrow();
   });
 
-  test("archives a non-empty private output directory", async () => {
+  test("prepares a private output directory without moving prior results", async () => {
     const root = await temporaryDirectory();
     const output = join(root, "scan");
     await mkdir(output, { mode: 0o700 });
@@ -5874,7 +6017,45 @@ describe("runtime directories and plugin Python boundary", () => {
     );
     await expect(stat(preview!)).rejects.toThrow();
 
-    const onOutputArchived = mock((_archiveDir: string) => {});
+    expect(
+      await prepareScanRegistrationOutput(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+      ),
+    ).toBe(output);
+    expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+      "previous scan\n",
+    );
+    expect(await readdir(root)).toEqual(["scan"]);
+    if (process.platform !== "win32") {
+      expect((await stat(output)).mode & 0o777).toBe(0o700);
+
+      const linkedOutput = join(root, "linked-scan");
+      await symlink(output, linkedOutput);
+      await expect(validateOutputDir(linkedOutput, true)).rejects.toThrow(
+        "not a directory",
+      );
+
+      await chmod(output, 0o770);
+      await expect(validateOutputDir(output, true)).rejects.toThrow(
+        "must not be accessible to other users",
+      );
+      await chmod(output, 0o700);
+    }
+
+    expect(await planOutputArchive(output)).not.toBeNull();
+  });
+
+  test("archives prior output through the exported preparation helper", async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "scan");
+    await mkdir(output, { mode: 0o700 });
+    await writeFile(join(output, "previous.txt"), "previous scan\n");
+    const archived: string[] = [];
+
     expect(
       await prepareOutputDir(
         output,
@@ -5882,38 +6063,38 @@ describe("runtime directories and plugin Python boundary", () => {
         undefined,
         undefined,
         true,
-        onOutputArchived,
+        (path) => {
+          archived.push(path);
+        },
       ),
     ).toBe(output);
-    const archived = onOutputArchived.mock.lastCall?.[0];
-    expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
-    expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
+    expect(archived).toHaveLength(1);
+    expect(await readFile(join(archived[0]!, "previous.txt"), "utf8")).toBe(
       "previous scan\n",
     );
     expect(await readdir(output)).toEqual([]);
-    if (process.platform !== "win32") {
-      expect((await stat(output)).mode & 0o777).toBe(0o700);
-
-      const linkedOutput = join(root, "linked-scan");
-      await symlink(archived!, linkedOutput);
-      await expect(validateOutputDir(linkedOutput, true)).rejects.toThrow(
-        "not a directory",
-      );
-
-      await chmod(archived!, 0o770);
-      await expect(validateOutputDir(archived!, true)).rejects.toThrow(
-        "must not be accessible to other users",
-      );
-      await chmod(archived!, 0o700);
-    }
-
-    expect(await planOutputArchive(output)).toBeNull();
+    expect(
+      await prepareOutputDir(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+        (path) => {
+          archived.push(path);
+        },
+      ),
+    ).toBe(output);
+    expect(archived).toHaveLength(1);
   });
 
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
     expect(await validateOutputDir(absent)).toBe(absent);
+    expect(
+      await validateOutputDir(`${root}/parent/../${basename(absent)}`),
+    ).toBe(absent);
     expect(await canonicalizeModelSafePath(join(root, "missing", "scan"))).toBe(
       join(root, "missing", "scan"),
     );
@@ -6236,20 +6417,22 @@ describe("runtime directories and plugin Python boundary", () => {
         managedRuntimeRoots: [managedRoot],
       }),
     ).toBe(managed);
-    const cacheDirectory = join(root, "custom-cache");
-    const cachedPython = join(
-      cacheDirectory,
-      "codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
-    );
-    await mkdir(dirname(cachedPython), { recursive: true });
-    await copyFile(managed, cachedPython);
-    await chmod(cachedPython, 0o700);
-    expect(
-      await resolvePluginPython({
-        environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
-        homeDirectory: join(root, "unused-home"),
-      }),
-    ).toBe(cachedPython);
+    for (const name of ["custom-cache", "custom-cache "]) {
+      const cacheDirectory = join(root, name);
+      const cachedPython = join(
+        cacheDirectory,
+        "codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+      );
+      await mkdir(dirname(cachedPython), { recursive: true });
+      await copyFile(managed, cachedPython);
+      await chmod(cachedPython, 0o700);
+      expect(
+        await resolvePluginPython({
+          environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
+          homeDirectory: join(root, "unused-home"),
+        }),
+      ).toBe(cachedPython);
+    }
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
       PYTHON: managed,
@@ -6500,6 +6683,20 @@ describe("runtime directories and plugin Python boundary", () => {
         }),
       ).rejects.toThrow(PluginPythonUnavailableError);
       expect(existsSync(marker)).toBe(false);
+
+      await expect(
+        runWorkbench(
+          {
+            pluginRoot: PLUGIN_ROOT,
+            environment: { PATH: trustedBin, PYTHON: unsafePython },
+            protectedRoot: repository,
+          },
+          ["list-scans"],
+        ),
+      ).rejects.toMatchObject({
+        cause: expect.any(PluginPythonUnavailableError),
+      });
+      expect(existsSync(marker)).toBe(false);
     },
   );
 
@@ -6508,6 +6705,7 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(isPythonPathCandidate("runtime\\python.exe")).toBe(true);
     expect(isPythonPathCandidate("./python3")).toBe(true);
     expect(isPythonPathCandidate("python3")).toBe(false);
+    expect(isPythonPathCandidate(".python")).toBe(false);
   });
 
   test("returns a targeted plugin diagnostic when Python is unavailable", async () => {

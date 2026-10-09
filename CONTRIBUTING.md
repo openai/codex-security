@@ -52,6 +52,23 @@ credentials, or sensitive scan results publicly.
 If a scan finds a vulnerability in another project, report it to that
 project's maintainers through their security policy.
 
+## Pull request labels
+
+Keep pull request labels focused on release behavior and material platform
+impact. Do not apply `area:*` labels to pull requests; describe the affected
+surface in the title and description. Issues retain their existing area,
+priority, and status labels. Existing maintainer triage labels can remain on
+pull requests while they identify actionable, unresolved work.
+
+Preserve the release labels `bug`, `enhancement`, `documentation`,
+`breaking-change`, and `skip-release-notes`, including maintainer overrides.
+Follow their [release-note and version semantics](RELEASING.md). Do not replace
+manual `breaking-change` or `skip-release-notes` labels based only on the title.
+
+Use `platform:windows` only when Windows-specific behavior is material to the
+change. Dependabot uses `dependencies` across all package ecosystems. Labels
+are not required to open, test, review, or merge a pull request.
+
 ## Dependency and release maintenance
 
 Maintainers update package dependencies and committed lockfiles with the

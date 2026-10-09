@@ -1,5 +1,7 @@
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   mkdir,
   mkdtemp,
@@ -15,13 +17,13 @@ import path from "node:path";
 import { importSource } from "./import-module.ts";
 
 const io = await importSource(
-  new URL("../src/artifact-io.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-io.ts"),
 );
 const contextApi = await importSource(
-  new URL("../src/artifact-context.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-context.ts"),
 );
 const writerApi = await importSource(
-  new URL("../artifact-writer-main.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../artifact-writer-main.ts"),
   {
     plugins: [
       {
@@ -38,7 +40,7 @@ const writerApi = await importSource(
   },
 );
 const schemas = await importSource(
-  new URL("../src/artifact-schema-loader.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-schema-loader.ts"),
 );
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
@@ -57,6 +59,7 @@ try {
   await testScanContext();
   await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
+  await testAtomicReplacementAfterInterruptedWriter();
   await testAtomicReplacement();
   await testBoundedPagination();
   await testUnsafeArtifacts();
@@ -327,6 +330,29 @@ async function testWorkerStandardLayout() {
     });
   assert.equal(reducer.layout, "reducer");
   assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
+}
+
+async function testAtomicReplacementAfterInterruptedWriter() {
+  const destination = await io.artifactDestination(
+    context,
+    ["interrupted.json"],
+    "interrupted artifact",
+  );
+  const child = spawn(process.execPath, [
+    "-e",
+    'require("node:fs").openSync(process.argv[1], "wx", 0o600); process.stdout.write("locked"); setInterval(() => {}, 1000);',
+    destination + ".lock",
+  ]);
+  await once(child.stdout, "data");
+  child.kill("SIGKILL");
+  await once(child, "close");
+  await io.replaceArtifactText(destination, "recovered\n");
+  assert.equal(await readFile(destination, "utf8"), "recovered\n");
+  const values = ["a", "b", "c"].map((value) => value.repeat(32_000));
+  await Promise.all(
+    values.map((value) => io.replaceArtifactText(destination, value)),
+  );
+  assert.ok(values.includes(await readFile(destination, "utf8")));
 }
 
 async function testSafeJsonAndJsonl() {

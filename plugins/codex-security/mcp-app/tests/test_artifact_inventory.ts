@@ -10,7 +10,7 @@ const execFile = promisify(nodeExecFile);
 const temporaryDirectories = createTemporaryDirectories(true);
 
 const inventory = await importSource(
-  new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-inventory.ts"),
 );
 
 try {
@@ -220,7 +220,7 @@ async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
   );
   await fixture.writeRepositoryFile(
     "tests/example.ts",
-    "export const ignored = true;\n",
+    "export const testSetup = true;\n",
   );
   await unlink(path.join(fixture.repoRoot, "src/deleted.ts"));
   await runGit(fixture.repoRoot, "add", ".");
@@ -235,13 +235,14 @@ async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
   };
 
   assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 3,
+    reviewItemsTotal: 4,
   });
   assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
     items: [
       { path: "src/changed.ts" },
       { path: "src/deleted.ts" },
       { path: "src/new.ts" },
+      { path: "tests/example.ts" },
     ],
   });
 }
@@ -433,7 +434,7 @@ async function createFixture(label: string) {
   const repoRoot = path.join(fixtureRoot, "repository");
   const scanRoot = path.join(fixtureRoot, "scan");
   const workerRoot = path.join(fixtureRoot, "worker");
-  const pluginRoot = new URL("../../", import.meta.url).pathname;
+  const pluginRoot = path.join(import.meta.dirname, "../../");
   await mkdir(repoRoot, { recursive: true });
   await mkdir(scanRoot, { recursive: true });
   return {

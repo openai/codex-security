@@ -1,4 +1,5 @@
 import * as childProcess from "node:child_process";
+import * as filesystem from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import {
   cp,
@@ -6,6 +7,8 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
+  stat,
   rm,
   symlink,
   writeFile,
@@ -16,12 +19,22 @@ import { PassThrough } from "node:stream";
 import { describe, expect, spyOn, test } from "bun:test";
 import { exportArtifact } from "../src/index.js";
 import {
+  resolveArtifactExportOutput,
   readThreatModelPath,
+  runArtifactExport,
   runArtifactHelper,
   writeThreatModel,
 } from "../src/artifact-export.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { PYTHON } from "./support/security-policy.js";
+
+const caseProbe = await mkdtemp(join(tmpdir(), "codex-security-case-probe-"));
+await mkdir(join(caseProbe, "reports"));
+const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
+  () => true,
+  () => false,
+);
+await rm(caseProbe, { recursive: true, force: true });
 
 describe("offline artifact export", () => {
   test.each([0, 1])(
@@ -71,6 +84,144 @@ describe("offline artifact export", () => {
       }
     },
   );
+
+  test("resolves the current directory without traversing outside it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cwd-output-"));
+    try {
+      const currentDirectory = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(currentDirectory);
+      await mkdir(scanDir);
+      const result = await resolveArtifactExportOutput(
+        { scanDir, output: currentDirectory, format: "json" },
+        currentDirectory,
+      );
+      expect(result.output).toBe(await realpath(currentDirectory));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves a scan-local export before its exports directory exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-new-export-"));
+    try {
+      const scanDir = join(root, "scan");
+      await mkdir(scanDir);
+      const output = join(scanDir, "exports", "findings.json");
+      expect(
+        (
+          await resolveArtifactExportOutput(
+            { scanDir, output, format: "json" },
+            root,
+          )
+        ).output,
+      ).toBe(join(await realpath(scanDir), "exports", "findings.json"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!caseInsensitiveVolume)(
+    "accepts an export parent accessed through a case alias",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-case-output-"));
+      await mkdir(join(root, "reports"));
+      try {
+        const result = await resolveArtifactExportOutput(
+          {
+            scanDir: join(root, "scan"),
+            format: "json",
+            output: join(root, "REPORTS", "result.json"),
+          },
+          root,
+        );
+        await writeFile(result.output, "synthetic export");
+        expect(
+          await readFile(join(root, "reports", "result.json"), "utf8"),
+        ).toBe("synthetic export");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("resolves real export directories while refusing linked repository parents", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-output-path-"));
+    const reports = join(root, "reports");
+    await mkdir(reports);
+    const link = join(root, "linked");
+    await symlink(reports, link, "junction");
+    try {
+      const options = {
+        scanDir: join(root, "scan"),
+        format: "json" as const,
+        output: join(reports, "result.json"),
+      };
+      expect((await resolveArtifactExportOutput(options, root)).output).toBe(
+        join(await realpath(reports), "result.json"),
+      );
+      await expect(
+        resolveArtifactExportOutput(
+          { ...options, output: join(link, "result.json") },
+          root,
+        ),
+      ).rejects.toThrow("cannot traverse a repository symlink");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a repository output ancestor replaced after resolution", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-export-binding-"),
+    );
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const outside = join(root, "outside");
+    const parent = join(repository, "reports");
+    const outsideOutput = join(outside, "result.md");
+    await mkdir(repository);
+    await mkdir(scanDir);
+    await mkdir(outside);
+    await writeFile(join(scanDir, "THREAT_MODEL.md"), "# Synthetic model\n");
+    await writeFile(outsideOutput, "Unrelated file\n");
+    await symlink(outside, parent, "junction");
+    let replaced = false;
+    const originalRealpath = filesystem.realpath;
+    const resolving = spyOn(filesystem, "realpath").mockImplementation((async (
+      ...args: Parameters<typeof originalRealpath>
+    ) => {
+      const canonical = await originalRealpath(...args);
+      if (args[0] === parent && !replaced) {
+        replaced = true;
+        await rm(parent, { recursive: true, force: true });
+        await mkdir(parent);
+      }
+      return canonical;
+    }) as typeof originalRealpath);
+    try {
+      const exporting = async () => {
+        const prepared = await resolveArtifactExportOutput(
+          {
+            scanDir,
+            output: join(parent, "result.md"),
+            artifact: "threat-model",
+            format: "md",
+          },
+          repository,
+        );
+        await runArtifactExport(prepared);
+      };
+      await expect(exporting()).rejects.toThrow(
+        "cannot traverse a repository symlink",
+      );
+      expect(replaced).toBe(true);
+      expect(await readFile(outsideOutput, "utf8")).toBe("Unrelated file\n");
+    } finally {
+      resolving.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   test("only exposes a document matching the current canonical model", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-current-model-"));
