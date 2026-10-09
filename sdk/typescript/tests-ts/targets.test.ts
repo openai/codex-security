@@ -60,6 +60,27 @@ function git(repo: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 }
 
+function validateCommittedDiffWithCredentialConfig(repo: string) {
+  return spawnSync(
+    process.execPath,
+    [
+      "-e",
+      "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
+      fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+      repo,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.extraHeader",
+        GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
+      },
+    },
+  );
+}
+
 async function createRepositoryGitShim(
   directory: string,
   marker: string,
@@ -111,6 +132,12 @@ describe("scan target normalization", () => {
 
   test("normalizes repository and path targets", async () => {
     const repo = await repository();
+    const alias = join(repo, "source-link");
+    await symlink(
+      join(repo, "src"),
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     expect(await normalizeTarget(repo, "repository")).toEqual({
       kind: "repository",
       paths: [],
@@ -121,6 +148,7 @@ describe("scan target normalization", () => {
         join(repo, "src", "app.ts"),
         join(repo, "src"),
         "src/app.ts",
+        alias,
       ]),
     ).toEqual({
       kind: "paths",
@@ -163,13 +191,28 @@ describe("scan target normalization", () => {
     },
   );
 
-  test("rejects empty and escaping paths", async () => {
+  test("rejects empty, missing, and escaping paths", async () => {
     const repo = await repository();
     await expect(normalizeTarget(repo, [""])).rejects.toThrow("empty path");
+    await expect(normalizeTarget(repo, ["missing.ts"])).rejects.toThrow(
+      "Path target does not exist: missing.ts",
+    );
     await expect(normalizeTarget(repo, [join(repo, "..")])).rejects.toThrow(
       "outside the repository",
     );
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects special filesystem targets the scan scope resolver cannot read",
+    async () => {
+      const repo = await repository();
+      const fifo = join(repo, "src", "pending.fifo");
+      execFileSync("mkfifo", [fifo]);
+      await expect(normalizeTarget(repo, [fifo])).rejects.toThrow(
+        "not a regular file or directory",
+      );
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "rejects NTFS alternate streams before runtime initialization",
@@ -359,24 +402,7 @@ describe("scan target normalization", () => {
     await chmod(hook, 0o700);
     git(repo, "config", "core.fsmonitor", hook);
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        "-e",
-        "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
-        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
-        repo,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_CONFIG_COUNT: "1",
-          GIT_CONFIG_KEY_0: "http.extraHeader",
-          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
-        },
-      },
-    );
+    const result = validateCommittedDiffWithCredentialConfig(repo);
 
     expect(result.status).toBe(0);
     expect(existsSync(leaked)).toBe(false);
@@ -411,24 +437,7 @@ describe("scan target normalization", () => {
     );
     await utimes(join(repo, "src", "app.ts"), new Date(0), new Date(0));
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        "-e",
-        "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
-        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
-        repo,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_CONFIG_COUNT: "1",
-          GIT_CONFIG_KEY_0: "http.extraHeader",
-          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
-        },
-      },
-    );
+    const result = validateCommittedDiffWithCredentialConfig(repo);
 
     expect(result.status).toBe(0);
     expect(existsSync(executed)).toBe(true);

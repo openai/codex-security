@@ -3,7 +3,7 @@
   "private": true,
   "description": "Promptfoo evals for the Codex Security triage-finding skill",
   "scripts": {
-    "setup": "pnpm install --frozen-lockfile && pnpm rebuild better-sqlite3 && pnpm --dir ../../sdk/typescript run build:evals",
+    "setup": "pnpm install --frozen-lockfile && pnpm rebuild better-sqlite3 && pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile && pnpm --dir ../../sdk/typescript run build:evals && node ../../plugins/codex-security/mcp-app/scripts/build_native.mjs",
     "calibration:generate": "node --experimental-strip-types scripts/generate-calibration-tests.mts",
     "calibration:hydrate": "node --experimental-strip-types scripts/hydrate-calibration-repos.mts",
     "sastbench:install": "node --experimental-strip-types sastbench/scripts/install-sastbench.mts",
@@ -14,24 +14,24 @@
     "test:calibration-generate": "node --experimental-strip-types scripts/test-generate-calibration-tests.mts",
     "test:calibration-hydrate": "node --experimental-strip-types scripts/test-hydrate-calibration-repos.mts",
     "test:dataset": "node --experimental-strip-types scripts/test-calibration-dataset.mts",
-    "test:deterministic": "node --experimental-strip-types scripts/test-app-surface-instructions.mts && node --experimental-strip-types scripts/test-triage-io.mts && node --experimental-strip-types scripts/test-intake-assertions.mts && node --experimental-strip-types scripts/test-calibration-dataset.mts && node --experimental-strip-types scripts/test-generate-calibration-tests.mts && node --experimental-strip-types scripts/test-promptfoo-runtime.mts && node --experimental-strip-types scripts/test-calibration-evidence.mts && node --experimental-strip-types scripts/test-hydrate-calibration-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-lib.mts && node --experimental-strip-types sastbench/scripts/test-install-sastbench.mts && node --experimental-strip-types sastbench/scripts/test-hydrate-sastbench-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-result.mts && node --experimental-strip-types sastbench/scripts/test-promptfoo-native-harness.mts",
+    "test:deterministic": "node --experimental-strip-types scripts/test-app-surface-instructions.mts && node --experimental-strip-types scripts/test-triage-io.mts && node --experimental-strip-types scripts/test-intake-assertions.mts && node --experimental-strip-types scripts/test-calibration-dataset.mts && node --experimental-strip-types scripts/test-generate-calibration-tests.mts && node --experimental-strip-types scripts/test-promptfoo-runtime.mts && node --experimental-strip-types scripts/test-calibration-evidence.mts && node --experimental-strip-types scripts/test-hydrate-calibration-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-lib.mts && node --experimental-strip-types sastbench/scripts/test-install-sastbench.mts && node --experimental-strip-types sastbench/scripts/test-hydrate-sastbench-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-result.mts && node --experimental-strip-types sastbench/scripts/test-promptfoo-native-harness.mts && node --experimental-strip-types --test scripts/test-promptfoo-runner.mts scripts/test-triage-provider.mts",
     "test:instructions": "node --experimental-strip-types scripts/test-app-surface-instructions.mts",
     "test:sastbench": "node --experimental-strip-types sastbench/scripts/test-sastbench-lib.mts && node --experimental-strip-types sastbench/scripts/test-install-sastbench.mts && node --experimental-strip-types sastbench/scripts/test-hydrate-sastbench-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-result.mts && node --experimental-strip-types sastbench/scripts/test-promptfoo-native-harness.mts",
-    "validate": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo validate config -c ./promptfooconfig.yaml",
-    "validate:calibration": "pnpm run calibration:generate && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo validate config -c ./promptfooconfig.calibration.yaml",
-    "validate:sastbench": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo validate config -c ./sastbench/promptfooconfig.sastbench.yaml",
-    "validate:sastbench:sample": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo validate config -c ./sastbench/promptfooconfig.sastbench-sample.yaml",
-    "eval": "mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.yaml -o ./artifacts/triage-finding-eval.json --no-cache --no-share",
-    "eval:smoke": "mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.yaml -o ./artifacts/triage-finding-eval-smoke.json --no-cache --no-share --filter-range 0:1",
-    "eval:calibration": "pnpm run calibration:generate && pnpm run calibration:hydrate && mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.calibration.yaml -o ./artifacts/triage-finding-calibration-eval.json --no-cache --no-share",
-    "eval:calibration:smoke": "node --experimental-strip-types scripts/generate-calibration-tests.mts --case oss-dompurify-ghsa-v8jm-5vwx-cfxm --variant vulnerable --output artifacts/calibration-smoke.yaml && node --experimental-strip-types scripts/hydrate-calibration-repos.mts --case oss-dompurify-ghsa-v8jm-5vwx-cfxm --variant vulnerable && mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.calibration-smoke.yaml -o ./artifacts/triage-finding-calibration-smoke.json --no-cache --no-share",
-    "eval:sastbench": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./sastbench/promptfooconfig.sastbench.yaml --no-cache --no-share",
-    "eval:sastbench:sample": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./sastbench/promptfooconfig.sastbench-sample.yaml --no-cache --no-share --max-concurrency 32",
-    "pf:view": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo view"
+    "validate": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts validate config -c ./promptfooconfig.yaml",
+    "validate:calibration": "pnpm run calibration:generate && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts validate config -c ./promptfooconfig.calibration.yaml",
+    "validate:sastbench": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts validate config -c ./sastbench/promptfooconfig.sastbench.yaml",
+    "validate:sastbench:sample": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts validate config -c ./sastbench/promptfooconfig.sastbench-sample.yaml",
+    "eval": "mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts eval -c ./promptfooconfig.yaml -o ./artifacts/triage-finding-eval.json --no-cache --no-share",
+    "eval:smoke": "mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts eval -c ./promptfooconfig.yaml -o ./artifacts/triage-finding-eval-smoke.json --no-cache --no-share --filter-range 0:1",
+    "eval:calibration": "pnpm run calibration:generate && pnpm run calibration:hydrate && mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts eval -c ./promptfooconfig.calibration.yaml -o ./artifacts/triage-finding-calibration-eval.json --no-cache --no-share",
+    "eval:calibration:smoke": "node --experimental-strip-types scripts/generate-calibration-tests.mts --case oss-dompurify-ghsa-v8jm-5vwx-cfxm --variant vulnerable --output artifacts/calibration-smoke.yaml && node --experimental-strip-types scripts/hydrate-calibration-repos.mts --case oss-dompurify-ghsa-v8jm-5vwx-cfxm --variant vulnerable && mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts eval -c ./promptfooconfig.calibration-smoke.yaml -o ./artifacts/triage-finding-calibration-smoke.json --no-cache --no-share",
+    "eval:sastbench": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts eval -c ./sastbench/promptfooconfig.sastbench.yaml --no-cache --no-share",
+    "eval:sastbench:sample": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts eval -c ./sastbench/promptfooconfig.sastbench-sample.yaml --no-cache --no-share --max-concurrency 32",
+    "pf:view": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts view"
   },
   "dependencies": {
-    "@openai/codex-sdk": "0.162.0-alpha.18",
-    "@opencode-ai/sdk": "1.18.33",
+    "@openai/codex-sdk": "0.162.0",
+    "@opencode-ai/sdk": "1.18.34",
     "promptfoo": "0.123.1"
   }
 }

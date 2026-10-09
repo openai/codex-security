@@ -4,25 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import sys
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
-
-def _load_finalizer() -> ModuleType:
-    script = Path(__file__).resolve().with_name("finalize_scan_contract.py")
-    spec = importlib.util.spec_from_file_location("codex_security_scan_contract", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load scan contract validator: {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-FINALIZER = _load_finalizer()
+# Keep sibling helpers importable when Python starts in isolated mode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import finalize_scan_contract as FINALIZER
 
 
 def validate_contract(scan_dir: Path) -> dict[str, Any]:
@@ -39,26 +28,7 @@ def validate_contract(scan_dir: Path) -> dict[str, Any]:
     FINALIZER.validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
 
     scan = FINALIZER._require_dict(manifest, "scan", "manifest")
-    findings_ref = scan["findingsRef"]
-    coverage_ref = scan["coverageRef"]
-    findings, findings_bytes = FINALIZER._read_scan_local_json_bytes(
-        scan_dir,
-        findings_ref,
-        findings_ref,
-    )
-    coverage, coverage_bytes = FINALIZER._read_scan_local_json_bytes(
-        scan_dir,
-        coverage_ref,
-        coverage_ref,
-    )
-    FINALIZER._validate_existing_seal(
-        scan_dir,
-        scan,
-        artifact_contents={
-            findings_ref: findings_bytes,
-            coverage_ref: coverage_bytes,
-        },
-    )
+    findings, coverage, _ = FINALIZER._read_sealed_artifacts(scan_dir, scan)
     findings_for_validation = FINALIZER._legacy_sealed_findings_for_validation(findings)
     FINALIZER._validate_findings(manifest, findings_for_validation)
     FINALIZER._validate_derived_finding_identities(manifest, findings)

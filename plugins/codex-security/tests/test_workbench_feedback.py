@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+from test_workbench_completion_binding import _seal_draft, register_cli_scan
 from workbench_test_support import (
     create_saved_workspace,
     get_scan,
@@ -15,6 +17,7 @@ from workbench_test_support import (
     set_triage,
     stable_target_id,
     start_delivered_scan,
+    start_workspace_scan,
     write_completed_contract,
 )
 
@@ -44,9 +47,7 @@ def _complete_scan(
     *,
     anchors: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    started = _start_scan(state_dir, workspace_id, scan_root)
-    scan_id = str(started["scanId"])
-    scan_dir = Path(str(started["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, scan_root)
     write_completed_contract(scan_dir, scan_id, target)
     if anchors is not None:
         findings_path = scan_dir / "findings.json"
@@ -70,18 +71,10 @@ def _close_finding(
     close_reason: str,
     note: str | None = None,
 ) -> dict[str, Any]:
-    arguments = [
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence_id,
-        "--status",
-        "closed",
-        "--close-reason",
-        close_reason,
-    ]
+    arguments = ["--close-reason", close_reason]
     if note is not None:
         arguments.extend(("--note", note))
-    return run_workbench(state_dir, *arguments)["scan"]
+    return set_triage(state_dir, occurrence_id, "closed", *arguments)["scan"]
 
 
 def _feedback(state_dir: Path, scan_id: str) -> dict[str, Any]:
@@ -350,4 +343,41 @@ def test_feedback_returns_only_the_50_latest_decisions(tmp_path: Path) -> None:
     assert len(feedback["falsePositives"]) == 50
     assert [finding["identity"]["anchor"] for finding in feedback["falsePositives"]] == [
         f"false-positive-{index:03d}" for index in range(54, 4, -1)
+    ]
+
+
+def test_later_offset_completion_supersedes_false_positive_feedback(tmp_path: Path) -> None:
+    state, target = tmp_path / "state", tmp_path / "target"
+    target.mkdir()
+    scans = []
+    for index in range(2):
+        scan_dir = tmp_path / f"scan-{index}"
+        scan_id = register_cli_scan(state, target, scan_dir)["scanId"]
+        write_completed_contract(scan_dir, scan_id, target)
+        manifest_path = scan_dir / "scan-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        timestamp = datetime.now(timezone.utc)
+        if index == 0:
+            timestamp -= timedelta(minutes=1)
+        else:
+            timestamp = timestamp.astimezone(timezone(timedelta(hours=-5)))
+        manifest["scan"].update(
+            startedAt="2026-10-08T00:00:00Z",
+            completedAt=timestamp.isoformat().replace("+00:00", "Z"),
+        )
+        manifest_path.write_text(json.dumps(manifest))
+        _seal_draft(scan_dir, target)
+        scan_command(state, "complete-scan", scan_id)
+        scans.append(scan_id)
+        if index == 0:
+            occurrence = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+            _close_finding(
+                state, occurrence["occurrenceId"], "false_positive", "Synthetic prior decision"
+            )
+    current = register_cli_scan(state, target, tmp_path / "scan-current")["scanId"]
+    assert _feedback(state, current)["falsePositives"] == []
+    assert [scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]] == [
+        current,
+        scans[1],
+        scans[0],
     ]

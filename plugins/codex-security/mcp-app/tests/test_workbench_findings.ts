@@ -17,6 +17,9 @@ const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
 const { parseJson, stringifyJson } = await importSource("src/helpers/json.ts");
+const { findPotentialDuplicates, listDedupeGroups } = (await importSource(
+  "src/workbench/duplicates.ts",
+)) as typeof import("../src/workbench/duplicates.ts");
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 
@@ -124,7 +127,6 @@ test("finding helper help exits without reading stdin", async () => {
     "find-potential-duplicates",
     "store-dedupe-groups",
     "list-dedupe-groups",
-    "dashboard",
   ];
   for (const command of commands) {
     // execFile leaves stdin open; help must exit without waiting for JSON.
@@ -200,6 +202,82 @@ test("import batches preserve identity, repository memberships and stable pages"
     error: "finding_conflict",
   });
   assert.equal(listStoredFindings(database, { limit: 10, offset: 0 }).total, 2);
+});
+
+test("historical timestamp spellings retain exact chronology, page boundaries, and ties", (t) => {
+  const database = open(t);
+  const timestamps = [
+    ["microsecond", "2026-10-08T01:00:00.123456Z"],
+    ["zero-b", "2026-10-08t01:00:00.000000000z"],
+    ["nanosecond", "2026-10-08T01:00:00.123456001Z"],
+    ["bare", "2026-10-08T01:00:00Z"],
+    ["offset", "2026-10-08T03:00:00.123456000+02:00"],
+    ["offset-overflow", "2026-10-08T03:00:00.123456+01:60"],
+    ["native", "2026-10-08T01:00:00.123Z"],
+    ["zero-a", "2026-10-08T01:00:00.000Z"],
+    ["later", "2026-10-08T01:00:01Z"],
+    ["upper-year", "9999-12-31T23:59:59.999999999-23:59"],
+    ["lower-year", "0001-01-01T00:00:00.000000001+23:59"],
+  ];
+  const expected = [
+    "lower-year",
+    "bare",
+    "zero-a",
+    "zero-b",
+    "native",
+    "microsecond",
+    "offset",
+    "offset-overflow",
+    "nanosecond",
+    "later",
+    "upper-year",
+  ];
+  for (const [id, timestamp] of timestamps) {
+    storeFindings(database, [entry(id)], timestamp, "repository");
+  }
+  for (const [id, timestamp] of timestamps) {
+    database
+      .prepare("INSERT INTO finding_dedupe_groups VALUES (?, ?)")
+      .run(id, timestamp);
+    database
+      .prepare("INSERT INTO finding_dedupe_group_members VALUES (?, 'native')")
+      .run(id);
+  }
+  const before = database
+    .prepare(
+      "SELECT id, created_at, updated_at, details_json FROM findings ORDER BY id",
+    )
+    .all();
+  assert.deepEqual(
+    expected.flatMap((_, offset) =>
+      listStoredFindings(database, { limit: 1, offset }).findings.map(
+        (finding) => finding.findingId,
+      ),
+    ),
+    expected,
+  );
+  assert.deepEqual(
+    listDedupeGroups(database, "native").groups.map((group) => group.groupId),
+    expected,
+  );
+  for (const repository of [undefined, "repository"]) {
+    const result = findPotentialDuplicates(database, "native", repository);
+    assert.ok(result.potentialDuplicates);
+    assert.deepEqual(
+      result.potentialDuplicates.map(
+        (finding) => (finding as Findings.Finding).findingId,
+      ),
+      expected.filter((id) => id !== "native"),
+    );
+  }
+  assert.deepEqual(
+    database
+      .prepare(
+        "SELECT id, created_at, updated_at, details_json FROM findings ORDER BY id",
+      )
+      .all(),
+    before,
+  );
 });
 
 test("mixed writers retain unchanged Python embeddings and replace supplied Node embeddings", async (t) => {

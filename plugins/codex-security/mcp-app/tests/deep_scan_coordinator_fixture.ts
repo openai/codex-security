@@ -25,6 +25,7 @@ import { importModule } from "./import-module.ts";
 export const {
   DeepScanCoordinator,
   DeepScanCoordinatorRegistry,
+  WorkbenchDeepScanStore,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,
   AsyncLock,
@@ -34,9 +35,10 @@ export const {
   stdin: {
     contents: `
       export * from "./registry.ts";
+      export { WorkbenchDeepScanStore } from "./store.ts";
       export { classifyCodexWorkerError } from "./errors.ts";
     `,
-    resolveDir: new URL("../src/deep-scan/", import.meta.url).pathname,
+    resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
   },
   loader: { ".md": "text" },
 });
