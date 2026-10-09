@@ -854,14 +854,12 @@ def test_bad_diff_revision_keeps_git_diagnostic_without_traceback(tmp_path: Path
     (tmp_path / "app.py").write_text("print('synthetic')\n")
     git(tmp_path, "add", ".")
     git(tmp_path, "commit", "-m", "Synthetic baseline")
-    result = run_cli(
+    result = run_repo_cli(
         "make-diff-rank-input",
-        "--repo",
-        str(tmp_path),
+        tmp_path,
+        tmp_path / "rank.jsonl",
         "--base",
         "missing-synthetic-revision",
-        "--out",
-        str(tmp_path / "rank.jsonl"),
         check=False,
     )
     assert result.returncode != 0
@@ -874,14 +872,12 @@ def test_unavailable_git_reports_status_without_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CODEX_SECURITY_GIT", "")
-    result = run_cli(
+    result = run_repo_cli(
         "make-diff-rank-input",
-        "--repo",
-        str(tmp_path),
+        tmp_path,
+        tmp_path / "rank.jsonl",
         "--base",
         "HEAD",
-        "--out",
-        str(tmp_path / "rank.jsonl"),
         check=False,
     )
     assert result.returncode != 0
