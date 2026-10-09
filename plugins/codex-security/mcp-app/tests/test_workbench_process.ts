@@ -140,7 +140,10 @@ for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
             ).stdout.trim();
       await mkdir(hooks, { recursive: true });
       await writeFile(
-        path.join(hooks, "sitecustomize.py"),
+        path.join(
+          hooks,
+          variable === "PYTHONPATH" ? "sitecustomize.py" : "usercustomize.py",
+        ),
         `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("startup hook ran")\n`,
       );
       await promisify(execFile)(python, ["-X", "utf8", "-B", "-c", "pass"]);

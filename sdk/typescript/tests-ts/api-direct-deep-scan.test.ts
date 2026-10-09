@@ -1,11 +1,15 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { hash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
-import { copyCompletedScan } from "./plugin-root.js";
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import {
   completedEvents,
+  preparedRuntime,
   scanRuntimeDependencies,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -35,6 +39,7 @@ test("Deep Scan uses the engine and retains SDK finalization and post-scan instr
   const started = mock();
   const client = TestClient.withDependencies({
     ...scanRuntimeDependencies(codexHome, scanDir),
+    supportsDirectDeepScan: async () => true,
     environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
     createCodex: () => ({
       startThread: () => ({ id: null, runStreamed: parentTurn }),
@@ -105,4 +110,93 @@ test("Deep Scan uses the engine and retains SDK finalization and post-scan instr
   } finally {
     await client.close();
   }
+});
+
+test.each(["configured", "managed"] as const)(
+  "Bun Deep Scans retain the parent route and %s Node configuration",
+  async (selection) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const environment = {
+      PATH: "",
+      ...(selection === "configured"
+        ? { CODEX_MCP_NODE_PATH: join(root, "managed-node") }
+        : { XDG_CACHE_HOME: join(root, "managed-cache") }),
+    };
+    const parentTurn = mock(async (prompt: string) => {
+      expect(prompt).toContain("start_codex_security_deep_scan");
+      throw new Error("parent route reached");
+    });
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model: "gpt-6.1-sol",
+          model_reasoning_effort: "high",
+        },
+      },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        environment: {
+          ...environment,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        createCodex: (options) => {
+          expect(options.env).toMatchObject(environment);
+          expect(options.config).toMatchObject({
+            model: "gpt-6.1-sol",
+            model_reasoning_effort: "high",
+          });
+          return {
+            startThread: (options) => {
+              expect(options.workingDirectory).toBe(scanDir);
+              return { id: null, runStreamed: parentTurn };
+            },
+          };
+        },
+        runDeepScan: async function* () {
+          throw new Error("unexpected direct engine");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+        }),
+      ).rejects.toThrow("parent route reached");
+      expect(parentTurn).toHaveBeenCalledTimes(1);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test("Node retains the direct Deep Scan capability", async () => {
+  const root = await temporaryDirectory();
+  const source = new URL("../src/deep-scan.ts", import.meta.url);
+  const built = await Bun.build({
+    entrypoints: [fileURLToPath(source)],
+    target: "node",
+    format: "esm",
+    define: { "import.meta.url": JSON.stringify(source.href) },
+  });
+  expect(built.success).toBe(true);
+  const module = join(root, "deep-scan.mjs");
+  await writeFile(module, await built.outputs[0]!.text());
+  await promisify(execFile)("node", [
+    "--input-type=module",
+    "--eval",
+    `import assert from "node:assert/strict";
+     const { supportsDirectDeepScan } = await import(${JSON.stringify(pathToFileURL(module).href)});
+     assert.equal(await supportsDirectDeepScan(${JSON.stringify(PLUGIN_ROOT)}), true);`,
+  ]);
 });

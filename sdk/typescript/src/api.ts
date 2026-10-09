@@ -486,6 +486,7 @@ interface ClientDependencies {
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
   runDeepScan?: typeof runDeepScan;
+  supportsDirectDeepScan?: typeof supportsDirectDeepScan;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -1456,7 +1457,9 @@ export class CodexSecurity {
       const directDeepScan =
         mode === "deep" &&
         options.resumeScanId === undefined &&
-        (await supportsDirectDeepScan(runtime.plugin.pluginRoot));
+        (await (
+          this.#dependencies.supportsDirectDeepScan ?? supportsDirectDeepScan
+        )(runtime.plugin.pluginRoot));
       const discoveryPrompt =
         options.validationPrompt === undefined
           ? undefined

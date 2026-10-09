@@ -13,6 +13,8 @@ import { withCodexPreflightLock } from "./provider-profile.js";
 export async function supportsDirectDeepScan(
   pluginRoot: string,
 ): Promise<boolean> {
+  // The native parent keeps the plugin's configured Node selection under Bun.
+  if (process.versions["bun"]) return false;
   const manifest = JSON.parse(
     await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
