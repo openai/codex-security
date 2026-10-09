@@ -28,7 +28,8 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./schemas/project-config.schema.json": "./schemas/project-config.schema.json"
+    "./schemas/project-config.schema.json": "./schemas/project-config.schema.json",
+    "./schemas/hosted-scan-v2.fixture.json": "./schemas/hosted-scan-v2.fixture.json"
   },
   "bin": {
     "codex-security": "./bin/codex-security.mjs",
@@ -43,7 +44,8 @@
     "README.md",
     "docs/cli.md",
     "docs/findings-service.md",
-    "docs/dedupe-records.md"
+    "docs/dedupe-records.md",
+    "docs/hosted-scans.md"
   ],
   "publishConfig": {
     "access": "public",

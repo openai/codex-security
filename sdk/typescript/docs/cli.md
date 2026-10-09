@@ -1434,3 +1434,7 @@ capabilities, no-new-privileges, and seccomp policy. Hosts that permit nested us
 namespaces do not need it. The legacy Landlock fallback is unsupported.
 See the [Docker guide](https://github.com/openai/codex-security/blob/main/docker/README.md)
 for deployment and source-build instructions.
+
+### Hosted Standard scan
+
+`codex-security scan --host` runs one versioned JSON-RPC invocation with an explicit host executor. Use it alone; it never performs local inference. See [the hosted scan protocol](hosted-scans.md) for input, filesystem, artifact, usage, and cancellation requirements.

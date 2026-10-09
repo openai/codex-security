@@ -2,6 +2,13 @@
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
+  ScanExecutionError,
+  ScanExecutionResultSchema,
+  type ScanExecutor,
+  type ScanExecutionEvent,
+  type ScanExecutionRequest,
+} from "./scan-executor.js";
+import {
   chmod,
   lstat,
   mkdir,
@@ -371,6 +378,7 @@ export interface ValidationResult {
 }
 
 export type ScanAuthentication =
+  | { method: "host"; verified: false }
   | { method: "command"; verified: false }
   | {
       method: "api_key";
@@ -467,6 +475,15 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
+  /** Explicit hosted execution; never falls back to createCodex. */
+  hostedScan?: {
+    executor: ScanExecutor;
+    context: Pick<
+      ScanExecutionRequest,
+      "repository" | "revision" | "scope" | "identity"
+    >;
+    onEvent(event: ScanExecutionEvent): void;
+  };
   createCodex(
     options: CodexOptions & { nativeProfile?: string },
   ): CodexClientLike | Promise<CodexClientLike>;
@@ -540,6 +557,11 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
+    // Reject the removed experimental option rather than starting local inference.
+    if ("hosted" in options)
+      throw new CodexSecurityError(
+        "Use runHostedScan with an executor for hosted execution.",
+      );
     return await this.#trackOperation(() =>
       options.workflowId === undefined
         ? this.#run(repository, { ...options })
@@ -2284,6 +2306,7 @@ export class CodexSecurity {
           )(`Could not run post-scan instructions: ${errorMessage(error)}`);
         }
       }
+      if (this.#dependencies.hostedScan !== undefined) return result;
       try {
         const runWorkbench = (args: readonly string[], input?: string) =>
           workbench(workbenchOptions, args, input);
@@ -2478,7 +2501,11 @@ export class CodexSecurity {
         }
       }
       if (this.#closed) this.#requireOpen();
-      if (signal.aborted && !(failure instanceof ScanInterruptedError)) {
+      if (
+        signal.aborted &&
+        !(failure instanceof ScanInterruptedError) &&
+        !(failure instanceof ScanExecutionError)
+      ) {
         throwIfAborted(signal, scanDir);
       }
       throw failure;
@@ -2723,6 +2750,86 @@ export class CodexSecurity {
     config?: JsonObject,
     configOverrides: string[] = [],
   ): Promise<{ codex: CodexClientLike; environment: ProcessEnvironment }> {
+    const hosted = this.#dependencies.hostedScan;
+    if (hosted !== undefined) {
+      const environment = {
+        ...session.runtime.environment,
+        ...runtimePaths,
+      };
+      const model = scanModelConfiguration(session.effectiveConfig);
+      return {
+        environment,
+        codex: {
+          startThread: () => {
+            let id: string | null = null;
+            return {
+              get id() {
+                return id;
+              },
+              async runStreamed(prompt, { signal }) {
+                const request = {
+                  version: 2 as const,
+                  requestId: randomUUID(),
+                  ...hosted.context,
+                  scanId: runtimePaths["CODEX_SECURITY_SCAN_ID"]!,
+                  prompt,
+                  ...model,
+                  runtime: {
+                    pluginRoot: session.runtime.plugin.pluginRoot,
+                    pluginVersion: session.runtime.plugin.version,
+                    stateDirectory: runtimePaths["CODEX_SECURITY_STATE_DIR"]!,
+                    outputDirectory: runtimePaths["CODEX_SECURITY_SCAN_DIR"]!,
+                    environment,
+                  },
+                };
+                // A transport failure is terminal; only the host can reconcile
+                // whether remote execution was accepted.
+                let result;
+                try {
+                  result = ScanExecutionResultSchema.parse(
+                    await hosted.executor.run(request, {
+                      signal: signal ?? new AbortController().signal,
+                      onEvent: hosted.onEvent,
+                    }),
+                  );
+                } catch (error) {
+                  // Transport failure does not prove non-acceptance. Never resubmit.
+                  throw new ScanExecutionError({
+                    requestId: request.requestId,
+                    status: "acceptance_unknown",
+                    message: errorMessage(error),
+                  });
+                }
+                if (result.requestId !== request.requestId)
+                  throw new ScanExecutionError({
+                    ...result,
+                    requestId: request.requestId,
+                    status: "acceptance_unknown",
+                    message:
+                      "Execution response does not match the active request.",
+                  });
+                if (result.status !== "completed")
+                  throw new ScanExecutionError(result);
+                id = result.sessionId!;
+                return {
+                  events: (async function* () {
+                    yield { type: "thread.started", thread_id: id };
+                    yield {
+                      type: "item.completed",
+                      item: {
+                        type: "agent_message",
+                        text: result.finalResponse ?? "",
+                      },
+                    };
+                    yield { type: "turn.completed", usage: result.usage };
+                  })(),
+                };
+              },
+            };
+          },
+        },
+      };
+    }
     const {
       runtime,
       runtimeHome,
@@ -2853,6 +2960,60 @@ export class CodexSecurity {
     temporaryRoot?: string,
     deepScan = false,
   ): Promise<PreparedSession> {
+    if (this.#dependencies.hostedScan !== undefined) {
+      // Hosted scans use only the explicitly selected bundle and configuration.
+      // No local auth, Codex subprocess, provider profile, or ambient config.
+      const environment = this.#dependencies.environment;
+      const runtimeHome = await createIsolatedHome(temporaryRoot, (path) =>
+        requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+      );
+      const pluginRoot = await bundledPluginRoot();
+      const metadata = await pluginMetadata(pluginRoot);
+      const effectiveConfig = {
+        // The executor supplies its actual tools and capacity. Local Codex
+        // defaults must not masquerade as hosted runtime capabilities.
+        approval_policy: "never",
+        ...this.config.codexOverrides,
+      };
+      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
+      const configPath = join(runtimeHome, "config-preflight.toml");
+      await writeCodexConfig(configPath, preflightConfig);
+      const runtime: PreparedRuntime = {
+        codexHome: runtimeHome,
+        bootstrapWorkspace: runtimeHome,
+        configPath,
+        credentialsAvailable: false,
+        environment: definedEnvironment(environment),
+        plugin: {
+          ...metadata,
+          pluginRoot,
+          installedRoot: pluginRoot,
+          marketplaceRoot: pluginRoot,
+          marketplaceName: "codex-security-sdk",
+        },
+      };
+      this.#runtime = runtime;
+      const python = await resolvePluginPython({
+        environment,
+        protectedRoot,
+        signal,
+      });
+      return {
+        runtime,
+        runtimeHome,
+        effectiveConfig,
+        preflightConfig,
+        sessionConfig: preflightConfig,
+        modelProvider: "host",
+        externalProvider: null,
+        apiKey: null,
+        scanEnvironment: environment,
+        authentication: { method: "host", verified: false },
+        approvalPolicy: "never",
+        python,
+        releaseCredentialHome: null,
+      };
+    }
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     const checkOpen = (): void => {
       this.#requireOpen();
