@@ -460,7 +460,7 @@ def _saved_finding_links(connection: sqlite3.Connection, scan_ids: set[str]) -> 
             FROM scan_comparison_matches AS matches
             JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
             JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
-            WHERE matches.before_scan_id IN ({placeholders})
+            WHERE matches.before_scan_id IN (SELECT value FROM json_each(?))
             ORDER BY matches.before_scan_id, after.scan_id, before.finding_id, after.finding_id
             """,
             sorted(scan_ids),
@@ -828,14 +828,8 @@ def _rows_for_ids(
     connection: sqlite3.Connection, query: str, ids: Iterable[str]
 ) -> Iterator[sqlite3.Row]:
     values = tuple(dict.fromkeys(ids))
-    getlimit = getattr(connection, "getlimit", None)
-    # Python 3.10 lacks getlimit; 999 is SQLite's older host-parameter limit.
-    limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if getlimit else 999
-    for start in range(0, len(values), limit):
-        batch = values[start : start + limit]
-        yield from connection.execute(
-            query.format(placeholders=", ".join("?" for _ in batch)), batch
-        )
+    if values:
+        yield from connection.execute(query, (json.dumps(values),))
 
 
 # Stable finding IDs already include the target identity. Follow their indexed
@@ -855,7 +849,7 @@ _LINKED_FINDINGS_SQL = f"""
     WITH RECURSIVE linked(finding_id) AS (
         SELECT occurrences.finding_id
         FROM finding_occurrences AS occurrences
-        WHERE occurrences.id IN ({{placeholders}})
+        WHERE occurrences.id IN (SELECT value FROM json_each(?))
         UNION
         SELECT neighbor.finding_id
         {_FINDING_NEIGHBORS_SQL}
@@ -924,7 +918,7 @@ def finding_relations(
         for row in _rows_for_ids(
             connection,
             "SELECT id, finding_id, scan_id, title FROM finding_occurrences "
-            "WHERE id IN ({placeholders})",
+            "WHERE id IN (SELECT value FROM json_each(?))",
             (pair[key] for pair in pairs for key in ("beforeOccurrenceId", "afterOccurrenceId")),
         )
     }

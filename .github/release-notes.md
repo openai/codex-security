@@ -172,6 +172,8 @@
 - reuse repeated workflow configuration ([#1464](https://github.com/openai/codex-security/pull/1464))
 - remove redundant dashboard copies ([#1451](https://github.com/openai/codex-security/pull/1451))
 - consolidate Deep Scan preflight compatibility coverage ([#1482](https://github.com/openai/codex-security/pull/1482))
+- use workbench for parent draft publication ([#1487](https://github.com/openai/codex-security/pull/1487))
+- simplify workbench history and usage readers ([#1495](https://github.com/openai/codex-security/pull/1495))
 
 <!-- release-section: highlights:end -->
 
