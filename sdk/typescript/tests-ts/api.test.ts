@@ -1837,6 +1837,8 @@ describe("CodexSecurity orchestration", () => {
           windows: { sandbox: "elevated" },
           profiles: {
             "cloud.production": {
+              model: "synthetic-profile-model",
+              model_reasoning_effort: "high",
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
@@ -1861,6 +1863,11 @@ describe("CodexSecurity orchestration", () => {
     };
     const clients = await Promise.all(
       scenarios.map(async ([overrides, expected, expectedTier], index) => {
+        const expectedModel = {
+          model:
+            index === 3 ? "synthetic-profile-model" : "openai.gpt-5.6-luna",
+          model_reasoning_effort: index === 3 ? "high" : "xhigh",
+        };
         const scanDir = join(root, `scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
         const instructionsFile =
@@ -1901,6 +1908,7 @@ describe("CodexSecurity orchestration", () => {
                 id: null,
                 async runStreamed() {
                   expect(threadOptions.workingDirectory).toBe(scanDir);
+                  expect(options.config).toMatchObject(expectedModel);
                   if (++started === scenarios.length) allStarted.resolve();
                   await allStarted.promise;
                   const mcpEnvironment = Object.fromEntries(
@@ -1985,8 +1993,8 @@ describe("CodexSecurity orchestration", () => {
                     await readFile(configPath!, "utf8"),
                   ) as JsonObject;
                   expect(resolveCodexProfile(config)).toMatchObject({
+                    ...expectedModel,
                     model_reasoning_summary: expected,
-                    model_reasoning_effort: "xhigh",
                     model_provider: "amazon-bedrock",
                   });
                   expect(config["service_tier"]).toBe(expectedTier);
@@ -6760,6 +6768,7 @@ describe("CodexSecurity orchestration", () => {
     const bundledTools = join(dirname(dirname(executable)), "codex-path");
     const inheritedTools = join(root, "operator-tools");
     await mkdir(bundledTools, { recursive: true });
+    await mkdir(dirname(executable));
     await mkdir(inheritedTools);
     const originalPlatform = Object.getOwnPropertyDescriptor(
       process,
