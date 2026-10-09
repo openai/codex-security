@@ -533,7 +533,7 @@ jobs:
     needs: [validate-title, package]
     runs-on: windows-latest
     timeout-minutes: 20
-    strategy:
+    strategy: &windows-node-strategy
       fail-fast: false
       matrix:
         node: ["22.13.0", "24"]
@@ -560,10 +560,7 @@ jobs:
         windows-test,
         windows-verify,
       ]
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["22.13.0", "24"]
+    strategy: *windows-node-strategy
     steps:
       - name: Require every Windows coverage job
         if: needs.validate-title.result != 'success' || (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')
