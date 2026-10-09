@@ -1211,13 +1211,7 @@ async function testUnsupportedProviderSnapshotFailsBeforeLaunch() {
     process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
     process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepPath;
     await assert.rejects(
-      new CodexSdkWorkerExecutor({ parentSandbox: trustedParentSandbox }).run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory: fixture.root,
-        subagents: 0,
-        signal: new AbortController().signal,
-      }),
+      runWorker(promptPath, fixture.root),
       (error: Error) =>
         error.name === "DeepScanNonRetryableError" &&
         error.message.includes("Update the SDK and bundled plugin together"),
@@ -1232,15 +1226,7 @@ async function testUnsupportedProviderSnapshotFailsBeforeLaunch() {
         stringifyToml({ worker_runtime: { native_profile: nativeProfile } }),
       );
       await assert.rejects(
-        new CodexSdkWorkerExecutor({ parentSandbox: trustedParentSandbox }).run(
-          {
-            kind: "discovery",
-            promptPath,
-            workingDirectory: fixture.root,
-            subagents: 0,
-            signal: new AbortController().signal,
-          },
-        ),
+        runWorker(promptPath, fixture.root),
         (error: Error) =>
           error.name === "DeepScanNonRetryableError" &&
           error.message.includes("invalid --profile value"),

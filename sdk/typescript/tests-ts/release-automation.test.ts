@@ -364,6 +364,24 @@ function workflowStepShell(workflow: string, stepName: string): string {
   return step.run;
 }
 
+function runReleaseLabels(
+  title: string,
+  routes: readonly string[],
+  setup: readonly string[] = [],
+  shiftEndpoint = true,
+) {
+  const mock = [...setup, releaseLabelGhMock(routes, shiftEndpoint)].join("\n");
+  const script = workflowStepShell(
+    releaseLabelsWorkflow,
+    "Categorize pull request without checking out its code",
+  );
+  return runShell(`${mock}\n${script}`, {
+    GITHUB_REPOSITORY: "test/codex-security",
+    MOCK_PR_TITLE: title,
+    PR_NUMBER: "17",
+  });
+}
+
 async function evaluateWorkflowCondition(
   condition: string,
   values: Record<string, string>,
@@ -3905,18 +3923,9 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "preserves a manually excluded release and reconciles its category after retitling to $title",
     async ({ title, expectedLabel }) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
-      );
-      const mock = [
-        "base64() {",
-        '  if [[ "${1:-}" == "--decode" ]]; then',
-        "    return 64",
-        "  fi",
-        '  command base64 "$@"',
-        "}",
-        releaseLabelGhMock([
+      const result = await runReleaseLabels(
+        title,
+        [
           '    "GET repos/test/codex-security/issues/17/labels")',
           "      printf '%s\\n' enhancement skip-release-notes",
           "      ;;",
@@ -3930,13 +3939,16 @@ describe("GitHub release workflow safeguards", () => {
           "      printf '%s\\n' 'removed a manually excluded release label'",
           "      return 70",
           "      ;;",
-        ]),
-      ].join("\n");
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
+        ],
+        [
+          "base64() {",
+          '  if [[ "${1:-}" == "--decode" ]]; then',
+          "    return 64",
+          "  fi",
+          '  command base64 "$@"',
+          "}",
+        ],
+      );
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(
@@ -3960,11 +3972,7 @@ describe("GitHub release workflow safeguards", () => {
   );
 
   test("preserves the latest unattributed skip label after earlier automation", async () => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = releaseLabelGhMock([
+    const result = await runReleaseLabels("feat: customer-visible change", [
       '    "GET repos/test/codex-security/issues/17")',
       "      printf '%s' 'feat: customer-visible change' | base64",
       "      ;;",
@@ -3983,10 +3991,6 @@ describe("GitHub release workflow safeguards", () => {
       "      return 70",
       "      ;;",
     ]);
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: "test/codex-security",
-      PR_NUMBER: "17",
-    });
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
@@ -4007,11 +4011,7 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "reconciles an automatic skip label after retitling to $title",
     async ({ title, label }) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
-      );
-      const mock = releaseLabelGhMock([
+      const result = await runReleaseLabels(title, [
         '    "GET repos/test/codex-security/issues/17/labels")',
         "      printf '%s\\n' skip-release-notes",
         "      ;;",
@@ -4022,11 +4022,6 @@ describe("GitHub release workflow safeguards", () => {
         "      printf '%s\\n' 'removed automatically applied skip-release-notes'",
         "      ;;",
       ]);
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(
@@ -4061,11 +4056,7 @@ describe("GitHub release workflow safeguards", () => {
       label: "breaking-change",
     },
   ])("categorizes breaking-change title $title", async ({ title, label }) => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = releaseLabelGhMock([
+    const result = await runReleaseLabels(title, [
       '    "GET repos/test/codex-security/issues/17/labels")',
       "      return 0",
       "      ;;",
@@ -4073,11 +4064,6 @@ describe("GitHub release workflow safeguards", () => {
       "      return 0",
       "      ;;",
     ]);
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: "test/codex-security",
-      MOCK_PR_TITLE: title,
-      PR_NUMBER: "17",
-    });
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`labels[]=${label}`);
@@ -4090,41 +4076,31 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "excludes %s and recovers from concurrent skip-label creation",
     async (title) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
+      const result = await runReleaseLabels(
+        title,
+        [
+          '    "GET repos/test/codex-security/issues/17")',
+          "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+          "      ;;",
+          '    "GET repos/test/codex-security/issues/17/labels")',
+          "      return 0",
+          "      ;;",
+          '    "GET repos/test/codex-security/labels/skip-release-notes")',
+          '      [[ "$skip_label_exists" == 1 ]]',
+          "      ;;",
+          '    "POST repos/test/codex-security/labels")',
+          "      skip_label_exists=1",
+          "      return 1",
+          "      ;;",
+          '    "POST repos/test/codex-security/issues/17/labels")',
+          '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
+          "      printf '%s\\n' 'applied skip-release-notes'",
+          "      ;;",
+          "    *) return 66 ;;",
+        ],
+        ["skip_label_exists=0"],
+        false,
       );
-      const mock = [
-        "skip_label_exists=0",
-        releaseLabelGhMock(
-          [
-            '    "GET repos/test/codex-security/issues/17")',
-            "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-            "      ;;",
-            '    "GET repos/test/codex-security/issues/17/labels")',
-            "      return 0",
-            "      ;;",
-            '    "GET repos/test/codex-security/labels/skip-release-notes")',
-            '      [[ "$skip_label_exists" == 1 ]]',
-            "      ;;",
-            '    "POST repos/test/codex-security/labels")',
-            "      skip_label_exists=1",
-            "      return 1",
-            "      ;;",
-            '    "POST repos/test/codex-security/issues/17/labels")',
-            '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
-            "      printf '%s\\n' 'applied skip-release-notes'",
-            "      ;;",
-            "    *) return 66 ;;",
-          ],
-          false,
-        ),
-      ].join("\n");
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("applied skip-release-notes");
