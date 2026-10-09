@@ -15,7 +15,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
-  runHostedScan,
   normalizeHostedScope,
   normalizeHostedPaths,
   HostedScanInputSchema,
@@ -24,9 +23,8 @@ import {
 } from "../src/hosted-scan.js";
 import { runHostedScanProtocol } from "../src/hosted-scan-protocol.js";
 import { runHostProtocol } from "../src/host-protocol.js";
-import { CodexSecurity, ScanExecutionError } from "../src/index.js";
+import { CodexSecurity, runHostedScan } from "../src/index.js";
 import type {
-  HostedScanExecution,
   ScanExecutionEvent,
   ScanExecutionResult,
 } from "../src/scan-executor.js";
@@ -267,6 +265,7 @@ test("hosted aliases require a canonical path before inference, including aliase
 });
 
 test("a completed model turn without artifacts is not a completed scan", async () => {
+  const usage = { input_tokens: 123, output_tokens: 7 };
   const result = await runHostedScan(await fixture(), {
     executor: {
       async run(request) {
@@ -274,12 +273,18 @@ test("a completed model turn without artifacts is not a completed scan", async (
           requestId: request.requestId,
           status: "completed",
           sessionId: "host-session",
+          usage,
         };
       },
     },
   });
   expect(result.status).not.toBe("completed");
   expect(result.artifacts).toEqual([]);
+  expect(result.execution).toMatchObject({
+    status: "completed",
+    sessionId: "host-session",
+    usage,
+  });
 });
 
 test("sealed partial coverage remains incomplete", async () => {
@@ -491,20 +496,6 @@ test.each([false, true])(
   },
 );
 
-function hostedOptions(
-  input: HostedScanInput,
-  executor: HostedScanExecution["executor"],
-): HostedScanExecution {
-  return {
-    executor,
-    revision: input.revision,
-    identity: input.identity,
-    stateDirectory: input.stateDirectory,
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-  };
-}
-
 const progressEvent: ScanExecutionEvent = {
   type: "progress",
   progress: { phase: "discovery", filesCompleted: 1, filesTotal: 2 },
@@ -627,128 +618,85 @@ test("one missing or escaping path rejects the entire multi-path request before 
   ).rejects.toThrow();
 });
 
-test("public SDK injects executor, forwards progress, isolates observer errors and defaults to full scan", async () => {
+test("standalone SDK forwards progress, isolates observer errors and defaults to full scan", async () => {
   const input = await fixture();
-  const client = new CodexSecurity();
+  delete input.scope;
   const events: string[] = [];
-  try {
-    const result = await client.run(input.repository, {
-      outputDir: input.outputDirectory,
-      hosted: hostedOptions(input, {
-        async run(request, options) {
-          expect(request.scope.paths).toEqual(["."]);
-          expect(request.runtime.environment).not.toHaveProperty(
-            "OPENAI_API_KEY",
-          );
-          options.onEvent?.(progressEvent);
-          options.onEvent?.(activityEvent);
-          await writeDraft(request);
-          return {
-            requestId: request.requestId,
-            status: "completed",
-            sessionId: "public-sdk",
-          };
-        },
-      }),
-      onProgress() {
-        events.push("progress");
+  const result = await runHostedScan(input, {
+    executor: {
+      async run(request, options) {
+        expect(request.scope.paths).toEqual(["."]);
+        expect(request.runtime.environment).not.toHaveProperty(
+          "OPENAI_API_KEY",
+        );
+        options.onEvent?.(progressEvent);
+        options.onEvent?.(activityEvent);
+        await writeDraft(request);
+        return {
+          requestId: request.requestId,
+          status: "completed",
+          sessionId: "public-sdk",
+        };
+      },
+    },
+    onEvent(event) {
+      events.push(event.type);
+      if (event.type === "progress")
         throw new Error("Optional progress failed");
-      },
-      onActivity() {
-        events.push("activity");
-      },
-      onObserverError() {
-        events.push("observer-error");
-      },
-    });
-    expect(result.coverage.completeness).toBe("complete");
-    expect(events).toContain("progress");
-    expect(events).toContain("activity");
-    expect(events).toContain("observer-error");
-  } finally {
-    await client.close();
-  }
+    },
+  });
+  expect(result.status, JSON.stringify(result)).toBe("completed");
+  expect(events).toContain("progress");
+  expect(events).toContain("activity");
 });
 
-test("hosted model settings override the caller's selected profile", async () => {
+test("standalone SDK passes the frozen model settings to its executor", async () => {
   const input = await fixture();
-  const client = new CodexSecurity({
-    codexOverrides: {
-      profile: "local",
-      profiles: {
-        local: {
-          model: "gpt-5.6-luna",
-          model_reasoning_effort: "low",
-        },
+  const requests: ScanExecutionRequest[] = [];
+  const result = await runHostedScan(input, {
+    executor: {
+      async run(request) {
+        requests.push(request);
+        return {
+          requestId: request.requestId,
+          status: "failed",
+          message: "Synthetic stop after dispatch",
+        };
       },
     },
   });
-  const requests: ScanExecutionRequest[] = [];
-  try {
-    await expect(
-      client.run(input.repository, {
-        outputDir: input.outputDirectory,
-        hosted: hostedOptions(input, {
-          async run(request) {
-            requests.push(request);
-            return {
-              requestId: request.requestId,
-              status: "failed",
-              message: "Synthetic stop after dispatch",
-            };
-          },
-        }),
-      }),
-    ).rejects.toBeInstanceOf(ScanExecutionError);
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.model).toBe(input.model);
-    expect(requests[0]?.reasoningEffort).toBe(input.reasoningEffort);
-  } finally {
-    await client.close();
-  }
+  expect(result.status).toBe("failed");
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.model).toBe(input.model);
+  expect(requests[0]?.reasoningEffort).toBe(input.reasoningEffort);
 });
 
 test.each(["failed", "canceled", "acceptance_unknown"] as const)(
-  "public SDK and terminal response retain %s host identity and usage",
+  "standalone SDK retains %s host identity and usage in its terminal receipt",
   async (status) => {
     const input = await fixture();
     const usage = {
       authoritative_snapshot: { input_tokens: 123, output_tokens: 7 },
     };
-    const client = new CodexSecurity();
     let receipt: ScanExecutionResult | undefined;
-    const executor = {
-      async run(request: ScanExecutionRequest): Promise<ScanExecutionResult> {
-        receipt = {
-          requestId: request.requestId,
-          status,
-          sessionId: "remote-session",
-          usage,
-          error: {
-            code: -32010,
-            message: "Recorded remote outcome",
-            data: { remoteTurnId: "turn-1" },
-          },
-        };
-        return receipt;
+    const terminal = await runHostedScan(input, {
+      executor: {
+        async run(request) {
+          receipt = {
+            requestId: request.requestId,
+            status,
+            sessionId: "remote-session",
+            usage,
+            error: {
+              code: -32010,
+              message: "Recorded remote outcome",
+              data: { remoteTurnId: "turn-1" },
+            },
+          };
+          return receipt;
+        },
       },
-    };
-    try {
-      await expect(
-        client.run(input.repository, {
-          outputDir: input.outputDirectory,
-          target: ["service-a", "service-b"],
-          hosted: hostedOptions(input, executor),
-        }),
-      ).rejects.toBeInstanceOf(ScanExecutionError);
-    } finally {
-      await client.close();
-    }
-    const output = join(input.outputDirectory, "another-output");
-    const terminal = await runHostedScan(
-      { ...input, outputDirectory: output },
-      { executor },
-    );
+    });
     expect(terminal.status).toBe(status);
     expect(terminal.execution).toEqual(receipt);
     expect(terminal.artifacts).toEqual([]);
@@ -758,36 +706,28 @@ test.each(["failed", "canceled", "acceptance_unknown"] as const)(
 test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
   const input = await fixture();
   const controller = new AbortController();
-  const client = new CodexSecurity();
-  try {
-    await client.run(input.repository, {
-      outputDir: input.outputDirectory,
-      signal: controller.signal,
-      hosted: hostedOptions(input, {
-        async run(request, options) {
-          controller.abort();
-          expect(options.signal.aborted).toBe(true);
-          await Promise.resolve();
-          return {
-            requestId: request.requestId,
-            status: "canceled",
-            sessionId: "canceled-session",
-            usage: { input_tokens: 42 },
-          };
-        },
-      }),
-    });
-    throw new Error("Expected cancellation");
-  } catch (error) {
-    expect(error).toBeInstanceOf(ScanExecutionError);
-    expect((error as ScanExecutionError).result).toMatchObject({
-      status: "canceled",
-      sessionId: "canceled-session",
-      usage: { input_tokens: 42 },
-    });
-  } finally {
-    await client.close();
-  }
+  const result = await runHostedScan(input, {
+    signal: controller.signal,
+    executor: {
+      async run(request, options) {
+        controller.abort();
+        expect(options.signal.aborted).toBe(true);
+        await Promise.resolve();
+        return {
+          requestId: request.requestId,
+          status: "canceled",
+          sessionId: "canceled-session",
+          usage: { input_tokens: 42 },
+        };
+      },
+    },
+  });
+  expect(result.status).toBe("canceled");
+  expect(result.execution).toMatchObject({
+    status: "canceled",
+    sessionId: "canceled-session",
+    usage: { input_tokens: 42 },
+  });
 });
 
 test("mismatched execution receipts are never accepted or retried", async () => {
@@ -999,34 +939,34 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
   ).toBe(true);
 });
 
-test("public hosted injection rejects unsupported execution paths before dispatch", async () => {
+test("standalone SDK rejects local scan options and configuration before dispatch", async () => {
   const input = await fixture();
   let dispatched = false;
-  const client = new CodexSecurity();
-  const hosted = hostedOptions(input, {
+  const executor = {
     async run(): Promise<never> {
       dispatched = true;
       throw new Error("Unexpected execution");
     },
-  });
+  };
+  for (const extra of [
+    { mode: "deep" },
+    { config: { codexOverrides: { profile: "local" } } },
+  ])
+    await expect(
+      runHostedScan({ ...input, ...extra }, { executor }),
+    ).rejects.toThrow("Unrecognized key");
+  expect(dispatched).toBe(false);
+});
+
+test("ordinary SDK rejects the removed hosted option instead of using local inference", async () => {
+  const client = new CodexSecurity();
   try {
-    for (const options of [
-      { mode: "deep" as const },
-      { mock: true },
-      { workflowId: "local" },
-      { resumeScanId: "resume" },
-      { validationPrompt: "Run custom validation" },
-      { validationPromptFile: "validation.md" },
-      { postScanPrompt: "Run more inference" },
-    ])
-      await expect(
-        client.run(input.repository, {
-          ...options,
-          outputDir: input.outputDirectory,
-          hosted,
-        }),
-      ).rejects.toThrow("Hosted execution supports");
-    expect(dispatched).toBe(false);
+    await expect(
+      client.run("unused-repository", {
+        // @ts-expect-error Legacy JavaScript callers must fail before local inference.
+        hosted: {},
+      }),
+    ).rejects.toThrow("Use runHostedScan with an executor");
   } finally {
     await client.close();
   }

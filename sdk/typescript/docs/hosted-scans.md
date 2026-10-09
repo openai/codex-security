@@ -6,9 +6,11 @@ inference, or model fallback. Ordinary local scans keep their existing behavior.
 
 ## Public executor API
 
-Use `CodexSecurity.run(repository, { hosted, ...options })` to inject the host's
-executor into the ordinary Standard lifecycle. Omit `target` for the entire
-repository, or pass an array of literal repository-relative folders/files.
+Use the standalone `runHostedScan(input, { executor, signal, onEvent })`
+function to run one hosted Standard scan. `CodexSecurity.run()` retains its local
+scan behavior; it does not accept a hosted executor. The CLI command is a thin
+JSON-RPC adapter around the same standalone function.
+
 The CLI owns scan registration, plugin lifecycle, target checks, finalization,
 report generation and sealed artifact validation. The host owns authorization,
 frozen checkout, execution, durable run state, replay, reconciliation, usage,
@@ -18,7 +20,7 @@ deduplication consume that accepted output separately. CLI workbench state
 remains scan-domain state; there is no hosted-attempt replay store.
 
 ```ts
-import { CodexSecurity, type ScanExecutor } from "@openai/codex-security";
+import { runHostedScan, type ScanExecutor } from "@openai/codex-security";
 
 const executor: ScanExecutor = {
   async run(request, { signal, onEvent }) {
@@ -27,44 +29,47 @@ const executor: ScanExecutor = {
     return await host.executeOnce(request, { signal, onEvent });
   },
 };
-const client = new CodexSecurity();
-try {
-  const scan = await client.run("/workspace/repository", {
-    mode: "standard",
-    target: ["services/api", "services/web"],
-    outputDir: "/scan/output",
-    hosted: {
-      executor,
-      revision: "0123456789012345678901234567890123456789",
-      identity: {
-        runId: "run-1",
-        attemptId: "attempt-1",
-        buildId: "runtime-build",
-      },
-      stateDirectory: "/scan/state",
-      model: "gpt-5.6-sol",
-      reasoningEffort: "high",
+const result = await runHostedScan(
+  {
+    version: 2,
+    repository: "/workspace/repository",
+    revision: "0123456789012345678901234567890123456789",
+    scope: { paths: ["services/api", "services/web"] },
+    outputDirectory: "/scan/output",
+    stateDirectory: "/scan/state",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+    identity: {
+      runId: "run-1",
+      attemptId: "attempt-1",
+      buildId: "runtime-build",
     },
-    onProgress(progress) {
-      console.error(progress);
+  },
+  {
+    executor,
+    onEvent(event) {
+      console.error(event);
     },
-  });
-} finally {
-  await client.close();
-}
+  },
+);
 ```
+
+The function creates and closes its scan client internally, reusing the ordinary
+Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
+repository-relative folders/files. Model settings come from the frozen input;
+local profiles and other local scan options are not accepted.
 
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress
 uses the existing `ScanProgress` type; activity uses `ScanActivity`. Observer
-failures cannot stop execution. A failed/canceled/uncertain executor result throws
-`ScanExecutionError` from the SDK, preserving the exact result, session identity,
-usage, message and structured error. Local artifact finalization failures also
-retain the preceding execution result. Aborting waits for the executor to settle;
-the host must cancel remote work and return its recorded outcome.
+failures cannot stop execution. Aborting waits for the executor to settle; the
+host must cancel remote work and return its recorded outcome.
 
-`runHostedScan(input, { executor, signal, onEvent })` is the protocol-oriented
-wrapper returning the terminal envelope described below. Repeated invocations
+Preparation errors throw before execution. Execution and finalization return a
+`HostedScanResult` receipt with status `completed`, `incomplete`, `failed`,
+`canceled`, or `acceptance_unknown`. The receipt retains the executor's outcome, session
+identity, usage, message and structured error even if artifact finalization
+fails. Only validated artifacts receive hashes and sizes. Repeated invocations
 are separate scans; the host decides whether a new invocation is allowed.
 
 ## Wire contract
@@ -133,9 +138,8 @@ The execution response `result` has:
 
 A transport failure or mismatched receipt is not proof of non-acceptance. The
 CLI stops without resubmitting and leaves reconciliation to the host. The terminal
-result retains `execution` even when scanning fails or is canceled. V2 messages
-are intentionally incompatible with v1; hosts select the protocol from the
-frozen runtime's `hostProtocolVersion` and retain their v1 reader for older runs.
+result retains `execution` even when scanning fails or is canceled. The runtime's
+`hostProtocolVersion` identifies this protocol as version 2.
 A package-exported example is available at
 `@openai/codex-security/schemas/hosted-scan-v2.fixture.json`.
 

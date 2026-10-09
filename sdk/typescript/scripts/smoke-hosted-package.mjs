@@ -15,6 +15,90 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 
+async function recordDraft(request) {
+  // Exercise the same bundled tool used by a hosted executor. The plugin
+  // derives canonical metadata; the CLI finalizes and seals it afterward.
+  const plugin = spawn(
+    process.execPath,
+    [join(request.runtime.pluginRoot, "mcp/server.mjs"), "--stdio"],
+    {
+      env: {
+        ...request.runtime.environment,
+        CODEX_MCP_NODE_PATH: process.execPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  const pluginClosed = new Promise((resolve, reject) => {
+    plugin.on("close", resolve);
+    plugin.on("error", reject);
+  });
+  const messages = createInterface({ input: plugin.stdout })[
+    Symbol.asyncIterator
+  ]();
+  let pluginError = "";
+  let nextId = 0;
+  plugin.stderr.on("data", (chunk) => {
+    pluginError += chunk;
+  });
+  async function rpc(method, rpcParams) {
+    const id = ++nextId;
+    plugin.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", id, method, params: rpcParams }) + "\n",
+    );
+    for (;;) {
+      const next = await messages.next();
+      assert.equal(next.done, false, pluginError);
+      const response = JSON.parse(next.value);
+      if (response.id !== id) continue;
+      assert.equal(response.error, undefined, JSON.stringify(response.error));
+      return response.result;
+    }
+  }
+  try {
+    await rpc("initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "hosted-package-smoke", version: "1" },
+    });
+    plugin.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+        params: {},
+      }) + "\n",
+    );
+    const saved = await rpc("tools/call", {
+      name: "record_codex_security_scan_draft",
+      arguments: {
+        scanId: request.scanId,
+        complete: true,
+        threatModel: {
+          summary:
+            "The synthetic service exports a constant and has no external inputs.",
+        },
+        findings: [],
+        coverage: {
+          completeness: "complete",
+          surfaces: [
+            {
+              label: "Synthetic service",
+              disposition: "no_issue_found",
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      },
+    });
+    assert.notEqual(saved.isError, true, JSON.stringify(saved));
+  } finally {
+    plugin.stdin.end();
+    plugin.kill();
+    await pluginClosed;
+  }
+}
+
 const packageRoot = resolve(process.argv[2] ?? ".");
 const environment = Object.fromEntries(
   Object.entries(process.env).filter(([key]) =>
@@ -107,92 +191,7 @@ try {
       );
       for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY"])
         assert.equal(request.runtime.environment[key], undefined);
-      // Exercise the same bundled tool used by a hosted executor. The plugin
-      // derives canonical metadata; the CLI finalizes and seals it afterward.
-      const plugin = spawn(
-        process.execPath,
-        [join(request.runtime.pluginRoot, "mcp/server.mjs"), "--stdio"],
-        {
-          env: {
-            ...request.runtime.environment,
-            CODEX_MCP_NODE_PATH: process.execPath,
-          },
-          stdio: ["pipe", "pipe", "pipe"],
-        },
-      );
-      const pluginClosed = new Promise((resolve, reject) => {
-        plugin.on("close", resolve);
-        plugin.on("error", reject);
-      });
-      const messages = createInterface({ input: plugin.stdout })[
-        Symbol.asyncIterator
-      ]();
-      let pluginError = "";
-      let nextId = 0;
-      plugin.stderr.on("data", (chunk) => {
-        pluginError += chunk;
-      });
-      async function rpc(method, rpcParams) {
-        const id = ++nextId;
-        plugin.stdin.write(
-          JSON.stringify({ jsonrpc: "2.0", id, method, params: rpcParams }) +
-            "\n",
-        );
-        for (;;) {
-          const next = await messages.next();
-          assert.equal(next.done, false, pluginError);
-          const response = JSON.parse(next.value);
-          if (response.id !== id) continue;
-          assert.equal(
-            response.error,
-            undefined,
-            JSON.stringify(response.error),
-          );
-          return response.result;
-        }
-      }
-      try {
-        await rpc("initialize", {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: { name: "hosted-package-smoke", version: "1" },
-        });
-        plugin.stdin.write(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            method: "notifications/initialized",
-            params: {},
-          }) + "\n",
-        );
-        const saved = await rpc("tools/call", {
-          name: "record_codex_security_scan_draft",
-          arguments: {
-            scanId: request.scanId,
-            complete: true,
-            threatModel: {
-              summary:
-                "The synthetic service exports a constant and has no external inputs.",
-            },
-            findings: [],
-            coverage: {
-              completeness: "complete",
-              surfaces: [
-                {
-                  label: "Synthetic service",
-                  disposition: "no_issue_found",
-                },
-              ],
-              explicitExclusions: [],
-              deferred: [],
-            },
-          },
-        });
-        assert.notEqual(saved.isError, true, JSON.stringify(saved));
-      } finally {
-        plugin.stdin.end();
-        plugin.kill();
-        await pluginClosed;
-      }
+      await recordDraft(request);
       child.stdin.write(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -262,11 +261,57 @@ try {
     pathToFileURL(join(packageRoot, "dist/index.js")).href
   );
   assert.equal(typeof publicSdk.CodexSecurity, "function");
-  assert.equal(typeof publicSdk.ScanExecutionError, "function");
+  assert.equal(typeof publicSdk.runHostedScan, "function");
   assert.equal(
     publicSdk.HostedScanInputSchema.parse(fixture.run.params).version,
     2,
   );
+  const sdkOutput = join(root, "sdk-output");
+  let sdkRequest;
+  const sdkResult = await publicSdk.runHostedScan(
+    { ...params, scope: undefined, outputDirectory: sdkOutput },
+    {
+      executor: {
+        async run(request) {
+          assert.equal(
+            sdkRequest,
+            undefined,
+            "One SDK scan must dispatch once",
+          );
+          sdkRequest = request;
+          assert.deepEqual(request.scope, { paths: ["."] });
+          await recordDraft(request);
+          return {
+            requestId: request.requestId,
+            status: "completed",
+            sessionId: "fake-sdk-session",
+            usage: { input_tokens: 20, output_tokens: 3 },
+          };
+        },
+      },
+    },
+  );
+  assert.equal(sdkResult.status, "completed", JSON.stringify(sdkResult));
+  assert.deepEqual(sdkResult.scope, { paths: ["."] });
+  assert.equal(sdkResult.execution.sessionId, "fake-sdk-session");
+  assert.deepEqual(sdkResult.execution.usage, {
+    input_tokens: 20,
+    output_tokens: 3,
+  });
+  const sdkManifest = JSON.parse(
+    await readFile(join(sdkOutput, "scan-manifest.json"), "utf8"),
+  );
+  assert.deepEqual(sdkManifest.scan.scope.includePaths, ["."]);
+  assert.equal(sdkManifest.scan.id, sdkRequest.scanId);
+  assert.ok(sdkManifest.scan.sealedAt);
+  for (const artifact of sdkResult.artifacts) {
+    const contents = await readFile(join(sdkOutput, artifact.path));
+    assert.equal(artifact.bytes, contents.byteLength);
+    assert.equal(
+      artifact.sha256,
+      createHash("sha256").update(contents).digest("hex"),
+    );
+  }
   // A single missing path must fail the entire scope before any execution.
   const missing = spawn(
     process.execPath,
@@ -312,6 +357,7 @@ try {
       scope: coverage.includePaths,
       coverage: coverage.completeness,
       sealed: true,
+      standaloneSdk: "passed",
     }),
   );
 } finally {
