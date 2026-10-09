@@ -1991,8 +1991,7 @@ export async function main(
         "closed",
         "--close-reason",
         "false_positive",
-        "--note",
-        options.reason,
+        `--note=${options.reason}`,
       ]);
     },
   });

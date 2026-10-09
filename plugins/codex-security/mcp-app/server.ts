@@ -39,6 +39,10 @@ import {
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
 import type { DeepScanRunState } from "./src/deep-scan/types.js";
+import {
+  WORKBENCH_PYTHON,
+  WORKBENCH_STATE_UNAVAILABLE_EXIT_CODE,
+} from "./src/server/workbench-process.js";
 
 const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
@@ -61,6 +65,11 @@ const workbenchStateSelectionLock = new AsyncLock();
 
 const userContextSchema = z.string().trim().min(1);
 const editableUserContextSchema = z.string().trim();
+const pathSchema = z
+  .string()
+  .min(1)
+  .max(4096)
+  .refine((value) => value.trim().length > 0, "Path must not be blank.");
 const verifiedAccessGrantSchema = z
   .strictObject({
     level: z.enum(["tac1", "tac2", "tac3", "government"]),
@@ -160,11 +169,7 @@ const openSchema = {
     .enum(["diff", "standard", "deep"])
     .optional()
     .describe("Initial scan mode inferred from the user's request."),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  scope: pathSchema
     .optional()
     .describe(
       "Optional directory inside targetPath. Use '.' or omit it for the whole target. Target-relative paths are preferred; absolute paths inside targetPath are normalized.",
@@ -176,11 +181,7 @@ const openSchema = {
     .describe(
       "Existing workspace ID to reopen without changing its setup. When provided, omit all other fields.",
     ),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema
     .optional()
     .describe("Optional resolved local target path."),
   targetSummary: z
@@ -216,18 +217,10 @@ const startPromptOnlyScanSchema = {
     .describe(
       "Prompt-driven scan mode. Deep Scan uses start_codex_security_deep_scan instead.",
     ),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Directory inside targetPath. Use '.' for the whole target."),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Resolved local target path."),
+  scope: pathSchema.describe(
+    "Directory inside targetPath. Use '.' for the whole target.",
+  ),
+  targetPath: pathSchema.describe("Resolved local target path."),
   targetSummary: z
     .string()
     .trim()
@@ -240,17 +233,8 @@ const startPromptOnlyScanSchema = {
     .describe("Optional security focus supplied by the user."),
 };
 const startHeadlessStandardScanSchema = {
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Resolved local target path."),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema.describe("Resolved local target path."),
+  scope: pathSchema
     .optional()
     .describe(
       "Optional directory inside targetPath. Omit it or use '.' for the whole target.",
@@ -329,22 +313,22 @@ const requestUserInputSchema = {
   ),
 };
 const targetInspectionSchema = {
-  targetPath: z.string().trim().min(1).max(4096),
+  targetPath: pathSchema,
 };
 const submissionSchema = {
   diffTarget: diffTargetSchema.optional(),
   mode: z.enum(["diff", "standard", "deep"]),
-  scope: z.string().trim().min(1).max(4096),
+  scope: pathSchema,
   sessionId: z.string().uuid(),
-  targetPath: z.string().trim().min(1).max(4096),
+  targetPath: pathSchema,
   targetSummary: z.string().trim().max(2400).optional(),
   userContext: editableUserContextSchema.optional(),
 };
 const setupInspectionSchema = {
   diffTarget: diffTargetSchema.optional(),
   mode: z.enum(["diff", "standard", "deep"]),
-  scope: z.string().trim().min(1).max(4096),
-  targetPath: z.string().trim().min(1).max(4096),
+  scope: pathSchema,
+  targetPath: pathSchema,
 };
 const scanSchema = { scanId: z.string().uuid() };
 const startDeepScanSchema = {
@@ -353,20 +337,12 @@ const startDeepScanSchema = {
     .uuid()
     .optional()
     .describe("Existing app-created or previously returned Deep Scan ID."),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema
     .optional()
     .describe(
       "Resolved local target path for a first terminal or headless Deep Scan call.",
     ),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  scope: pathSchema
     .optional()
     .describe(
       "Scope inside targetPath. Deep Scan currently requires the whole target.",
@@ -519,7 +495,7 @@ const findingRemediationSchema = {
     .string()
     .regex(/^sha256:[a-f0-9]{64}$/)
     .optional(),
-  patchPath: z.string().trim().min(1).max(4096).optional(),
+  patchPath: pathSchema.optional(),
   requestId: z.string().uuid(),
   state: z.enum(["generated", "applied", "verifying", "verified", "failed"]),
   summary: z.string().trim().max(2400).optional(),
@@ -2368,7 +2344,12 @@ async function executeWorkbenchWithStateSelection(
       persistentWorkbenchStateSucceeded = true;
       return result;
     } catch (error) {
-      if (!isUnwritableSqliteOpenError(error)) throw error;
+      if (
+        !isExecError(error) ||
+        !("code" in error) ||
+        error.code !== WORKBENCH_STATE_UNAVAILABLE_EXIT_CODE
+      )
+        throw error;
       const fallbackStateDir = await pinFallbackWorkbenchStateDir();
       console.error(
         JSON.stringify({
@@ -2393,14 +2374,6 @@ async function executeWorkbench(
   stateDir?: string,
   input?: string | Buffer,
 ): Promise<JsonObject> {
-  const userContextIndex = args.indexOf("--user-context");
-  const userContext =
-    userContextIndex === -1 ? undefined : args[userContextIndex + 1];
-  const workbenchArgs = [...args];
-  if (userContextIndex !== -1) {
-    workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
-  }
-  const workbenchInput = input ?? userContext;
   const timeout = [
     "begin-deep-scan",
     "cancel-scan",
@@ -2431,7 +2404,7 @@ async function executeWorkbench(
     : 30_000;
   const execution = execFileAsync(
     pythonCommand,
-    [workbenchScriptPath(), ...workbenchArgs],
+    ["-c", WORKBENCH_PYTHON, workbenchScriptPath()],
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,
@@ -2446,12 +2419,14 @@ async function executeWorkbench(
       timeout,
     },
   );
-  if (workbenchInput !== undefined) {
-    execution.child.stdin!.on("error", () => {
-      // The workbench may exit before consuming stdin; surface its process error.
-    });
-    execution.child.stdin!.end(workbenchInput);
-  }
+  execution.child.stdin!.on("error", () => {
+    // The workbench may exit before consuming stdin; surface its process error.
+  });
+  // Match native argv's UTF-8 encoding while framing NUL separately from stdin.
+  execution.child.stdin!.write(
+    `${JSON.stringify(args.map((argument) => argument.toWellFormed()))}\n`,
+  );
+  execution.child.stdin!.end(input);
   const { stdout } = await execution.catch((error: unknown) => {
     if (
       error instanceof Error &&
@@ -2629,14 +2604,4 @@ function deepScanFailureMessage(run: DeepScanRunState): string {
     "Do not call complete_codex_security_scan in this response.",
     "Do not start a replacement Deep Scan, call cancel for this terminal scan, claim a successful or no-findings scan, satisfy a successful-scan output schema, or emit benchmark JSON.",
   ].join("\n");
-}
-
-function isUnwritableSqliteOpenError(error: unknown): boolean {
-  return /sqlite3\.OperationalError:\s*unable to open database file/i.test(
-    isExecError(error)
-      ? error.stderr
-      : error instanceof Error
-        ? error.message
-        : "",
-  );
 }

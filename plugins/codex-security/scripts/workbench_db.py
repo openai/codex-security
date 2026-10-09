@@ -216,9 +216,19 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 def connect(*, deferred: bool = False) -> sqlite3.Connection:
     path = database_path()
-    create_private_directory(path.parent)
+    try:
+        create_private_directory(path.parent)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
+            exc._codex_security_state_unavailable = True
+        raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
-        connection = sqlite3.connect(path, timeout=5)
+        try:
+            connection = sqlite3.connect(path, timeout=5)
+        except sqlite3.OperationalError as exc:
+            if str(exc) == "unable to open database file":
+                exc._codex_security_state_unavailable = True
+            raise
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
@@ -587,7 +597,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
 
 
 def require_scope(scope: str, mode: str, target: Path) -> str:
-    value = scope.strip() or "."
+    value = scope if scope.strip() else "."
     requested_scope = Path(value)
     if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
         raise SystemExit("Scan scope must use repository-relative POSIX paths.")
@@ -601,6 +611,8 @@ def require_scope(scope: str, mode: str, target: Path) -> str:
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("Scan scope must stay inside the scanned target.") from exc
     normalized = relative_scope.as_posix() or "."
+    if not normalized.strip():
+        normalized = "./" + normalized
     if mode == "deep" and normalized != ".":
         raise SystemExit("Deep Scan is repository-wide and cannot use a scoped path.")
     if not resolved_scope.is_dir():
@@ -646,8 +658,10 @@ def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
 def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     workspace_id = require_uuid(args.workspace_id, "workspace-id")
     timestamp = now()
-    target_path = optional_text(args.target_path, maximum=4096)
-    default_scope = optional_text(args.scope, maximum=4096) or "."
+    target_path = args.target_path if optional_text(args.target_path, maximum=4096) else None
+    default_scope = args.scope if optional_text(args.scope, maximum=4096) else "."
+    if any(len(value) > 4096 for value in (target_path, default_scope) if value is not None):
+        raise SystemExit("Text value must be no longer than 4096 characters.")
     diff_target_kind = args.diff_target_kind if args.mode == "diff" else None
     diff_base_revision = (
         optional_text(args.diff_base_revision, maximum=512) if args.mode == "diff" else None
@@ -2486,15 +2500,14 @@ def require_sha256_digest(value: str, label: str) -> str:
 
 
 def require_scan_relative_file(scan: sqlite3.Row, value: str) -> str:
-    normalized = optional_text(value, maximum=4096)
-    if normalized is None or "\\" in normalized:
+    if len(value) > 4096:
+        raise SystemExit("Text value must be no longer than 4096 characters.")
+    if not value.strip() or "\\" in value:
         raise SystemExit("Patch path must identify a scan-local regular file.")
-    parsed = PurePosixPath(normalized)
+    parsed = PurePosixPath(value)
     if parsed.is_absolute() or ".." in parsed.parts:
         raise SystemExit("Patch path must identify a scan-local regular file.")
-    path = artifact_path(Path(scan["scan_dir"]), parsed.as_posix(), required=True)
-    if path is None:
-        raise SystemExit("Patch path must identify a scan-local regular file.")
+    artifact_path(Path(scan["scan_dir"]), parsed.as_posix(), required=True)
     return parsed.as_posix()
 
 
