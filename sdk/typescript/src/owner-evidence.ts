@@ -2,7 +2,11 @@ import { execFile as execFileCallback } from "node:child_process";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { promisify } from "node:util";
-import { CodexSecurityError, InvalidTargetError } from "./errors.js";
+import {
+  CodexSecurityError,
+  InvalidTargetError,
+  errorMessage,
+} from "./errors.js";
 import type { OwnerFinding } from "./suggest-owners.js";
 import {
   nullIfMissingFile,
@@ -43,7 +47,10 @@ export interface OwnerContext {
   identities: OwnerIdentity[];
   evidence: OwnerEvidence[];
   limitations: string[];
-  codeowner: CodeownerIdentity | null;
+  declaredOwners: {
+    owner: CodeownerIdentity;
+    evidenceIds: string[];
+  }[];
 }
 
 /** Read committed objects, so dirty files and source symlinks are never followed. */
@@ -171,7 +178,7 @@ export async function collectOwnerEvidence(
   const context: OwnerContext = {
     identities: [],
     evidence: [],
-    codeowner: null,
+    declaredOwners: [],
     limitations: [
       "Git authors are not verified tracker accounts or proof of current employment.",
     ],
@@ -188,16 +195,6 @@ export async function collectOwnerEvidence(
     );
   if (finding.locations.length === 0)
     context.limitations.push("No source locations were supplied.");
-  const identityIndex = (name: string, email: string) => {
-    const index = context.identities.findIndex(
-      (identity) => identity.email === email,
-    );
-    if (index !== -1) return index;
-    return context.identities.push({ name, email }) - 1;
-  };
-  const add = (item: Omit<OwnerEvidence, "id">) => {
-    context.evidence.push({ id: `e${context.evidence.length + 1}`, ...item });
-  };
   const codeownersPath = [
     ".github/CODEOWNERS",
     "CODEOWNERS",
@@ -220,13 +217,8 @@ export async function collectOwnerEvidence(
         if (!hasFile(path)) continue;
         const rule = codeownersForPath(rules, path);
         if (rule === undefined) continue;
-        const owner = rule.owners[0];
-        if (owner === undefined) continue;
-        context.codeowner = owner;
-        context.limitations.push(
-          "CODEOWNERS identities are declarations; their existence and repository access are not verified.",
-        );
-        add({
+        if (rule.owners.length === 0) continue;
+        const citation = addOwnerEvidence(context, {
           kind: "codeowners",
           path: codeownersPath,
           commit: revision,
@@ -237,10 +229,51 @@ export async function collectOwnerEvidence(
           content: rule.rule,
           identityIndex: null,
         });
-        return context;
+        for (const owner of rule.owners)
+          context.declaredOwners.push({ owner, evidenceIds: [citation.id] });
       }
     }
   }
+  if (context.declaredOwners.length > 0)
+    context.limitations.push(
+      "CODEOWNERS identities are declarations; their existence and repository access are not verified.",
+    );
+  try {
+    await collectGitOwnerEvidence(finding, repository, context, stale);
+  } catch (error) {
+    if (context.declaredOwners.length === 0) throw error;
+    context.limitations.push(
+      `Git contributor evidence failed: ${errorMessage(error)}`,
+    );
+  }
+  return context;
+}
+
+function addOwnerEvidence(
+  context: OwnerContext,
+  item: Omit<OwnerEvidence, "id">,
+): OwnerEvidence {
+  const evidence = { id: `e${context.evidence.length + 1}`, ...item };
+  context.evidence.push(evidence);
+  return evidence;
+}
+
+async function collectGitOwnerEvidence(
+  finding: OwnerFinding,
+  repository: Awaited<ReturnType<typeof ownerRepository>>,
+  context: OwnerContext,
+  stale: boolean,
+): Promise<void> {
+  const { git, revision, hasFile } = repository;
+  const identityIndex = (name: string, email: string) => {
+    const index = context.identities.findIndex(
+      (identity) => identity.email === email,
+    );
+    if (index !== -1) return index;
+    return context.identities.push({ name, email }) - 1;
+  };
+  const add = (item: Omit<OwnerEvidence, "id">) =>
+    addOwnerEvidence(context, item);
   for (const path of new Set(finding.locations.map(({ path }) => path))) {
     if (!hasFile(path)) {
       context.limitations.push(`Not a regular file at HEAD: ${path}`);
@@ -357,5 +390,4 @@ export async function collectOwnerEvidence(
         });
     }
   }
-  return context;
 }

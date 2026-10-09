@@ -1007,8 +1007,10 @@ external object stores such as `git clone --shared` are rejected.
 
 CODEOWNERS declarations take priority over Git history, following
 [GitHub's CODEOWNERS rules](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners).
-The last matching rule wins, and the command returns its first declared owner.
-Git history is the fallback when no declared owner applies.
+The last matching rule wins. Results include ranked `suggestions`: declared
+owners first, followed by contributors recommended from source, blame, and
+history. The existing `owner` is the first suggestion. Git activity does not
+verify membership in a declared team.
 
 Results preserve IDs and report `identified`, `abstained`, or `error`. Identified
 owners include a declared GitHub user, team, or email, or an observed Git
