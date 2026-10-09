@@ -46,7 +46,6 @@ import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
-import { gitlabPatchDescription } from "./gitlab-patch-description.js";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
@@ -6868,6 +6867,15 @@ async function publishPatchBranch(
     );
     throw error;
   }
+}
+
+function gitlabPatchDescription(body: string): string {
+  // GitLab ignores quick actions inside its native fenced blockquotes. Choose
+  // a fence the report cannot close, and end at EOF to preserve its exact bytes.
+  let fenceLength = 3;
+  for (const match of body.matchAll(/^[ \t]*(>+)/gmu))
+    fenceLength = Math.max(fenceLength, match[1]!.length + 1);
+  return `${">".repeat(fenceLength)}\n${body}`;
 }
 
 function patchRemoteHost(remote: string): string | undefined {
