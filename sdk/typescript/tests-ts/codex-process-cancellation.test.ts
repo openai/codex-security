@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  spawn,
+  type ChildProcessWithoutNullStreams,
+  type SpawnOptions,
+} from "node:child_process";
 import { getEventListeners } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -53,6 +57,8 @@ for (const surface of ["review", "feedback"] as const) {
         const exited = Promise.withResolvers<void>();
         let child: ChildProcessWithoutNullStreams | undefined;
         let holderStarted = false;
+        let holderPid: number | undefined;
+        let nativeSpawnOptions: SpawnOptions | undefined;
         let starts = 0;
         let retries = 0;
         let retryDiagnostic: string | undefined;
@@ -62,12 +68,22 @@ for (const surface of ["review", "feedback"] as const) {
           options,
         ) => {
           starts++;
+          nativeSpawnOptions = {
+            ...options,
+            stdio: ["pipe", "pipe", "pipe", "ipc"],
+          };
           child = spawn(
             mode === "spawn-error" ? join(root, "missing-codex") : node,
             [fixture, mode, release],
-            { ...options, stdio: ["pipe", "pipe", "pipe", "ipc"] },
+            nativeSpawnOptions,
           ) as ChildProcessWithoutNullStreams;
           child.on("message", (message) => {
+            if (
+              message &&
+              typeof message === "object" &&
+              "holderPid" in message
+            )
+              holderPid = message.holderPid as number;
             if (message === "ready") {
               holderStarted = true;
               ready.resolve();
@@ -132,6 +148,7 @@ for (const surface of ["review", "feedback"] as const) {
               throw new Error(`${phase} did not settle before holder release`);
             }),
           ]);
+        let primaryFailure: unknown;
         try {
           if (mode !== "spawn-error") {
             await bounded(
@@ -185,31 +202,40 @@ for (const surface of ["review", "feedback"] as const) {
           if (mode === "spawn-error") {
             // Compare native ownership without depending on its callback identities.
             const controlAbort = new AbortController();
-            const control = spawn(join(root, "missing-codex"), [], {
-              signal: controlAbort.signal,
-              stdio: "ignore",
-            });
-            let controlError: Error | undefined;
-            control.once("error", (error: Error) => {
+            let control: ReturnType<typeof spawn> | undefined;
+            let controlError: unknown;
+            try {
+              control = spawn(
+                join(root, "missing-codex"),
+                [fixture, mode, release],
+                { ...nativeSpawnOptions, signal: controlAbort.signal },
+              );
+              control.once("error", (error: Error) => {
+                controlError = error;
+              });
+              await new Promise<void>((resolve) =>
+                control!.once("close", resolve),
+              );
+            } catch (error) {
               controlError = error;
-            });
-            await new Promise<void>((resolve) =>
-              control.once("close", resolve),
-            );
+            }
             expect(controlError).toBeInstanceOf(Error);
             expect((outcome.error as Error).message).toContain(
-              controlError!.message,
+              (controlError as Error).message,
             );
             expect(remaining).toHaveLength(
               getEventListeners(controlAbort.signal, "abort").length,
             );
-            expect(child!.listenerCount("exit")).toBe(
-              control.listenerCount("exit"),
+            expect(child?.listenerCount("exit") ?? 0).toBe(
+              control?.listenerCount("exit") ?? 0,
             );
           } else {
             expect(remaining).toHaveLength(0);
             expect(child!.listenerCount("exit")).toBe(0);
           }
+        } catch (error) {
+          primaryFailure = error;
+          throw error;
         } finally {
           try {
             await writeFile(release, "released");
@@ -224,6 +250,28 @@ for (const surface of ["review", "feedback"] as const) {
                 })(),
                 "holder cleanup",
               );
+          } catch (error) {
+            let holderStatus = "not announced";
+            if (holderPid !== undefined) {
+              try {
+                process.kill(holderPid, 0);
+                holderStatus = "alive";
+              } catch (probeError) {
+                holderStatus =
+                  (probeError as NodeJS.ErrnoException).code ??
+                  String(probeError);
+              }
+            }
+            const cleanupError = new Error(
+              `Holder cleanup failed (holder ${holderPid ?? "unknown"}: ${holderStatus}; completion marker: ${existsSync(`${release}.done`)})`,
+              { cause: error },
+            );
+            if (primaryFailure !== undefined)
+              throw new AggregateError(
+                [primaryFailure, cleanupError],
+                "The cancellation test and holder cleanup both failed",
+              );
+            throw cleanupError;
           } finally {
             deadline.abort();
           }

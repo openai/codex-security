@@ -96,7 +96,7 @@ export async function sendFeedback(
       child.once("close", () => {
         uploaded.reject(
           new CodexSecurityError(
-            stderr.trim() || "Codex exited before feedback was uploaded.",
+            stderr || "Codex exited before feedback was uploaded.",
           ),
         );
         resolve();
@@ -203,8 +203,8 @@ export async function sendFeedback(
       }
     } catch (error) {
       options.signal?.throwIfAborted();
-      if (error === stdinError && stderr.trim())
-        throw new CodexSecurityError(stderr.trim(), { cause: error });
+      if (error === stdinError && stderr)
+        throw new CodexSecurityError(stderr, { cause: error });
       throw error;
     }
   } finally {
