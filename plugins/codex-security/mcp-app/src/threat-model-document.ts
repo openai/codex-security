@@ -7,6 +7,7 @@ import {
   replaceArtifactText,
 } from "./artifact-io.js";
 import { resolvePythonCommand } from "./python_command.js";
+import { asRecord } from "./record.js";
 
 const pendingDocuments = new Map<string, Promise<void>>();
 
@@ -40,11 +41,8 @@ async function writeCurrentThreatModelDocument(
       [context.layout === "scan" ? "scan-manifest.json" : "result.json"],
       "saved threat model",
     );
-    const document = context.layout === "scan" ? source.scan : source;
-    const threatModel =
-      document && typeof document === "object" && !Array.isArray(document)
-        ? (document as Record<string, unknown>).threatModel
-        : undefined;
+    const document = asRecord(context.layout === "scan" ? source.scan : source);
+    const threatModel = document?.threatModel;
     if (threatModel === undefined) return;
     const destination = await artifactDestination(
       context,
@@ -52,8 +50,7 @@ async function writeCurrentThreatModelDocument(
       "threat model document",
     );
     const python = context.pythonCommand ?? (await resolvePythonCommand());
-    const target = context.targetContract?.target as
-      Record<string, unknown> | undefined;
+    const target = asRecord(document?.target);
     const markdown = await renderThreatModel(python, context.pluginRoot!, {
       threatModel,
       provenance: {
@@ -61,7 +58,9 @@ async function writeCurrentThreatModelDocument(
         scanId: context.scanId,
         target: context.repoRoot,
         revision: context.targetRevision,
-        snapshotDigest: target?.requiredSnapshotDigest,
+        snapshotDigest:
+          target?.snapshotDigest ??
+          asRecord(context.targetContract?.target)?.requiredSnapshotDigest,
         status: context.status ?? "running",
         provisional: context.status !== "complete",
         ...(context.scope === undefined

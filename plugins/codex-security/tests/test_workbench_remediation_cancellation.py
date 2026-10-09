@@ -13,6 +13,7 @@ from workbench_test_support import (
     set_remediation,
     start_saved_scan,
     write_completed_contract,
+    write_remediation_patch,
 )
 
 
@@ -46,14 +47,7 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
     generation_token = str(uuid.uuid4())
     request_remediation(state_dir, occurrence_id, request_id, generation_token)
     patch_path = scan_dir / "remediation.patch"
-    patch_path.write_text(
-        "diff --git a/source.txt b/source.txt\n"
-        "--- a/source.txt\n"
-        "+++ b/source.txt\n"
-        "@@ -1 +1 @@\n"
-        "-vulnerable\n"
-        "+fixed\n"
-    )
+    write_remediation_patch(patch_path)
     generated = set_remediation(
         state_dir,
         occurrence_id,
