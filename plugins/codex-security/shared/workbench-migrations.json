@@ -403,5 +403,12 @@
       "DROP TABLE finding_publications;",
       "CREATE INDEX finding_issue_receipts_by_finding\nON finding_issue_receipts(finding_id, destination_key, id);"
     ]
+  },
+  {
+    "version": 49,
+    "name": "index finding issue receipt ownership",
+    "statements": [
+      "CREATE INDEX finding_issue_receipts_by_destination_issue\nON finding_issue_receipts(destination_key, external_id, finding_id);"
+    ]
   }
 ]
