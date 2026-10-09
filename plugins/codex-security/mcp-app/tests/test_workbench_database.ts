@@ -75,6 +75,27 @@ function insertScan(database: DatabaseSync, target = "/synthetic/repository") {
     .run(target);
 }
 
+test("retains SQLite open errors and recovery guidance", async () => {
+  const directory = await temporary.create("workbench-database-error-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  await mkdir(databasePath);
+  await assert.rejects(
+    openWorkbenchDatabase(databasePath),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { errcode: number }).errcode, 14);
+      assert.equal(
+        (error as Error & { code: string }).code,
+        "ERR_SQLITE_ERROR",
+      );
+      assert.ok(error.message.includes("unable to open database file"));
+      assert.ok(error.message.includes(databasePath));
+      assert.ok(error.message.includes("CODEX_SECURITY_STATE_DIR"));
+      return true;
+    },
+  );
+});
+
 test("opens a private WAL database at the configured state path", async () => {
   const directory = await temporary.create("workbench-database-");
   const home = join(directory, "codex-home");

@@ -1,12 +1,12 @@
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { parseJson } from "../helpers/json";
-import { requireSqliteText } from "./database";
+import { requireSqliteText, timestampOrder } from "./database";
 import { listDedupeGroups } from "./duplicates";
 import { transaction } from "./transaction";
 
 const records = {
   findings: `
-    SELECT findings.id, json_extract(dashboard_title(details_json), '$') AS title,
+    SELECT findings.id, details_json -> '$.title' AS title,
       COALESCE(repositories.ids, '[]') AS repositoryIds,
       json_extract(details_json, '$.severity.level') AS severity,
       findings.created_at AS createdAt, findings.updated_at AS updatedAt
@@ -16,7 +16,7 @@ const records = {
     ) AS repositories ON repositories.finding_id = findings.id
     WHERE details_json IS NOT NULL`,
   groups: `
-    SELECT groups.id, groups.id AS title,
+    SELECT groups.id, json_quote(groups.id) AS title,
       (SELECT json_group_array(DISTINCT repository_id)
        FROM finding_dedupe_group_members AS members
        JOIN finding_repositories ON finding_repositories.finding_id = members.finding_id
@@ -29,7 +29,7 @@ const records = {
 const sorts = {
   activity: "records.updatedAt",
   newest: "records.createdAt",
-  title: "dashboard_lower(json_quote(records.title))",
+  title: "dashboard_lower(records.title)",
   repository: "repository_label(records.repositoryIds)",
   severity:
     "CASE records.severity WHEN 'informational' THEN 0 WHEN 'low' THEN 1 " +
@@ -101,16 +101,16 @@ function detail(
 export function dashboard(database: DatabaseSync, query: DashboardQuery) {
   requireSqliteText([query.query, query.repository, query.id]);
   // JSON preserves text across Node 22 SQLite result and callback boundaries.
-  database.function("dashboard_title", { deterministic: true }, (value) =>
-    JSON.stringify(
-      (JSON.parse(value as string).title as string).toWellFormed(),
-    ),
-  );
   database.function("dashboard_lower", { deterministic: true }, (value) =>
     (JSON.parse(value as string) as string).toLowerCase(),
   );
-  database.function("dashboard_upper", { deterministic: true }, (value) =>
-    (JSON.parse(value as string) as string).toUpperCase(),
+  const search = query.query?.toUpperCase() ?? "";
+  database.function("dashboard_contains", { deterministic: true }, (value) =>
+    Number(
+      ((JSON.parse(value as string) as string | null) ?? "")
+        .toUpperCase()
+        .includes(search),
+    ),
   );
   database.function("repository_label", { deterministic: true }, (value) =>
     repositoryIds(JSON.parse(value as string))
@@ -120,11 +120,12 @@ export function dashboard(database: DatabaseSync, query: DashboardQuery) {
   const clauses: string[] = [];
   const values: string[] = [];
   if (query.query) {
-    const columns = ["id", "title", "repositoryIds"];
+    const columns = ["json_quote(records.id)", "records.title"];
     clauses.push(
-      `(${columns.map((column) => `instr(dashboard_upper(json_quote(COALESCE(records.${column}, ''))), ?) > 0`).join(" OR ")})`,
+      `(${columns.map((column) => `dashboard_contains(${column})`).join(" OR ")} OR
+        EXISTS (SELECT 1 FROM json_each(records.repositoryIds)
+          WHERE dashboard_contains(json_quote(value))))`,
     );
-    values.push(...columns.map(() => query.query!.toUpperCase()));
   }
   if (query.repository) {
     clauses.push(
@@ -133,14 +134,19 @@ export function dashboard(database: DatabaseSync, query: DashboardQuery) {
     values.push(query.repository);
   }
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const direction = { asc: "ASC", desc: "DESC" }[query.direction ?? "desc"];
-  let order = `${sorts[query.sort]} ${direction}`;
+  const direction = ({ asc: "ASC", desc: "DESC" } as const)[
+    query.direction ?? "desc"
+  ];
+  let order =
+    query.sort === "activity" || query.sort === "newest"
+      ? timestampOrder(database, sorts[query.sort], direction)
+      : `${sorts[query.sort]} ${direction}`;
   if (query.view === "findings" && query.sort === "activity")
     order += `, ${sorts.severity} DESC`;
   order += ", records.id";
   const source = records[query.view];
   const field = query.view === "findings" ? "severity" : "memberCount";
-  const projection = `json_object('id', records.id, 'title', records.title,
+  const projection = `json_object('id', records.id, 'title', json(records.title),
     'repositoryIds', json(repositoryIds), 'createdAt', createdAt, 'updatedAt', updatedAt,
     '${field}', ${field}) AS item`;
   return transaction(database, "BEGIN", () => {
