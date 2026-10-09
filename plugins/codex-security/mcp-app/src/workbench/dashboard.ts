@@ -1,6 +1,6 @@
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { parseJson } from "../helpers/json";
-import { requireSqliteText, timestampOrder } from "./database";
+import { requireSqliteText } from "./database";
 import { listDedupeGroups } from "./duplicates";
 import { transaction } from "./transaction";
 
@@ -27,8 +27,8 @@ const records = {
 };
 
 const sorts = {
-  activity: "records.updatedAt",
-  newest: "records.createdAt",
+  activity: "julianday(upper(records.updatedAt))",
+  newest: "julianday(upper(records.createdAt))",
   title: "dashboard_lower(records.title)",
   repository: "repository_label(records.repositoryIds)",
   severity:
@@ -139,10 +139,7 @@ export function dashboard(database: DatabaseSync, query: DashboardQuery) {
   const direction = ({ asc: "ASC", desc: "DESC" } as const)[
     query.direction ?? "desc"
   ];
-  let order =
-    query.sort === "activity" || query.sort === "newest"
-      ? timestampOrder(database, sorts[query.sort], direction)
-      : `${sorts[query.sort]} ${direction}`;
+  let order = `${sorts[query.sort]} ${direction}`;
   if (query.view === "findings" && query.sort === "activity")
     order += `, ${sorts.severity} DESC`;
   order += ", records.id";

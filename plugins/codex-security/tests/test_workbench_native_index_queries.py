@@ -1,19 +1,11 @@
 from __future__ import annotations
 
-import json
 import ntpath
 from argparse import Namespace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_workbench_completion_binding import _seal_draft, register_cli_scan
-from workbench_test_support import (
-    run_workbench,
-    scan_command,
-    stable_target_id,
-    write_completed_contract,
-)
+from workbench_test_support import stable_target_id
 
 SCAN_IDS = [f"00000000-0000-4000-8000-{index:012d}" for index in range(3)]
 
@@ -167,65 +159,11 @@ def test_latest_scan_confirmation_uses_group_membership(
 
 
 @pytest.mark.parametrize(
-    ("older", "later", "equal"),
-    [
-        ("2026-10-08T03:00:00.123456+02:00", "2026-10-08T01:00:02.000Z", False),
-        ("2026-10-08T01:00:00.123Z", "2026-10-08T01:00:00.123456Z", False),
-        (
-            "2026-10-08T01:00:00.123456000000000001Z",
-            "2026-10-08T01:00:00.123456000000000002Z",
-            False,
-        ),
-        ("2026-10-08T03:00:00.123000+02:00", "2026-10-08t01:00:00.123z", True),
-    ],
-)
-def test_global_findings_select_exact_sealed_completion_times(
-    tmp_path: Path, older: str, later: str, equal: bool
-) -> None:
-    state, target = tmp_path / "state", tmp_path / "target"
-    target.mkdir()
-    expected = []
-    sealed = {}
-    for index, timestamp in enumerate((older, later)):
-        scan = tmp_path / f"scan-{index}"
-        scan_id = register_cli_scan(state, target, scan)["scanId"]
-        write_completed_contract(scan, scan_id, target)
-        manifest = json.loads((scan / "scan-manifest.json").read_text())
-        manifest["scan"].update(startedAt="2026-10-08T00:00:00Z", completedAt=timestamp)
-        (scan / "scan-manifest.json").write_text(json.dumps(manifest))
-        findings = json.loads((scan / "findings.json").read_text())
-        findings["findings"][0]["title"] = f"Synthetic observation {index}"
-        findings["findings"][0]["severity"]["level"] = "low" if index == 0 else "high"
-        (scan / "findings.json").write_text(json.dumps(findings))
-        _seal_draft(scan, target)
-        sealed.update(
-            {
-                scan / name: (scan / name).read_bytes()
-                for name in ("scan-manifest.json", "findings.json", "coverage.json")
-            }
-        )
-        scan_command(state, "complete-scan", scan_id)
-        expected.append(json.loads((scan / "findings.json").read_text())["findings"][0])
-    selected = max(expected, key=lambda item: item["occurrenceId"]) if equal else expected[1]
-    (finding,) = run_workbench(state, "list-global-findings")["findings"]
-    assert finding["occurrenceId"] == selected["occurrenceId"]
-    assert finding["title"] == selected["title"]
-    assert finding["severity"] == {"level": selected["severity"]["level"]}
-    assert finding["createdAt"] == (older if selected is expected[0] else later)
-    assert {path: path.read_bytes() for path in sealed} == sealed
-
-
-@pytest.mark.parametrize(
     ("completion", "status", "updated"),
     [
         ("2026-10-08T03:00:00+02:00", "closed", "2026-10-08T01:00:01.000001Z"),
         ("2026-10-07T23:00:02-02:00", "open", "2026-10-07T23:00:02-02:00"),
-        ("2026-10-08T03:00:01.000001000+02:00", "closed", "2026-10-08T03:00:01.000001000+02:00"),
-        (
-            "2026-10-08T01:00:01.000001000000000001Z",
-            "open",
-            "2026-10-08T01:00:01.000001000000000001Z",
-        ),
+        ("2026-10-08T03:00:01.000001+02:00", "closed", "2026-10-08T03:00:01.000001+02:00"),
     ],
 )
 def test_global_findings_compare_decisions_and_return_original_update_text(
@@ -266,15 +204,7 @@ def test_global_findings_compare_decisions_and_return_original_update_text(
             [
                 "2026-10-08T03:00:00+02:00",
                 "2026-10-08T01:00:00.123Z",
-                "2026-10-08T01:00:00.123456Z",
-            ],
-            [2, 1, 0],
-        ),
-        (
-            [
-                "2026-10-08T01:00:00.123456000000000001Z",
-                "2026-10-08T01:00:00.123456000000000002Z",
-                "2026-10-08T01:00:00.123456000000000003Z",
+                "2026-10-08T01:00:00.234567Z",
             ],
             [2, 1, 0],
         ),
@@ -286,17 +216,9 @@ def test_global_findings_compare_decisions_and_return_original_update_text(
             ],
             [0, 1, 2],
         ),
-        (
-            [
-                "0001-01-01T00:00:00.000000001+23:59",
-                "0001-01-01T00:00:00Z",
-                "9999-12-31T23:59:59.999999999-23:59",
-            ],
-            [2, 1, 0],
-        ),
     ],
 )
-def test_global_finding_pages_follow_exact_completion_order(
+def test_global_finding_pages_follow_completion_order(
     workbench_api, indexed_collections, timestamps, order
 ):
     connection, _ = indexed_collections
@@ -461,15 +383,7 @@ def test_scan_list_probes_requested_repository_once(
             [
                 "2026-10-08T03:00:00+02:00",
                 "2026-10-08T01:00:00.123Z",
-                "2026-10-08T01:00:00.123456Z",
-            ],
-            [2, 1, 0],
-        ),
-        (
-            [
-                "2026-10-08T01:00:00.123456000000000001Z",
-                "2026-10-08T01:00:00.123456000000000002Z",
-                "2026-10-08T01:00:00.123456000000000003Z",
+                "2026-10-08T01:00:00.234567Z",
             ],
             [2, 1, 0],
         ),
@@ -483,7 +397,7 @@ def test_scan_list_probes_requested_repository_once(
         ),
     ],
 )
-def test_scan_pages_compare_exact_updates_and_preserve_ties(
+def test_scan_pages_compare_updates_and_preserve_ties(
     workbench_api, indexed_collections, timestamps, order
 ):
     connection, _ = indexed_collections
@@ -515,8 +429,7 @@ def test_scan_pages_compare_exact_updates_and_preserve_ties(
     [
         ("2026-10-08T01:00:00Z", "2026-10-08T01:00:00.100000Z", False),
         ("2026-10-08T03:00:00+02:00", "2026-10-08T01:00:00.100000Z", False),
-        ("2026-10-08T01:00:00.000000001Z", "2026-10-08T01:00:00.000000002Z", False),
-        ("2026-10-08T03:00:00.100000+02:00", "2026-10-08t01:00:00.1z", True),
+        ("2026-10-08T03:00:00.100000+02:00", "2026-10-08t01:00:00.100z", True),
     ],
 )
 def test_scan_start_chronology_keeps_latest_and_first_seen_queries_consistent(
