@@ -22,11 +22,9 @@ import {
 import {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} from "../artifact-validation-phase.js";
-import {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} from "../artifact-attack-path.js";
+} from "../artifact-candidate-ledger.js";
 import {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
