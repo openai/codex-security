@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -418,8 +419,13 @@ def main() -> None:
         try:
             make_diff_rank_input(args)
         except subprocess.CalledProcessError as error:
+            detail = re.sub(
+                r"[\x00-\x1f\x7f-\x9f\u2028\u2029]",
+                lambda match: f"\\u{ord(match[0]):04x}",
+                os.fsdecode(error.stderr).strip(),
+            )
             raise SystemExit(
-                f"Git diff failed with exit code {error.returncode}: {os.fsdecode(error.stderr).strip()}"
+                f"Git diff failed with exit code {error.returncode}: {detail}"
             ) from error
     else:
         raise SystemExit(f"Unknown command: {args.command}")

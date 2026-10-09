@@ -849,7 +849,18 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
     assert {row["path"]: row["preview"] for row in read_jsonl(output)} == expected
 
 
-def test_bad_diff_revision_keeps_git_diagnostic_without_traceback(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("revision", "displayed"),
+    [
+        ("missing-synthetic-revision", "missing-synthetic-revision"),
+        ("missing-\u009b31m-synthetic", r"missing-\u009b31m-synthetic"),
+        ("missing-\u2028\u2029-synthetic", r"missing-\u2028\u2029-synthetic"),
+        ("missing-café-synthetic", "missing-café-synthetic"),
+    ],
+)
+def test_bad_diff_revision_keeps_git_diagnostic_without_traceback(
+    tmp_path: Path, revision: str, displayed: str
+) -> None:
     initialize_repo(tmp_path)
     (tmp_path / "app.py").write_text("print('synthetic')\n")
     git(tmp_path, "add", ".")
@@ -859,11 +870,14 @@ def test_bad_diff_revision_keeps_git_diagnostic_without_traceback(tmp_path: Path
         tmp_path,
         tmp_path / "rank.jsonl",
         "--base",
-        "missing-synthetic-revision",
+        revision,
         check=False,
     )
-    assert result.returncode != 0
-    assert "missing-synthetic-revision" in result.stderr
+    assert result.returncode == 1
+    assert displayed in result.stderr
+    assert "\u009b" not in result.stderr
+    assert "\u2028" not in result.stderr
+    assert "\u2029" not in result.stderr
     assert "unknown revision" in result.stderr or "bad revision" in result.stderr
     assert "Traceback" not in result.stderr
 
