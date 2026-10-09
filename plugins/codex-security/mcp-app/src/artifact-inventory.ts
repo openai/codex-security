@@ -84,8 +84,7 @@ export async function prepareCodexSecurityReviewItems(
     helper,
     "--repo",
     context.repoRoot,
-    "--scope",
-    context.scope ?? ".",
+    `--scope=${context.scope ?? "."}`,
     "--out",
     destination,
   ];
