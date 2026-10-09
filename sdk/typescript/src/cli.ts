@@ -92,6 +92,10 @@ import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
+import {
+  publishPatchReview,
+  resolvePatchReviewPublisher,
+} from "./patch-publication.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
@@ -6772,93 +6776,25 @@ async function publishPatchBranch(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<{ branch: string; url: string }> {
-  const run = (command: "git" | "gh" | "glab", args: string[]) =>
+  const run = (command: "git" | "gh" | "glab", args: readonly string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   try {
     const remote = await run("git", ["remote", "get-url", "--push", "origin"]);
-    const host = patchRemoteHost(remote);
-    const gitlabHost =
-      dependencies.environment["GITLAB_HOST"] ||
-      dependencies.environment["GITLAB_URI"] ||
-      dependencies.environment["GL_HOST"];
-    const gitlab =
-      host === "gitlab.com" ||
-      (host !== undefined &&
-        gitlabHost !== undefined &&
-        host ===
-          patchRemoteHost(
-            gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
-          ));
-    const command = gitlab ? "glab" : "gh";
-    const gitlabRepository = remote.includes("://")
-      ? remote
-      : `ssh://${remote.replace(":", "/")}`;
-    let url = await run(
-      command,
-      gitlab
-        ? [
-            "mr",
-            "list",
-            "--all",
-            "--source-branch",
-            branch,
-            "--output",
-            "json",
-            "--jq",
-            "map(select(.source_project_id == .target_project_id))[0].web_url // empty",
-            "--repo",
-            gitlabRepository,
-          ]
-        : [
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--state",
-            "all",
-            "--json",
-            "url",
-            "--jq",
-            ".[0].url // empty",
-          ],
+    const publisher = resolvePatchReviewPublisher(
+      remote,
+      dependencies.environment,
+      run,
     );
-    if (!url) {
-      await run("git", ["push", "--set-upstream", "origin", branch]);
-      url = await run(
-        command,
-        gitlab
-          ? [
-              "mr",
-              "create",
-              "--draft",
-              "--head",
-              gitlabRepository,
-              "--source-branch",
-              branch,
-              "--title",
-              PATCH_PR_TITLE,
-              "--description",
-              gitlabPatchDescription(body),
-              "--yes",
-              "--repo",
-              gitlabRepository,
-            ]
-          : [
-              "pr",
-              "create",
-              "--draft",
-              "--head",
-              branch,
-              "--title",
-              PATCH_PR_TITLE,
-              "--body",
-              body,
-            ],
-      );
-    }
-    stderr.write(
-      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
-    );
+    const url = await publishPatchReview({
+      branch,
+      title: PATCH_PR_TITLE,
+      body,
+      publisher,
+      pushBranch: async (branch) => {
+        await run("git", ["push", "--set-upstream", "origin", branch]);
+      },
+    });
+    stderr.write(`${publisher.label}: ${safePatchText(url)}\n`);
     return { branch, url };
   } catch (error) {
     stderr.write(
@@ -6866,21 +6802,6 @@ async function publishPatchBranch(
     );
     throw error;
   }
-}
-
-function gitlabPatchDescription(body: string): string {
-  // GitLab ignores quick actions inside its native fenced blockquotes. Choose
-  // a fence the report cannot close after quick-action CR removal; preserve its
-  // original bytes and end the outer quote at EOF.
-  let fenceLength = 3;
-  for (const match of body.replaceAll("\r", "").matchAll(/^[ \t]*(>+)/gmu))
-    fenceLength = Math.max(fenceLength, match[1]!.length + 1);
-  return `${">".repeat(fenceLength)}\n${body}`;
-}
-
-function patchRemoteHost(remote: string): string | undefined {
-  if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
-  return /^(?:[^@/]+@)?([^:/]+):[^/]/u.exec(remote)?.[1]?.toLowerCase();
 }
 
 async function resumePatchPullRequest(
