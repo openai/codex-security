@@ -5,8 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = PLUGIN_ROOT / "scripts"
 
@@ -27,10 +25,9 @@ def test_all_scripts_support_help() -> None:
         assert "usage:" in result.stdout.lower(), script.name
 
 
-@pytest.mark.parametrize("name", ("workbench_publication.py", "workbench_severity.py"))
-def test_workbench_helpers_support_help_with_safe_path(name: str) -> None:
+def test_workbench_publication_supports_help_with_safe_path() -> None:
     result = subprocess.run(
-        [sys.executable, "-I", str(SCRIPT_DIR / name), "--help"],
+        [sys.executable, "-I", str(SCRIPT_DIR / "workbench_publication.py"), "--help"],
         check=False,
         capture_output=True,
         text=True,

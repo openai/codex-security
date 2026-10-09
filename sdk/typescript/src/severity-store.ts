@@ -10,17 +10,17 @@ import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   canonicalizeModelSafePath,
+  bundledPluginRoot,
   codexSecurityStateDirectory,
   workbenchEnvironment,
   requireOutputOutsideRepository,
-  resolveWorkbenchRuntime,
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "./runtime.js";
 
 /** @internal */
 export class SeverityStore {
-  private options?: Promise<WorkbenchCommandOptions>;
+  private options?: Promise<Omit<WorkbenchCommandOptions, "python">>;
 
   constructor(
     private readonly environment: NodeJS.ProcessEnv,
@@ -111,22 +111,19 @@ export class SeverityStore {
     );
   }
 
-  private async resolveOptions(): Promise<WorkbenchCommandOptions> {
+  private async resolveOptions(): Promise<
+    Omit<WorkbenchCommandOptions, "python">
+  > {
     const environment = workbenchEnvironment(this.environment);
     requireOutputOutsideRepository(
       this.scanDirectory,
       await canonicalizeModelSafePath(environment.CODEX_SECURITY_STATE_DIR),
       "runtime",
     );
-    const [python, pluginRoot] = await resolveWorkbenchRuntime({
+    return {
+      pluginRoot: await bundledPluginRoot(),
       environment,
       protectedRoot: this.scanDirectory,
-      signal: this.signal,
-    });
-    return {
-      python,
-      pluginRoot,
-      environment,
       signal: this.signal,
       failureMessage: "Could not access severity assessments",
     };

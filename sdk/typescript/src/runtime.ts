@@ -1609,6 +1609,8 @@ export async function runWorkbench(
       "store-dedupe-groups",
       "list-dedupe-groups",
       "dashboard",
+      "severity-classification",
+      "read-severity-classification",
     ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]

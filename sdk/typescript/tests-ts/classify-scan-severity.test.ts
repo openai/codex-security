@@ -2,7 +2,7 @@ import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
 import { chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
   classifyScanDirectorySeverity,
@@ -18,7 +18,6 @@ import type { JsonObject } from "../src/config.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
-import { resolvePluginPython } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -103,10 +102,14 @@ function classifier(
 
 async function query(environment: NodeJS.ProcessEnv, sql: string) {
   const result = spawnSync(
-    await resolvePluginPython({ environment }),
+    Bun.which("node")!,
     [
-      "-c",
-      "import json,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.row_factory=sqlite3.Row; print(json.dumps([dict(r) for r in c.execute(sys.argv[2]) ])); c.commit()",
+      "--input-type=module",
+      "--eval",
+      `import { DatabaseSync } from "node:sqlite";
+const database = new DatabaseSync(process.argv[1]);
+try { console.log(JSON.stringify(database.prepare(process.argv[2]).all())); }
+finally { database.close(); }`,
       join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
       sql,
     ],
@@ -115,6 +118,29 @@ async function query(environment: NodeJS.ProcessEnv, sql: string) {
   expect(result.status, result.stderr).toBe(0);
   return JSON.parse(result.stdout) as Record<string, unknown>[];
 }
+
+test("classification and saved assessments run with Node and no Python", async () => {
+  const { environment, root, scanDirectory, scanId, findings } =
+    await fixture();
+  const withoutPython = {
+    ...environment,
+    PATH: dirname(Bun.which("node")!),
+    PYTHON: join(root, "missing-python"),
+  };
+  const { scanId: _scanId, ...classification } =
+    await classifyScanDirectorySeverity(scanDirectory, {
+      environment: withoutPython,
+    });
+  expect(
+    await readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      withoutPython,
+    ),
+  ).toEqual(classification);
+});
 
 function recordingClassifier() {
   const calls: string[] = [];

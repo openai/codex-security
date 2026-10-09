@@ -51,6 +51,10 @@ const workbenchUsage: Record<string, string> = {
     "Usage: list-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.findingId.",
   dashboard:
     "Usage: dashboard\nReads a JSON object from stdin with an absolute stateDirectory and payload containing view (findings or groups), sort, limit and offset; direction, query, repository and id are optional.",
+  "severity-classification":
+    "Usage: severity-classification\nReads a JSON object from stdin with an absolute stateDirectory and payload describing the begin or save action.",
+  "read-severity-classification":
+    "Usage: read-severity-classification --scan-id <id>\nReads a JSON object from stdin with an absolute stateDirectory. Reads saved assessments without updating the database.",
 };
 if (command === "resolve-security-md") {
   process.exitCode = resolveSecurityMdCommand(args, posixHome);
@@ -81,19 +85,33 @@ if (command === "resolve-security-md") {
   void (async () => {
     const { values } = parseArgs({
       args,
-      options: { help: { type: "boolean", short: "h" } },
+      options: {
+        help: { type: "boolean", short: "h" },
+        ...(command === "read-severity-classification"
+          ? { "scan-id": { type: "string" as const } }
+          : {}),
+      },
     });
     if (values.help) {
       console.log(workbenchUsage[command]);
       return;
     }
+    if (
+      command === "read-severity-classification" &&
+      values["scan-id"] === undefined
+    )
+      throw new Error("read-severity-classification requires --scan-id.");
     let result: unknown;
     if (command === "database-info") {
       const { databaseInfo } = await import("./src/workbench/database");
       result = await databaseInfo(JSON.parse(decodeUtf8(readFileSync(0))));
     } else {
-      const { findingsCommand } = await import("./src/workbench/commands");
-      result = await findingsCommand(command, decodeUtf8(readFileSync(0)));
+      const { workbenchCommand } = await import("./src/workbench/commands");
+      result = await workbenchCommand(
+        command,
+        decodeUtf8(readFileSync(0)),
+        values["scan-id"] as string | undefined,
+      );
     }
     console.log(
       stringifyJson(result, 0).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
