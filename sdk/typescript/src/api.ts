@@ -1452,8 +1452,10 @@ export class CodexSecurity {
         );
       }
       const skillName = skillNameFor(normalized, mode);
+      // Native no-turn resume retains saved permissions; exec refreshes them.
       const directDeepScan =
         mode === "deep" &&
+        options.resumeScanId === undefined &&
         (await supportsDirectDeepScan(runtime.plugin.pluginRoot));
       const discoveryPrompt =
         options.validationPrompt === undefined
@@ -2006,8 +2008,6 @@ export class CodexSecurity {
             repository: repo,
             scanDir,
             scanId,
-            resumeThreadId:
-              typeof resumeThreadId === "string" ? resumeThreadId : undefined,
             prompt,
             signal,
           })

@@ -13,7 +13,7 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-test("Deep Scan uses the engine and retains SDK registration and finalization", async () => {
+test("Deep Scan uses the engine and retains SDK finalization and post-scan instructions", async () => {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const codexHome = join(root, "codex-home");
@@ -25,12 +25,20 @@ test("Deep Scan uses the engine and retains SDK registration and finalization", 
   const parentTurn = mock(async () => {
     throw new Error("A parent model turn must not execute the Deep Scan.");
   });
+  const postScanTurn = mock(async () => ({
+    events: completedEvents("engine-session"),
+  }));
+  const resumeThread = mock((threadId: string) => ({
+    id: threadId,
+    runStreamed: postScanTurn,
+  }));
   const started = mock();
   const client = TestClient.withDependencies({
     ...scanRuntimeDependencies(codexHome, scanDir),
     environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
     createCodex: () => ({
       startThread: () => ({ id: null, runStreamed: parentTurn }),
+      resumeThread,
     }),
     runDeepScan: async function* (options) {
       expect(options.scanId).toBe("scan_example_001");
@@ -62,11 +70,22 @@ test("Deep Scan uses the engine and retains SDK registration and finalization", 
   try {
     const result = await client.run(repository, {
       mode: "deep",
+      postScanPrompt: "Summarize the completed scan.",
       onScanStarted: started,
     });
     expect(result.threadId).toBe("engine-session");
     expect(result.reportPath).toBe(join(scanDir, "report.md"));
     expect(parentTurn).not.toHaveBeenCalled();
+    expect(resumeThread).toHaveBeenCalledTimes(1);
+    expect(resumeThread).toHaveBeenCalledWith(
+      "engine-session",
+      expect.objectContaining({ workingDirectory: scanDir }),
+    );
+    expect(postScanTurn).toHaveBeenCalledTimes(1);
+    expect(postScanTurn).toHaveBeenCalledWith(
+      "Summarize the completed scan.",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(started).toHaveBeenCalledTimes(1);
     expect(
       commands.filter((command) =>

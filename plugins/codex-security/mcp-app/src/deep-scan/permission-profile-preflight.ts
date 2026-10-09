@@ -70,7 +70,6 @@ export async function readDeepScanRuntimeConfig(
 /** Persist the owning session and obtain native permissions without a model turn. */
 export async function prepareCliDeepScanSession(
   options: RuntimeConfigReadOptions & {
-    threadId?: string;
     prompt: string;
   },
 ): Promise<{
@@ -80,21 +79,16 @@ export async function prepareCliDeepScanSession(
   permissionProfile: unknown;
 }> {
   return withPreflightClient(options, async (client) => {
-    const response = await client.request(
-      options.threadId === undefined ? "thread/start" : "thread/resume",
-      {
-        cwd: options.cwd,
-        ...(options.threadId === undefined
-          ? { threadSource: "security_scan", ephemeral: false }
-          : { threadId: options.threadId }),
-      },
-    );
+    const response = await client.request("thread/start", {
+      cwd: options.cwd,
+      threadSource: "security_scan",
+      ephemeral: false,
+    });
     const thread = record(response.thread);
     if (
       typeof thread?.id !== "string" ||
       typeof thread.path !== "string" ||
-      typeof response.model !== "string" ||
-      (options.threadId !== undefined && options.threadId !== thread.id)
+      typeof response.model !== "string"
     ) {
       throw new Error("Codex did not return the owning Deep Scan session.");
     }

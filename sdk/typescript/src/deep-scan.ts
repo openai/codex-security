@@ -26,7 +26,6 @@ export interface DirectDeepScanOptions {
   repository: string;
   scanDir: string;
   scanId: string;
-  resumeThreadId?: string;
   prompt: string;
   signal: AbortSignal;
 }
@@ -70,7 +69,6 @@ export async function* runDeepScan(
           "features.plugins=false",
         ],
         signal: options.signal,
-        threadId: options.resumeThreadId,
         prompt:
           options.prompt +
           "\n\nThe host runs this Deep Scan coordinator directly and owns finalization. This saved request supplies context for later follow-up; do not start a replacement scan.",

@@ -102,49 +102,45 @@ async function testDirectScanSession() {
     },
     network: "restricted",
   };
-  for (const threadId of [undefined, "existing-scan-thread"]) {
-    await withFakeCodex(
-      { parentPermissionProfile: permissionProfile },
-      async (fixture) => {
-        const result = await prepareCliDeepScanSession({
-          codexPath: fixture.codexPath,
-          commandArgs: ["--config", 'model_provider="synthetic_provider"'],
-          cwd: fixture.cwd,
-          configOverrides: ['model_reasoning_effort="high"'],
-          threadId,
-          prompt: "Review the supplied synthetic repository.",
-          signal: new AbortController().signal,
-        });
-        assert.deepEqual(result, {
-          threadId: threadId ?? "new-scan-thread",
-          model: "synthetic-model",
-          reasoningEffort: "high",
-          permissionProfile,
-        });
-        const calls = await readJsonLines(fixture.callsPath);
-        assert.deepEqual(
-          calls.map((call) => call.method),
-          [
-            "initialize",
-            "initialized",
-            threadId ? "thread/resume" : "thread/start",
-            "thread/inject_items",
-          ],
-        );
-        assert.equal(calls[2].params.cwd, fixture.cwd);
-        assert.equal(
-          calls[3].params.items[0].content[0].text,
-          "Review the supplied synthetic repository.",
-        );
-        const argv = await readJson(fixture.argvPath);
-        assert.equal(
-          argv[argv.indexOf("--config") + 1],
-          'model_provider="synthetic_provider"',
-        );
-        assert.equal(argv.includes("--profile"), false);
-      },
-    );
-  }
+  await withFakeCodex(
+    { parentPermissionProfile: permissionProfile },
+    async (fixture) => {
+      const result = await prepareCliDeepScanSession({
+        codexPath: fixture.codexPath,
+        commandArgs: ["--config", 'model_provider="synthetic_provider"'],
+        cwd: fixture.cwd,
+        configOverrides: ['model_reasoning_effort="high"'],
+        prompt: "Review the supplied synthetic repository.",
+        signal: new AbortController().signal,
+      });
+      assert.deepEqual(result, {
+        threadId: "new-scan-thread",
+        model: "synthetic-model",
+        reasoningEffort: "high",
+        permissionProfile,
+      });
+      const calls = await readJsonLines(fixture.callsPath);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["initialize", "initialized", "thread/start", "thread/inject_items"],
+      );
+      assert.deepEqual(calls[2].params, {
+        cwd: fixture.cwd,
+        threadSource: "security_scan",
+        ephemeral: false,
+      });
+      assert.equal(
+        calls[3].params.items[0].content[0].text,
+        "Review the supplied synthetic repository.",
+      );
+      const argv = await readJson(fixture.argvPath);
+      assert.equal(
+        argv[argv.indexOf("--config") + 1],
+        'model_provider="synthetic_provider"',
+      );
+      assert.equal(argv.includes("--profile"), false);
+    },
+  );
   await withFakeCodex({ parentPermissionProfile: null }, async (fixture) => {
     await assert.rejects(
       prepareCliDeepScanSession({
@@ -1132,9 +1128,9 @@ function handle(message) {
     send(message.id, { userAgent: "fixture", codexHome: "/fixture", platformFamily: "unix", platformOs: "macos" });
     return;
   }
-  if (message.method === "thread/start" || message.method === "thread/resume") {
+  if (message.method === "thread/start") {
     send(message.id, {
-      thread: { id: message.params.threadId ?? 'new-scan-thread', path: scenario.callsPath + '.session.jsonl' },
+      thread: { id: 'new-scan-thread', path: scenario.callsPath + '.session.jsonl' },
       model: 'synthetic-model', reasoningEffort: 'high',
     });
     return;

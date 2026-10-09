@@ -30,7 +30,7 @@ export async function prepareCliDeepScanSession(options) {
   initializing = true;
   try {
     await writeFile(join(options.env.CODEX_HOME, 'initialized'), 'ready');
-    return { threadId: options.threadId ?? options.env.SYNTHETIC_THREAD_ID,
+    return { threadId: options.env.SYNTHETIC_THREAD_ID,
     model: 'synthetic-model', reasoningEffort: 'high',
     permissionProfile: { configOverrides: options.configOverrides, commandArgs: options.commandArgs } };
   } finally { initializing = false; }
@@ -63,10 +63,10 @@ if (process.env.SYNTHETIC_WAIT === '1') {
   return { root, pluginRoot };
 }
 
-test("isolates direct engine credentials and runtime snapshots across concurrent and resumed scans", async () => {
+test("isolates direct engine credentials and runtime snapshots across concurrent scans", async () => {
   const { root, pluginRoot } = await fixture();
   const events = await Promise.all(
-    ["first", "second"].map(async (name, index) => {
+    ["first", "second"].map(async (name) => {
       const scanDir = join(root, name);
       const receipt = join(root, `${name}.json`);
       await mkdir(scanDir);
@@ -93,7 +93,6 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
         repository: root,
         scanDir,
         scanId: `scan-${name}`,
-        resumeThreadId: index ? "resumed-session" : undefined,
         prompt: "Synthetic audit request.",
         signal: new AbortController().signal,
         codexOptions: {
@@ -114,7 +113,7 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
         argv: ["--deep-scan-engine"],
         request: {
           scanId: `scan-${name}`,
-          threadId: index ? "resumed-session" : `thread-${name}`,
+          threadId: `thread-${name}`,
           permissionProfile: {
             commandArgs: ["--config", `model_provider="provider_${name}"`],
             configOverrides: [
