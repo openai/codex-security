@@ -596,24 +596,26 @@ describe("CLI", () => {
       expect(started).toBe(false);
 
       const trustedHook = await readFile(hook, "utf8");
-      await writeFile(
-        hook,
+      for (const legacyHook of [
         "#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity medium\n",
-      );
-      const migratedHook = captureCli(main, "stdout");
-      expect(
-        await migratedHook.run(
-          ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
-          deps,
-        ),
-      ).toBe(0);
-      const migrated = JSON.parse(migratedHook.text()) as {
-        hook: string;
-        failOnSeverity: string;
-      };
-      expect(normalize(migrated.hook)).toBe(hook);
-      expect(migrated.failOnSeverity).toBe("medium");
-      expect(await readFile(hook, "utf8")).toBe(trustedHook);
+        trustedHook.replace("unset GIT_DIR GIT_INDEX_FILE\n", ""),
+      ]) {
+        await writeFile(hook, legacyHook);
+        const migratedHook = captureCli(main, "stdout");
+        expect(
+          await migratedHook.run(
+            ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
+            deps,
+          ),
+        ).toBe(0);
+        const migrated = JSON.parse(migratedHook.text()) as {
+          hook: string;
+          failOnSeverity: string;
+        };
+        expect(normalize(migrated.hook)).toBe(hook);
+        expect(migrated.failOnSeverity).toBe("medium");
+        expect(await readFile(hook, "utf8")).toBe(trustedHook);
+      }
 
       const existingHook = captureCli(main, "stderr");
       expect(await existingHook.run(["install-hook", "."], deps)).toBe(2);
@@ -693,6 +695,7 @@ describe("CLI", () => {
         },
       );
       expect(commit.status, commit.stderr).toBeGreaterThan(0);
+      expect(commit.stderr).not.toContain("is not supported");
       await expect(stat(maliciousMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });

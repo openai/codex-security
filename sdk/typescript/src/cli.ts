@@ -3725,20 +3725,25 @@ export async function main(
           ]
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
-          const contents = `#!/bin/sh\nset -eu\nexec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
-          const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const scan = `scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          // Git exports these to hooks, and scans reject them.
+          const contents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_INDEX_FILE\nexec ${command} ${scan}`;
+          const legacyContents = [
+            `#!/bin/sh\nset -eu\nexec ${command} ${scan}`,
+            `#!/bin/sh\nset -eu\nexec npx --no-install codex-security ${scan}`,
+          ];
           const existing = await readFile(hook, "utf8").catch(() => null);
           if (
             existing !== null &&
             existing !== contents &&
-            existing !== legacyContents
+            !legacyContents.includes(existing)
           ) {
             throw new Error(`A pre-commit hook already exists at ${hook}.`);
           }
           if (existing === null) {
             await mkdir(dirname(hook), { recursive: true });
             await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
-          } else if (existing === legacyContents) {
+          } else if (legacyContents.includes(existing)) {
             await writeFile(hook, contents, { flag: "w" });
           }
           return {
