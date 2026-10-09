@@ -27,6 +27,20 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+def add_submodule_gitlink(repository: Path, revision: str, scope: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
+        ],
+        cwd=repository,
+        check=True,
+    )
+
+
 def set_default_subprocess_encoding(monkeypatch: pytest.MonkeyPatch, encoding: str) -> None:
     run = subprocess.run
 
@@ -303,17 +317,7 @@ def test_submodule_checks_preserve_target_alias_spelling(
     scoped.mkdir(exist_ok=True)
     submodule = scoped / "submodule"
     revision = initialize_git_repository(submodule)
-    subprocess.run(
-        [
-            "git",
-            "update-index",
-            "--add",
-            "--cacheinfo",
-            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
-        ],
-        cwd=target,
-        check=True,
-    )
+    add_submodule_gitlink(target, revision, scope)
     alias = tmp_path / ("alias" if alias_kind == "symlink" else "TARGET")
     if alias_kind == "symlink":
         alias.symlink_to(target, target_is_directory=True)
@@ -640,17 +644,7 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
     (scoped / "fixture.py").write_text("synthetic = True\n")
     submodule = scoped / "submodule"
     submodule.mkdir()
-    subprocess.run(
-        [
-            "git",
-            "update-index",
-            "--add",
-            "--cacheinfo",
-            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
-        ],
-        cwd=repository,
-        check=True,
-    )
+    add_submodule_gitlink(repository, revision, scope)
     selected = scoped
     if alias_kind != "original":
         alias = tmp_path / ("selected-alias" if alias_kind == "symlink" else "REPOSITORY")
@@ -677,3 +671,105 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
         assert len(calls) == 1
         assert (copied / "fixture.py").read_text() == "synthetic = True\n"
         assert not (copied / "submodule").exists()
+
+
+@pytest.mark.parametrize("replacement", ["directory", "ignored_file", "link"])
+@pytest.mark.parametrize("case_insensitive", [False, True])
+def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
+    tmp_path: Path, replacement: str, case_insensitive: bool
+) -> None:
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    source = target / "deleted.ts"
+    source.write_bytes(b"one\rtwo\r\nthree\nfour")
+    subprocess.run(["git", "add", "deleted.ts"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "selected source"], cwd=target, check=True)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    subprocess.run(["git", "rm", "-q", "deleted.ts"], cwd=target, check=True)
+    (target / ".git" / "info" / "exclude").write_text("deleted.ts\n")
+    if replacement == "directory":
+        source.mkdir()
+    elif replacement == "ignored_file":
+        source.write_text("replacement\n")
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "private.txt").write_text("Synthetic unrelated content.\n")
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(source), str(outside)],
+                check=True,
+                capture_output=True,
+            )
+        else:
+            source.symlink_to(outside, target_is_directory=True)
+    from generate_rank_input import git_changed_paths
+
+    assert dict(git_changed_paths(target, revision, revision, "local-patch"))[source] == "D"
+    sources = WORKBENCH_TARGET["candidate_source_lines"](
+        target,
+        {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},
+        ["deleted.ts"],
+        ["deleted.ts", "DELETED.TS"],
+        case_insensitive=case_insensitive,
+    )
+    expected = {"deleted.ts": {"path": "deleted.ts", "lineCount": 4}}
+    if case_insensitive:
+        expected["DELETED.TS"] = expected["deleted.ts"]
+    assert sources == expected
+
+
+@pytest.mark.parametrize("case_insensitive", [False, True])
+def test_candidate_aliases_use_selected_tree_and_preserve_ambiguity(
+    tmp_path: Path, case_insensitive: bool
+) -> None:
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    support = target / "Support.ts"
+    support.write_text("support\nsecond\n")
+    subprocess.run(["git", "add", "Support.ts"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "support source"], cwd=target, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    for name, mode, content in (
+        ("Foo.ts", "100644", b"upper\n"),
+        ("foo.ts", "100644", b"lower\nsecond\nthird\n"),
+        ("folder/file.ts", "100644", b"nested\n"),
+        ("link.ts", "120000", b"Support.ts"),
+    ):
+        blob = (
+            subprocess.check_output(
+                ["git", "hash-object", "-w", "--stdin"], cwd=target, input=content
+            )
+            .decode()
+            .strip()
+        )
+        subprocess.run(
+            ["git", "update-index", "--add", "--cacheinfo", f"{mode},{blob},{name}"],
+            cwd=target,
+            check=True,
+        )
+    subprocess.run(["git", "commit", "-qm", "selected tree"], cwd=target, check=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    support.unlink()
+    subprocess.run(
+        ["git", "update-index", "--force-remove", "Support.ts", "Foo.ts"], cwd=target, check=True
+    )
+    subprocess.run(["git", "commit", "-qm", "later tree"], cwd=target, check=True)
+    (target / "foo.ts").write_text("different current content\n")
+    requested = ["Foo.ts", "foo.ts", "FOO.ts", "SUPPORT.TS", "./SUPPORT.TS", "LINK.TS", "FOLDER"]
+    sources = WORKBENCH_TARGET["candidate_source_lines"](
+        target,
+        {"kind": "range", "baseRevision": base, "headRevision": head},
+        ["Foo.ts", "foo.ts"],
+        requested,
+        case_insensitive=case_insensitive,
+    )
+    assert sources["Foo.ts"] == {"path": "Foo.ts", "lineCount": 1}
+    assert sources["foo.ts"] == {"path": "foo.ts", "lineCount": 3}
+    assert sources["FOO.ts"] == {"error": "missing"}
+    for name in ("SUPPORT.TS", "./SUPPORT.TS"):
+        assert sources[name] == (
+            {"path": "Support.ts", "lineCount": 2} if case_insensitive else {"error": "missing"}
+        )
+    for name in ("LINK.TS", "FOLDER"):
+        assert sources[name] == {"error": "not_file" if case_insensitive else "missing"}

@@ -264,7 +264,12 @@ describe("CLI update notice", () => {
       ["info", "--json"],
       dependencies({ onUpdateCheck }),
     );
-    for (const argv of [["--help"], ["--version"], ["scan", "--dry-run"]]) {
+    for (const argv of [
+      ["--help"],
+      ["--version"],
+      ["scan", "--dry-run"],
+      ["info", "--workers"],
+    ]) {
       await main(
         argv,
         capture().stream,

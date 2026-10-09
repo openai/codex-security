@@ -153,28 +153,78 @@ export class ScanDashboard {
   #observingStreamErrors = false;
   readonly #onStreamError = (): void => {};
   #keyInput: PassThrough | null = null;
-  #inputKeys: string[] | null = null;
+  #inputKeys: {
+    keys: string[];
+    continued: boolean;
+    replay: boolean;
+  } | null = null;
   readonly #onInput = (chunk: string | Uint8Array): void => {
-    const keys: string[] = [];
-    this.#inputKeys = keys;
+    const batch = {
+      keys: [] as string[],
+      continued: false,
+      replay: false,
+    };
+    this.#inputKeys = batch;
     try {
       this.#keyInput?.write(chunk);
     } finally {
       this.#inputKeys = null;
     }
-    this.#handleKeys(keys);
+    if (batch.replay) this.#onInput(chunk);
+    else this.#handleKeys(batch.keys);
   };
 
   #setKeyInput(input: PassThrough | null): void {
-    this.#keyInput?.removeAllListeners();
-    this.#keyInput?.destroy();
+    const previous = this.#keyInput;
+    if (previous !== null) {
+      previous.removeAllListeners("keypress");
+      previous.on("keypress", () => {});
+      // Readline clears its Escape timer on input, after the active keypress returns.
+      queueMicrotask(() => {
+        previous.write(" ");
+        previous.removeAllListeners();
+        previous.destroy();
+      });
+    }
     this.#keyInput = input;
     if (input === null) return;
-    emitKeypressEvents(input);
-    input.on("keypress", (_text: unknown, key: { sequence: string }) => {
-      if (this.#inputKeys !== null) this.#inputKeys.push(key.sequence);
-      else this.#handleKeys([key.sequence]);
+    let pending = 0;
+    input.setEncoding("utf8");
+    input.on("data", (text: string) => {
+      if (this.#inputKeys !== null) this.#inputKeys.continued = pending > 0;
+      pending += text.length;
     });
+    emitKeypressEvents(input);
+    input.on(
+      "keypress",
+      (
+        _text: unknown,
+        key: { sequence: string; meta?: boolean; code?: string },
+      ) => {
+        pending -= key.sequence.length;
+        const keys =
+          (key.meta && key.code === undefined) ||
+          key.sequence.includes("\u0003")
+            ? Array.from(key.sequence)
+            : [key.sequence];
+        const batch = this.#inputKeys;
+        const continued = batch?.continued === true;
+        if (batch !== null) batch.continued = false;
+        if (batch === null) this.#handleKeys(keys);
+        else if (
+          this.#budget !== null &&
+          batch.keys.length === 0 &&
+          keys.length > 1 &&
+          keys[0] === "\u001B" &&
+          continued
+        ) {
+          // The buffered Escape belongs to the prior chunk's budget dismissal.
+          // Decode this chunk again after that transition, retaining its own keys.
+          this.#handleKeys(["\u001B"]);
+          batch.replay = true;
+        } else batch.keys.push(...keys);
+      },
+    );
   }
 
   #handleKeys(keys: string[]): void {
@@ -207,9 +257,6 @@ export class ScanDashboard {
           budget.input += key;
         }
       }
-      // Discard the rest of this input event, including an unfinished key sequence.
-      if (this.#budget === null && this.#keyInput !== null)
-        this.#setKeyInput(new PassThrough());
       this.#refresh();
       return;
     }
@@ -463,11 +510,13 @@ export class ScanDashboard {
     ) {
       return Promise.resolve(undefined);
     }
+    this.#setKeyInput(new PassThrough());
     return new Promise((resolve) => {
       const abort = () => finish();
       const finish = (limit?: number) => {
         request.signal.removeEventListener("abort", abort);
         this.#budget = null;
+        if (this.#timer !== null) this.#setKeyInput(new PassThrough());
         this.#refresh();
         resolve(limit);
       };

@@ -8,8 +8,10 @@ import * as filesystem from "node:fs/promises";
 import { CodexSecurityError } from "../src/errors.js";
 import {
   appendFile,
+  mkdir,
   readFile,
   readdir,
+  rename,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -42,6 +44,86 @@ const copyPublishedIssues: PublishScanDependencies["recordPublishedIssues"] =
   async (_prepared, issues) => {
     return [...issues];
   };
+
+test("returns completed publication when cancellation arrives during receipt persistence", async () => {
+  const publication = preparedPublication();
+  const controller = new AbortController();
+  const receipts: PublishScanResult[] = [];
+  const result = await publishScanInternal(
+    "scan",
+    { ...OPTIONS, signal: controller.signal },
+    dependencies(publication, {
+      writeReceipt: async (receipt) => {
+        receipts.push(receipt);
+        controller.abort(new Error("Cancellation after saved receipt"));
+      },
+    }),
+  );
+  expect(receipts).toHaveLength(1);
+  expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+});
+
+test("retains indeterminate publication evidence when reading the handoff fails", async () => {
+  const publication = preparedPublication();
+  const receipts: PublishScanResult[] = [];
+  let file = "";
+  const injected = dependencies(publication, {
+    runCodex: async (_command, _args, input) => {
+      file = publicationData(input).handoffFile;
+      await writeHandoff(input, [
+        handoffRecord(publication, publication.issues[0]!, {
+          identifier: "SEC-123",
+        }),
+      ]);
+      await rename(file, `${file}.saved`);
+      await mkdir(file);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    writeReceipt: async (receipt) => {
+      receipts.push(receipt);
+    },
+  });
+  await expect(publishScanInternal("scan", OPTIONS, injected)).rejects.toThrow(
+    "could not verify every completed mutation",
+  );
+  expect(receipts.length).toBeGreaterThan(0);
+  expect(receipts[0]!.indeterminate).toBe(true);
+  expect(receipts[0]!.failed[0]!.error).toContain("EISDIR");
+  expect((await stat(dirname(file))).isDirectory()).toBe(true);
+  expect(await readFile(`${file}.saved`, "utf8")).toContain("SEC-123");
+});
+
+test("preserves unreadable handoff diagnostics when every connector outcome failed", async () => {
+  const publication = preparedPublication();
+  const receipts: PublishScanResult[] = [];
+  const injected = dependencies(publication, {
+    runCodex: async (_command, _args, input) => {
+      const file = publicationData(input).handoffFile;
+      await rename(file, `${file}.saved`);
+      await mkdir(file);
+      return {
+        exitCode: 0,
+        stdout: issueEvent(publication.issues[0]!, {
+          status: "failed",
+          error: "Synthetic connector failure",
+        }),
+        stderr: "",
+      };
+    },
+    writeReceipt: async (receipt) => {
+      receipts.push(structuredClone(receipt));
+    },
+  });
+  await expect(publishScanInternal("scan", OPTIONS, injected)).rejects.toThrow(
+    "EISDIR",
+  );
+  expect(receipts.length).toBeGreaterThan(0);
+  for (const receipt of receipts) {
+    expect(receipt.indeterminate).toBe(true);
+    expect(receipt.warnings?.join(" ")).toContain("EISDIR");
+    expect(receipt.failed[0]?.error).toBe("Synthetic connector failure");
+  }
+});
 
 function issueMapping(record: Record<string, unknown>) {
   return [record["findingId"], record["issueIdentifier"]];
@@ -2709,16 +2791,28 @@ describe("connected Linear publication", () => {
     },
   );
 
-  test.each([1, 2])(
-    "preserves recovery evidence when handoff read %d fails",
-    async (failedRead) => {
+  test.each([
+    ["initial handoff-only read", 1, false, false],
+    ["later handoff-only read", 2, false, false],
+    ["initial connector-only read", 1, true, false],
+    ["later connector-only read", 2, true, false],
+    ["initial read and event-write failure", 1, true, true],
+    ["later read and event-write failure", 2, true, true],
+  ] as const)(
+    "preserves recovery evidence after %s fails",
+    async (_name, failedRead, hasEvents, eventWriteFails) => {
       const publication = preparedPublication();
       const persisted = mock(copyPublishedIssues);
-      const writeReceipt = mock(async () => {});
+      const writeReceipt = mock(async (_receipt: PublishScanResult) => {});
       const originalReadFile = filesystem.readFile;
+      const code = failedRead === 1 ? "EACCES" : "EIO";
       const failure = Object.assign(
-        new Error("EACCES: permission denied reading synthetic handoff"),
-        { code: "EACCES" },
+        new Error(`${code}: could not read synthetic handoff`),
+        { code },
+      );
+      const event = issueEvent(publication.issues[0]!);
+      const writeFailure = new Error(
+        "Synthetic connector-event storage unavailable.",
       );
       let handoffFile = "",
         reads = 0;
@@ -2731,11 +2825,13 @@ describe("connected Linear publication", () => {
           dependencies(publication, {
             runCodex: async (_command, _args, input) => {
               handoffFile = publicationData(input).handoffFile;
-              await writeHandoff(input, [
-                handoffRecord(publication, publication.issues[0]!, {
-                  identifier: "SEC-RECOVERABLE",
-                }),
-              ]);
+              if (!hasEvents) {
+                await writeHandoff(input, [
+                  handoffRecord(publication, publication.issues[0]!, {
+                    identifier: "SEC-RECOVERABLE",
+                  }),
+                ]);
+              }
               const read = spyOn(filesystem, "readFile").mockImplementation(
                 (async (...args: Parameters<typeof originalReadFile>) => {
                   if (args[0] === handoffFile && ++reads === failedRead)
@@ -2746,8 +2842,19 @@ describe("connected Linear publication", () => {
               restore = () => {
                 read.mockRestore();
               };
-              return { exitCode: 0, stdout: "", stderr: "" };
+              return {
+                exitCode: 0,
+                stdout: hasEvents ? event : "",
+                stderr: "",
+              };
             },
+            ...(eventWriteFails
+              ? {
+                  writeEvents: async () => {
+                    throw writeFailure;
+                  },
+                }
+              : {}),
             recordPublishedIssues: persisted,
             writeReceipt,
           }),
@@ -2763,14 +2870,55 @@ describe("connected Linear publication", () => {
       expect((rejected as Error).message).toContain(
         "recover it before retrying",
       );
-      const cause = (rejected as Error).cause;
-      expect(failedRead === 1 ? cause : (cause as Error).cause).toBe(failure);
-      expect(await readFile(handoffFile, "utf8")).toContain("SEC-RECOVERABLE");
+      expect(reads).toBe(failedRead === 1 && hasEvents ? 2 : failedRead);
+      const handoffContent = await readFile(handoffFile, "utf8");
+      if (hasEvents) {
+        if (failedRead === 1) {
+          expect(await readJsonLines(handoffFile)).toMatchObject([
+            {
+              findingId: publication.issues[0]!.findingId,
+              issueIdentifier: `SEC-${publication.issues[0]!.findingId.slice(8)}`,
+            },
+          ]);
+        } else {
+          expect(handoffContent).toBe("");
+        }
+        if (eventWriteFails) {
+          expect((rejected as Error).message).toContain(writeFailure.message);
+          expect((rejected as Error).message).toContain(
+            "Could not preserve Linear connector-event evidence",
+          );
+        } else {
+          const eventsFile = await publicationEventsFile(handoffFile);
+          expect(await readFile(eventsFile, "utf8")).toBe(`${event}\n`);
+          expect((rejected as Error).message).toContain(eventsFile);
+        }
+      } else {
+        expect(handoffContent).toContain("SEC-RECOVERABLE");
+        expect(
+          (await readdir(dirname(handoffFile))).filter((name) =>
+            name.startsWith("events-"),
+          ),
+        ).toEqual([]);
+      }
       expect(
         await readFile(join(dirname(handoffFile), "publication.json"), "utf8"),
       ).toContain("unsafe(input)");
-      expect(writeReceipt).not.toHaveBeenCalled();
-      expect(persisted).not.toHaveBeenCalled();
+      const causes: unknown[] = [];
+      for (let cause = rejected; cause instanceof Error; cause = cause.cause)
+        causes.push(cause);
+      expect(causes).toContain(failure);
+      if (failedRead === 1) {
+        expect(writeReceipt).toHaveBeenCalled();
+        for (const [receipt] of writeReceipt.mock.calls) {
+          expect(receipt.indeterminate).toBe(true);
+          expect(receipt.warnings?.join(" ")).toContain(failure.message);
+        }
+        expect(persisted).toHaveBeenCalledTimes(hasEvents ? 1 : 0);
+      } else {
+        expect(writeReceipt).not.toHaveBeenCalled();
+        expect(persisted).not.toHaveBeenCalled();
+      }
     },
   );
 
@@ -2909,7 +3057,7 @@ describe("connected Linear publication", () => {
           '].join("");',
           'spawn(process.execPath, ["-e", descendant], { env: { CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });',
           "const waiter = new Int32Array(new SharedArrayBuffer(4));",
-          "for (let attempts = 0; !fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID); attempts += 1) {",
+          "for (let attempts = 0; (!fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID) || fs.statSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID).size === 0); attempts += 1) {",
           "  if (attempts === 1000) process.exit(3);",
           "  Atomics.wait(waiter, 0, 0, 10);",
           "}",

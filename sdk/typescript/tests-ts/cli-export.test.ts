@@ -68,9 +68,6 @@ describe("CLI", () => {
       Path: "C:\\Python;C:\\Windows\\System32",
       PYTHON: "/managed/python",
       XDG_CACHE_HOME: "/managed/cache",
-      LD_LIBRARY_PATH: "/managed/libraries",
-      DYLD_LIBRARY_PATH: "/managed/dylibs",
-      DYLD_FALLBACK_LIBRARY_PATH: "/managed/fallback-libraries",
       PYTHONUTF8: "1",
       TMPDIR: "/tmp",
     });
@@ -131,12 +128,29 @@ describe("CLI", () => {
       failure.exportFindings = async () => {
         throw new Error("EACCES: synthetic export denied");
       };
-      const failed = createCliTest(main);
-      expect(
-        await failed.runCli(["export", "scan", "--output", "-"], failure),
-      ).toBe(2);
-      expect(failed.stdout.text()).toBe("");
-      expect(failed.stderr.text()).toContain("EACCES: synthetic export denied");
+      failure.runWorkbench = async () => {
+        throw new Error("Synthetic setup read failure");
+      };
+      for (const [args, diagnostic] of [
+        [
+          ["export", "scan", "--output", "-"],
+          "EACCES: synthetic export denied",
+        ],
+        [
+          ["export", "scan", "--export-format", "md", "--output", "-"],
+          "Findings exports support",
+        ],
+        [["export", "--output", "-"], "Synthetic setup read failure"],
+        [
+          ["export", "scan", "--export-format", "invalid", "--output", "-"],
+          "Invalid option:",
+        ],
+      ] as const) {
+        const failed = createCliTest(main);
+        expect(await failed.runCli([...args], failure)).toBe(2);
+        expect(failed.stdout.text()).toBe("");
+        expect(failed.stderr.text()).toContain(diagnostic);
+      }
       for (const metadata of ["--help", "--schema"]) {
         const result = createCliTest(main);
         expect(

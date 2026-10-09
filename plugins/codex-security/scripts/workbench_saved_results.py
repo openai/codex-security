@@ -31,7 +31,6 @@ from finalize_scan_contract import (
     _read_scan_local_json_with_metadata,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
-    _schema_values_equal,
     _validate_completion_binding,
     _validate_resolved_deferred,
     _validate_schema_node,
@@ -42,7 +41,6 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
-from workbench.json_numbers import normalize_json_integer
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -569,7 +567,7 @@ def _finding_key(finding: dict[str, Any]) -> str:
     locations = finding.get("locations", [])
     if not isinstance(locations, list):
         locations = []
-    return _semantic_digest(
+    return _digest(
         [
             finding.get("ruleId"),
             identity,
@@ -577,8 +575,8 @@ def _finding_key(finding: dict[str, Any]) -> str:
                 (
                     (
                         location.get("path"),
-                        normalize_json_integer(location.get("startLine")),
-                        normalize_json_integer(location.get("endLine", location.get("startLine"))),
+                        location.get("startLine"),
+                        location.get("endLine", location.get("startLine")),
                     )
                     for location in locations
                     if isinstance(location, dict)
@@ -591,7 +589,7 @@ def _finding_key(finding: dict[str, Any]) -> str:
 
 def _worker_candidate_key(
     worker_id: str, candidate_id: str, finding: dict[str, Any]
-) -> tuple[str, str, str]:
+) -> tuple[str, str, Any, Any, Any]:
     """Identify one worker-local candidate without merging unrelated locations."""
     provenance = finding.get("provenance")
     identity = (
@@ -605,31 +603,16 @@ def _worker_candidate_key(
         identity = normalized.get("identity")
     anchor = identity.get("anchor") if isinstance(identity, dict) else None
     instance = identity.get("instance") if isinstance(identity, dict) else None
-    return worker_id, candidate_id, _semantic_digest([finding.get("ruleId"), anchor, instance])
+    return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
 
 
-def _semantic_digest(value: Any) -> str:
-    """Compare JSON values; source and checkpoint digests retain their exact encoding."""
-
-    def normalize(item: Any) -> Any:
-        if isinstance(item, dict):
-            return {key: normalize(child) for key, child in item.items()}
-        if isinstance(item, (list, tuple)):
-            return [normalize(child) for child in item]
-        return normalize_json_integer(item)
-
-    return _digest(normalize(value))
-
-
-def _finding_content_key(finding: dict[str, Any]) -> str:
-    """Identify substantive finding content without generated identity or provenance."""
-    return _semantic_digest(
-        {
-            key: value
-            for key, value in finding.items()
-            if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
-        }
-    )
+def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
+    """Return substantive finding content without generated identity or provenance."""
+    return {
+        key: value
+        for key, value in finding.items()
+        if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
+    }
 
 
 def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> None:
@@ -1341,9 +1324,9 @@ def merge_saved_results(
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
     represented: dict[str, str | None] = {}
-    represented_candidates: dict[tuple[str, str, str], str | None] = {}
+    represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
-    represented_candidate_history: dict[tuple[str, str, str], set[str]] = {}
+    represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
@@ -1544,7 +1527,7 @@ def merge_saved_results(
                     retained_key = _finding_key(retained)
                     if retained is not finding:
                         represented_history.setdefault(retained_key, set()).add(
-                            _finding_content_key(retained)
+                            _digest(_finding_content(retained))
                         )
                     previous_key = represented.get(retained_key)
                     if retained_key not in represented:
@@ -1572,7 +1555,7 @@ def merge_saved_results(
                                 # that worker-local identity ambiguous.
                                 represented_candidates[candidate_key] = None
                             represented_candidate_history.setdefault(candidate_key, set()).add(
-                                _finding_content_key(original["finding"])
+                                _digest(_finding_content(original["finding"]))
                             )
     replaced_surfaces, surface_updates = _generic_surface_updates(
         all_sources,
@@ -1797,11 +1780,7 @@ def merge_saved_results(
                     finding_positions.setdefault(_finding_key(finding), len(findings))
                 findings.append(finding)
                 continue
-            if (
-                relative != "parent"
-                and parent
-                and any(_schema_values_equal(value, entry) for entry in parent["findings"])
-            ):
+            if relative != "parent" and parent and value in parent["findings"]:
                 continue
             if not isinstance(value, dict):
                 warnings.append(f"Retained malformed finding evidence in {relative}.")
@@ -1821,7 +1800,7 @@ def merge_saved_results(
                         if not any(
                             isinstance(previous, dict)
                             and _finding_key(previous) == _finding_key(finding)
-                            and _finding_content_key(previous) == _finding_content_key(finding)
+                            and _finding_content(previous) == _finding_content(finding)
                             for previous in history
                         ):
                             history.append(finding)
@@ -1868,10 +1847,10 @@ def merge_saved_results(
                     historical_contents = set()
                 if mapped_key is not None:
                     key = mapped_key
-                    represented_by_parent = _finding_content_key(value) in historical_contents
+                    represented_by_parent = _digest(_finding_content(value)) in historical_contents
             if key in finding_positions:
                 retained = findings[finding_positions[key]]
-                if not _schema_values_equal(finding, retained):
+                if finding != retained:
                     if not represented_by_parent and _finding_strength(finding) > _finding_strength(
                         retained
                     ):
@@ -1899,13 +1878,17 @@ def merge_saved_results(
                         if not isinstance(original, dict):
                             continue
                         source_key = _finding_key(original)
-                        source_content = _finding_content_key(original)
+                        source_content = _finding_content(original)
                         already_retained = any(
                             source_key == _finding_key(historical)
-                            and source_content == _finding_content_key(historical)
+                            and source_content == _finding_content(historical)
                             for historical in _retained_findings(retained)
                         )
-                        if not already_retained:
+                        if (
+                            not already_retained
+                            and original not in history
+                            and original != retained
+                        ):
                             history.append(original)
                 continue
             finding_positions[key] = len(findings)
@@ -1977,7 +1960,7 @@ def merge_saved_results(
                         if not any(
                             isinstance(previous, dict)
                             and _finding_key(previous) == _finding_key(finding)
-                            and _finding_content_key(previous) == _finding_content_key(finding)
+                            and _finding_content(previous) == _finding_content(finding)
                             for previous in history
                         ):
                             history.append(copy.deepcopy(finding))

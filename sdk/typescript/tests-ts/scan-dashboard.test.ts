@@ -2,10 +2,12 @@ import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock, jest } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
 import { capture, fakeResult } from "./cli-fixtures.js";
+
+afterEach(() => jest.useRealTimers());
 
 const STARTED_AT = new Date(2026, 6, 29, 9, 41, 0).getTime();
 
@@ -226,7 +228,68 @@ describe("live scan dashboard", () => {
     }
   });
 
+  test.each(["\u001B", "\u001B["])(
+    "discards a pending %j when entering a budget prompt",
+    async (sequence) => {
+      jest.useFakeTimers();
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(capture(true).stream, { input });
+      dashboard.start();
+      try {
+        input.emit("data", sequence);
+        const answer = dashboard.requestBudgetIncrease({
+          maxCostUsd: 20,
+          cost: fakeResult([], "complete", {
+            input_tokens: 100,
+            output_tokens: 1,
+          }).cost!,
+          signal: new AbortController().signal,
+        });
+        await Promise.resolve();
+        expect(jest.getTimerCount()).toBe(0);
+        jest.runAllTimers();
+        input.emit("data", "30\r");
+        await expect(answer).resolves.toBe(30);
+      } finally {
+        dashboard.stop();
+      }
+    },
+  );
+
+  test("discards a partial key when a budget request aborts externally", async () => {
+    jest.useFakeTimers();
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(
+      { ...stderr.stream, rows: 14 },
+      { input },
+    );
+    const controller = new AbortController();
+    dashboard.start();
+    try {
+      for (let index = 0; index < 20; index++)
+        dashboard.note(`Activity ${index}`);
+      const answer = dashboard.requestBudgetIncrease({
+        maxCostUsd: 20,
+        cost: fakeResult([], "complete", {
+          input_tokens: 100,
+          output_tokens: 1,
+        }).cost!,
+        signal: controller.signal,
+      });
+      input.emit("data", "\u001B[");
+      controller.abort();
+      await expect(answer).resolves.toBeUndefined();
+      input.emit("data", "A");
+      expect(lastFrame(stderr)).not.toContain("above live");
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      dashboard.stop();
+    }
+  });
+
   test("owns only its input listeners and drops pending Escape on stop and restart", async () => {
+    jest.useFakeTimers();
     const stderr = capture(true);
     const input = new DashboardTestInput();
     input.isRaw = true;
@@ -237,9 +300,12 @@ describe("live scan dashboard", () => {
     const dashboard = createDashboard(stderr.stream, { input, onInterrupt });
     dashboard.start();
     input.emit("data", "\u001B");
+    expect(jest.getTimerCount()).toBe(1);
     dashboard.stop();
+    await Promise.resolve();
+    expect(jest.getTimerCount()).toBe(0);
     const stopped = stderr.text();
-    await Bun.sleep(600);
+    jest.runAllTimers();
     expect(stderr.text()).toBe(stopped);
     expect(onInterrupt).not.toHaveBeenCalled();
     expect(input.isRaw).toBe(true);
@@ -251,6 +317,102 @@ describe("live scan dashboard", () => {
     dashboard.stop();
     expect(observer).toHaveBeenCalledTimes(2);
   });
+
+  test.each(["scan", "budget", "components"] as const)(
+    "preserves Escape-prefixed cancellation and chunk ownership in %s",
+    async (mode) => {
+      jest.useFakeTimers();
+      for (const chunks of [
+        ["\u001B", "\u0003"],
+        ["\u001B\u0003"],
+        ["\u001B", "\u001B"],
+        ["\u001B\u001B"],
+        ["\u001B[", "\u0003"],
+        ["\u001B[\u0003"],
+        ["\u001BO", "\u0003"],
+        ["\u001BO\u0003"],
+        ["\u001B", "\u0003d"],
+        ["\u001B\u0003d"],
+        ["\u001B", "\u001B\u0003"],
+        ["\u001B\u001B", "\u0003"],
+        ["\u001B\u001B\u0003"],
+        ["\u001B", "\u001B\u0003d"],
+        ...Array.from({ length: 8 }, (_, index) => {
+          const escapes = "\u001B".repeat(index + 1);
+          return [
+            ["\u001B", `${escapes}\u0003`],
+            [escapes, "\u001B\u0003"],
+            [escapes, "\u0003"],
+            [`${escapes}\u0003`],
+          ];
+        }).flat(),
+      ]) {
+        const stderr = capture(true);
+        const input = new DashboardTestInput();
+        input.isRaw = true;
+        const observer = mock();
+        input.on("data", observer);
+        input.on("keypress", observer);
+        const controller = new AbortController();
+        const onInterrupt = mock(() => controller.abort("SIGINT"));
+        const dashboard = createDashboard(stderr.stream, {
+          input,
+          presentation: mode === "components" ? "components" : "scan",
+          onInterrupt,
+        });
+        let answer: number | undefined | "pending" = "pending";
+        const pasted =
+          mode === "budget"
+            ? Array.from(Buffer.from("é🙂界"), (byte) => Uint8Array.of(byte))
+            : [];
+        dashboard.start();
+        try {
+          if (mode === "budget")
+            void dashboard
+              .requestBudgetIncrease({
+                maxCostUsd: 20,
+                cost: fakeResult([], "complete", {
+                  input_tokens: 100,
+                  output_tokens: 1,
+                }).cost!,
+                signal: controller.signal,
+              })
+              .then((value) => {
+                answer = value;
+              });
+          for (const chunk of pasted) input.emit("data", chunk);
+          if (mode === "budget") {
+            expect(lastFrame(stderr)).toContain("é🙂界");
+            expect(lastFrame(stderr)).not.toContain("\uFFFD");
+          }
+          for (const chunk of chunks) input.emit("data", Buffer.from(chunk));
+          await Promise.resolve();
+          jest.runAllTimers();
+          await Promise.resolve();
+          const interrupted =
+            chunks.some((chunk) => chunk.includes("\u0003")) &&
+            (mode !== "budget" || chunks.length > 1);
+          expect(onInterrupt).toHaveBeenCalledTimes(interrupted ? 1 : 0);
+          expect(controller.signal.aborted).toBe(interrupted);
+          if (mode === "budget") {
+            expect(answer).toBeUndefined();
+            if (chunks.at(-1)?.endsWith("d"))
+              expect(lastFrame(stderr).includes("DETAILS")).toBe(
+                chunks.length > 1,
+              );
+          }
+        } finally {
+          dashboard.stop();
+          await Promise.resolve();
+        }
+        expect(input.isRaw).toBe(true);
+        expect(input.listenerCount("data")).toBe(1);
+        expect(input.listenerCount("keypress")).toBe(1);
+        expect(observer).toHaveBeenCalledTimes(pasted.length + chunks.length);
+        expect(jest.getTimerCount()).toBe(0);
+      }
+    },
+  );
 
   test.each(["enter", "escape", "abort", "stop", "interrupt", "eof"] as const)(
     "dismisses a budget prompt without increasing the limit on %s",
@@ -296,6 +458,7 @@ describe("live scan dashboard", () => {
   );
 
   test("shows concurrent components and keeps their activity and costs separate", async () => {
+    jest.useFakeTimers();
     const stderr = capture(true);
     const input = new DashboardTestInput();
     let timers = 0;
@@ -403,7 +566,8 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("API session detail");
     expect(frame()).not.toContain("Web session detail");
     input.emit("data", "\u001B");
-    await Bun.sleep(600); // Allow readline's default standalone-Escape disambiguation.
+    jest.advanceTimersToNextTimer();
+    await Promise.resolve();
     input.emit("data", "\u001B[");
     input.emit("data", "B\r");
     expect(frame()).toContain("Web only activity");
