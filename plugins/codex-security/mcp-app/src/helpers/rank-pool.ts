@@ -1,6 +1,5 @@
 import { isDeepStrictEqual as same } from "node:util";
 import { createHash } from "node:crypto";
-import { isDeepStrictEqual as same } from "node:util";
 import { basename, dirname } from "node:path";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { formatDiagnostic, object, parseJson } from "./json";
