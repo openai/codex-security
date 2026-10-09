@@ -2563,17 +2563,19 @@ describe("scan and patch workflow", () => {
   });
 
   test.each([
-    { emptyFirstReport: false, renameFix: false },
-    { emptyFirstReport: true, renameFix: false },
-    { emptyFirstReport: false, renameFix: true },
+    { emptyFirstReport: false, renameFix: false, nested: false },
+    { emptyFirstReport: true, renameFix: false, nested: false },
+    { emptyFirstReport: false, renameFix: true, nested: false },
+    { emptyFirstReport: false, renameFix: false, nested: true },
   ])(
-    "publishes cumulative reviewed files (empty report: $emptyFirstReport, rename: $renameFix)",
-    async ({ emptyFirstReport, renameFix }) => {
+    "publishes cumulative reviewed files (empty report: $emptyFirstReport, rename: $renameFix, nested: $nested)",
+    async ({ emptyFirstReport, renameFix, nested }) => {
       const root = await temporaryDirectory("codex-security-reviewed-patch-");
-      const repository = join(root, "repository");
+      const gitRoot = join(root, "repository");
+      const repository = nested ? join(gitRoot, "package") : gitRoot;
       const remote = join(root, "remote.git");
       await mkdir(join(repository, "src"), { recursive: true });
-      const git = repositoryGit(repository);
+      const git = repositoryGit(gitRoot);
       const result = resultWithFindings(["high"]);
       let authors = 0;
       let reviews = 0;
@@ -2605,6 +2607,7 @@ describe("scan and patch workflow", () => {
             "scan",
             "--review-minimality",
             "--create-pr",
+            ...(nested ? ["--assess-patch-risk"] : []),
             "--json",
           ],
           {
@@ -2619,6 +2622,18 @@ describe("scan and patch workflow", () => {
                   : "https://github.com/example/repository/pull/1",
             onCodex: async (_args, output) => {
               const { prompt, sandbox } = output!.appServer!;
+              if (prompt.includes("$codex-security:assess-patch-risk")) {
+                const artifact = JSON.parse(
+                  prompt
+                    .split("\n")
+                    .find((line) => line.startsWith('{"path":'))!,
+                );
+                expect(await readFile(artifact.path, "utf8")).toContain(
+                  "+safe",
+                );
+                output!.stdout.write(patchRiskAssessment().report);
+                return 0;
+              }
               if (sandbox === "read-only") {
                 const lines = prompt.split("\n");
                 const index = lines.findIndex((line) =>
@@ -2677,7 +2692,9 @@ describe("scan and patch workflow", () => {
           git("show", "--format=", "--name-only", "--no-renames", "HEAD").split(
             "\n",
           ),
-        ).toEqual(expectedFiles);
+        ).toEqual(
+          expectedFiles.map((file) => (nested ? `package/${file}` : file)),
+        );
         expect(git("status", "--porcelain")).toBe("");
       } finally {
         await rm(root, { recursive: true, force: true });
@@ -2799,6 +2816,51 @@ describe("scan and patch workflow", () => {
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    },
+  );
+
+  test.each(["blocked", "failed"] as const)(
+    "preserves the reason for a %s author revision",
+    async (status) => {
+      const result = resultWithFindings(["high"]);
+      const reason =
+        "Regression failed: synthetic-api-key-value\nThe original failure still reproduces.";
+      let authors = 0;
+      let reviews = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan", "--review-minimality", "--json"],
+        {
+          result,
+          onWorkbench: () => savedScan(result, "scan"),
+          onCodex: (args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "revise",
+                  findings: ["Add the regression test."],
+                }),
+              );
+            } else if (++authors === 1) {
+              completePatches(args, output);
+            } else {
+              output!.stdout.write(
+                JSON.stringify({
+                  patches: [
+                    { occurrenceId: "occ_1", status, files: [], reason },
+                  ],
+                }),
+              );
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(authors).toBe(2);
+      expect(reviews).toBe(1);
+      expect(JSON.parse(outcome.stdout).patches[0].status).toBe("failed");
+      expect(outcome.stderr).toContain(reason);
     },
   );
 

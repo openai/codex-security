@@ -37,6 +37,7 @@ import {
   isAbsolute,
   join,
   parse,
+  posix,
   relative,
   resolve,
   win32,
@@ -7497,7 +7498,7 @@ type SkillStageRunner = (
 
 type PatchReviewSubject =
   | { status: "ready"; response: string }
-  | { status: "empty" }
+  | { status: "empty"; reasons: string[] }
   | { status: "invalid" };
 
 type PatchReviewerResult =
@@ -7550,7 +7551,10 @@ async function parsePatchReviewSubject(
       return { status: "invalid" };
     }
     if (!patches.some(({ status }) => status === "verified"))
-      return { status: "empty" };
+      return {
+        status: "empty",
+        reasons: patches.flatMap(({ reason }) => (reason ? [reason] : [])),
+      };
   }
 
   const head =
@@ -7563,8 +7567,15 @@ async function parsePatchReviewSubject(
     context.dependencies,
     head,
   );
-  if (typeof context.base === "string")
+  if (typeof context.base === "string") {
+    const prefix = await context.dependencies.runRepositoryCommand(
+      "git",
+      ["rev-parse", "--show-prefix"],
+      context.directory,
+    );
+    context.paths = context.paths.map((file) => posix.relative(prefix, file));
     context.baseline = { tree: context.base, head };
+  }
   if (reported !== undefined) {
     if (context.paths.length === 0) return { status: "invalid" };
     response = JSON.stringify({
@@ -7742,6 +7753,9 @@ async function runPatchReviewWorkflow(
       }
       subject = await parsePatchReviewSubject(patch.response, context);
       if (subject.status !== "ready") {
+        if (subject.status === "empty")
+          for (const reason of subject.reasons)
+            context.stderr.write(`${safePatchReport(reason)}\n`);
         context.stderr.write(
           "The revised patch did not return a valid review subject.\n",
         );
@@ -8052,7 +8066,7 @@ async function runSkillStage(
     ...(options.reviewPaths === undefined
       ? []
       : [
-          "Candidate changes since the pre-author baseline are in these files; preserve unrelated pre-existing working-tree changes (JSON array):",
+          "Candidate changes since the pre-author baseline are in these task-directory-relative files; preserve unrelated pre-existing working-tree changes (JSON array):",
           JSON.stringify(options.reviewPaths),
         ]),
     ...(options.reviewBaseline === undefined
