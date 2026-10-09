@@ -265,6 +265,51 @@ def test_same_issue_can_track_a_later_occurrence(tmp_path: Path) -> None:
     assert len({entry["scanId"] for entry in history}) == 2
 
 
+@pytest.mark.parametrize("operation", ["create", "update", "reuse"])
+def test_issue_cannot_move_to_a_different_finding(tmp_path: Path, operation: str) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    sources = []
+    for index in range(2):
+        scan_dir = tmp_path / f"scan-{index}"
+        scan_dir.mkdir()
+        write_completed_contract(
+            scan_dir, str(uuid.uuid4()), target, identity_anchor=f"synthetic-finding-{index}"
+        )
+        VALIDATOR.FINALIZER.finalize_scan(scan_dir)
+        sources.append((scan_dir, VALIDATOR.validate_contract(scan_dir)))
+    first_dir, first = sources[0]
+    second_dir, second = sources[1]
+    existing = receipt_for(first)
+    conflicting = receipt_for(second, operation=operation)
+    assert existing["findingId"] != conflicting["findingId"]
+    issues(state, first_dir, "record", receipts=[existing])
+
+    result = run_workbench(
+        state,
+        "finding-issues",
+        input_text=json.dumps(
+            {
+                "action": "record",
+                "scanDirectory": str(second_dir),
+                "destination": LINEAR,
+                "receipts": [receipt_for(second, issueIdentifier="SEC-102"), conflicting],
+            }
+        ),
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert "already associated with another finding" in result["stderr"]
+    assert issues(state, second_dir, "inspect")["receipts"] == []
+    assert issues(state, first_dir, "inspect")["receipts"] == [
+        {**existing, "scanId": first["manifest"]["scan"]["id"]}
+    ]
+    # Issue identifiers are scoped to their destination.
+    recorded = issues(state, second_dir, "record", destination=JIRA, receipts=[conflicting])
+    assert recorded["receipts"] == [{**conflicting, "scanId": second["manifest"]["scan"]["id"]}]
+
+
 @pytest.mark.parametrize("mutation", ["finding", "occurrence", "scan", "seal"])
 def test_invalid_source_is_rejected_before_creating_state(tmp_path: Path, mutation: str) -> None:
     scan_dir, validated = source(tmp_path)

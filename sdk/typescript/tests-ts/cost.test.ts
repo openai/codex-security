@@ -1,5 +1,5 @@
 import { jsonLines } from "./support/json.js";
-import { spawnSync } from "node:child_process";
+import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
 import { join, parse, sep } from "node:path";
@@ -220,18 +220,12 @@ describe("scan cost", () => {
         "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
         "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
       ].join("\n");
-      const result = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          "-c",
-          probe,
-          join(PLUGIN_ROOT, "scripts"),
-          JSON.stringify(usage),
-        ],
-        { encoding: "utf8" },
-      );
+      const result = runNodePython(python!, [
+        "-c",
+        probe,
+        join(PLUGIN_ROOT, "scripts"),
+        JSON.stringify(usage),
+      ]);
 
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout)).toMatchObject({

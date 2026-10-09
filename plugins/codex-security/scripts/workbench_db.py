@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
@@ -217,9 +218,19 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 def connect(*, deferred: bool = False) -> sqlite3.Connection:
     path = database_path()
-    create_private_directory(path.parent)
+    try:
+        create_private_directory(path.parent)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
+            exc._codex_security_state_unavailable = True
+        raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
-        connection = sqlite3.connect(path, timeout=5)
+        try:
+            connection = sqlite3.connect(path, timeout=5)
+        except sqlite3.OperationalError as exc:
+            if str(exc) == "unable to open database file":
+                exc._codex_security_state_unavailable = True
+            raise
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
@@ -588,7 +599,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
 
 
 def require_scope(scope: str, mode: str, target: Path) -> str:
-    value = scope.strip() or "."
+    value = scope if scope.strip() else "."
     requested_scope = Path(value)
     if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
         raise SystemExit("Scan scope must use repository-relative POSIX paths.")
@@ -602,6 +613,8 @@ def require_scope(scope: str, mode: str, target: Path) -> str:
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("Scan scope must stay inside the scanned target.") from exc
     normalized = relative_scope.as_posix() or "."
+    if not normalized.strip():
+        normalized = "./" + normalized
     if mode == "deep" and normalized != ".":
         raise SystemExit("Deep Scan is repository-wide and cannot use a scoped path.")
     if not resolved_scope.is_dir():
@@ -647,8 +660,10 @@ def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
 def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     workspace_id = require_uuid(args.workspace_id, "workspace-id")
     timestamp = now()
-    target_path = optional_text(args.target_path, maximum=4096)
-    default_scope = optional_text(args.scope, maximum=4096) or "."
+    target_path = args.target_path if optional_text(args.target_path, maximum=4096) else None
+    default_scope = args.scope if optional_text(args.scope, maximum=4096) else "."
+    if any(len(value) > 4096 for value in (target_path, default_scope) if value is not None):
+        raise SystemExit("Text value must be no longer than 4096 characters.")
     diff_target_kind = args.diff_target_kind if args.mode == "diff" else None
     diff_base_revision = (
         optional_text(args.diff_base_revision, maximum=512) if args.mode == "diff" else None
@@ -2487,15 +2502,14 @@ def require_sha256_digest(value: str, label: str) -> str:
 
 
 def require_scan_relative_file(scan: sqlite3.Row, value: str) -> str:
-    normalized = optional_text(value, maximum=4096)
-    if normalized is None or "\\" in normalized:
+    if len(value) > 4096:
+        raise SystemExit("Text value must be no longer than 4096 characters.")
+    if not value.strip() or "\\" in value:
         raise SystemExit("Patch path must identify a scan-local regular file.")
-    parsed = PurePosixPath(normalized)
+    parsed = PurePosixPath(value)
     if parsed.is_absolute() or ".." in parsed.parts:
         raise SystemExit("Patch path must identify a scan-local regular file.")
-    path = artifact_path(Path(scan["scan_dir"]), parsed.as_posix(), required=True)
-    if path is None:
-        raise SystemExit("Patch path must identify a scan-local regular file.")
+    artifact_path(Path(scan["scan_dir"]), parsed.as_posix(), required=True)
     return parsed.as_posix()
 
 
@@ -3319,40 +3333,66 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
     ) as connection:
         remediation_state.require_available(connection, args, require_scan)
-        if args.command == "create-workspace":
-            result = create_workspace(connection, args)
+        handlers = {
+            "create-workspace": create_workspace,
+            "save-workspace": save_workspace,
+            "start-scan": start_scan,
+            "begin-deep-scan": deep_scan.begin_deep_scan,
+            "get-deep-scan": deep_scan.get_deep_scan,
+            "claim-deep-scan-coordinator": deep_scan.claim_deep_scan_coordinator,
+            "upsert-deep-scan-worker": deep_scan.upsert_deep_scan_worker,
+            "claim-deep-scan-dedup": deep_scan.claim_deep_scan_dedup,
+            "commit-deep-scan-dedup": deep_scan.commit_deep_scan_dedup,
+            "finish-deep-scan": deep_scan.finish_deep_scan,
+            "fail-deep-scan": deep_scan.fail_deep_scan,
+            "record-deep-scan-publication-failure": deep_scan.record_deep_scan_publication_failure,
+            "list-scans": scan_history.list_scans,
+            "register-cli-scan": partial(register_cli_scan, before_archive=before_archive),
+            "set-scan-thread": set_scan_thread,
+            "set-scan-cost-limit": set_scan_cost_limit,
+            "list-global-findings": native_indexes.list_global_findings,
+            "list-repositories": native_indexes.list_repositories,
+            "list-findings": list_findings,
+            "complete-budget-exhausted-scan": complete_budget_exhausted_scan,
+            "set-finding-triage": set_finding_triage,
+            "request-finding-remediation": request_finding_remediation,
+            "request-finding-remediation-action": request_finding_remediation_action,
+            "claim-finding-remediation-resend": claim_finding_remediation_resend,
+            "mark-finding-remediation-delivered": mark_finding_remediation_delivered,
+            "release-finding-remediation-claim": release_finding_remediation_claim,
+            "set-finding-remediation": set_finding_remediation,
+            "update-progress": partial(progress.update_progress, command_context),
+            "update-scan-context": partial(progress.update_context, command_context),
+            "cancel-scan": partial(saved_results.cancel_scan, _WORKBENCH_DB_CONTEXT),
+            "fail-scan": partial(saved_results.fail_scan, _WORKBENCH_DB_CONTEXT),
+            "preserve-scan-results": partial(
+                saved_results.preserve_scan_results, _WORKBENCH_DB_CONTEXT
+            ),
+            "recover-scan-results": partial(
+                saved_results.recover_scan_results, _WORKBENCH_DB_CONTEXT
+            ),
+            "write-scan-draft": partial(saved_results.write_scan_draft, _WORKBENCH_DB_CONTEXT),
+            "save-scan-artifact": partial(saved_results.save_scan_artifact, _WORKBENCH_DB_CONTEXT),
+            "mark-handoff-delivered": partial(handoff.mark_handoff_delivered, command_context),
+            "claim-handoff-delivery": partial(handoff.claim_handoff_delivery, command_context),
+            "release-handoff-delivery": partial(handoff.release_handoff_delivery, command_context),
+            "attach-scan-continuation-thread": partial(
+                handoff.attach_scan_continuation_thread, command_context
+            ),
+            "export-findings": partial(publication.export_findings, _WORKBENCH_PUBLICATION_CONTEXT),
+        }
+        if handler := handlers.get(args.command):
+            result = handler(connection, args)
         elif args.command == "get-workspace":
             result = workspace_state(
                 connection,
                 args.workspace_id,
                 thread_id=args.thread_id,
             )
-        elif args.command == "save-workspace":
-            result = save_workspace(connection, args)
-        elif args.command == "start-scan":
-            result = start_scan(connection, args)
         elif args.command == "start-prompt-only-scan":
             result = _start_prompt_driven_scan(connection, args, headless_standard=False)
         elif args.command == "start-headless-standard-scan":
             result = _start_prompt_driven_scan(connection, args, headless_standard=True)
-        elif args.command == "begin-deep-scan":
-            result = deep_scan.begin_deep_scan(connection, args)
-        elif args.command == "get-deep-scan":
-            result = deep_scan.get_deep_scan(connection, args)
-        elif args.command == "claim-deep-scan-coordinator":
-            result = deep_scan.claim_deep_scan_coordinator(connection, args)
-        elif args.command == "upsert-deep-scan-worker":
-            result = deep_scan.upsert_deep_scan_worker(connection, args)
-        elif args.command == "claim-deep-scan-dedup":
-            result = deep_scan.claim_deep_scan_dedup(connection, args)
-        elif args.command == "commit-deep-scan-dedup":
-            result = deep_scan.commit_deep_scan_dedup(connection, args)
-        elif args.command == "finish-deep-scan":
-            result = deep_scan.finish_deep_scan(connection, args)
-        elif args.command == "fail-deep-scan":
-            result = deep_scan.fail_deep_scan(connection, args)
-        elif args.command == "record-deep-scan-publication-failure":
-            result = deep_scan.record_deep_scan_publication_failure(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
         elif args.command == "rename-scan":
@@ -3361,8 +3401,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             )
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
-        elif args.command == "list-scans":
-            result = scan_history.list_scans(connection, args)
         elif args.command == "list-unmatched-scan-pairs":
             result = scan_history.list_unmatched_scan_pairs(
                 connection,
@@ -3370,12 +3408,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 backfill_finding_details=backfill_legacy_finding_details,
                 read_coverage=coverage_for_comparison,
             )
-        elif args.command == "register-cli-scan":
-            result = register_cli_scan(connection, args, before_archive=before_archive)
-        elif args.command == "set-scan-thread":
-            result = set_scan_thread(connection, args)
-        elif args.command == "set-scan-cost-limit":
-            result = set_scan_cost_limit(connection, args)
         elif args.command == "get-scan-recipe":
             result = scan_history.scan_recipe(require_scan(connection, args.scan_id))
         elif args.command == "get-cli-scan-resume":
@@ -3409,63 +3441,15 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
             )
-        elif args.command == "list-global-findings":
-            result = native_indexes.list_global_findings(connection, args)
-        elif args.command == "list-repositories":
-            result = native_indexes.list_repositories(connection, args)
-        elif args.command == "list-findings":
-            result = list_findings(connection, args)
-        elif args.command == "update-progress":
-            result = progress.update_progress(command_context, connection, args)
-        elif args.command == "update-scan-context":
-            result = progress.update_context(command_context, connection, args)
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(
                 connection, args, prepare_only=args.command == "prepare-scan-completion"
             )
-        elif args.command == "complete-budget-exhausted-scan":
-            result = complete_budget_exhausted_scan(connection, args)
-        elif args.command == "cancel-scan":
-            result = saved_results.cancel_scan(_WORKBENCH_DB_CONTEXT, connection, args)
-        elif args.command == "fail-scan":
-            result = saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
-        elif args.command == "preserve-scan-results":
-            result = saved_results.preserve_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
-        elif args.command == "recover-scan-results":
-            result = saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
-        elif args.command == "write-scan-draft":
-            result = saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
-        elif args.command == "save-scan-artifact":
-            result = saved_results.save_scan_artifact(_WORKBENCH_DB_CONTEXT, connection, args)
-        elif args.command == "mark-handoff-delivered":
-            result = handoff.mark_handoff_delivered(command_context, connection, args)
-        elif args.command == "claim-handoff-delivery":
-            result = handoff.claim_handoff_delivery(command_context, connection, args)
-        elif args.command == "release-handoff-delivery":
-            result = handoff.release_handoff_delivery(command_context, connection, args)
-        elif args.command == "attach-scan-continuation-thread":
-            result = handoff.attach_scan_continuation_thread(command_context, connection, args)
-        elif args.command == "set-finding-triage":
-            result = set_finding_triage(connection, args)
-        elif args.command == "request-finding-remediation":
-            result = request_finding_remediation(connection, args)
-        elif args.command == "request-finding-remediation-action":
-            result = request_finding_remediation_action(connection, args)
-        elif args.command == "claim-finding-remediation-resend":
-            result = claim_finding_remediation_resend(connection, args)
-        elif args.command == "mark-finding-remediation-delivered":
-            result = mark_finding_remediation_delivered(connection, args)
-        elif args.command == "release-finding-remediation-claim":
-            result = release_finding_remediation_claim(connection, args)
         elif args.command == "cancel-finding-remediation-request":
             result = scan_context(
                 connection,
                 remediation_state.cancel_finding_remediation_request(connection, args),
             )
-        elif args.command == "set-finding-remediation":
-            result = set_finding_remediation(connection, args)
-        elif args.command == "export-findings":
-            result = publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
         elif args.command == "severity-classification":

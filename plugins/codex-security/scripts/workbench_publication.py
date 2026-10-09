@@ -217,7 +217,12 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
             pass  # Let SQLite report the open failure used by the host's state fallback.
     if payload["action"] == "inspect":
         database_uri = f"file:{quote(str(path), safe='')}?mode=ro"
-        connection = sqlite3.connect(database_uri, uri=True, timeout=5)
+        try:
+            connection = sqlite3.connect(database_uri, uri=True, timeout=5)
+        except sqlite3.OperationalError as exc:
+            if str(exc) == "unable to open database file":
+                exc._codex_security_state_unavailable = True
+            raise
         connection.row_factory = sqlite3.Row
     else:
         connection = db.connect()
@@ -233,6 +238,16 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
             elif payload["action"] == "record":
                 timestamp = db.now()
                 for receipt in receipts:
+                    conflicting = connection.execute(
+                        "SELECT 1 FROM finding_issue_receipts "
+                        "WHERE destination_key = ? AND external_id = ? AND finding_id != ? LIMIT 1",
+                        (key, receipt["issueIdentifier"], receipt["findingId"]),
+                    ).fetchone()
+                    if conflicting is not None:
+                        raise SystemExit(
+                            "The issue identifier is already associated with another finding "
+                            "in this destination."
+                        )
                     readback = (
                         json.dumps(receipt["readback"], ensure_ascii=False)
                         if "readback" in receipt
@@ -367,30 +382,13 @@ def write_csv_export(
             candidate_id = finding_candidate_id(finding)
             if isinstance(occurrence_id, str) and isinstance(candidate_id, str):
                 candidate_ids_by_occurrence[occurrence_id] = candidate_id
-    writer.writerow(finding_csv_columns(deep_scan))
+    columns = finding_csv_columns(deep_scan)
+    writer.writerow(columns)
     for row in finding_export_rows(connection, scan["id"]):
-        writer.writerow(
-            (
-                csv_cell(row["occurrence_id"]),
-                csv_cell(row["finding_id"]),
-                *(
-                    (csv_cell(candidate_ids_by_occurrence.get(row["occurrence_id"])),)
-                    if deep_scan
-                    else ()
-                ),
-                csv_cell(row["title"]),
-                csv_cell(row["summary"]),
-                csv_cell(row["severity"]),
-                csv_cell(row["confidence"]),
-                csv_cell(row["status"]),
-                csv_cell(row["close_reason"]),
-                csv_cell(row["note"]),
-                csv_cell(row["remediation"]),
-                csv_cell(row["relative_path"]),
-                row["start_line"],
-                row["end_line"],
-            )
-        )
+        values = dict(row)
+        values["path"] = row["relative_path"]
+        values["candidate_id"] = candidate_ids_by_occurrence.get(row["occurrence_id"])
+        writer.writerow(csv_cell(values[column]) for column in columns)
     destination = scan_dir / "exports" / "findings.csv"
     try:
         write_export_output(
