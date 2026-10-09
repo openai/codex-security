@@ -2998,7 +2998,14 @@ describe("scan and patch workflow", () => {
                   join(repository, "app.ts"),
                   `safe\npre-existing user edit\n${authors === 2 ? "focused explanation\n" : ""}`,
                 );
-                output!.stdout.write("Verified patch.");
+                output!.stdout.write(
+                  authors === 1
+                    ? "Verified patch."
+                    : JSON.stringify({
+                        status: "verified",
+                        report: "Verified patch.",
+                      }),
+                );
               }
               return 0;
             },
@@ -3094,7 +3101,9 @@ describe("scan and patch workflow", () => {
           } else {
             authors += 1;
             output!.stdout.write(
-              authors === 1 ? "Initial verified patch." : reason,
+              authors === 1
+                ? "Initial verified patch."
+                : JSON.stringify({ status: "verified", report: reason }),
             );
           }
           return 0;
@@ -3157,7 +3166,14 @@ describe("scan and patch workflow", () => {
                 } else {
                   await writeFile(join(repository, "test.ts"), "regression\n");
                 }
-                output!.stdout.write("Verified patch.");
+                output!.stdout.write(
+                  authors === 1
+                    ? "Verified patch."
+                    : JSON.stringify({
+                        status: "verified",
+                        report: "Verified patch.",
+                      }),
+                );
               }
               return 0;
             },
@@ -3167,6 +3183,145 @@ describe("scan and patch workflow", () => {
         expect(stages).toEqual(["author", "review", "author", "review"]);
       } finally {
         await rm(repository, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
+    { outcome: "verified", json: false },
+    { outcome: "verified", json: true },
+    { outcome: "blocked", json: true },
+    { outcome: "failed", json: true },
+    { outcome: "no_change", json: true },
+    { outcome: "malformed", json: true },
+    { outcome: "empty_report", json: true },
+    { outcome: "nonzero", json: true },
+    { outcome: "interrupt", json: true },
+  ])(
+    "requires a verified private author revision before direct-input publication: $outcome (JSON: $json)",
+    async ({ outcome: revisionOutcome, json }) => {
+      const root = await temporaryDirectory("codex-security-revision-outcome-");
+      const repository = join(root, "repository");
+      const remote = join(root, "remote.git");
+      await mkdir(repository, { recursive: true });
+      const git = repositoryGit(repository);
+      const commands: string[][] = [];
+      const report =
+        "Complete report: synthetic-api-key-value\nValidation details remain unchanged.\n";
+      let authors = 0;
+      let reviews = 0;
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        await writeFile(join(repository, "app.ts"), "unsafe\n");
+        git("add", "--", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        git("push", "--set-upstream", "origin", "main");
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "Synthetic security issue",
+            "--review-minimality",
+            "--create-pr",
+            ...(json ? ["--json"] : []),
+          ],
+          {
+            currentDirectory: repository,
+            onRepositoryCommand: (command, args, directory, options) => {
+              commands.push([command, ...args]);
+              return command === "git"
+                ? runGitRepositoryCommand(command, args, directory, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.com/example/repository/pull/1";
+            },
+            onCodex: async (_args, output) => {
+              if (output!.appServer!.sandbox === "read-only") {
+                reviews += 1;
+                output!.stdout.write(
+                  JSON.stringify(
+                    reviews === 1
+                      ? {
+                          status: "revise",
+                          findings: ["Add the focused regression test."],
+                        }
+                      : { status: "approved", findings: [] },
+                  ),
+                );
+                return 0;
+              }
+              authors += 1;
+              await writeFile(
+                join(repository, "app.ts"),
+                authors === 1 ? "safe\n" : "revised\n",
+              );
+              if (authors === 1) {
+                output!.stdout.write("Initial verified patch.");
+              } else if (
+                revisionOutcome === "nonzero" ||
+                revisionOutcome === "interrupt"
+              ) {
+                output!.stderr.write(report);
+                return revisionOutcome === "nonzero" ? 3 : 130;
+              } else if (revisionOutcome === "malformed") {
+                output!.stdout.write(
+                  "Malformed outcome: synthetic-api-key-value",
+                );
+              } else {
+                output!.stdout.write(
+                  JSON.stringify({
+                    status:
+                      revisionOutcome === "empty_report"
+                        ? "verified"
+                        : revisionOutcome,
+                    report:
+                      revisionOutcome === "empty_report" ? " \n " : report,
+                  }),
+                );
+              }
+              return 0;
+            },
+          },
+        );
+        const verified = revisionOutcome === "verified";
+        expect(outcome.exitCode, outcome.stderr).toBe(
+          verified
+            ? 0
+            : revisionOutcome === "nonzero"
+              ? 3
+              : revisionOutcome === "interrupt"
+                ? 130
+                : 2,
+        );
+        expect(authors).toBe(2);
+        expect(reviews).toBe(verified ? 2 : 1);
+        expect(
+          commands.some(
+            ([command, ...args]) =>
+              command === "gh" ||
+              args.includes("commit") ||
+              args.includes("push"),
+          ),
+        ).toBe(verified);
+        if (verified) {
+          expect(
+            json ? JSON.parse(outcome.stdout).report : outcome.stdout,
+          ).toBe(report);
+        } else if (revisionOutcome === "malformed") {
+          expect(outcome.stderr).toContain(
+            "Malformed outcome: synthetic-api-key-value",
+          );
+        } else if (revisionOutcome === "empty_report") {
+          expect(outcome.stderr).toContain("invalid outcome");
+        } else {
+          expect(outcome.stderr).toContain(report);
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
       }
     },
   );

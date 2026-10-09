@@ -274,7 +274,14 @@ describe("CLI skill commands", () => {
                   "Remove the unrelated helper refactor.",
                 );
               }
-              output!.stdout.write(`Patch ${stages.length}.\n`);
+              output!.stdout.write(
+                stages.length === 1
+                  ? `Patch ${stages.length}.\n`
+                  : JSON.stringify({
+                      status: "verified",
+                      report: `Patch ${stages.length}.\n`,
+                    }),
+              );
             }
             return 0;
           },
@@ -305,7 +312,14 @@ describe("CLI skill commands", () => {
             const { prompt, sandbox } = output!.appServer!;
             prompts.push(prompt);
             if (sandbox !== "read-only") {
-              output!.stdout.write("Verified synthetic patch.");
+              output!.stdout.write(
+                minimalityReviews === 0
+                  ? "Verified synthetic patch."
+                  : JSON.stringify({
+                      status: "verified",
+                      report: "Verified synthetic patch.",
+                    }),
+              );
               return 0;
             }
             const minimality = prompt.includes("only the minimality review");
@@ -368,7 +382,14 @@ describe("CLI skill commands", () => {
               decisions: history < 0 ? [] : JSON.parse(lines[history + 1]!),
             });
             if (sandbox !== "read-only") {
-              output!.stdout.write("Verified synthetic patch.");
+              output!.stdout.write(
+                minimalityReviews === 0
+                  ? "Verified synthetic patch."
+                  : JSON.stringify({
+                      status: "verified",
+                      report: "Verified synthetic patch.",
+                    }),
+              );
               return 0;
             }
             if (minimality) minimalityReviews += 1;
@@ -432,7 +453,14 @@ describe("CLI skill commands", () => {
                 expect(prompt).toContain("reconciliation decision is binding");
                 expect(prompt).toContain("No mandatory rule requires a helper");
               }
-              output!.stdout.write("Verified synthetic patch.");
+              output!.stdout.write(
+                minimalityReviews === 0
+                  ? "Verified synthetic patch."
+                  : JSON.stringify({
+                      status: "verified",
+                      report: "Verified synthetic patch.",
+                    }),
+              );
               return 0;
             }
             if (
@@ -516,7 +544,14 @@ describe("CLI skill commands", () => {
             onCodex: (_args, output) => {
               const { prompt, sandbox } = output!.appServer!;
               if (sandbox !== "read-only") {
-                output!.stdout.write("Verified synthetic patch.");
+                output!.stdout.write(
+                  minimalityReviews === 0
+                    ? "Verified synthetic patch."
+                    : JSON.stringify({
+                        status: "verified",
+                        report: "Verified synthetic patch.",
+                      }),
+                );
                 return 0;
               }
               if (
@@ -586,7 +621,14 @@ describe("CLI skill commands", () => {
                 ).toEqual(["Synthetic security issue"]);
               }
               if (reviews > 0) revisions += 1;
-              output!.stdout.write(`Patch ${revisions}.`);
+              output!.stdout.write(
+                revisions === 0
+                  ? `Patch ${revisions}.`
+                  : JSON.stringify({
+                      status: "verified",
+                      report: `Patch ${revisions}.`,
+                    }),
+              );
             }
             return 0;
           },
@@ -618,7 +660,14 @@ describe("CLI skill commands", () => {
             const { prompt, sandbox } = output!.appServer!;
             if (sandbox !== "read-only") {
               stages.push(stages.length === 0 ? "author" : "revision");
-              output!.stdout.write("Verified patch.");
+              output!.stdout.write(
+                stages.length === 1
+                  ? "Verified patch."
+                  : JSON.stringify({
+                      status: "verified",
+                      report: "Verified patch.",
+                    }),
+              );
               return 0;
             }
             const stage = ["minimality", "local-coding-style"].find((value) =>
@@ -708,7 +757,11 @@ describe("CLI skill commands", () => {
             onCodex: (_args, output) => {
               invocations += 1;
               output!.stdout.write(
-                output!.appServer!.sandbox === "read-only" ? verdict : "Patch",
+                output!.appServer!.sandbox === "read-only"
+                  ? verdict
+                  : invocations === 1
+                    ? "Patch"
+                    : JSON.stringify({ status: "verified", report: "Patch" }),
               );
               return 0;
             },

@@ -1107,6 +1107,11 @@ const patchReviewSchema = z.object({
   findings: z.array(z.string().trim().min(1)),
 });
 
+const patchRevisionSchema = z.object({
+  status: findingPatchSchema.shape.status,
+  report: z.string().refine((report) => report.trim().length > 0),
+});
+
 const findingVerificationSchema = z.object({
   id: z.string(),
   status: z.enum(["fixed", "still_vulnerable", "inconclusive"]),
@@ -7755,6 +7760,26 @@ async function runPatchReviewWorkflow(
       if (patch.exitCode !== PATCH_REVIEW_EXIT_CODE.success) {
         return patch.exitCode;
       }
+      if (context.options.findings === undefined) {
+        let revision: z.infer<typeof patchRevisionSchema>;
+        try {
+          revision = patchRevisionSchema.parse(JSON.parse(patch.response));
+        } catch {
+          context.stderr.write(`${safePatchReport(patch.response)}\n`);
+          context.stderr.write(
+            "The author revision returned an invalid outcome.\n",
+          );
+          return PATCH_REVIEW_EXIT_CODE.failure;
+        }
+        if (revision.status !== "verified") {
+          context.stderr.write(`${safePatchReport(revision.report)}\n`);
+          context.stderr.write(
+            `The author revision did not verify the patch (${revision.status}).\n`,
+          );
+          return PATCH_REVIEW_EXIT_CODE.failure;
+        }
+        patch.response = revision.report;
+      }
       subject = await parsePatchReviewSubject(patch.response, context);
       if (subject.status !== "ready") {
         if (subject.status === "empty")
@@ -8051,7 +8076,11 @@ async function runSkillStage(
         : [
             `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
             ...(options.findings === undefined
-              ? []
+              ? options.reviewFindings === undefined
+                ? []
+                : [
+                    'Return exactly one JSON object: {"status":"verified|no_change|blocked|failed","report":"the complete patch report, including validation commands, results, and any blocker or failure explanation"}. Use verified only after the original issue no longer reproduces and all required validation passes. Preserve the full report text inside report; do not return the report outside this object.',
+                  ]
               : [
                   'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the original issue is fixed or that the current code is already safe, and that legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
                 ]),
