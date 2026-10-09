@@ -1,3 +1,4 @@
+import { isDeepStrictEqual as same } from "node:util";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual as same } from "node:util";
 import { basename, dirname } from "node:path";
