@@ -63,10 +63,8 @@ function item(
   row: Record<string, SQLOutputValue>,
 ): Record<string, SQLOutputValue | string[]> {
   const value = JSON.parse(row.item as string);
-  return {
-    ...value,
-    repositoryIds: repositoryIds(value.repositoryIds),
-  };
+  repositoryIds(value.repositoryIds);
+  return value;
 }
 
 function detail(
