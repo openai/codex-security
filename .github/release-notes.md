@@ -191,6 +191,7 @@
 - remove the local findings serve command ([#1340](https://github.com/openai/codex-security/pull/1340))
 - update Node types and string-width ([#1545](https://github.com/openai/codex-security/pull/1545))
 - preserve import and export representations ([#1510](https://github.com/openai/codex-security/pull/1510))
+- frame terminal input and skip unused activity ([#1511](https://github.com/openai/codex-security/pull/1511))
 
 <!-- release-section: highlights:end -->
 
