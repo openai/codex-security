@@ -36,7 +36,7 @@ export const {
       export * from "./registry.ts";
       export { classifyCodexWorkerError } from "./errors.ts";
     `,
-    resolveDir: new URL("../src/deep-scan/", import.meta.url).pathname,
+    resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
   },
   loader: { ".md": "text" },
 });

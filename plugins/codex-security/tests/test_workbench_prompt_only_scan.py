@@ -77,6 +77,25 @@ def start_headless_standard_scan(
     )
 
 
+def prompt_scan_arguments(target: Path, root: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        thread_id="thread-fixture",
+        target_path=str(target),
+        scope=".",
+        mode="standard",
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+        user_context=None,
+        user_context_stdin=False,
+        target_summary=None,
+        scan_root=str(root / "scans"),
+        model=None,
+        reasoning_effort=None,
+    )
+
+
 def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -233,22 +252,7 @@ def test_prompt_scan_revalidates_target_after_concurrent_database_write(
     globals_ = start.__globals__
     identity = globals_["scan_target_identity"]
     calls = 0
-    args = argparse.Namespace(
-        thread_id="thread-fixture",
-        target_path=str(target),
-        scope=".",
-        mode="standard",
-        diff_target_kind=None,
-        diff_base_revision=None,
-        diff_head_revision=None,
-        diff_content_digest=None,
-        user_context=None,
-        user_context_stdin=False,
-        target_summary=None,
-        scan_root=str(tmp_path / "scans"),
-        model=None,
-        reasoning_effort=None,
-    )
+    args = prompt_scan_arguments(target, tmp_path)
 
     def inspect_identity(*args, **kwargs):
         nonlocal calls
@@ -307,22 +311,7 @@ def test_prompt_scan_revalidates_target_after_database_lock_wait(
     globals_ = start.__globals__
     identity = globals_["scan_target_identity"]
     calls = 0
-    args = argparse.Namespace(
-        thread_id="thread-fixture",
-        target_path=str(target),
-        scope=".",
-        mode="standard",
-        diff_target_kind=None,
-        diff_base_revision=None,
-        diff_head_revision=None,
-        diff_content_digest=None,
-        user_context=None,
-        user_context_stdin=False,
-        target_summary=None,
-        scan_root=str(tmp_path / "scans"),
-        model=None,
-        reasoning_effort=None,
-    )
+    args = prompt_scan_arguments(target, tmp_path)
 
     acquiring = Event()
 
@@ -414,22 +403,7 @@ def test_concurrent_prompt_scan_starts_join_the_winner(
     identity = globals_["scan_target_identity"]
     ready = Barrier(2)
     caller = local()
-    args = argparse.Namespace(
-        thread_id="thread-fixture",
-        target_path=str(target),
-        scope=".",
-        mode="standard",
-        diff_target_kind=None,
-        diff_base_revision=None,
-        diff_head_revision=None,
-        diff_content_digest=None,
-        user_context=None,
-        user_context_stdin=False,
-        target_summary=None,
-        scan_root=str(tmp_path / "scans"),
-        model=None,
-        reasoning_effort=None,
-    )
+    args = prompt_scan_arguments(target, tmp_path)
 
     def synchronized_identity(*args, **kwargs):
         caller.calls = getattr(caller, "calls", 0) + 1

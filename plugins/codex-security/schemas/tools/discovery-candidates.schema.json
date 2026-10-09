@@ -20,10 +20,7 @@
       "properties": {
         "scanId": { "type": "string", "pattern": "\\S" },
         "candidates": {
-          "type": "array",
-          "items": {
-            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/rawDiscoveryCandidate"
-          }
+          "$ref": "#/$defs/recordDiscoveryCandidatesInput/properties/candidates"
         }
       },
       "required": ["scanId", "candidates"],
