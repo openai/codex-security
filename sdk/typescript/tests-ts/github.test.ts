@@ -443,3 +443,16 @@ describe("GitHub import CLI", () => {
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   });
 });
+
+for (const [host, url] of [
+  ["github.com", "https://api.github.com/user"],
+  ["example.ghe.com", "https://api.example.ghe.com/user"],
+  ["github.example.test", "https://github.example.test/api/v3/user"],
+]) {
+  test(`selects the documented API base for ${host}`, async () => {
+    const client = await createAuthenticatedGitHub(host!, {
+      token: "synthetic-token",
+    });
+    expect(client.request.endpoint("/user").url).toBe(url!);
+  });
+}
