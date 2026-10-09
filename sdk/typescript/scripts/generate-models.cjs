@@ -30,9 +30,10 @@ async function generate() {
   ];
   const models = await Promise.all(
     documents.map(async ([filename, name]) => {
-      const schema = JSON.parse(readFileSync(join(schemas, filename), "utf8"));
       // json-schema-to-typescript drops object fields when allOf uses contains or if/then.
-      const input = modelSchema(schema);
+      const input = modelSchema(
+        JSON.parse(readFileSync(join(schemas, filename), "utf8")),
+      );
       input.title = name;
       return compile(input, name, {
         bannerComment: "",

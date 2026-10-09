@@ -103,6 +103,7 @@
     "scripts/workbench_target.py",
     "scripts/workbench_target_state.py",
     "scripts/workbench_validation.py",
+    "shared/workbench-history-repairs.json",
     "shared/workbench-migrations.json",
     "skills/attack-path-analysis/SKILL.md",
     "skills/attack-path-analysis/agents/openai.yaml",
