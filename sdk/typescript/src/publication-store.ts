@@ -1,6 +1,14 @@
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
+import { isRecord } from "./record.js";
+import { CodexSecurityError } from "./errors.js";
 import type { PreparedScanPublication } from "./publication.js";
 import type { PublishedScanIssue } from "./publish.js";
-import { resolveWorkbenchRuntime, runWorkbench } from "./runtime.js";
+import {
+  codexSecurityStateDirectory,
+  resolveWorkbenchRuntime,
+  runWorkbench,
+} from "./runtime.js";
 
 type StoredIssue = PublishedScanIssue & { scanId: string };
 
@@ -64,11 +72,26 @@ async function findingIssues(
   signal?: AbortSignal,
 ): Promise<StoredIssue[]> {
   signal?.throwIfAborted();
+  const stateDirectory = codexSecurityStateDirectory(environment);
+  const database = join(stateDirectory, "workbench.sqlite3");
+  const metadata = await stat(database).catch((error: unknown) => {
+    if (!isRecord(error) || error["code"] !== "ENOENT") throw error;
+    throw new CodexSecurityError(
+      "Cannot publish findings because the local Codex Security scan-history database does not exist. Use the state directory where this scan was completed.",
+      { cause: error },
+    );
+  });
+  if (!metadata.isFile()) {
+    throw new CodexSecurityError(
+      "Cannot publish findings because the local Codex Security scan-history database is not a regular file.",
+    );
+  }
   const [python, pluginRoot] = await resolveWorkbenchRuntime({
     environment,
     protectedRoot: publication.scanDirectory,
     signal,
   });
+  signal?.throwIfAborted();
   const result = await runWorkbench(
     {
       python,

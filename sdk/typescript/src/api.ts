@@ -4274,6 +4274,10 @@ async function collectResult(
       await requireScanFile(scanDir, name, name, signal);
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
+      let cause = error;
+      while (cause instanceof Error && cause.cause !== undefined)
+        cause = cause.cause;
+      if (!isRecord(cause) || cause["code"] !== "ENOENT") throw error;
       missing.push(name);
     }
   }
@@ -4778,9 +4782,11 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     }
     return result;
   };
-  const result = executionConfig(config);
-  // Keep effective execution settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
+  const result = executionConfig(
+    safeProfileName(config["profile"]) ? config : resolved,
+  );
+  // Keep effective execution settings even when preflight filters the profile name.
   for (const key of ["model_reasoning_summary", "service_tier"]) {
     const value = resolved[key];
     if (safeString(value)) result[key] = value;
@@ -4949,6 +4955,7 @@ function selectedWorkerRuntimeConfig(
         "model_context_window",
         "model_instructions_file",
         "model_verbosity",
+        "shell_environment_policy",
         "web_search",
         "windows",
       ]

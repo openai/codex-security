@@ -1,14 +1,12 @@
 # Container releases
 
 `container-release` publishes `ghcr.io/openai/codex-security` from the default
-`scanner` Docker target. The scanner and findings service use this same image
-in separate containers with separate state. `compose.findings.yaml` supplies
-the Node server command, working directory, and service environment; the image's
-default command remains the scanner CLI.
+`scanner` Docker target. The image runs the scanner CLI; saved-scan
+deduplication uses the runner's local SQLite database directly.
 
 Releases use the SDK package version, native Linux `amd64`/`arm64` builds,
 BuildKit SBOMs and maximum-mode provenance, and a GitHub provenance attestation.
-Each native image passes scanner and findings API/persistence checks before
+Each native image passes scanner checks before
 publishing the multiarchitecture manifest. Anonymous
 pulls and attestation must succeed before promoting version, `sha-<commit>`, and
 `latest` tags. Stable version tags cannot be overwritten.
@@ -41,7 +39,7 @@ gh attestation verify "oci://$reference" --repo openai/codex-security
 docker pull "$reference"
 ```
 
-Set `CODEX_SECURITY_IMAGE` or `CODEX_SECURITY_FINDINGS_IMAGE` to the verified
+Set `CODEX_SECURITY_IMAGE` to the verified
 `reference` when using Compose. The index selects the native `amd64` or `arm64`
 image. Its `unknown/unknown` entries contain the per-platform SBOM and build
 provenance; they are not runnable platforms and should not be removed.
@@ -94,31 +92,11 @@ stable version exists, promotion leaves `latest` untouched; otherwise a retry
 also requires `latest` to reference that digest. `bootstrap` and
 `release-candidate-<commit>` tags are not consumer releases.
 
-See the [findings service guide](../sdk/typescript/README.md#findings-service-preview)
-for image selection, source builds, storage, backups, and upgrades.
-
-## Migrating the findings service
-
-The `findings-service` build target and separate
-`ghcr.io/openai/codex-security-findings` release are replaced by the shared
-image. For source builds, use `--target scanner` (or omit `--target`). Update
-`compose.findings.yaml` and set `CODEX_SECURITY_FINDINGS_IMAGE` to a published
-`ghcr.io/openai/codex-security` version or digest before pulling and starting
-the service. Custom deployments must also carry over the Compose file's Node
-entrypoint, server command, package working directory, and service environment.
-
-Back up the service as described in the [upgrade guide](../sdk/typescript/README.md#upgrades-and-backups).
-Keep the same Compose project name and `findings-state` volume mounted at
-`/state`; do not run `down --volumes`. This packaging change does not migrate or
-move the database, and the runner must keep its own state. Existing published
-images and tags are unchanged.
-
 ## Workflow runner
 
 `compose.runner.yaml` runs the packaged CLI from the **scanner** image. It does
 not start a findings service or implement another workflow engine. It passes
 commands, output, and exit codes through the existing scanner entrypoint.
-The findings service uses the same image with the configuration described above.
 
 Run these commands from the repository root. After the selected scanner release
 is available, prepare private directories and choose the host user's UID/GID so
@@ -140,8 +118,7 @@ your host shell. Compose passes the key to the runner. Use API keys for
 unattended runs too.
 
 Git authentication uses the existing `GH_TOKEN`/`GITHUB_TOKEN` and optional
-`CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs;
-the findings service's embedding credentials are configured separately.
+`CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs.
 Use a version or digest in `CODEX_SECURITY_IMAGE` for repeatable deployments.
 To test an unreleased checkout, build the same scanner target locally instead
 of pulling. First prepare the [universal native payload](../plugins/codex-security/native/README.md#package-inputs):
@@ -174,47 +151,22 @@ An existing checkout elsewhere can instead be bind-mounted with
 `run --volume /absolute/repository:/input/repository`; repeat that mount on each
 stage that needs the source. Moving a host scan's files into these directories
 does not rewrite absolute paths in its saved state. Run the scan in the runner
-or preserve its original paths. Never share the runner's workbench database or
-Codex home with the findings service's `/state` volume.
+or preserve its original paths.
 
-### Connecting to the findings service
+### Deduplication and custom endpoints
 
-For an independently hosted service, pass its reachable base URL through the
-existing `--findings-url` flag. Container loopback addresses refer to the runner,
-not the Docker host or another container. The findings API has no authentication;
-use a private network or an authenticated TLS proxy appropriate to the deployment.
-Do not expose the unauthenticated API publicly.
-
-For a service on the same Docker engine, start it as a separate Compose project:
+Deduplicate a saved scan against the runner's persisted local SQLite database:
 
 ```bash
-docker compose -p findings -f compose.findings.yaml up -d
+docker compose -f compose.runner.yaml run --rm codex-security \
+  dedupe --scan SCAN_ID --json
 ```
 
-Save this network-only override as `compose.runner.local.yaml`:
-
-```yaml
-networks:
-  default:
-    external: true
-    name: findings_default
-```
-
-Then run the runner as a different project on that existing network. The service
-is reachable by its Compose DNS name even though its published host port remains
-loopback-only:
-
-```bash
-docker compose -p runner -f compose.runner.yaml -f compose.runner.local.yaml \
-  run --rm codex-security dedupe --scan SCAN_ID \
-  --findings-url http://findings:3000 --json
-```
-
-Use the scan ID from the completed scan and first import its findings into the
-service with the matching repository ID, as described in the
-[findings API guide](../sdk/typescript/README.md#findings-service-preview).
-For a remote service, omit the network override and supply its URL instead.
-Stopping or replacing the runner does not stop the service or remove its volume.
+For an independently operated compatible endpoint, pass its reachable base URL
+through `--findings-url`. Container loopback addresses refer to the runner, not
+the Docker host or another container. See the
+[findings guide](../sdk/typescript/docs/findings-service.md) for custom publication,
+remote deduplication, and the removed local service's compatibility changes.
 
 Only commands supported by the selected image are available. Workflow resumption,
 custom publication, and dedupe write-back require a release containing those
@@ -237,5 +189,5 @@ to work around host restrictions.
 `run --rm` removes only the finished runner container. Preserve its host mounts
 for later stages and retries; use the same image version and source paths.
 Stop active runners before backing up the entire results and state directories,
-and back up the findings service separately. No service ports or Docker socket
-are exposed by the runner example.
+and keep backups separately. No service ports or Docker socket are exposed by
+the runner example.

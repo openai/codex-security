@@ -10,6 +10,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import * as os from "node:os";
 import { join, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -276,6 +277,20 @@ describe("read-only publication history", () => {
         [original.scanId],
       ),
     ).toEqual([{ seal_manifest_digest: digest }]);
+  });
+
+  test("inspects history without temporary-directory access", async () => {
+    const fixture = await publicationFixture();
+    const temporary = spyOn(os, "tmpdir").mockImplementation(() => {
+      throw new Error("No temporary directory is available.");
+    });
+    try {
+      await expect(
+        inspectPublicationStore(fixture.publication, fixture.environment),
+      ).resolves.toEqual([]);
+    } finally {
+      temporary.mockRestore();
+    }
   });
 
   test("forwards inspection cancellation through Python discovery and the shared workbench", async () => {
@@ -766,7 +781,7 @@ connection.close()
     ).toEqual([{ name: "publication_error_message" }]);
   });
 
-  test("rejects a missing local scan-history database without creating one", async () => {
+  test("rejects missing and non-regular publication history without initializing it", async () => {
     const fixture = await publicationFixture({ createDatabase: false });
 
     await expect(
@@ -774,7 +789,45 @@ connection.close()
     ).rejects.toThrow(/scan-history database does not exist/u);
 
     expect(existsSync(fixture.stateDirectory)).toBe(false);
+    await mkdir(join(fixture.stateDirectory, "workbench.sqlite3"), {
+      recursive: true,
+    });
+    await expect(
+      preparePublicationStore(fixture.publication, fixture.environment),
+    ).rejects.toThrow(/not a regular file/u);
   });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "preserves actual filesystem permission errors before opening publication history",
+    async () => {
+      const fixture = await publicationFixture({ createDatabase: false });
+      await mkdir(fixture.stateDirectory, { mode: 0o700 });
+      await writeFile(
+        join(fixture.stateDirectory, "workbench.sqlite3"),
+        "synthetic",
+      );
+      await chmod(fixture.stateDirectory, 0);
+      try {
+        for (const operation of [
+          inspectPublicationStore,
+          preparePublicationStore,
+          (
+            publication: PreparedScanPublication,
+            environment: NodeJS.ProcessEnv,
+          ) => recordPublishedIssues(publication, [], environment),
+        ]) {
+          await expect(
+            operation(fixture.publication, fixture.environment),
+          ).rejects.toMatchObject({
+            code: "EACCES",
+            message: expect.stringContaining("workbench.sqlite3"),
+          });
+        }
+      } finally {
+        await chmod(fixture.stateDirectory, 0o700);
+      }
+    },
+  );
 
   test("rejects a scan absent from existing local scan history", async () => {
     const fixture = await publicationFixture({ seedScan: false });

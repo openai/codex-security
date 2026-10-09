@@ -151,6 +151,7 @@ import {
   AuthenticationRequiredError,
   ConfigurationError,
   InvalidTargetError,
+  IncompleteScanError,
   LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -1590,10 +1591,8 @@ export async function runCodexSkillCommand(
     process.on("SIGTERM", onTerminate);
     try {
       let diagnostic = "";
-      invocation.stderr?.on("data", (chunk: Buffer) => {
-        diagnostic = `${diagnostic}${chunk.toString("utf8")}`.slice(
-          -64 * 1_024,
-        );
+      invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+        diagnostic += chunk;
       });
       const captured =
         output === undefined || invocation.stdout === null
@@ -1641,7 +1640,7 @@ export async function runCodexSkillCommand(
       if (events?.sandboxUnavailable && requestedSignal === null) {
         throw new PatchCommandError(
           "SANDBOX_UNAVAILABLE",
-          SANDBOX_UNAVAILABLE_MESSAGE,
+          `${SANDBOX_UNAVAILABLE_MESSAGE}${events.error ? `\n${events.error}` : ""}`,
         );
       }
       if (status === 0 && output?.appServer !== undefined && events?.error) {
@@ -1650,9 +1649,15 @@ export async function runCodexSkillCommand(
       if (output === undefined || status === 130 || status === 143)
         return status;
       if (status !== 0) {
+        const failure = skillCommandFailure(
+          output.command,
+          status,
+          events?.error ?? diagnostic,
+          authentication,
+        );
         await writeCliOutput(
           output.stderr,
-          `codex-security: ${skillCommandFailure(output.command, status, events?.error ?? diagnostic, authentication)}\n`,
+          `codex-security: ${diagnosticLines(failure)}\n`,
         );
         return status;
       }
@@ -1795,7 +1800,7 @@ export async function main(
         await dependencies.runWorkbench(args, undefined, undefined, pythonPath),
       );
     } catch (error) {
-      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
       exitCode = 2;
       throw error;
     }
@@ -1871,7 +1876,7 @@ export async function main(
           : interrupted === "SIGTERM"
             ? "Finding matching terminated by SIGTERM. Saved comparisons are preserved."
             : errorMessage(error);
-      errorOutput.write(`codex-security: ${message}\n`);
+      errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
       throw error;
     } finally {
       removeListeners();
@@ -2158,10 +2163,23 @@ export async function main(
         const result = await history(
           ["get-scan", "--scan-id", scanId],
           async (value) => {
+            const scan = value["scan"] as ScanLogSource;
             const logs = await readSavedScanLogs(
-              value["scan"] as ScanLogSource,
-              codexSecurityCredentialHome(dependencies.environment),
+              scan,
+              [
+                codexSecurityCredentialHome(dependencies.environment),
+                configuredCodexHome(dependencies.environment),
+              ],
+              {
+                allowMissingRoot: Boolean(
+                  scan.threadIds?.length || scan.executionThreadIds?.length,
+                ),
+              },
             );
+            if (logs.sessions.length === 0)
+              throw new CodexSecurityError(
+                `No saved session logs are available for scan ${scanId}.`,
+              );
             // Incur owns filtering, envelopes and token controls. Keep those
             // requests on its formatter; plain JSON needs no aggregate string.
             if (
@@ -2234,7 +2252,7 @@ export async function main(
           scanArguments.showCost = options.showCost;
         } catch (error) {
           const message = errorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
           return finishScan(
             { exitCode: 2, error: message },
             format,
@@ -2293,7 +2311,8 @@ export async function main(
           scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
         } catch (error) {
           const message = errorMessage(error);
-          if (exitCode === 0) errorOutput.write(`codex-security: ${message}\n`);
+          if (exitCode === 0)
+            errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
           return finishScan(
             { exitCode: 2, error: message },
             format,
@@ -2376,7 +2395,7 @@ export async function main(
           scanArguments.showCost = options.showCost;
         } catch (error) {
           const message = errorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
           return finishScan(
             { exitCode: 2, error: message },
             format,
@@ -2486,7 +2505,7 @@ export async function main(
       errorOutput.write(`codex-security: ${reason}${recovery}\n`);
       exitCode = signal === "SIGINT" ? 130 : 143;
     } else {
-      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
       exitCode = 2;
     }
   };
@@ -3644,7 +3663,7 @@ export async function main(
           );
         } catch (error) {
           const message = errorMessage(error);
-          errorOutput.write(`${message}\n`);
+          errorOutput.write(`${diagnosticLines(message)}\n`);
           outcome = { exitCode: 2, error: message };
         }
 
@@ -3727,7 +3746,7 @@ export async function main(
             failOnSeverity: options.failOnSeverity,
           };
         } catch (error) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 2;
           return undefined;
         }
@@ -4329,7 +4348,7 @@ export async function main(
         } catch (error) {
           stopDashboard();
           exitCode = interruptedExitCode(controller.signal) ?? 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         } finally {
           stopDashboard();
           signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
@@ -4646,7 +4665,7 @@ export async function main(
             (error instanceof Error && error.name === "ExitPromptError"
               ? 130
               : 2);
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         } finally {
           removeSignals();
         }
@@ -4781,12 +4800,12 @@ export async function main(
             }
             exitCode = 0;
           } catch (error) {
-            errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+            errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
             exitCode = 2;
           }
         } catch (error) {
           if (exitCode !== 2) {
-            errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+            errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           }
           exitCode = 2;
         }
@@ -4819,7 +4838,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         }
       },
     })
@@ -5538,40 +5557,6 @@ export async function main(
         });
       },
     })
-    .command("serve", {
-      description: "Start the local findings HTTP service.",
-      hint:
-        "Environment: HOST=127.0.0.1, PORT=3000.\n" +
-        "CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint\n" +
-        "(default: https://api.openai.com/v1/embeddings).",
-      destructive: true,
-      mcp: false,
-      options: z.object({
-        port: z
-          .number()
-          .int()
-          .min(0)
-          .max(65535)
-          .optional()
-          .describe(
-            "Listen port (default: PORT or 3000; 0 picks a free port).",
-          ),
-      }),
-      async run({ options }) {
-        try {
-          const { serveFindings } = await import("./server/serve.js");
-          await serveFindings(
-            options.port === undefined
-              ? dependencies.environment
-              : { ...dependencies.environment, PORT: String(options.port) },
-            output,
-          );
-        } catch (error) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-          exitCode = 1;
-        }
-      },
-    })
     .command("init", {
       description: "Create a starter project configuration.",
       hint: "Existing files are never overwritten.",
@@ -5599,7 +5584,7 @@ export async function main(
           return { path };
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         }
       },
     })
@@ -5805,7 +5790,7 @@ export async function main(
     );
     if (
       structuredOutput &&
-      ["validate", "login", "logout", "serve"].includes(command) &&
+      ["validate", "login", "logout"].includes(command) &&
       !argv.includes("--schema")
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
@@ -5939,10 +5924,7 @@ export async function main(
       command !== "verify-fix" &&
       command !== "patch" &&
       positionals.length >
-        (scanImport ||
-        command === "logout" ||
-        command === "info" ||
-        command === "serve"
+        (scanImport || command === "logout" || command === "info"
           ? 0
           : subcommand === "compare" || subcommand === "match"
             ? 2
@@ -6129,7 +6111,7 @@ export async function main(
     } else {
       if (exitCode !== 0) return exitCode;
       errorOutput.write(
-        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+        `codex-security: ${diagnosticLines(incurErrorMessage(frameworkOutput))}\n`,
       );
       return 2;
     }
@@ -6179,7 +6161,7 @@ export async function main(
     );
     return exitCode;
   } catch (error) {
-    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
     return 2;
   }
 }
@@ -6318,12 +6300,10 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe has an invalid Git head.",
     );
   }
-  const threshold = recipe["failOnSeverity"];
-  if (
-    threshold !== undefined &&
-    (typeof threshold !== "string" ||
-      !REPORTABLE_SEVERITIES.includes(threshold as FailureSeverity))
-  ) {
+  const threshold = ScanSettingsSchema.shape.failureSeverity.safeParse(
+    recipe["failOnSeverity"],
+  );
+  if (!threshold.success) {
     throw new CodexSecurityError(
       "The saved scan recipe contains an invalid severity policy.",
     );
@@ -6422,7 +6402,7 @@ async function prepareScanArgumentsFromRecipe(
     codexOverrides: Object.hasOwn(config, "approval_policy")
       ? config
       : { ...config, approval_policy: "never" },
-    failureSeverity: threshold as FailureSeverity | undefined,
+    failureSeverity: threshold.data,
     maxCostUsd,
     dryRun: false,
     parentScanId,
@@ -7903,10 +7883,14 @@ export async function readSkillCommandOutput(
           }
           startTurn();
         } else if (value["id"] === 5) {
-          const result = value["result"] as { exitCode: number };
+          const result = value["result"] as {
+            exitCode: number;
+            stdout: string;
+            stderr: string;
+          };
           if (result.exitCode !== 0) {
             sandboxUnavailable = true;
-            error = SANDBOX_UNAVAILABLE_MESSAGE;
+            error = result.stderr || result.stdout;
             appServer.input.end();
             continue;
           }
@@ -7999,25 +7983,9 @@ export function skillCommandFailure(
       detail,
     )
   ) {
-    return authenticationFailureMessage(authentication);
+    return `${detail}\n${authenticationFailureMessage(authentication)}`;
   }
-  if (
-    /403|model.not.found|model.*access|access.*model|permission/iu.test(detail)
-  ) {
-    return "The selected model is unavailable for the current credentials.";
-  }
-  if (/429|rate.limit|tokens.per.minute/iu.test(detail)) {
-    return "The request was rate limited. Wait and retry.";
-  }
-  if (
-    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(detail)
-  ) {
-    return "Codex could not load its model metadata. Update Codex or refresh its model cache.";
-  }
-  if (/econn|enotfound|network|timed.out|timeout/iu.test(detail)) {
-    return "Codex could not connect to the model service. Check the network and retry.";
-  }
-  return `${command} failed with exit code ${status}.`;
+  return detail || `${command} failed with exit code ${status}.`;
 }
 
 function incurErrorMessage(output: string): string {
@@ -8032,9 +8000,13 @@ function incurErrorMessage(output: string): string {
 
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
+function diagnosticLines(value: unknown): string {
+  return errorMessage(value).split("\n").map(diagnosticValue).join("\n");
+}
+
 function diagnosticValue(value: unknown): string {
   return errorMessage(value).replaceAll(
-    /[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu,
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
     " ",
   );
 }
@@ -9014,6 +8986,7 @@ const LOCAL_SYSCALL_CODES = new Set([
 ]);
 
 function isLocalScanFailure(error: unknown): boolean {
+  if (error instanceof IncompleteScanError) error = error.cause;
   if (
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
@@ -9122,13 +9095,19 @@ function scanFailureMessage(
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
   )?.[0];
-  if (nativeRefreshRecovery !== undefined) return nativeRefreshRecovery;
+  if (nativeRefreshRecovery !== undefined)
+    return error instanceof IncompleteScanError
+      ? diagnosticValue(error)
+      : nativeRefreshRecovery;
+  const detail =
+    error instanceof IncompleteScanError ? `${diagnosticValue(error)}\n` : "";
   if (
     /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
       message,
     )
   ) {
     return (
+      detail +
       "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
       "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. " +
       "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
@@ -9137,18 +9116,18 @@ function scanFailureMessage(
   }
   switch (classification) {
     case "unauthorized":
-      return authenticationFailureMessage(authentication);
+      return detail + authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
-        return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
+        return `${detail}The configured Codex provider denied access. Check the command credentials and provider permissions.`;
       }
       return authentication?.method === "api_key"
-        ? `The API key from ${authentication.source} cannot access the configured model. ` +
+        ? `${detail}The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
-        : "The stored ChatGPT credentials cannot access the configured model. " +
+        : `${detail}The stored ChatGPT credentials cannot access the configured model. ` +
             "Use an account or API key with model access.";
     case "rate_limited":
-      return "The configured account reached its rate limit. Wait and retry.";
+      return `${detail}The configured account reached its rate limit. Wait and retry.`;
     case "network_error":
     case "timeout":
     case "unknown":
@@ -9797,7 +9776,7 @@ if (invokedAsMain()) {
       process.exitCode = exitCode;
     },
     (error: unknown) => {
-      process.stderr.write(`codex-security: ${errorMessage(error)}\n`);
+      process.stderr.write(`codex-security: ${diagnosticLines(error)}\n`);
       process.exitCode = 2;
     },
   );
