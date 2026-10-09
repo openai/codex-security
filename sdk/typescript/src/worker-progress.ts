@@ -154,6 +154,20 @@ function preflightStatus(
   ) {
     return null;
   }
+  const expectedExitCode =
+    payload["status"] === "blocked"
+      ? 1
+      : payload["status"] === "incomplete"
+        ? 2
+        : 0;
+  const exitCode = item["exit_code"];
+  // Codex also marks the helper's intentional nonzero exits as failed.
+  if (
+    (typeof exitCode === "number" && exitCode !== expectedExitCode) ||
+    (item["status"] === "failed" && expectedExitCode === 0)
+  ) {
+    return null;
+  }
   const results = payload["results"];
   const delegated = results.filter(
     (result): result is Record<string, unknown> =>

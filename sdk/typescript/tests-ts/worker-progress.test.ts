@@ -7,6 +7,7 @@ import {
 function commandEvent(
   command: string,
   output: string,
+  execution: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
     type: "item.completed",
@@ -17,6 +18,7 @@ function commandEvent(
       aggregated_output: output,
       exit_code: 0,
       status: "completed",
+      ...execution,
     },
   };
 }
@@ -130,6 +132,83 @@ describe("worker progress events", () => {
       delegation: "available",
       configuredSlots: 8,
     });
+  });
+
+  test.each([
+    ["ready", 0],
+    ["blocked", 1],
+    ["incomplete", 2],
+  ] as const)(
+    "reconciles %s preflight output with its exit code",
+    (status, expectedExitCode) => {
+      const output = JSON.stringify({
+        profile: "security_scan",
+        status,
+        results: [
+          { capability: "delegated_workers", status: "pass", actual: true },
+          { capability: "usable_worker_slots_6", status: "pass", actual: 8 },
+        ],
+      });
+      for (const exitCode of [0, 1, 2, 127]) {
+        const result = workerStatusFromEvent(
+          commandEvent("config_preflight.py", output, {
+            exit_code: exitCode,
+            status: exitCode === 0 ? "completed" : "failed",
+          }),
+        );
+        expect(result).toEqual(
+          exitCode === expectedExitCode
+            ? { kind: "preflight", delegation: "available", configuredSlots: 8 }
+            : null,
+        );
+      }
+    },
+  );
+
+  test("does not report ready capabilities from an explicitly failed command", () => {
+    for (const status of ["ready", undefined]) {
+      const output = JSON.stringify({
+        profile: "security_scan",
+        status,
+        results: [{ capability: "delegated_workers", status: "pass" }],
+      });
+      for (const exitCode of [0, undefined]) {
+        expect(
+          workerStatusFromEvent(
+            commandEvent("config_preflight.py", output, {
+              status: "failed",
+              exit_code: exitCode,
+            }),
+          ),
+        ).toBeNull();
+      }
+    }
+  });
+
+  test("keeps legacy preflight output without execution or helper status", () => {
+    const output = JSON.stringify({
+      profile: "security_diff_scan",
+      results: [{ capability: "delegated_workers", status: "pass" }],
+    });
+    for (const exitCode of [0, undefined]) {
+      expect(
+        workerStatusFromEvent(
+          commandEvent("config_preflight.py", output, {
+            status: undefined,
+            exit_code: exitCode,
+          }),
+        ),
+      ).toEqual({
+        kind: "preflight",
+        delegation: "available",
+        configuredSlots: null,
+      });
+    }
+    expect(
+      workerStatusFromEvent(
+        commandEvent("config_preflight.py", output, { exit_code: 1 }),
+      ),
+    ).toBeNull();
   });
 
   test("keeps unavailable and unknown delegation distinct from capacity", () => {
