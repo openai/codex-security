@@ -31,15 +31,6 @@ export interface ReviewItem {
   path: string;
 }
 
-export interface ReviewItemsResult {
-  items: ReviewItem[];
-  nextCursor?: string;
-}
-
-export interface PreparedReviewItems {
-  reviewItemsTotal: number;
-}
-
 export const prepareReviewItemsInputSchema = loadArtifactZodSchema(
   documents,
   reviewItemsSchema.$id,
@@ -61,7 +52,7 @@ const reviewItemSchema = loadArtifactZodSchema(
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
-): Promise<PreparedReviewItems> {
+) {
   if (context.layout !== "scan") {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
@@ -146,7 +137,7 @@ export async function prepareCodexSecurityReviewItems(
 export async function listCodexSecurityReviewItems(
   context: ArtifactContext,
   page: ArtifactPage = {},
-): Promise<ReviewItemsResult> {
+) {
   const result = paginateArtifactRows(
     await readReviewItems(context),
     page,
