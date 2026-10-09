@@ -1,27 +1,26 @@
-import { execFile } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 import {
   chmod,
   copyFile,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { isMain } from "./is-main.mjs";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
-const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-const packageRoot = resolve(scriptDirectory, "..");
+const packageRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(packageRoot, "../..");
-const execFileAsync = promisify(execFile);
 
 function validatePath(path) {
   const parts = path.split("/");
   if (
-    path === "" ||
     path.includes("\\") ||
     posix.isAbsolute(path) ||
     parts.some((part) => part === "" || part === "." || part === "..")
@@ -50,6 +49,7 @@ async function destinationFiles(root, prefix = "") {
   return files.sort();
 }
 
+/** @returns {Promise<string[]>} */
 export async function buildBundledPlugin({
   contractPath = join(
     repositoryRoot,
@@ -89,43 +89,59 @@ export async function buildBundledPlugin({
     }),
   );
 
-  await rm(destination, { force: true, recursive: true });
-  if (files.some((path) => path.startsWith("mcp/"))) {
-    const mcpApp = join(source, "mcp-app");
-    await execFileAsync(
-      process.execPath,
-      [
-        join(mcpApp, "scripts/build_mcp_app.mjs"),
-        "--output",
-        join(destination, "mcp"),
-      ],
-      { cwd: mcpApp, maxBuffer: 10 * 1024 * 1024 },
-    );
-  }
-  for (const { file, mode, path } of sourceFiles) {
-    const output = join(destination, path);
-    await mkdir(dirname(output), { recursive: true });
-    await copyFile(file, output);
-    await chmod(output, mode);
-  }
+  await mkdir(dirname(destination), { recursive: true });
+  const staging = await mkdtemp(join(dirname(destination), ".plugin-build-"));
+  const staged = join(staging, "bundle");
+  const previous = join(staging, "previous");
+  let preservePrevious = false;
+  try {
+    if (files.some((path) => path.startsWith("mcp/"))) {
+      const mcpApp = join(source, "mcp-app");
+      execFileSync(
+        process.execPath,
+        [
+          join(mcpApp, "scripts/build_mcp_app.mjs"),
+          "--output",
+          join(staged, "mcp"),
+        ],
+        { cwd: mcpApp, stdio: "inherit" },
+      );
+    }
+    for (const { file, mode, path } of sourceFiles) {
+      const output = join(staged, path);
+      await mkdir(dirname(output), { recursive: true });
+      await copyFile(file, output);
+      await chmod(output, mode);
+    }
 
-  const generated = await destinationFiles(destination);
-  const expected = [...files].sort();
-  if (
-    generated.length !== expected.length ||
-    generated.some((path, index) => path !== expected[index])
-  ) {
-    throw new Error("Bundled plugin generated files outside its contract.");
+    if (!isDeepStrictEqual(await destinationFiles(staged), [...files].sort())) {
+      throw new Error("Bundled plugin generated files outside its contract.");
+    }
+    try {
+      await rename(destination, previous);
+      preservePrevious = true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    try {
+      await rename(staged, destination);
+    } catch (error) {
+      if (preservePrevious) {
+        await rename(previous, destination);
+        preservePrevious = false;
+      }
+      throw error;
+    }
+    preservePrevious = false;
+  } finally {
+    // Leave the previous bundle available if restoring it fails.
+    if (!preservePrevious) await rm(staging, { recursive: true, force: true });
   }
 
   return files;
 }
 
-const invokedPath = process.argv[1];
-if (
-  invokedPath !== undefined &&
-  pathToFileURL(resolve(invokedPath)).href === import.meta.url
-) {
+if (isMain(import.meta.url)) {
   buildBundledPlugin()
     .then((files) => {
       console.log(`Generated bundled plugin with ${files.length} files.`);

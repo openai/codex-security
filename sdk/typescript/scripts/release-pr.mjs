@@ -1,9 +1,11 @@
+import { gitText } from "../../../plugins/codex-security/mcp-app/scripts/git.mjs";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
+import { isMain } from "./is-main.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
 export const notesPath = ".github/release-notes.md";
@@ -88,13 +90,13 @@ export function generateNoteSections(changes) {
             "",
             ...breaking.map(changeLine),
           ].join("\n")
-        : "Review compatibility and document any required migration steps before releasing.",
+        : "No additional migration steps are documented for this release.",
     ].join("\n"),
   };
 }
 
 function sectionBlock(id, content) {
-  return `<!-- release-section: ${id}:start -->\n${content}\n<!-- release-section: ${id}:end -->`;
+  return `<!-- release-section: ${id}:start -->\n\n${content}\n\n<!-- release-section: ${id}:end -->`;
 }
 
 function findSection(notes, id) {
@@ -122,28 +124,18 @@ export function updateReleaseNotes(
 ) {
   const header = `<!-- release-version: ${version} -->`;
   const sections = {};
-  if (previousSections === undefined) {
-    const blocks = sectionIds.map((id) => {
-      const block = sectionBlock(id, generated[id]);
-      sections[id] = {
-        generatedHash: hash("sha256", block),
-        humanOwned: false,
-      };
-      return block;
-    });
-    return { notes: `${header}\n\n${blocks.join("\n\n")}\n`, sections };
-  }
-
-  let notes = previousNotes;
+  const initial = previousSections === undefined;
+  let notes = initial ? null : previousNotes;
   if (notes !== null) {
     notes = /^<!-- release-version: [^\r\n]* -->/u.test(notes)
       ? notes.replace(/^<!-- release-version: [^\r\n]* -->/u, header)
       : `${header}\n\n${notes}`;
   }
   for (const id of sectionIds) {
-    const previous = previousSections[id];
-    const block = notes === null ? null : findSection(notes, id);
+    const previous = initial ? null : previousSections[id];
+    const block = initial || notes === null ? null : findSection(notes, id);
     const humanOwned =
+      !initial &&
       previous?.reset !== true &&
       (previous?.humanOwned !== false ||
         block === null ||
@@ -223,11 +215,7 @@ export function createReleasePlan(history, previous = null) {
 
 export function createGitRepository(directory) {
   const git = (...args) =>
-    execFileSync("git", args, {
-      cwd: directory,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    gitText(args, { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
   return {
     git,
     ensureCommit(sha) {
@@ -685,10 +673,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
   };
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
   const directory = fileURLToPath(new URL("../../..", import.meta.url));
   const repository = process.env.GITHUB_REPOSITORY ?? "openai/codex-security";
   const token =

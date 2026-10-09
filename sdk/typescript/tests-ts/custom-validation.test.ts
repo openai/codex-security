@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import Ajv2020 from "ajv/dist/2020.js";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import {
   runCustomValidation,
   type CustomValidationResult,
@@ -20,19 +20,14 @@ import {
   type FindingsDocument,
   type ScanManifest,
 } from "../src/index.js";
-import {
-  createMarketplace,
-  resolveCodexCommand,
-  runWorkbench,
-} from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import { readJson as json } from "./support/json.js";
+import { createMarketplace, resolveCodexCommand } from "../src/runtime.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { runWorkbench } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { readJson as json, jsonLines } from "./support/json.js";
+import { rejecting } from "./support/errors.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 const resultName = "artifacts/custom-validation/results.json";
@@ -43,9 +38,7 @@ async function save(path: string, value: unknown) {
 }
 
 async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
-  await cp(join(PLUGIN_ROOT, "examples/completed-scan"), scanDir, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(scanDir);
   const manifest = await json<ScanManifest>(
     join(scanDir, "scan-manifest.json"),
   );
@@ -316,9 +309,7 @@ describe("custom validation", () => {
     await expect(
       runCustomValidation({
         ...f,
-        run: async () => {
-          throw new Error("unexpected validation");
-        },
+        run: unexpectedValidation,
       }),
     ).rejects.toThrow("unsealed custom-validation draft");
   });
@@ -334,23 +325,22 @@ describe("custom validation", () => {
       };
     }
     await save(join(f.scanDir, "findings.json"), f.findings);
-    let called = false;
+    const run = mock(async () => {
+      const candidates = await json<{
+        candidates: Array<{ finding: unknown }>;
+      }>(join(f.scanDir, "artifacts/custom-validation/candidates.json"));
+      expect(candidates.candidates).toHaveLength(3);
+      expect(candidates.candidates[0]!.finding).toHaveProperty(
+        "attackPath.dataflow",
+        { source: "Synthetic request input" },
+      );
+      return JSON.stringify(result("reportable", "reportable", "reportable"));
+    });
     await runCustomValidation({
       ...f,
-      run: async () => {
-        called = true;
-        const candidates = await json<{
-          candidates: Array<{ finding: unknown }>;
-        }>(join(f.scanDir, "artifacts/custom-validation/candidates.json"));
-        expect(candidates.candidates).toHaveLength(3);
-        expect(candidates.candidates[0]!.finding).toHaveProperty(
-          "attackPath.dataflow",
-          { source: "Synthetic request input" },
-        );
-        return JSON.stringify(result("reportable", "reportable", "reportable"));
-      },
+      run,
     });
-    expect(called).toBe(true);
+    expect(run).toHaveBeenCalled();
     const saved = await json<FindingsDocument>(
       join(f.scanDir, "findings.json"),
     );
@@ -374,9 +364,7 @@ describe("custom validation", () => {
     await expect(
       runCustomValidation({
         ...f,
-        run: async () => {
-          throw new Error("Synthetic validation failure");
-        },
+        run: rejecting("Synthetic validation failure"),
       }),
     ).rejects.toThrow("Synthetic validation failure");
     expect(
@@ -391,9 +379,7 @@ describe("custom validation", () => {
     await expect(
       runCustomValidation({
         ...f,
-        run: async () => {
-          throw new Error("unexpected validation");
-        },
+        run: unexpectedValidation,
       }),
     ).rejects.toThrow(/findings\[1\].*title/);
     expect(
@@ -410,9 +396,7 @@ describe("custom validation", () => {
     await expect(
       runCustomValidation({
         ...f,
-        run: async () => {
-          throw new Error("unexpected validation");
-        },
+        run: unexpectedValidation,
       }),
     ).rejects.toThrow("coverage/surfaces/0/label");
     expect(await json<CoverageDocument>(path)).toEqual(coverage);
@@ -518,6 +502,12 @@ describe("custom validation", () => {
       const commands: string[] = [];
       const activities: ScanActivity[] = [];
       const validationActivity = "Synthetic validation activity.";
+      const profileDisabledTools =
+        scenario === "standard"
+          ? []
+          : diff
+            ? ["profile_disabled_tool"]
+            : undefined;
       const workbench = (args: readonly string[], input?: string) =>
         runWorkbench(
           {
@@ -532,7 +522,22 @@ describe("custom validation", () => {
           input,
         );
       const client = new TestClient(
-        {},
+        profileDisabledTools === undefined
+          ? {}
+          : {
+              codexOverrides: {
+                profile: "synthetic.validation",
+                profiles: {
+                  "synthetic.validation": {
+                    mcp_servers: {
+                      "codex-security": {
+                        disabled_tools: profileDisabledTools,
+                      },
+                    },
+                  },
+                },
+              },
+            },
         {
           environment: { CODEX_SECURITY_STATE_DIR: stateDir },
           prepareRuntime: async () => {
@@ -550,7 +555,13 @@ describe("custom validation", () => {
             expect(options.config?.["mcp_servers"]).toMatchObject({
               "codex-security": {
                 disabled_tools: expect.arrayContaining([
+                  "start_codex_security_standard_scan",
+                  "start_codex_security_prompt_only_scan",
+                  "start_codex_security_deep_scan",
                   "complete_codex_security_scan",
+                  "record_codex_security_candidate_validations",
+                  "record_candidate_attack_paths",
+                  ...(profileDisabledTools ?? []),
                 ]),
               },
             });
@@ -658,9 +669,7 @@ describe("custom validation", () => {
                         ];
                         await writeFile(
                           join(codexHome, "sessions", `rollout-${id}.jsonl`),
-                          records
-                            .map((record) => JSON.stringify(record))
-                            .join("\n") + "\n",
+                          jsonLines(records) + "\n",
                         );
                       }
                     }
@@ -774,7 +783,7 @@ describe("custom validation", () => {
 
   test("rejects Deep and empty prompts before starting Codex", async () => {
     const root = await temporaryDirectory();
-    const client = new TestClient({}, {});
+    const client = TestClient.withDependencies({});
     await expect(
       client.run(root, { mode: "deep", validationPrompt: "Validate." }),
     ).rejects.toThrow("not supported for Deep");
@@ -790,10 +799,17 @@ describe("custom validation", () => {
     expect(standard).toContain("## Baseline Auditor Prompt");
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("security_scan` capability preflight");
+    expect(standard).toContain("use it for the same early model checkpoint");
+    expect(standard).toContain("retain the model in an early partial");
+    expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
     );
     expect(diff).toContain("Run `$finding-discovery`");
+    expect(diff).toContain(
+      "Immediately save a `complete: false` semantic draft",
+    );
+    expect(diff).toContain('"format": "markdown", "content": "<model text>"');
     expect(diff).not.toContain("run `$validation` once");
     expect(diff).not.toContain("Call `complete_codex_security_scan` once");
     for (const prompt of [standard, diff]) {
@@ -859,3 +875,5 @@ describe("custom validation", () => {
     expect(ordinary.disabled_tools).toBeNull();
   });
 });
+
+const unexpectedValidation = rejecting("unexpected validation");

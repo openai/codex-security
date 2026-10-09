@@ -1,4 +1,4 @@
-import { randomUUID, hash } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import { z } from "incur";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
@@ -34,42 +34,35 @@ export function recordsReviewAttribution(
       return observationId;
     }),
   );
-  const beneficiaryObservationIds = [...participants]
-    .filter((id) => anchors.has(id))
-    .sort();
+  const beneficiaryObservationIds = [
+    ...participants.intersection(anchors),
+  ].sort();
   if (beneficiaryObservationIds.length === 0)
     throw new Error("Records review has no incoming observation participants.");
   return {
     version: 1,
     beneficiaryObservationIds,
-    contextObservationIds: [...participants]
-      .filter((id) => !anchors.has(id))
-      .sort(),
+    contextObservationIds: [...participants.difference(anchors)].sort(),
   };
 }
 
 const id = z.string().min(1);
-const record = z
-  .object({
-    id,
-    finding: z.unknown().transform((value) => requireFinding(value)),
-  })
-  .strict();
+const record = z.strictObject({
+  id,
+  finding: z.unknown().transform((value) => requireFinding(value)),
+});
 
-const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
-  .object({
+const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> =
+  z.strictObject({
     version: z.literal(1),
     observations: z.array(record),
     candidateRelationships: z.array(
-      z
-        .object({
-          observationId: id,
-          candidateObservationIds: z.array(id),
-        })
-        .strict(),
+      z.strictObject({
+        observationId: id,
+        candidateObservationIds: z.array(id),
+      }),
     ),
-  })
-  .strict();
+  });
 
 export interface DeduplicateRecordsInput {
   version: 1;
@@ -142,8 +135,8 @@ export async function deduplicateRecords(
     groups: [],
     unresolved: [],
   };
-  const sourceFindings = [...relationships.keys()].map((id) =>
-    observations.get(id)!,
+  const sourceFindingIds = [...relationships.keys()].map(
+    (id) => observations.get(id)!.findingId,
   );
   const reviewer = new CodexDeduplicationReviewer({
     async run<T>({
@@ -208,9 +201,7 @@ export async function deduplicateRecords(
   );
   let groups: string[][];
   try {
-    const decisions = await algorithm.run(
-      sourceFindings.map((finding) => finding.findingId),
-    );
+    const decisions = await algorithm.run(sourceFindingIds);
     options.signal?.throwIfAborted();
     groups = decisions.duplicateGroups;
   } catch (error) {
@@ -226,9 +217,7 @@ export async function deduplicateRecords(
   }
   const grouped = new Set(groups.flat());
   groups.push(
-    ...sourceFindings
-      .filter((finding) => !grouped.has(finding.findingId))
-      .map((finding) => [finding.findingId]),
+    ...sourceFindingIds.filter((id) => !grouped.has(id)).map((id) => [id]),
   );
   for (const group of groups) {
     const observationIds = group.map((id) => references.get(id)!);

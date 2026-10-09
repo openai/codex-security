@@ -1,3 +1,4 @@
+import { isNonEmptyString } from "./value.js";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { JsonObject } from "./config.js";
@@ -9,7 +10,11 @@ export type SavedScan = JsonObject & { scanId: string; scanDir: string };
 
 export interface SavedScanDependencies {
   currentDirectory(): string;
-  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
+  runWorkbench(
+    args: readonly string[],
+    input?: string,
+    signal?: AbortSignal,
+  ): Promise<JsonObject>;
 }
 
 export async function resolveWorkflowScan(
@@ -70,17 +75,15 @@ export async function resolveCompletedScan(
     throw new CodexSecurityError(`Scan ${scanId} is not complete.`);
   }
   const storedDirectory = scan["scanDir"];
-  const scanDir =
-    typeof storedDirectory === "string" && storedDirectory.length > 0
-      ? resolve(dependencies.currentDirectory(), expandHome(storedDirectory))
-      : undefined;
-  const metadata =
-    scanDir === undefined
-      ? undefined
-      : await lstat(scanDir).catch(() => undefined);
-  if (scanDir === undefined || metadata?.isDirectory() !== true) {
+  const scanDir = isNonEmptyString(storedDirectory)
+    ? resolve(dependencies.currentDirectory(), expandHome(storedDirectory))
+    : undefined;
+  if (
+    scanDir === undefined ||
+    (await lstat(scanDir).catch(() => undefined))?.isDirectory() !== true
+  ) {
     throw new CodexSecurityError(
-      `Artifacts for scan ${scanId} are unavailable. Restore the completed scan artifacts or run a new scan.`,
+      `Artifacts for scan ${scanId} are unavailable. Restore the saved scan artifacts or run a new scan.`,
     );
   }
   return { ...scan, scanId, scanDir };

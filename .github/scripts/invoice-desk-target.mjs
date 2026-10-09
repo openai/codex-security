@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { isMain } from "../../sdk/typescript/scripts/is-main.mjs";
 
 function eligible(pr, repository, sha) {
   return (
@@ -40,14 +40,11 @@ export async function resolveScanTargets(
     );
     if (candidates.length === 0) return [];
     const dispatched = new Set(await dispatchedScanTitles(sha));
-    return candidates
-      .filter(
-        (pr) =>
-          !dispatched.has(
-            `Invoice Desk scan — PR #${pr.number} @ ${pr.head.sha}`,
-          ),
-      )
-      .map((pr) => ({ pr: pr.number, sha: pr.head.sha }));
+    return candidates.flatMap((pr) =>
+      !dispatched.has(`Invoice Desk scan — PR #${pr.number} @ ${pr.head.sha}`)
+        ? { pr: pr.number, sha: pr.head.sha }
+        : [],
+    );
   }
   if (eventName !== "workflow_dispatch") return [];
   const { pr_number: number = "", source_sha: sourceSha = "" } =
@@ -64,10 +61,7 @@ export async function resolveScanTargets(
   return [{ pr: pr.number, sha: sourceSha }];
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
   const repository = process.env.GITHUB_REPOSITORY;
   const targets = await resolveScanTargets(
     {

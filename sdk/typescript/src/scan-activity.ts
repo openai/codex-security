@@ -1,4 +1,5 @@
 import { isRecord } from "./record.js";
+import { parseJson } from "./value.js";
 
 const MAX_ACTIVITY_PATHS = 8;
 const MAX_PROSE_CHARACTERS = 1_000;
@@ -171,10 +172,8 @@ export function scanActivityFromSessionEvent(
         ? payload["text"]
         : payload["message"];
     if (kind === null || typeof text !== "string") return null;
-    const timestamp =
-      typeof event["timestamp"] === "string" ? event["timestamp"] : "";
     return proseActivity(
-      `${type}:${timestamp}:${text}`,
+      `${type}:${typeof event["timestamp"] === "string" ? event["timestamp"] : ""}:${text}`,
       kind,
       delta ? "running" : "completed",
       text,
@@ -303,19 +302,13 @@ function prose(text: string, limit?: number): string {
 
 function customShellCommand(name: string, value: unknown): string | null {
   if (name !== "exec" || typeof value !== "string") return null;
-  const match =
+  const quoted =
     /\b(?:exec_command|shell_command)\s*\(\s*\{[\s\S]{0,1024}?\b(?:cmd|command)["']?\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`)/u.exec(
       value,
-    );
-  if (match?.[1] === undefined) return null;
-  const quoted = match[1];
+    )?.[1];
+  if (quoted === undefined) return null;
   if (quoted.startsWith('"')) {
-    try {
-      const parsed: unknown = JSON.parse(quoted);
-      return typeof parsed === "string" ? parsed : null;
-    } catch {
-      return null;
-    }
+    return parseJson(() => quoted) as string | null;
   }
   return quoted.slice(1, -1).replaceAll(/\\(['`\\])/gu, "$1");
 }
@@ -361,12 +354,8 @@ function sessionCallArguments(
   const value = payload["arguments"] ?? payload["input"];
   if (isRecord(value)) return value;
   if (typeof value !== "string") return {};
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return isRecord(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  const parsed = parseJson(() => value);
+  return isRecord(parsed) ? parsed : {};
 }
 
 function commandRepositoryPaths(command: string, repository: string): string[] {

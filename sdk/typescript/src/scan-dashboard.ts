@@ -265,7 +265,7 @@ export class ScanDashboard {
         input.on("data", this.#onInput);
         this.#stream.write(ENABLE_ALTERNATE_SCROLL);
       }
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch (error) {
       try {
         this.stop();
@@ -537,12 +537,8 @@ export class ScanDashboard {
   #refresh(): void {
     if (this.#timer === null) return;
     try {
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch {}
-  }
-
-  #render(): void {
-    this.#stream.write(this.#frame());
   }
 
   #frame(): string {
@@ -568,7 +564,9 @@ export class ScanDashboard {
     const files =
       this.#files === null
         ? "waiting for inventory"
-        : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
+        : this.#files.filesCompleted > 0
+          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
+          : `${formatCount(this.#files.filesTotal)} in scope`;
     const history = this.#activityLines(width);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
@@ -600,7 +598,7 @@ export class ScanDashboard {
       scrollStatus = `Esc components · ${scrollStatus}`;
     const model = this.#options.model;
 
-    const lines = [
+    return this.#formatFrame([
       `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
       divider,
       ...activity,
@@ -624,9 +622,7 @@ export class ScanDashboard {
                 ]),
           ]),
       `  TIME     ${time}  ·  ${this.#budget === null ? scrollStatus : "Enter to apply · Ctrl+C to exit"}`,
-    ];
-
-    return this.#formatFrame(lines);
+    ]);
   }
 
   #formatFrame(lines: (string | DashboardActivityLine)[]): string {
@@ -841,15 +837,20 @@ export class ScanDashboard {
 
   #costLines(): string[] {
     if (!this.#showCost) return [];
+    if (
+      this.#cost === null &&
+      this.#options.maxCostUsd === undefined &&
+      estimateScanCost(this.#options.model?.model, {
+        input_tokens: 0,
+        output_tokens: 0,
+      }) === null
+    ) {
+      return [];
+    }
     const cost =
       this.#cost === null
         ? this.#options.maxCostUsd === undefined
-          ? estimateScanCost(this.#options.model?.model, {
-              input_tokens: 0,
-              output_tokens: 0,
-            }) === null
-            ? "unavailable (model pricing missing)"
-            : "waiting for usage"
+          ? "waiting for usage"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
     return wrapActivity("  COST     ", cost, this.#width());
@@ -1056,9 +1057,7 @@ function detailsDescription(
   const itemType = typeof payload["type"] === "string" ? payload["type"] : type;
   if (itemType === "token_count") return undefined;
   if (itemType === "message" || itemType === "agent_message") {
-    const role =
-      typeof payload["role"] === "string" ? payload["role"] : "assistant";
-    return `${role}: ${detailsText(payload["content"] ?? payload["message"])}`;
+    return `${typeof payload["role"] === "string" ? payload["role"] : "assistant"}: ${detailsText(payload["content"] ?? payload["message"])}`;
   }
   if (itemType === "reasoning" || itemType.startsWith("agent_reasoning")) {
     const text = detailsText(
@@ -1269,11 +1268,7 @@ function styleLine(
     if (kind === "status" || kind === "warning") {
       return `${prefix}\u001B[${style}m${marker}${separator}${description}\u001B[0m`;
     }
-    const workerLabel =
-      worker === undefined ? "" : `\u001B[36m${worker}\u001B[39m`;
-    const prose =
-      kind === "message" ? `\u001B[1m${description}\u001B[22m` : description;
-    return `${prefix}\u001B[${style}m${marker}\u001B[39m${separator}${workerLabel}${prose}`;
+    return `${prefix}\u001B[${style}m${marker}\u001B[39m${separator}${worker === undefined ? "" : `\u001B[36m${worker}\u001B[39m`}${kind === "message" ? `\u001B[1m${description}\u001B[22m` : description}`;
   }
   return `\u001B[${style}m${value}\u001B[0m`;
 }

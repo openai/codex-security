@@ -7,14 +7,12 @@ import {
   chmod,
   cp,
   mkdir,
-  mkdtemp,
   readFile,
   rm,
   symlink,
   truncate,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -22,34 +20,22 @@ import {
   publishScanToCloud,
   selectCloudDestination,
 } from "../src/cloud-publish.js";
-import type {
-  CreateImportedScan,
-  ImportedScanReceipt,
-  ImportDestination,
-} from "../src/cloud-import-models.js";
+import {
+  nativeCloudServer as server,
+  nativeCloudDestination as destination,
+} from "./support/cloud-import.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-const destination: ImportDestination = {
-  environment_id: "env-1",
-  environment_name: "Example",
-  repository_id: "repo-1",
-  repository_full_name: "example/repo",
-  repository_remote: "https://github.com/example/repo.git",
-  connector_id: "connector-1",
-};
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-cloud-"));
-  directories.push(root);
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-cloud-",
+  false,
+);
+afterEach(cleanup);
+async function fixture(homeName = "home") {
+  const root = await temporaryDirectory();
   const scan = join(root, "scan"),
-    home = join(root, "home");
+    home = join(root, homeName);
   await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scan, {
     recursive: true,
   });
@@ -82,104 +68,6 @@ async function fixture() {
     environment: {
       CODEX_HOME: home,
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    },
-  };
-}
-function server(
-  options: {
-    destinations?: ImportDestination[];
-    accepted?: boolean;
-    finalizing?: boolean;
-    retentionFailed?: boolean;
-    finalizeStatus?: "accepted" | "finalizing";
-    failed?: boolean;
-    rejectPutOnce?: boolean;
-  } = {},
-) {
-  const calls: { url: string; method: string; body?: BodyInit | null }[] = [];
-  let publication: ImportedScanReceipt | undefined;
-  let create: CreateImportedScan | undefined;
-  let rejected = false;
-  const fetch = async (url: string, request: RequestInit) => {
-    calls.push({ url, method: request.method!, body: request.body });
-    expect((request.headers as Record<string, string>)["Authorization"]).toBe(
-      "Bearer synthetic-access-token",
-    );
-    expect(request.redirect).toBe("error");
-    if (url.includes("/destinations"))
-      return Response.json({
-        protocol_version: 1,
-        destinations: options.destinations ?? [destination],
-      });
-    if (url.endsWith("/v1")) {
-      create = JSON.parse(String(request.body));
-      publication ??= {
-        protocol_version: 1,
-        imported_scan_id: "import-1",
-        source: "cli",
-        source_scan_id: create!.source_scan_id,
-        environment_id: destination.environment_id,
-        repository_id: destination.repository_id,
-        repository_full_name: destination.repository_full_name,
-        repository_remote: create!.repository_remote,
-        connector_id: create!.connector_id,
-        target_kind: create!.target_kind,
-        base_commit: create!.base_commit,
-        snapshot_digest: create!.snapshot_digest ?? null,
-        upload_status:
-          options.finalizing || options.retentionFailed
-            ? "finalizing"
-            : options.accepted
-              ? "accepted"
-              : "uploading",
-        materialization_status:
-          options.failed || options.retentionFailed ? "failed" : "pending",
-        dedupe_status: "pending",
-        artifacts: create!.artifacts.map((item) => ({
-          ...item,
-          uploaded: Boolean(
-            options.accepted || options.finalizing || options.retentionFailed,
-          ),
-          download_url: null,
-        })),
-        created_at: "2026-06-01T00:00:00Z",
-        scan_started_at: create!.scan_started_at,
-        scan_completed_at: create!.scan_completed_at,
-        finalized_at: null,
-        finalization_started_at: null,
-        materialization_completed_at: null,
-        finding_count: null,
-        failure_code: options.retentionFailed
-          ? "artifact_retention_failed"
-          : null,
-        status_url: "/api/aardvark/imported-scans/v1/import-1",
-      };
-    } else if (request.method === "PUT") {
-      if (options.rejectPutOnce && !rejected && url.endsWith("findings.json")) {
-        rejected = true;
-        throw new Error("connection lost");
-      }
-      const name = url.split("/").at(-1);
-      const artifact = publication!.artifacts.find(
-        (item) => item.name === name,
-      )!;
-      const contents = request.body as Uint8Array;
-      expect(createHash("sha256").update(contents).digest("hex")).toBe(
-        artifact.sha256,
-      );
-      expect(contents.byteLength).toBe(artifact.size_bytes);
-      artifact.uploaded = true;
-    } else if (url.endsWith("/finalize"))
-      publication!.upload_status = options.finalizeStatus ?? "accepted";
-    else if (url.endsWith("/retry"))
-      publication!.materialization_status = "pending";
-    return Response.json(publication);
-  };
-  return {
-    fetch,
-    calls,
-    get create() {
-      return create;
     },
   };
 }
@@ -637,6 +525,171 @@ describe("native Cloud publication", () => {
         },
       }),
     ).rejects.toThrow("saved SCM provenance");
+  });
+});
+
+describe("native Cloud preflight and diagnostics", () => {
+  test("reports a rejected create request with the service detail and no uploads", async () => {
+    const { scan, environment } = await fixture();
+    const cloud = server();
+    const calls: string[] = [];
+    await expect(
+      publishScanToCloud(scan, {
+        environment,
+        fetch: async (url, request) => {
+          calls.push(request.method!);
+          if (request.method === "POST")
+            return Response.json(
+              {
+                detail: "Artifact declaration does not match the saved scan.",
+                code: "invalid_artifacts",
+              },
+              { status: 422 },
+            );
+          return cloud.fetch(url, request);
+        },
+      }),
+    ).rejects.toThrow(
+      /HTTP 422.*Artifact declaration does not match.*invalid_artifacts.*Resolve this rejection/s,
+    );
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  test("rejects the aggregate artifact limit before credentials for dry-run and publication", async () => {
+    const { scan } = await fixture();
+    const manifestPath = join(scan, "scan-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    const size = 45 * 1024 * 1024;
+    for (const name of ["findings.json", "coverage.json", "report.md"]) {
+      const path = join(scan, name);
+      const original = await readFile(path);
+      const padded = Buffer.concat([
+        original,
+        Buffer.alloc(size - original.byteLength, " "),
+      ]);
+      await writeFile(path, padded);
+      const artifact = manifest.scan.artifacts.find(
+        (item: { path: string }) => item.path === name,
+      );
+      if (artifact)
+        artifact.sha256 = createHash("sha256").update(padded).digest("hex");
+    }
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    for (const dryRun of [true, false]) {
+      await expect(
+        publishScanToCloud(scan, {
+          dryRun,
+          environment: {},
+          fetch: async () => {
+            throw new Error("unexpected network");
+          },
+        }),
+      ).rejects.toThrow(/artifacts total \d+ bytes.*134217728 bytes/);
+    }
+    expect((await readFile(join(scan, "report.md"))).byteLength).toBe(size);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves significant whitespace in the credential home",
+    async () => {
+      const { scan, home, environment } = await fixture(" home ");
+      await mkdir(home.trim(), { mode: 0o700 });
+      await writeFile(
+        join(home.trim(), "config.toml"),
+        'cli_auth_credentials_store = "file"\n',
+      );
+      await writeFile(
+        join(home.trim(), "auth.json"),
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            access_token: "wrong-trimmed-home-token",
+            account_id: "wrong-account",
+          },
+        }),
+        { mode: 0o600 },
+      );
+      const cloud = server();
+      const result = await publishScanToCloud(scan, {
+        environment,
+        fetch: cloud.fetch,
+      });
+      expect(result.publication?.upload_status).toBe("accepted");
+    },
+  );
+
+  test("honors the configured native import base URL", async () => {
+    const { scan, environment } = await fixture();
+    const cloud = server();
+    const base = "http://127.0.0.1:12345/imported-scans/v1";
+    await publishScanToCloud(scan, {
+      environment: { ...environment, CODEX_SECURITY_CLOUD_PUBLISH_URL: base },
+      fetch: async (url, request) => {
+        expect(url.startsWith(base)).toBe(true);
+        return cloud.fetch(url, request);
+      },
+    });
+  });
+
+  test("rejects malformed and unsupported credentials before discovery", async () => {
+    const { scan, home, environment } = await fixture();
+    for (const credentials of [
+      { auth_mode: "apikey", OPENAI_API_KEY: "synthetic-api-secret" },
+      {
+        auth_mode: "personal_access_token",
+        tokens: {
+          access_token: "synthetic-token",
+          account_id: "synthetic-account",
+        },
+      },
+      { tokens: { access_token: "synthetic-token" } },
+      {},
+    ]) {
+      await writeFile(join(home, "auth.json"), JSON.stringify(credentials), {
+        mode: 0o600,
+      });
+      await expect(
+        publishScanToCloud(scan, {
+          environment,
+          fetch: async () => {
+            throw new Error("unexpected network");
+          },
+        }),
+      ).rejects.toThrow("ChatGPT login");
+    }
+  });
+
+  test("rejects artifact tampering before credentials or discovery", async () => {
+    const { scan } = await fixture();
+    await writeFile(join(scan, "findings.json"), "{}");
+    await expect(
+      publishScanToCloud(scan, {
+        environment: {},
+        fetch: async () => {
+          throw new Error("unexpected network");
+        },
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("preserves cancellation while reading a response", async () => {
+    const { scan, environment } = await fixture();
+    const controller = new AbortController();
+    const cancellation = new Error("response canceled");
+    await expect(
+      publishScanToCloud(scan, {
+        environment,
+        signal: controller.signal,
+        fetch: async () => {
+          const response = Response.json({});
+          response.json = async () => {
+            controller.abort(cancellation);
+            throw controller.signal.reason;
+          };
+          return response;
+        },
+      }),
+    ).rejects.toBe(cancellation);
   });
 });
 

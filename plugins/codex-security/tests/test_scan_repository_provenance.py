@@ -28,7 +28,7 @@ def test_migration_does_not_infer_repository_from_current_origin(tmp_path: Path)
         connection.execute("ALTER TABLE scans DROP COLUMN target_remote")
         connection.execute("ALTER TABLE scans DROP COLUMN target_repository_path")
         connection.execute("ALTER TABLE scans DROP COLUMN target_provenance_recorded")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 42")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 48")
     subprocess.run(
         ["git", "remote", "add", "origin", "https://github.com/example/current.git"],
         cwd=target,

@@ -68,9 +68,11 @@ const validateCreate = ajv.compile<CreateImportedScan>({
 
 export interface CloudPublicationResult {
   scanId: string;
-  /** Canonical findings become available asynchronously after materialization. */
+  /** Native publication does not return canonical finding IDs in this response. */
   findingIds: string[];
+  /** Number of findings in the submitted local artifact, before Cloud processing. */
   findingCount: number;
+  /** Finalization/acceptance receipt; inspect stage statuses for processing completion. */
   publication?: ImportedScanReceipt;
   dryRun?: true;
   findings?: Finding[];
@@ -129,9 +131,20 @@ async function cloudRequest(
     );
   }
   if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
+    const detail = await response.text();
+    dependencies.signal?.throwIfAborted();
+    const recovery =
+      response.status === 401
+        ? "Sign in with ChatGPT again."
+        : response.status === 403
+          ? "Current access to the selected environment and repository is required."
+          : response.status === 404 || response.status === 410
+            ? "This deployment does not support native scan imports; no legacy publication was attempted."
+            : method === "POST" && path === "" && response.status < 500
+              ? "Resolve this rejection before retrying publication."
+              : "Repeat the same publication to resume after resolving the error.";
     throw new CodexSecurityError(
-      `Cloud publication failed (HTTP ${response.status}). ${response.status === 401 ? "Sign in with ChatGPT again." : response.status === 403 ? "Current access to the selected environment and repository is required." : response.status === 404 || response.status === 410 ? "This deployment does not support native scan imports; no legacy publication was attempted." : "Repeat the same publication to resume after resolving the error."}`,
+      `Cloud publication failed (HTTP ${response.status}). ${detail}${detail ? " " : ""}${recovery}`,
     );
   }
   return response.json();
@@ -259,6 +272,15 @@ export async function publishScanToCloud(
   if (!validateImportContent(content))
     throw new CodexSecurityError(
       `The scan does not satisfy the Cloud import contract: ${ajv.errorsText(validateImportContent.errors)}.`,
+    );
+  const totalBytes = artifacts.reduce(
+    (total, artifact) => total + artifact.size_bytes,
+    0,
+  );
+  const maxTotalBytes = 128 * 1024 * 1024;
+  if (totalBytes > maxTotalBytes)
+    throw new CodexSecurityError(
+      `Cloud publication artifacts total ${totalBytes} bytes; the import limit is ${maxTotalBytes} bytes (128 MiB).`,
     );
   if (dependencies.dryRun)
     return {
@@ -393,8 +415,9 @@ export async function publishFindingsCsvToCloud(
 }
 
 async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+  const configuredHome = environment["CODEX_HOME"];
   let home = expandHome(
-    environment["CODEX_HOME"]?.trim() || "~/.codex",
+    configuredHome?.trim() ? configuredHome : "~/.codex",
     environment,
   );
   let requireFileStorage = true;

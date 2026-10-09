@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, mkdirSync, openSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isMain } from "../../sdk/typescript/scripts/is-main.mjs";
 
 export function extractApplication(repository, sha, destination) {
   const git = (args) =>
@@ -43,10 +43,7 @@ export function extractApplication(repository, sha, destination) {
   return entries.length;
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
   const count = extractApplication(
     process.env.SOURCE_REPOSITORY,
     process.env.SOURCE_SHA,

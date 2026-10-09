@@ -1,4 +1,5 @@
 import type { DeepReducerContext } from "../artifact-io.js";
+import type { WorkbenchDeepScanStore } from "./store.js";
 
 export type DeepScanTerminalReason = "saturated" | "capped";
 
@@ -22,15 +23,9 @@ export interface DeepScanConfig {
   maxTimeHours?: number;
 }
 
-export interface DeepScanCanonicalArtifacts {
-  inScopeFilesPath: string;
-  candidateLedgerPath: string;
-}
-
 export interface DeepScanRunState {
   scanId: string;
   status: DeepScanRunStatus;
-  phase?: "setup" | "discovery" | "reducing" | "terminal";
   coordinatorGeneration?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -42,7 +37,6 @@ export interface DeepScanRunState {
   dispatchedCount: number;
   noNewStreak: number;
   consecutiveErrors: number;
-  canonicalArtifacts?: DeepScanCanonicalArtifacts;
   manifestPath?: string;
   terminalReason?: DeepScanTerminalReason;
   error?: string;
@@ -105,65 +99,10 @@ export interface DedupCommit {
 }
 
 /** Durable operations implemented by the Python workbench. */
-export interface DeepScanStore {
-  begin(input: {
-    scanId?: string;
-    targetPath?: string;
-    scope?: string;
-    userContext?: string;
-    handoffClaimToken?: string;
-    model?: string;
-    reasoningEffort?: string;
-    threadId: string;
-    scanRoot: string;
-  }): Promise<DeepScanRunState>;
-  get(scanId: string, threadId: string): Promise<DeepScanRunState>;
-  claimCoordinator(
-    input: DeepScanCoordinatorLeaseInput,
-  ): Promise<DeepScanCoordinatorClaim>;
-  heartbeatCoordinator(
-    input: DeepScanCoordinatorLeaseInput,
-  ): Promise<DeepScanRunState>;
-  cancel(scanId: string, threadId: string): Promise<Record<string, unknown>>;
-  updateWorker(
-    update: DeepScanWorkerMutation,
-  ): Promise<PersistedDeepScanWorker>;
-  claimDedup(input: {
-    id: string;
-    scanId: string;
-    workerIds: string[];
-    promptPath: string;
-    artifactDir: string;
-  }): Promise<void>;
-  commitDedup(commit: DedupCommit): Promise<DeepScanRunState>;
-  finish(input: {
-    scanId: string;
-    reason: DeepScanTerminalReason;
-    manifestPath: string;
-    stagedManifestPath?: string;
-    omittedWorkerIds: string[];
-  }): Promise<DeepScanRunState>;
-  fail(
-    scanId: string,
-    message: string,
-    status?: "failed" | "interrupted",
-    manifestPath?: string,
-    stagedManifestPath?: string,
-  ): Promise<DeepScanRunState>;
-  recordStoppedPublicationFailure(
-    scanId: string,
-    message: string,
-    coordinatorGeneration?: number,
-  ): Promise<DeepScanRunState>;
-  updateProgress(input: {
-    scanId: string;
-    handoffClaimToken?: string;
-    phase?: "preflight" | "discovery";
-    deepReviewPass?: number;
-    reviewItemsTotal?: number;
-    reviewItemsCompleted?: number;
-  }): Promise<void>;
-}
+export type DeepScanStore = Omit<
+  WorkbenchDeepScanStore,
+  "begin" | "coordinatorLeaseArgs"
+>;
 
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {

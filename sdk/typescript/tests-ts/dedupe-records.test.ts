@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
@@ -19,6 +19,7 @@ import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import attributionFixtures from "./fixtures/records-review-attribution.json";
+import { rejecting, throwing } from "./support/errors.js";
 
 test("attribution maps exact structured participants to sorted host identities", () => {
   const references = new Map(
@@ -182,9 +183,7 @@ test("records honors explicit observation neighborhoods and handles empty/isolat
       },
       {
         reviewRunner: {
-          async run() {
-            throw new Error("No model call expected");
-          },
+          run: rejecting("No model call expected"),
         },
       },
     );
@@ -281,34 +280,33 @@ test.each([
 ])(
   "%s review never becomes a unique disposition or retries",
   async (scenario) => {
-    let calls = 0;
+    const runMock = mock(async (review: DeduplicationReviewRequest) => {
+      if (scenario === "pair-failed" && review.stage !== "pair-review")
+        return answer(review);
+      if (scenario === "failed" || scenario === "pair-failed")
+        throw new Error("Remote execution may already have been accepted");
+      if (scenario === "malformed") return "not an object";
+      if (scenario === "inconclusive") return { decision: "INCONCLUSIVE" };
+      if (scenario === "unknown-canonical") {
+        if (review.stage === "screening") return answer(review);
+        return {
+          ...decision(assigned(review)),
+          canonicalFindingId: "unknown",
+        };
+      }
+      const valid = answer(review) as {
+        decisions: Record<string, unknown>;
+      };
+      if (scenario === "missing-pair") delete valid.decisions["pair-1"];
+      if (scenario === "unknown-slot") {
+        valid.decisions["unknown"] = valid.decisions["pair-1"];
+        delete valid.decisions["pair-1"];
+      }
+      return valid;
+    });
     const result = await deduplicateRecords(input(), {
       reviewRunner: {
-        async run(review) {
-          calls++;
-          if (scenario === "pair-failed" && review.stage !== "pair-review")
-            return answer(review);
-          if (scenario === "failed" || scenario === "pair-failed")
-            throw new Error("Remote execution may already have been accepted");
-          if (scenario === "malformed") return "not an object";
-          if (scenario === "inconclusive") return { decision: "INCONCLUSIVE" };
-          if (scenario === "unknown-canonical") {
-            if (review.stage === "screening") return answer(review);
-            return {
-              ...decision(assigned(review)),
-              canonicalFindingId: "unknown",
-            };
-          }
-          const valid = answer(review) as {
-            decisions: Record<string, unknown>;
-          };
-          if (scenario === "missing-pair") delete valid.decisions["pair-1"];
-          if (scenario === "unknown-slot") {
-            valid.decisions["unknown"] = valid.decisions["pair-1"];
-            delete valid.decisions["pair-1"];
-          }
-          return valid;
-        },
+        run: runMock,
       },
     });
     expect(result.status).toBe("unresolved");
@@ -316,7 +314,7 @@ test.each([
     expect(result.unresolved.map(({ observationId }) => observationId)).toEqual(
       ["a", "b", "c", "d"],
     );
-    expect(calls).toBe(
+    expect(runMock).toHaveBeenCalledTimes(
       ["pair-failed", "unknown-canonical"].includes(scenario) ? 3 : 1,
     );
   },
@@ -368,9 +366,7 @@ test("rejects invalid inputs before calling the host", async () => {
     await expect(
       deduplicateRecords(data as DeduplicateRecordsInput, {
         reviewRunner: {
-          async run() {
-            throw new Error("Host must not be called");
-          },
+          run: rejecting("Host must not be called"),
         },
       }),
     ).rejects.toThrow();
@@ -448,9 +444,7 @@ test("CLI records mode uses only the fake host, bypassing saved scans, persisten
   for (const key of Object.keys(deps)) {
     if (typeof deps[key as keyof typeof deps] === "function")
       Object.assign(deps, {
-        [key]: () => {
-          throw new Error(`Unexpected dependency: ${key}`);
-        },
+        [key]: throwing(`Unexpected dependency: ${key}`),
       });
   }
   deps.addSignalListener = () => {};
@@ -588,10 +582,8 @@ test("real CLI pipes exit after a fake-host run without local Codex or state wri
     child.on("error", reject);
     child.on("close", resolve);
   });
-  let stderr = "";
-  child.stderr.setEncoding("utf8").on("data", (value) => {
-    stderr += value;
-  });
+  const stderr = capture();
+  child.stderr.setEncoding("utf8").on("data", stderr.stream.write);
   child.stdin.on("error", () => {});
   try {
     child.stdin.write(`${JSON.stringify(run)}\n`);
@@ -627,7 +619,7 @@ test("real CLI pipes exit after a fake-host run without local Codex or state wri
       reviews.filter((review) => review.stage === "pair-review"),
     ).toHaveLength(2);
     expect(await closed).toBe(0);
-    expect(stderr).toBe("");
+    expect(stderr.text()).toBe("");
     expect(final).toMatchObject({
       id: "run-1",
       result: {
@@ -702,13 +694,12 @@ test.each(["result", "error"] as const)(
       const inputStream = new PassThrough();
       const messages: Message[] = [];
       let release!: () => void;
-      const { promise: writing, resolve: started } =
-        Promise.withResolvers<void>();
+      const writing = Promise.withResolvers<void>();
       const output = new Writable({
         write(chunk, _encoding, callback) {
           messages.push(JSON.parse(chunk.toString()));
           release = callback;
-          started();
+          writing.resolve();
         },
       });
       const controller = new AbortController();
@@ -727,7 +718,7 @@ test.each(["result", "error"] as const)(
                   },
           })}\n`,
         );
-        await writing;
+        await writing.promise;
         if (notification)
           inputStream.write(
             `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,

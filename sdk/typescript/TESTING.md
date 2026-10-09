@@ -46,6 +46,23 @@ JavaScript and TypeScript, not the Python helpers or child processes. It is
 diagnostic for now. Use several successful CI runs to establish a baseline
 before proposing a coverage floor.
 
+## Native artifacts in fresh development environments
+
+SDK tests, including Ona's **Run tests** automation, require the eight verified
+native payloads. Installing Node and Python dependencies alone does not supply
+them. Select a successful native-artifacts or node-ci run built from this
+checkout's native sources and toolchain, then use the exact artifact name from
+that run (pull request artifacts use the tested merge commit):
+
+```sh
+gh run download <run-id> --name native-universal-<commit> --dir plugins/codex-security/native/prebuilt
+```
+
+Run this command from the repository root before starting the automation.
+Refresh the artifact after changing native source or toolchain. The standalone
+plugin supports a host-only build; that does not satisfy the SDK's universal
+packaging tests. See the [native build guide](../../plugins/codex-security/native/README.md).
+
 ## Writing tests
 
 - Test observable results, failures, cancellation, and cleanup. Prefer a
@@ -103,13 +120,13 @@ package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
 
-`scripts/run-ci-tests.mjs` assigns the longest measured files first. Its
+`scripts/run-ci-tests.mts` assigns the longest measured files first. Its
 `ci-test-durations.json` records per-file seconds from CI reports.
 Every new test file is included automatically with a one-second estimate.
 Refresh those estimates from the uploaded reports when adding or splitting
 expensive files; estimates affect scheduling, never whether a test runs.
 To reproduce one Windows shard locally after building the plugin, run
-`node scripts/run-ci-tests.mjs 3/7 --seed=12345`.
+`node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
 
 Every Bun lane uploads JUnit; Linux lanes also upload LCOV per shard. Python
 reports include case durations, and the MCP runner can upload its JUnit report.
@@ -126,7 +143,7 @@ The workflow compares test identities and outcomes against the unsharded
 default run and records timings, including failed shards, in the job summary.
 It is not a required check or part of the release trigger.
 
-Runner trials use Bun 1.3.13 to avoid the
+Runner trials use Bun 1.4.2 to avoid the
 [async-module initialization bug in 1.3.14](https://github.com/oven-sh/bun/issues/31410)
 that breaks the Ink UI tests under isolation. Keep the trial pin until a newer
 release passes the full SDK suite in every mode. Required CI and the mutation

@@ -1,16 +1,18 @@
 import { isRecord } from "./record.js";
+import { isSafeNonNegativeInteger } from "./value.js";
 
 export interface DeepScanProgress {
   completed: number;
   active: number;
   maximum: number;
+  /** Whether the coordinator is reducing results or has finished. */
+  consolidating?: boolean;
 }
 
 interface DeepScanProgressTrackerOptions {
   read: (signal: AbortSignal) => Promise<unknown>;
   onProgress: (progress: DeepScanProgress) => void;
   onError?: (error: unknown) => void;
-  pollIntervalMs?: number;
 }
 
 const DEEP_PROGRESS_POLL_INTERVAL_MS = 5_000;
@@ -19,34 +21,29 @@ export class DeepScanProgressTracker {
   readonly #options: DeepScanProgressTrackerOptions;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> | null = null;
-  #abortController: AbortController | null = null;
+  readonly #abortController = new AbortController();
   #lastProgress: DeepScanProgress | null = null;
-  #stopped = false;
 
   public constructor(options: DeepScanProgressTrackerOptions) {
     this.#options = options;
   }
 
   public start(): void {
-    if (this.#timer !== null || this.#stopped) return;
+    if (this.#timer !== null || this.#abortController.signal.aborted) return;
     const poll = () => {
       void this.refresh().catch((error: unknown) => {
         this.#options.onError?.(error);
       });
     };
-    this.#timer = setInterval(
-      poll,
-      this.#options.pollIntervalMs ?? DEEP_PROGRESS_POLL_INTERVAL_MS,
-    );
+    this.#timer = setInterval(poll, DEEP_PROGRESS_POLL_INTERVAL_MS);
     this.#timer.unref();
     poll();
   }
 
   public async refresh(): Promise<void> {
-    if (this.#stopped) return;
+    if (this.#abortController.signal.aborted) return;
     if (this.#pending !== null) return await this.#pending;
-    const abortController = new AbortController();
-    this.#abortController = abortController;
+    const abortController = this.#abortController;
     let update: Promise<void> | null = null;
     update = (async () => {
       try {
@@ -54,23 +51,22 @@ export class DeepScanProgressTracker {
           await this.#options.read(abortController.signal),
         );
         if (
-          this.#stopped ||
           abortController.signal.aborted ||
           progress === null ||
-          sameProgress(progress, this.#lastProgress)
+          (progress.completed === this.#lastProgress?.completed &&
+            progress.active === this.#lastProgress?.active &&
+            progress.maximum === this.#lastProgress?.maximum &&
+            progress.consolidating === this.#lastProgress?.consolidating)
         ) {
           return;
         }
         this.#lastProgress = progress;
         this.#options.onProgress(progress);
       } catch (error) {
-        if (this.#stopped || abortController.signal.aborted) return;
+        if (abortController.signal.aborted) return;
         throw error;
       } finally {
         if (this.#pending === update) this.#pending = null;
-        if (this.#abortController === abortController) {
-          this.#abortController = null;
-        }
       }
     })();
     this.#pending = update;
@@ -78,12 +74,10 @@ export class DeepScanProgressTracker {
   }
 
   public stop(): void {
-    if (this.#stopped) return;
-    this.#stopped = true;
+    if (this.#abortController.signal.aborted) return;
     clearInterval(this.#timer ?? undefined);
     this.#timer = null;
-    this.#abortController?.abort();
-    this.#abortController = null;
+    this.#abortController.abort();
   }
 }
 
@@ -95,39 +89,24 @@ export function deepScanProgressFromWorkbench(
   if (!isRecord(progress)) return null;
   const independentReviews = progress["independentReviews"];
   if (independentReviews === undefined) return null;
-  if (
-    !isRecord(independentReviews) ||
-    !isCount(independentReviews["completed"]) ||
-    !isCount(independentReviews["active"]) ||
-    !isPositiveCount(independentReviews["maximum"])
-  ) {
-    throw new Error(
-      "Codex Security workbench returned invalid Deep Scan progress.",
-    );
+  if (isRecord(independentReviews)) {
+    const { completed, active, maximum, consolidating } = independentReviews;
+    if (
+      isSafeNonNegativeInteger(completed) &&
+      isSafeNonNegativeInteger(active) &&
+      isSafeNonNegativeInteger(maximum) &&
+      maximum > 0 &&
+      (consolidating === undefined || typeof consolidating === "boolean")
+    ) {
+      return {
+        completed,
+        active,
+        maximum,
+        ...(typeof consolidating === "boolean" ? { consolidating } : {}),
+      };
+    }
   }
-  return {
-    completed: independentReviews["completed"],
-    active: independentReviews["active"],
-    maximum: independentReviews["maximum"],
-  };
-}
-
-function sameProgress(
-  left: DeepScanProgress,
-  right: DeepScanProgress | null,
-): boolean {
-  return (
-    right !== null &&
-    left.completed === right.completed &&
-    left.active === right.active &&
-    left.maximum === right.maximum
+  throw new Error(
+    "Codex Security workbench returned invalid Deep Scan progress.",
   );
-}
-
-function isCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isPositiveCount(value: unknown): value is number {
-  return isCount(value) && value > 0;
 }
