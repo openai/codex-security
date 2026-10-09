@@ -1,7 +1,7 @@
 import { modelResponseText } from "./support/model-response-text.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { delimiter, join, relative } from "node:path";
+import { delimiter, dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, expect, test } from "bun:test";
@@ -659,6 +659,128 @@ test("prioritizes the first committed declared owner without a model call", asyn
     ],
   });
   expect(report.results[0]!.evidence).toHaveLength(1);
+});
+
+test.each([
+  ["src/main.ts", "/src/ @alex_corp", "alex_corp", 2],
+  [
+    "src/main.ts",
+    "/src/ @example/maintainers @alex_corp",
+    "example/maintainers",
+    2,
+  ],
+  ["lib/main.rb", "***/*.rb @ruby-team", "default", 1],
+  ["app/[id]/page.ts", "/app/\\[id\\]/page.ts @routes-team", "routes-team", 2],
+] as const)(
+  "selects the committed owner for %s using %s",
+  async (path, rule, handle, line) => {
+    const repo = await repository();
+    await mkdir(join(repo.path, dirname(path)), { recursive: true });
+    await writeFile(join(repo.path, path), "// Ownership fixture\n");
+    await writeFile(join(repo.path, "CODEOWNERS"), `* @default\n${rule}\n`);
+    await repo.git("add", ".");
+    await repo.git("commit", "-qm", "Declare owners");
+    const { codex, calls } = fakeCodex();
+    const report = await suggestOwners(
+      repo.path,
+      [{ ...finding, locations: [{ path }] }],
+      { codex },
+    );
+    expect(report.results[0]).toMatchObject({
+      status: "identified",
+      owner: { handle },
+      evidence: [
+        {
+          kind: "codeowners",
+          startLine: line,
+          matchedPath: path,
+          commit: report.revision,
+          rule: line === 1 ? "* @default" : rule,
+        },
+      ],
+    });
+    expect(calls).toHaveLength(0);
+  },
+);
+
+test("loads CODEOWNERS once per invocation while matching each finding separately", async () => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "other.ts"), "// Another owned file\n");
+  await writeFile(
+    join(repo.path, "CODEOWNERS"),
+    "/handler.ts @handler-owner\n/other.ts @other-owner\n",
+  );
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owners");
+  const trace = join(await temporaryDirectory("owner-trace-"), "git.jsonl");
+  const { codex, calls } = fakeCodex();
+  const options = {
+    codex,
+    environment: { ...process.env, GIT_TRACE2_EVENT: trace },
+  };
+  const findings = [
+    finding,
+    {
+      ...finding,
+      findingId: "finding-two",
+      locations: [{ path: "other.ts" }],
+    },
+  ];
+  const first = await suggestOwners(repo.path, findings, options);
+  expect(first.results).toMatchObject([
+    {
+      owner: { handle: "handler-owner" },
+      evidence: [{ matchedPath: "handler.ts", startLine: 1 }],
+    },
+    {
+      owner: { handle: "other-owner" },
+      evidence: [{ matchedPath: "other.ts", startLine: 2 }],
+    },
+  ]);
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @new-owner\n");
+  await repo.git("commit", "-qam", "Update owners");
+  const second = await suggestOwners(repo.path, findings, options);
+  expect(second.revision).not.toBe(first.revision);
+  expect(second.results.map(({ owner }) => owner)).toEqual([
+    { kind: "person", provider: "github", handle: "new-owner" },
+    { kind: "person", provider: "github", handle: "new-owner" },
+  ]);
+  const reads = (await readFile(trace, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { event: string; argv?: string[] })
+    .filter(
+      ({ event, argv }) => event === "start" && argv?.includes("cat-file"),
+    );
+  expect(reads.map(({ argv }) => argv!.at(-1))).toEqual([
+    `${first.revision}:CODEOWNERS`,
+    `${second.revision}:CODEOWNERS`,
+  ]);
+  expect(calls).toHaveLength(0);
+});
+
+test("reports a lazy CODEOWNERS load failure for each finding", async () => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @owner\n");
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owner");
+  const blob = await repo.git("rev-parse", "HEAD:CODEOWNERS");
+  await rm(join(repo.path, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+  const { codex, calls } = fakeCodex();
+  expect((await suggestOwners(repo.path, [], { codex })).results).toEqual([]);
+  const report = await suggestOwners(
+    repo.path,
+    [finding, { ...finding, findingId: "finding-two" }],
+    { codex },
+  );
+  expect(
+    report.results.map(({ findingId, status }) => ({ findingId, status })),
+  ).toEqual([
+    { findingId: finding.findingId, status: "error" },
+    { findingId: "finding-two", status: "error" },
+  ]);
+  expect(report.results[0]!.reason).toContain("cat-file");
+  expect(calls).toHaveLength(0);
 });
 
 test.each([

@@ -121,7 +121,28 @@ export async function ownerRepository(
   // Latin-1 keys preserve Git's filename bytes, including unrelated non-UTF-8 names.
   const hasFile = (path: string) =>
     path.isWellFormed() && files.has(Buffer.from(path).toString("latin1"));
-  return { git, revision, hasFile, shallow };
+  const loadCodeowners = async () => {
+    const path = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"].find(
+      hasFile,
+    );
+    if (path === undefined) return null;
+    const source = await git("cat-file", "blob", `${revision}:${path}`);
+    // GitHub requires CODEOWNERS to be under 3 MB.
+    return {
+      path,
+      rules:
+        Buffer.byteLength(source) >= 3_000_000 ? null : parseCodeowners(source),
+    };
+  };
+  let codeowners: ReturnType<typeof loadCodeowners> | undefined;
+  return {
+    git,
+    revision,
+    hasFile,
+    shallow,
+    // Keep the load lazy so failures remain inside per-finding error handling.
+    codeowners: () => (codeowners ??= loadCodeowners()),
+  };
 }
 
 /** Neither references nor objects may link into another checkout. */
@@ -198,27 +219,16 @@ export async function collectOwnerEvidence(
   const add = (item: Omit<OwnerEvidence, "id">) => {
     context.evidence.push({ id: `e${context.evidence.length + 1}`, ...item });
   };
-  const codeownersPath = [
-    ".github/CODEOWNERS",
-    "CODEOWNERS",
-    "docs/CODEOWNERS",
-  ].find(hasFile);
-  if (codeownersPath !== undefined) {
-    const source = await git(
-      "cat-file",
-      "blob",
-      `${revision}:${codeownersPath}`,
-    );
-    // GitHub requires CODEOWNERS to be under 3 MB.
-    if (Buffer.byteLength(source) >= 3_000_000) {
+  const codeowners = await repository.codeowners();
+  if (codeowners !== null) {
+    if (codeowners.rules === null) {
       context.limitations.push(
         "CODEOWNERS meets or exceeds GitHub's 3 MB file-size limit and was ignored.",
       );
     } else {
-      const rules = parseCodeowners(source);
       for (const { path } of finding.locations) {
         if (!hasFile(path)) continue;
-        const rule = codeownersForPath(rules, path);
+        const rule = codeownersForPath(codeowners.rules, path);
         if (rule === undefined) continue;
         const owner = rule.owners[0];
         if (owner === undefined) continue;
@@ -228,7 +238,7 @@ export async function collectOwnerEvidence(
         );
         add({
           kind: "codeowners",
-          path: codeownersPath,
+          path: codeowners.path,
           commit: revision,
           startLine: rule.line,
           endLine: rule.line,

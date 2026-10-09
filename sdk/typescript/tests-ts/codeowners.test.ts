@@ -15,6 +15,9 @@ test.each([
   ["src/**/test?.ts", "src/deep/test12.ts", false],
   ["src/**", "src/deep/file.ts", true],
   ["/a\\ b.ts", "a b.ts", true],
+  ["/app/\\[id\\]/page.ts", "app/[id]/page.ts", true],
+  ["/app/\\[id\\]/page.ts", "app/i/page.ts", false],
+  ["/\\*\\*\\*/main.rb", "***/main.rb", true],
   ["*.ts", "src/A.TS", false],
 ] as const)("matches %s against %s: %p", (pattern, path, matches) => {
   expect(
@@ -36,6 +39,28 @@ test("uses the last matching rule and preserves all owners and ownerless overrid
   });
   expect(codeownersForPath(rules, "apps/generated/api.ts")?.owners).toEqual([]);
 });
+
+test.each(["@alex_corp", "@example/app-team @alex_corp"])(
+  "preserves a rule containing the managed user: %s",
+  (owners) => {
+    const rules = parseCodeowners(`* @default\n/apps/ ${owners}\n`);
+    expect(codeownersForPath(rules, "apps/handler.ts")).toMatchObject({
+      line: 2,
+      owners: expect.arrayContaining([
+        { kind: "person", provider: "github", handle: "alex_corp" },
+      ]),
+    });
+  },
+);
+
+test.each(["***/*.rb", "src/***/main.rb", "/app/[id]/page.ts"])(
+  "skips invalid pattern %s without replacing the default owner",
+  (pattern) => {
+    expect(parseCodeowners(`* @default\n${pattern} @other\n`)).toMatchObject([
+      { pattern: "*", owners: [{ handle: "default" }] },
+    ]);
+  },
+);
 
 test("skips unsupported and invalid rules without shadowing a valid owner", () => {
   const rules = parseCodeowners(

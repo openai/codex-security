@@ -17,13 +17,8 @@ export function parseCodeowners(source: string): CodeownersRule[] {
     const value = line.trim();
     if (!value || value.startsWith("#")) continue;
     const token = /^(?:\\.|[^\s])+/u.exec(value)![0];
-    if (
-      token.startsWith("!") ||
-      token.includes("[") ||
-      token.includes("]") ||
-      token.startsWith("\\#")
-    )
-      continue;
+    const matches = codeownersPattern(token);
+    if (matches === null) continue;
     const handles = value
       .slice(token.length)
       .split("#", 1)[0]!
@@ -33,7 +28,7 @@ export function parseCodeowners(source: string): CodeownersRule[] {
     const owners: CodeownerIdentity[] = [];
     let valid = true;
     for (const handle of handles) {
-      if (/^@[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\/[a-z\d_.-]+)?$/iu.test(handle)) {
+      if (/^@[a-z\d](?:[a-z\d_-]*[a-z\d])?(?:\/[a-z\d_.-]+)?$/iu.test(handle)) {
         owners.push(
           handle.includes("/")
             ? { kind: "group", provider: "github", handle: handle.slice(1) }
@@ -52,13 +47,14 @@ export function parseCodeowners(source: string): CodeownersRule[] {
         line: index + 1,
         rule: line,
         owners,
-        matches: codeownersPattern(token),
+        matches,
       });
   }
   return rules;
 }
 
-function codeownersPattern(pattern: string): RegExp {
+function codeownersPattern(pattern: string): RegExp | null {
+  if (pattern.startsWith("!") || pattern.startsWith("\\#")) return null;
   const anchored = pattern.startsWith("/");
   if (anchored) pattern = pattern.slice(1);
   const directory = pattern.endsWith("/");
@@ -69,6 +65,12 @@ function codeownersPattern(pattern: string): RegExp {
     const character = pattern[index]!;
     if (character === "\\" && index + 1 < pattern.length) {
       expression += escapeRegex(pattern[++index]!);
+    } else if (
+      character === "[" ||
+      character === "]" ||
+      pattern.startsWith("***", index)
+    ) {
+      return null;
     } else if (
       character === "*" &&
       pattern[index + 1] === "*" &&
