@@ -223,7 +223,11 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
         "are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside "
         "the scanned repository."
     )
-    create_private_directory(path.parent)
+    try:
+        create_private_directory(path.parent)
+    except OSError:
+        print(guidance, file=sys.stderr)
+        raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
             connection = sqlite3.connect(path, timeout=5)
