@@ -49,32 +49,6 @@
       },
       "required": ["scanId"],
       "additionalProperties": false
-    },
-    "recordDiscoveryCandidatesResult": {
-      "type": "object",
-      "properties": {
-        "operation": { "const": "replace" },
-        "candidatesRecorded": { "type": "integer", "minimum": 0 }
-      },
-      "required": ["operation", "candidatesRecorded"],
-      "additionalProperties": false
-    },
-    "listCandidatesResult": {
-      "type": "object",
-      "properties": {
-        "rows": {
-          "type": "array",
-          "items": {
-            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/discoveryCandidate"
-          }
-        },
-        "nextCursor": {
-          "type": "string",
-          "pattern": "^(?:0|[1-9][0-9]*)$"
-        }
-      },
-      "required": ["rows"],
-      "additionalProperties": false
     }
   }
 }

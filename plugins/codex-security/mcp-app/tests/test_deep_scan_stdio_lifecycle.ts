@@ -555,7 +555,7 @@ model_reasoning_summary = "none"
     assert.equal(activeFailureState.workers[0].status, "running");
     assertProcessAlive(failedWorker.pid);
 
-    const failureMessage = "fixture unrecoverable failure";
+    const failureMessage = "fixture unrecoverable failure\0source";
     const failureResponse = await server.request(
       21,
       "tools/call",
@@ -936,11 +936,13 @@ model_reasoning_summary = "none"
       const helperLaunches = await readLogLines(workbenchLaunchLogPath);
       for (const command of ["get-scan", "write-scan-draft", "complete-scan"]) {
         const launches = helperLaunches.filter(
-          (launch) => launch.args[1] === command,
+          (launch) => launch.workbenchArgs[0] === command,
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.equal(launch.args[0], workbenchPath);
+          assert.equal(launch.args[0], "-c");
+          assert.equal(launch.args[2], workbenchPath);
+          assert.equal(launch.args.length, 3);
           assert.equal(launch.cwd, pluginRoot);
         }
       }
@@ -1239,17 +1241,19 @@ async function writePythonWrapper(executablePath: string) {
 import { appendFileSync, existsSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, cwd: process.cwd() }) + '\\n');
+const input = Buffer.concat(await process.stdin.toArray());
+const workbenchArgs = JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'));
+appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
-if (args[1] === 'cancel-scan') {
-  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(args) + '\\n');
+if (workbenchArgs[0] === 'cancel-scan') {
+  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(workbenchArgs) + '\\n');
 }
-if (args[1] === 'cancel-scan' && control && existsSync(control)) {
+if (workbenchArgs[0] === 'cancel-scan' && control && existsSync(control)) {
   unlinkSync(control);
   console.error('injected cancel-scan failure');
   process.exit(1);
 }
-const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { stdio: 'inherit' });
+const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { input, stdio: ['pipe', 'inherit', 'inherit'] });
 if (result.error) throw result.error;
 process.exit(result.status ?? 1);
 `,

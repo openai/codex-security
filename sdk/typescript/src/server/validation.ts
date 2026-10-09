@@ -36,6 +36,7 @@ export async function findingsRequestValidator(): Promise<
   return new Ajv2020({ strict: false }).compile<FindingsRequest>({
     type: "object",
     required: ["findings"],
+    $defs: schema.$defs,
     properties: {
       findings: schema.properties.findings,
       repositoryId: { type: "string", minLength: 1, pattern: "^[^\\u0000]*$" },
