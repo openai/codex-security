@@ -1005,30 +1005,16 @@ owners.
 Linked worktrees and bound separate Git directories are supported; borrowed
 external object stores such as `git clone --shared` are rejected.
 
-The command uses the first committed regular CODEOWNERS file in `.github/`, the
-root, or `docs/`, following [GitHub's CODEOWNERS rules](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners).
-The last matching rule wins, including rules without owners. A declared owner
-takes priority over Git contributors and requires no model call. When several
-owners or affected paths match, this single-owner command selects the first owner
-on the winning rule for the first matching path in the input. Git remains the
-fallback when no declared owner matches.
+CODEOWNERS declarations take priority over Git history, following
+[GitHub's CODEOWNERS rules](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners).
+The last matching rule wins, and the command returns its first declared owner.
+Git history is the fallback when no declared owner applies.
 
-Results preserve IDs and report `identified`, `abstained`, or `error`, with one
-primary `owner`, reason, and checked citations. A CODEOWNERS identity is
-`{ "kind": "person" | "group", "provider": "github", "handle": "..." }`, or
-`{ "kind": "person", "email": "..." }`. For example, a team declaration returns
-`{ "kind": "group", "provider": "github", "handle": "example/maintainers" }`.
-Its `codeowners` citation includes the ownership file, rule line, analyzed commit,
-original `rule`, and `matchedPath`. Provider handles are declarations; their
-existence and repository access are not verified. No provider account lookup runs.
-
-Git recommendations retain the existing `{ "name": "...", "email": "..." }` shape.
+Results preserve IDs and report `identified`, `abstained`, or `error`. Identified
+owners include a declared GitHub user, team, or email, or an observed Git
+name/email, with a reason and checked citations.
 Git identities do not establish current employment or tracker accounts; match
 accounts before assigning. Use a checkout matching the findings.
-
-Report `schemaVersion` remains `1`. Strict JSON readers must accept CODEOWNERS
-identities in `owner`, the `codeowners` evidence kind, and optional citation fields
-`rule` and `matchedPath`. Input formats, command arguments, and flags are unchanged.
 
 The command uses scan-default model/effort; override with `--model` and `--effort`.
 The model receives collected evidence with tools/network disabled. Exit `0`
