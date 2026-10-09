@@ -825,6 +825,8 @@ describe("custom validation", () => {
     expect(standard).toContain("use it for the same early model checkpoint");
     expect(standard).toContain("retain the model in an early partial");
     expect(standard).not.toContain("undefined");
+    expect(standard).not.toContain("## Runtime Validation");
+    expect(standard).not.toContain("may build and execute targeted tests");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
     );

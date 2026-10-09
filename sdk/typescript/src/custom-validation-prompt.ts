@@ -9,7 +9,7 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md":
-    "9e9211f6de6eb8138246474e2ec24a8506abf08537c2a5f572de4fe16c38c19c",
+    "8a7e86a2ec032abc4441bdc91d9fb11f6fc1eaeeb694574eb05f3dbd5072207c",
   "skills/security-scan/SKILL.md":
     "5a565d8d0ba80d3048db75922b8b4f29e23c76690a5795b0d7dfbd24a233d3a0",
   "skills/security-diff-scan/SKILL.md":
@@ -56,6 +56,8 @@ export async function customDiscoveryPrompt(
       source(pluginRoot, "references/core-scan.md"),
     ]);
     const discovery = core
+      // The custom validator owns execution; discovery remains source-only.
+      .replace(/\n## Runtime Validation\n[\s\S]*?(?=\n## |$)/, "")
       .replace(
         /^7\. .+$/m,
         "7. Retain the combined source-backed candidates and their existing evidence. The SDK will run independent final validation in a separate turn.",

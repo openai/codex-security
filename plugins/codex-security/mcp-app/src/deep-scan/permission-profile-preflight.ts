@@ -1,6 +1,9 @@
 import type { JsonObject as JsonRecord } from "../types.js";
 import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { version as MCP_APP_VERSION } from "../../package.json";
@@ -22,8 +25,9 @@ export interface DeepScanPermissionProfilePreflightOptions {
   /** Provider metadata needed for managed selection; credentials stay in private profiles. */
   readonly providerConfigOverrides?: readonly string[];
   /**
-   * Exact environment snapshot shared with the SDK worker. The caller resolves
-   * relative CODEX_HOME values before changing the preflight subprocess cwd.
+   * Worker configuration and authentication environment. The caller resolves
+   * relative CODEX_HOME values before changing the preflight subprocess cwd;
+   * temporary directories may move to verified scratch before the worker starts.
    * Omit it to retain Node's default child-process environment inheritance.
    */
   readonly env?: Readonly<Record<string, string>>;
@@ -31,6 +35,8 @@ export interface DeepScanPermissionProfilePreflightOptions {
   readonly allowOpenAiApiKeyFallback?: boolean;
   /** The injected profile before app-server expands omitted options to null. */
   readonly expectedProfile: Readonly<Record<string, unknown>>;
+  /** Optional scratch candidate to verify with native sandboxed filesystem I/O. */
+  readonly scratchPath?: string;
   readonly signal: AbortSignal;
   /** Internal SDK helper context changes the wrapper-owned subject label. */
   readonly context?: "helper";
@@ -81,7 +87,7 @@ export async function readDeepScanRuntimeConfig(
  */
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
-): Promise<{ useOpenAiApiKey: boolean }> {
+): Promise<{ useOpenAiApiKey: boolean; scratchWritable?: boolean }> {
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
@@ -104,11 +110,21 @@ export async function preflightDeepScanWorkerPermissionProfile(
       catalogEntry,
       requirementsResponse,
     );
+    const scratchResult =
+      options.scratchPath === undefined
+        ? {}
+        : {
+            scratchWritable: await probeScratchDirectory(
+              client,
+              options,
+              options.scratchPath,
+            ),
+          };
     if (
       !options.allowOpenAiApiKeyFallback ||
       record(configResponse.config)?.forced_login_method === "chatgpt"
     ) {
-      return { useOpenAiApiKey: false };
+      return { useOpenAiApiKey: false, ...scratchResult };
     }
     // Reuse Codex's selected credential store, including keyring, instead of
     // interpreting auth.json here. Custom provider auth is loaded privately by exec.
@@ -116,10 +132,74 @@ export async function preflightDeepScanWorkerPermissionProfile(
       refreshToken: false,
     });
     return {
+      ...scratchResult,
       useOpenAiApiKey:
         account.requiresOpenaiAuth === true && account.account === null,
     };
   });
+}
+
+// The path is an argv value, never evaluated as source or passed through a shell.
+const scratchProbeScript = `
+const fs = require("node:fs");
+const path = process.argv[1];
+let created = false;
+try {
+  fs.writeFileSync(path, "codex-security-scratch-probe", { flag: "wx" });
+  created = true;
+  if (fs.readFileSync(path, "utf8") !== "codex-security-scratch-probe") {
+    process.exitCode = 1;
+  }
+} finally {
+  if (created) fs.unlinkSync(path);
+}
+`;
+
+async function probeScratchDirectory(
+  client: AppServerPreflightClient,
+  options: DeepScanPermissionProfilePreflightOptions,
+  scratchPath: string,
+): Promise<boolean> {
+  if (options.signal.aborted) throw abortError(options.signal.reason);
+  try {
+    await mkdir(scratchPath, { recursive: true });
+  } catch (error) {
+    if (options.signal.aborted) throw abortError(options.signal.reason);
+    const code = (error as NodeJS.ErrnoException).code;
+    if (
+      code === "EACCES" ||
+      code === "EPERM" ||
+      code === "EROFS" ||
+      code === "ENOENT" ||
+      code === "ENOTDIR" ||
+      code === "EEXIST" ||
+      code === "ELOOP" ||
+      code === "ENAMETOOLONG"
+    )
+      return false;
+    throw error;
+  }
+  const probePath = join(scratchPath, `.codex-security-probe-${randomUUID()}`);
+  try {
+    // Omit sandboxPolicy and permissionProfile: command/exec uses this
+    // session's exact default profile, already verified above.
+    const result = await client.request("command/exec", {
+      command: [process.execPath, "-e", scratchProbeScript, probePath],
+      cwd: options.cwd,
+    });
+    if (
+      typeof result.exitCode !== "number" ||
+      !Number.isInteger(result.exitCode) ||
+      typeof result.stdout !== "string" ||
+      typeof result.stderr !== "string"
+    )
+      throw malformedPreflightError(options.context);
+    return result.exitCode === 0;
+  } finally {
+    // Native finally normally removes the file. Cancellation or a read/delete
+    // denial must not leave a probe artifact or mask the original failure.
+    await rm(probePath, { force: true }).catch(() => {});
+  }
 }
 
 async function withPreflightClient<T>(
@@ -369,7 +449,7 @@ class AppServerPreflightClient {
     const id = message.id;
     if (typeof id !== "number") {
       // Notifications and server-initiated requests are irrelevant to this
-      // read-only preflight. We never answer them or start a turn.
+      // no-turn preflight. We never answer them or start a model turn.
       return;
     }
     const pending = this.pending;
@@ -504,7 +584,7 @@ function disallowedProfileAllowlistError(
   context?: "helper",
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `${subject(context)} cannot safely start a read-only worker because organization policy does not allow the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID} = true\n\n${subject(context)} did not run.`,
+    `${subject(context)} cannot safely start a worker because organization policy does not allow the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID} = true\n\n${subject(context)} did not run.`,
   );
 }
 
@@ -512,7 +592,7 @@ function managedPolicyRejectedError(
   context?: "helper",
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `${subject(context)} cannot safely start a read-only worker because managed Codex policy rejected the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. ${subject(context)} did not run.`,
+    `${subject(context)} cannot safely start a worker because managed Codex policy rejected the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. ${subject(context)} did not run.`,
   );
 }
 
@@ -520,19 +600,19 @@ function profileNotSelectedError(
   context?: "helper",
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `${subject(context)} cannot safely start a read-only worker because Codex did not select the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to allow that profile for ${subject(context)}. ${subject(context)} did not run.`,
+    `${subject(context)} cannot safely start a worker because Codex did not select the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to allow that profile for ${subject(context)}. ${subject(context)} did not run.`,
   );
 }
 
 function profileCollisionError(context?: "helper"): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `${subject(context)} cannot safely start a read-only worker because existing Codex configuration changes the reserved \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\` stub limited to \`extends = ":read-only"\`; ${subject(context)} supplies its deny rules at runtime. ${subject(context)} did not run.`,
+    `${subject(context)} cannot safely start a worker because existing Codex configuration changes the reserved \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\` stub limited to \`extends = ":read-only"\`; ${subject(context)} supplies the exact filesystem rules at runtime. ${subject(context)} did not run.`,
   );
 }
 
 function malformedPreflightError(context?: "helper"): Error {
   return new Error(
-    `${subject(context)} cannot safely verify its read-only worker permission profile with this Codex configuration. ${subject(context)} did not run.`,
+    `${subject(context)} cannot safely verify its worker permission profile with this Codex configuration. ${subject(context)} did not run.`,
   );
 }
 
@@ -543,7 +623,7 @@ function unsupportedCodexApiError(
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
     subject(context) +
-      " cannot safely verify its read-only worker permission profile because " +
+      " cannot safely verify its worker permission profile because " +
       "the selected Codex executable " +
       JSON.stringify(codexPath) +
       " does not support the required " +
@@ -576,7 +656,7 @@ function jsonRpcPreflightError(
   }
   return new Error(
     subject(context) +
-      " cannot safely verify its read-only worker permission profile because " +
+      " cannot safely verify its worker permission profile because " +
       "the selected Codex executable " +
       JSON.stringify(codexPath) +
       " returned an error for " +
@@ -649,7 +729,7 @@ function codexExecutableFailureMessage(
 ): string {
   return (
     subject(context) +
-    " cannot safely verify its read-only worker permission profile because " +
+    " cannot safely verify its worker permission profile because " +
     "the selected Codex executable " +
     JSON.stringify(codexPath) +
     " " +
