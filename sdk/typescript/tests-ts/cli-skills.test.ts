@@ -1330,6 +1330,7 @@ process.stdout.write(JSON.stringify({
     "line 1429 could not be parsed",
     "count_tokens_per_minute_limit is undefined",
     "token_expired_cache is undefined",
+    "ModelAccessDeniedCache is undefined",
   ])("does not misclassify an operational skill failure: %s", (detail) => {
     const message = skillCommandFailure("patch", 1, detail);
     expect(message).toContain(detail);
@@ -1338,27 +1339,65 @@ process.stdout.write(JSON.stringify({
     expect(message).not.toContain("rate limited");
   });
 
+  const diagnosticAdviceCases = [
+    ...(
+      [
+        ["invalid api key", "Authentication failed"],
+        ["token expired", "Authentication failed"],
+        ["model not found", "selected model is unavailable"],
+        ["model access denied", "selected model is unavailable"],
+        ["access denied to model", "selected model is unavailable"],
+        ["access to model denied", "selected model is unavailable"],
+        ["rate limit", "rate limited"],
+        ["rate limited", "rate limited"],
+        ["rate limit exceeded", "rate limited"],
+        ["tokens per minute", "rate limited"],
+        ["timed out", "could not connect"],
+        ["timeout error", "could not connect"],
+        ["network error", "could not connect"],
+        ["network timeout", "could not connect"],
+      ] as const
+    ).flatMap(([words, advice]) =>
+      [" ", "_", "-", "."].map((separator) => {
+        const code = words.replaceAll(" ", separator);
+        return [
+          words === "timed out" ? `request ${code}` : code,
+          advice,
+        ] as const;
+      }),
+    ),
+    ["NetworkError", "could not connect"],
+    ["TimeoutError", "could not connect"],
+    ["RequestTimeout", "could not connect"],
+    ["ModelAccessDenied", "selected model is unavailable"],
+    ["accessDeniedToModel", "selected model is unavailable"],
+    ["accessToModelDenied", "selected model is unavailable"],
+  ] as const;
+
   test.each(
     (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
-      ["token_expired", "token.expired", "token-expired"].map(
-        (detail) => [command, detail] as const,
+      diagnosticAdviceCases.map(
+        ([detail, advice]) => [command, detail, advice] as const,
       ),
     ),
-  )("retains authentication advice from %s for %s", async (command, detail) => {
-    const stdout = capture();
-    const stderr = capture();
-    const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
-    expect(
-      await runCodexSkillCommand(
-        ["-e", source],
-        { command, stdout: stdout.stream, stderr: stderr.stream },
-        { command: process.execPath },
-      ),
-    ).toBe(7);
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Authentication failed");
-    expect(stderr.text()).toContain(detail);
-  });
+  )(
+    "retains diagnostic advice from %s for %s",
+    async (command, detail, advice) => {
+      const stdout = capture();
+      const stderr = capture();
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(advice);
+      expect(stderr.text()).toContain(detail);
+    },
+  );
 
   test("keeps unknown credential failures neutral", () => {
     for (const authentication of [

@@ -8026,11 +8026,16 @@ export function skillCommandFailure(
   let advice: string | undefined;
   if (
     classification === "unauthorized" ||
-    /\b(?:authorizationrequired|token[._-]expired)\b/iu.test(detail)
+    /\b(?:authorizationrequired|invalid[._ -]api[._ -]key|token[._ -]expired)\b/iu.test(
+      detail,
+    )
   ) {
     advice = authenticationFailureMessage(authentication);
   } else if (
     /\bpermissions? to use (?:this |the )?model\b/iu.test(detail) ||
+    /\b(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))\b/iu.test(
+      detail,
+    ) ||
     (classification === "forbidden" &&
       /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
         detail,
@@ -8039,7 +8044,9 @@ export function skillCommandFailure(
     advice = "The selected model is unavailable for the current credentials.";
   } else if (
     classification === "rate_limited" ||
-    /\btokens[ _-]per[ _-]minute\b/iu.test(detail)
+    /\b(?:rate[._ -]limit(?:ed|[._ -]exceeded)?|tokens[._ -]per[._ -]minute)\b/iu.test(
+      detail,
+    )
   ) {
     advice = "The request was rate limited. Wait and retry.";
   } else if (
@@ -8050,7 +8057,9 @@ export function skillCommandFailure(
   } else if (
     classification === "network_error" ||
     classification === "timeout" ||
-    /\bECONNABORTED\b/iu.test(detail)
+    /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
+      detail,
+    )
   ) {
     advice =
       "Codex could not connect to the model service. Check the network and retry.";
