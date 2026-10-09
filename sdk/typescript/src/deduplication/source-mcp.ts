@@ -155,6 +155,16 @@ async function readSourceConfig(
     };
     child.once("error", failed);
     child.stdin.on("error", failed);
+    const releaseCanceledPipes = () => {
+      if (!signal?.aborted) return;
+      lines.close();
+      if (child.exitCode === null && child.signalCode === null) return;
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+    signal?.addEventListener("abort", releaseCanceledPipes, { once: true });
+    child.once("exit", releaseCanceledPipes);
     const send = (message: object) =>
       child.stdin.write(`${JSON.stringify(message)}\n`);
     try {
@@ -245,27 +255,31 @@ async function readSourceConfig(
           return resolvedConfig!;
         }
       }
-      throw (
-        processError ??
-        new ConfigurationError(
-          stderr.trim() ||
-            "Codex exited before returning source MCP configuration.",
-        )
-      );
     } catch (error) {
       signal?.throwIfAborted();
       throw error;
     } finally {
-      lines.close();
-      child.stdin.end();
-      child.kill();
-      const timer = setTimeout(() => child.kill("SIGKILL"), 1_000);
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
+        lines.close();
+        child.stdin.end();
+        child.kill();
+        timer = setTimeout(() => child.kill("SIGKILL"), 1_000);
         await closed;
       } finally {
         clearTimeout(timer);
+        signal?.removeEventListener("abort", releaseCanceledPipes);
+        child.removeListener("exit", releaseCanceledPipes);
       }
     }
+    signal?.throwIfAborted();
+    throw (
+      processError ??
+      new ConfigurationError(
+        stderr.trim() ||
+          "Codex exited before returning source MCP configuration.",
+      )
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

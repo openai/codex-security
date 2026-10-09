@@ -451,6 +451,7 @@ export function exportEnvironment(
         "TEMP",
         "TMPDIR",
         "PYTHON",
+        "XDG_CACHE_HOME",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",

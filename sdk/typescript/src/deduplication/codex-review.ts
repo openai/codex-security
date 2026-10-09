@@ -365,10 +365,26 @@ export class CodexReviewRunner {
         inputError = error;
         lines.close();
       });
-      child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (message: string) =>
-        emitDiagnostic(onDiagnostic, { event: "review.stderr", message }),
-      );
+      const releaseCanceledPipes = () => {
+        if (!this.signal?.aborted) return;
+        lines.close();
+        if (child.exitCode === null && child.signalCode === null) return;
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      };
+      this.signal?.addEventListener("abort", releaseCanceledPipes, {
+        once: true,
+      });
+      child.once("exit", releaseCanceledPipes);
+      let diagnostic = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+        diagnostic += chunk;
+        emitDiagnostic(onDiagnostic, {
+          event: "review.stderr",
+          message: chunk,
+        });
+      });
       const send = (message: object) =>
         child.stdin.write(`${JSON.stringify(message)}\n`);
       const startThread = () =>
@@ -733,43 +749,49 @@ export class CodexReviewRunner {
             return accepted;
           }
         }
-        if (processError) throw processError;
-        throw new ReviewAttemptError(
-          "transport",
-          inputError?.message ?? "Codex exited before completing the review",
-          "Codex review transport failed.",
-          true,
-        );
       } finally {
-        lines.close();
-        child.stdin.end();
-        let force = false;
         try {
-          if (source !== undefined) {
-            child.stdout.resume();
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            try {
-              // EOF lets native teardown terminate remote executor processes.
-              // Match source discovery's grace before forcing stalled startup.
-              await Promise.race([
-                closed,
-                new Promise<void>((resolve) => {
-                  timer = setTimeout(resolve, 1_000);
-                }),
-              ]);
-            } finally {
-              clearTimeout(timer);
+          lines.close();
+          child.stdin.end();
+          let force = false;
+          try {
+            if (source !== undefined) {
+              child.stdout.resume();
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                // EOF lets native teardown terminate remote executor processes.
+                // Match source discovery's grace before forcing stalled startup.
+                await Promise.race([
+                  closed,
+                  new Promise<void>((resolve) => {
+                    timer = setTimeout(resolve, 1_000);
+                  }),
+                ]);
+              } finally {
+                clearTimeout(timer);
+              }
+              force = true;
+              // Stop descendants while their parent can still reap them.
+              force = stopSourceChildren(child) === 0;
             }
-            force = true;
-            // Stop descendants while their parent can still reap them.
-            force = stopSourceChildren(child) === 0;
+          } finally {
+            if (child.exitCode === null)
+              child.kill(force ? "SIGKILL" : "SIGTERM");
+            await closed;
           }
         } finally {
-          if (child.exitCode === null)
-            child.kill(force ? "SIGKILL" : "SIGTERM");
-          await closed;
+          this.signal?.removeEventListener("abort", releaseCanceledPipes);
+          child.removeListener("exit", releaseCanceledPipes);
         }
       }
+      if (processError) throw processError;
+      throw new ReviewAttemptError(
+        "transport",
+        [inputError?.message, diagnostic].filter(Boolean).join("\n") ||
+          "Codex exited before completing the review",
+        "Codex review transport failed.",
+        true,
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

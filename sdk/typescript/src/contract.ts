@@ -34,17 +34,6 @@ const DOCUMENTS = {
   "coverage.json": "coverage.schema.json",
 } as const;
 const PRODUCER_NAME = "codex-security-plugin";
-const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
-  "scan",
-  "target",
-  "remote",
-  "completedAt",
-  "sealedAt",
-  "artifacts",
-  "findings",
-  "coverage",
-  "scope",
-]);
 interface CheckedScanFile {
   path: string;
   metadata: Stats;
@@ -969,7 +958,7 @@ function validateParsedJson(value: unknown, context: string): void {
           `${context}: expected well-formed Unicode JSON keys.`,
         );
       }
-      validateParsedJson(item, `${context}.<property>`);
+      validateParsedJson(item, `${context}[${JSON.stringify(key)}]`);
     }
   }
 }
@@ -1142,22 +1131,13 @@ function schemaError(
   errors: readonly ErrorObject[],
 ): ContractValidationError {
   const first = errors[0];
-  const segments = first?.instancePath.split("/").filter(Boolean) ?? [];
-  const location =
-    segments.length === 0
-      ? "<root>"
-      : segments
-          .map((segment) => {
-            if (/^(?:0|[1-9]\d{0,9})$/.test(segment)) return segment;
-            return SAFE_SCHEMA_ERROR_PROPERTIES.has(segment)
-              ? segment
-              : "<property>";
-          })
-          .join(".");
+  const location = first?.instancePath
+    ? JSON.stringify(first.instancePath)
+    : "<root>";
   const keyword = first?.keyword ?? "unknown";
   const count = errors.length;
   return new ContractValidationError(
-    `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"}).`,
+    `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"})${first?.message ? `: ${first.message}` : ""}.`,
   );
 }
 

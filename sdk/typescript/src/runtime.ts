@@ -1,5 +1,5 @@
 import { gitProtectionRoots } from "./targets.js";
-import { isNonEmptyString } from "./value.js";
+import { isNonEmptyString, notify } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -36,6 +36,7 @@ import {
   basename,
   dirname,
   extname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -1595,6 +1596,22 @@ def before_archive():
 workbench["main"](before_archive=before_archive)
 `;
 
+// Internal publication callers use only the SDK's bundled workbench.
+const PUBLICATION_PROGRAM = String.raw`
+import json, runpy, sys
+from contextlib import closing
+workbench = runpy.run_path(sys.argv[1])
+context = workbench["_WORKBENCH_PUBLICATION_CONTEXT"]
+payload = json.load(sys.stdin, parse_constant=workbench["reject_non_finite_json"])
+handler = getattr(workbench["publication"], sys.argv[2].replace("-", "_"))
+if sys.argv[2] == "inspect-linear-publication":
+    result = handler(context, payload)
+else:
+    with closing(workbench["connect"]()) as connection:
+        result = handler(context, connection, payload)
+print(json.dumps(result, allow_nan=False, sort_keys=True))
+`;
+
 const workbenchComparisonSupport = new Map<
   string,
   { stdin: boolean; related: boolean }
@@ -1646,10 +1663,22 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
+    const publicationInput =
+      input !== undefined &&
+      arguments_.length === 1 &&
+      [
+        "inspect-linear-publication",
+        "prepare-linear-publication",
+        "record-linear-publications",
+      ].includes(arguments_[0]!);
     // OS argv cannot carry NUL, but workbench text fields can.
     const framedArguments =
       !native && arguments_.some((argument) => argument.includes("\0"));
-    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
+    let program = archiveHandshake
+      ? ARCHIVE_REGISTRATION_PROGRAM
+      : publicationInput
+        ? PUBLICATION_PROGRAM
+        : undefined;
     if (framedArguments)
       program =
         WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
@@ -1827,22 +1856,9 @@ export async function runWorkbench(
     }
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
-    const databaseFailure =
-      /\b(?:unable to open database file|attempt to write a readonly database|readonly database|disk i\/o error)\b/iu.test(
-        detail,
-      );
     const failure =
       options.failureMessage ?? "Could not run the Codex Security workbench";
-    throw new CodexSecurityError(
-      databaseFailure
-        ? `${failure}: cannot open the workbench database at ${join(
-            options.stateDirectory ??
-              codexSecurityStateDirectory(options.environment),
-            "workbench.sqlite3",
-          )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
-        : `${failure}: ${detail}`,
-      { cause: error },
-    );
+    throw new CodexSecurityError(`${failure}: ${detail}`, { cause: error });
   }
   let result: unknown;
   try {
@@ -2166,7 +2182,7 @@ async function prepareOutputDirectory(
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
         await rename(path, archiveDir);
-        onOutputArchived?.(archiveDir);
+        notify(() => onOutputArchived?.(archiveDir));
         existing = null;
       }
     }
@@ -2791,12 +2807,21 @@ export function resolveCodexCommand(
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
   const expanded =
-    configured === undefined ? undefined : expandHome(configured, environment);
+    configured === undefined
+      ? undefined
+      : expandExecutableHome(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
   ) {
-    return { command: resolve(expanded) };
+    return {
+      command:
+        process.platform === "win32"
+          ? resolve(expanded)
+          : isAbsolute(expanded)
+            ? expanded
+            : `${process.cwd()}${sep}${expanded}`,
+    };
   }
 
   const platform = process.platform === "android" ? "linux" : process.platform;
@@ -3248,6 +3273,7 @@ export function pluginExecutionEnvironment(
   return {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
+    CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
 }
@@ -3558,7 +3584,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandHome(candidate, environment)
+      ? expandExecutableHome(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3612,6 +3638,17 @@ export function sameFile(left: string, right: string): Promise<boolean> {
       leftMetadata.ino === rightMetadata.ino,
     () => false,
   );
+}
+
+function expandExecutableHome(
+  value: string,
+  environment: ProcessEnvironment,
+): string {
+  const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
+  // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
+  return path.startsWith("~/")
+    ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
+    : expandHome(path, environment);
 }
 
 export function expandHome(
