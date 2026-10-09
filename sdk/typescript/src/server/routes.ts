@@ -141,7 +141,11 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+        Buffer.concat(chunks),
+      ),
+    );
   } catch {
     throw new FindingsError(
       "invalid_request",

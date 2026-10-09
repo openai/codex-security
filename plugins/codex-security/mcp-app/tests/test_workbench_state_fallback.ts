@@ -1,7 +1,10 @@
-import { readJsonLines } from "./support/json.ts";
 import { assertNoError } from "./assertions.ts";
+import {
+  WORKBENCH_PYTHON,
+  WORKBENCH_STATE_UNAVAILABLE_EXIT_CODE,
+} from "../src/server/workbench-process.ts";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -29,8 +32,6 @@ async function testWorkbenchStateFallback() {
     await mkdtemp(path.join(tmpdir(), "codex-security-state-fallback-")),
   );
   const targetPath = path.join(fixtureRoot, "target");
-  const fakePythonPath = path.join(fixtureRoot, "fake-python.mjs");
-  const invocationLog = path.join(fixtureRoot, "python-invocations.jsonl");
   const serverBundlePath = path.join(
     pluginRoot,
     "mcp",
@@ -47,12 +48,16 @@ async function testWorkbenchStateFallback() {
 
   await mkdir(targetPath, { recursive: true });
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
-  await writeFakePython(fakePythonPath);
   await buildServer(serverBundlePath, { target: "node20" });
 
   try {
     if (process.getuid?.() !== 0) {
-      for (const firstOperation of ["scan", "standalone"]) {
+      for (const firstOperation of [
+        "scan",
+        "standalone",
+        "fresh-home",
+        "inspection",
+      ]) {
         const codexHome = path.join(
           fixtureRoot,
           `default-${firstOperation}-home`,
@@ -63,8 +68,35 @@ async function testWorkbenchStateFallback() {
           "plugins",
           "codex-security",
         );
-        await mkdir(defaultState, { recursive: true });
-        await chmod(defaultState, 0o500);
+        const lockedDirectory =
+          firstOperation === "fresh-home" ? codexHome : defaultState;
+        await mkdir(lockedDirectory, { recursive: true });
+        await chmod(lockedDirectory, 0o500);
+        const environment = {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_STATE_DIR: undefined,
+        };
+        const direct = spawnSync(
+          realPython,
+          [path.join(pluginRoot, "scripts/workbench_db.py"), "database-info"],
+          { env: environment, encoding: "utf8" },
+        );
+        const wrapped = spawnSync(
+          realPython,
+          [
+            "-c",
+            WORKBENCH_PYTHON,
+            path.join(pluginRoot, "scripts/workbench_db.py"),
+          ],
+          { env: environment, encoding: "utf8", input: '["database-info"]\n' },
+        );
+        assert.equal(direct.status, 1);
+        assert.equal(wrapped.status, WORKBENCH_STATE_UNAVAILABLE_EXIT_CODE);
+        assert.equal(
+          wrapped.stderr.trim().split("\n").at(-1),
+          direct.stderr.trim().split("\n").at(-1),
+        );
         const server = startServer(serverBundlePath, {
           CODEX_HOME: codexHome,
           CODEX_SECURITY_SCAN_ROOT: undefined,
@@ -74,6 +106,15 @@ async function testWorkbenchStateFallback() {
         let fallbackState;
         try {
           await initialize(server, 1);
+          if (firstOperation === "inspection")
+            assertNoError(await inspectTarget(server, 2, targetPath));
+          if (firstOperation === "fresh-home") {
+            const opened = await Promise.all([
+              openWorkspace(server, 20, targetPath, "first-thread"),
+              openWorkspace(server, 21, targetPath, "second-thread"),
+            ]);
+            opened.forEach(assertNoError);
+          }
           const standaloneInput = {
             targetPath,
             storage: "persistent",
@@ -158,7 +199,7 @@ async function testWorkbenchStateFallback() {
           );
         } finally {
           await server.stop();
-          await chmod(defaultState, 0o700);
+          await chmod(lockedDirectory, 0o700);
           if (fallbackState)
             await rm(fallbackState, { recursive: true, force: true });
         }
@@ -252,242 +293,131 @@ async function testWorkbenchStateFallback() {
       }
     }
 
-    const scanRoot = path.join(fixtureRoot, "fallback-scans");
-    const fallbackServer = startServer(serverBundlePath, {
-      CODEX_SECURITY_SCAN_ROOT: scanRoot,
-      CODEX_SECURITY_STATE_DIR: undefined,
-      FAKE_PYTHON_ALWAYS_FAIL: undefined,
-      FAKE_PYTHON_FAILURE: undefined,
-      FAKE_PYTHON_LOG: invocationLog,
-      FAKE_REAL_PYTHON: realPython,
-      PYTHON: fakePythonPath,
-    });
-    try {
-      await initialize(fallbackServer, 1);
-      const promptOnly = await startPromptOnlyScan(
-        fallbackServer,
-        3,
-        targetPath,
-      );
-      assertNoError(promptOnly);
-      assert.equal(
-        promptOnly.result.structuredContent.startDisposition,
-        "created",
-      );
-      assert.equal(
-        promptOnly.result.structuredContent.scan.handoffStatus,
-        "delivered",
-      );
-      const opened = await openWorkspace(fallbackServer, 4, targetPath);
-      assertNoError(opened);
-      const sessionId = opened.result.structuredContent.workspace.id;
-      assertNoError(await reopenWorkspace(fallbackServer, 5, sessionId));
-      assertNoError(
-        await submitSetup(fallbackServer, 7, sessionId, targetPath),
-      );
-      assertNoError(await startScan(fallbackServer, 8, sessionId));
-      const invocations = await readJsonLines(invocationLog);
-      const fallbackStateDir = path.join(scanRoot, "workbench-state");
-      assert.equal(invocations[0].stateDir, null);
-      assert.equal(
-        invocations
-          .slice(1)
-          .every((entry) => entry.stateDir === fallbackStateDir),
-        true,
-      );
-      assert.equal((await stat(fallbackStateDir)).isDirectory(), true);
-      const events = fallbackServer
-        .stderrEvents()
-        .filter((event) => event.event === "state_fallback_pinned");
-      assert.equal(events.length, 1);
-      assert.deepEqual(events[0], {
-        component: "codex_security_workbench",
-        event: "state_fallback_pinned",
-        reason: "persistent_sqlite_unwritable",
+    for (const [index, name] of [
+      "ordinary-missing",
+      "WorkbenchStateDirectoryError:missing",
+      "newline\nWorkbenchStateDirectoryError: [Errno 13] Permission denied: state",
+      "sqlite3.OperationalError: unable to open database file",
+    ].entries()) {
+      const codexHome = path.join(fixtureRoot, `collision-${index}`);
+      const scanRoot = path.join(fixtureRoot, `collision-scans-${index}`);
+      const server = startServer(serverBundlePath, {
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_STATE_DIR: undefined,
+        CODEX_SECURITY_SCAN_ROOT: scanRoot,
+        PYTHON: realPython,
       });
-    } finally {
-      await fallbackServer.stop();
+      try {
+        await initialize(server, 1);
+        const missing = path.join(fixtureRoot, name);
+        const failure = await startPromptOnlyScan(server, 2, missing);
+        assertToolError(
+          failure,
+          /Scan target is not a readable local directory/,
+        );
+        assert.ok(failure.result.content[0].text.includes(missing));
+        assertNoError(await openWorkspace(server, 3, targetPath));
+        assert.equal(server.stderrEvents().length, 0);
+        assert.equal(
+          await pathExists(path.join(scanRoot, "workbench-state")),
+          false,
+        );
+        assert.equal(
+          await pathExists(
+            path.join(
+              codexHome,
+              "state/plugins/codex-security/workbench.sqlite3",
+            ),
+          ),
+          true,
+        );
+      } finally {
+        await server.stop();
+      }
     }
 
-    await writeFile(invocationLog, "");
-    const explicitStateDir = path.join(fixtureRoot, "explicit-state");
-    const explicitServer = startServer(serverBundlePath, {
-      CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "explicit-scans"),
-      CODEX_SECURITY_STATE_DIR: explicitStateDir,
-      FAKE_PYTHON_ALWAYS_FAIL: "1",
-      FAKE_PYTHON_FAILURE:
-        "sqlite3.OperationalError: unable to open database file",
-      FAKE_PYTHON_LOG: invocationLog,
-      FAKE_REAL_PYTHON: realPython,
-      PYTHON: fakePythonPath,
-    });
-    try {
-      await initialize(explicitServer, 10);
-      assertToolError(
-        await inspectTarget(explicitServer, 11, targetPath),
-        /unable to open database file/,
-      );
+    for (const scenario of [
+      "explicit",
+      "explicit-open",
+      "proven",
+      "proven-open",
+      "malformed",
+    ]) {
+      if (scenario !== "malformed" && process.getuid?.() === 0) continue;
+      const codexHome = path.join(fixtureRoot, `${scenario}-home`);
+      const stateDir = path.join(codexHome, "state/plugins/codex-security");
+      const scanRoot = path.join(fixtureRoot, `${scenario}-scans`);
+      await mkdir(stateDir, { recursive: true });
+      const server = startServer(serverBundlePath, {
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_STATE_DIR:
+          scenario === "explicit"
+            ? path.join(stateDir, "explicit-state")
+            : scenario === "explicit-open"
+              ? stateDir
+              : undefined,
+        CODEX_SECURITY_SCAN_ROOT: scanRoot,
+        PYTHON: realPython,
+      });
+      try {
+        await initialize(server, 1);
+        if (scenario.startsWith("proven"))
+          assertNoError(await openWorkspace(server, 2, targetPath));
+        if (scenario === "malformed")
+          await writeFile(
+            path.join(stateDir, "workbench.sqlite3"),
+            "not a database",
+          );
+        else await chmod(stateDir, 0o500);
+        if (scenario === "proven-open")
+          await chmod(path.join(stateDir, "workbench.sqlite3"), 0o000);
+        assertToolError(
+          await openWorkspace(server, 3, targetPath, "next-thread"),
+          /Permission denied|readonly|read-only|not a database|unable to open database file/,
+        );
+        assert.equal(server.stderrEvents().length, 0);
+        assert.equal(
+          await pathExists(path.join(scanRoot, "workbench-state")),
+          false,
+        );
+      } finally {
+        await server.stop();
+        await chmod(stateDir, 0o700);
+      }
+    }
+
+    const script = path.join(pluginRoot, "scripts/workbench_db.py");
+    for (const args of [
+      ["--help"],
+      ["create-workspace", "--help"],
+      ["resolve-scan-root"],
+      ["database-info"],
+      ["inspect-target", "--target-path", path.join(fixtureRoot, "missing")],
+    ]) {
+      const env = {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "parity-state"),
+        PYTHONSAFEPATH: "1",
+        PYTHONIOENCODING: "ascii",
+      };
+      const direct = spawnSync(realPython, [script, ...args], {
+        env,
+        encoding: "utf8",
+      });
+      const wrapped = spawnSync(realPython, ["-c", WORKBENCH_PYTHON, script], {
+        env,
+        encoding: "utf8",
+        input: `${JSON.stringify(args)}\n`,
+      });
       assert.deepEqual(
-        (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
-        [explicitStateDir],
+        [wrapped.status, wrapped.stdout, wrapped.stderr],
+        [direct.status, direct.stdout, direct.stderr],
       );
-      assert.equal(
-        explicitServer
-          .stderrEvents()
-          .some((event) => event.event === "state_fallback_pinned"),
-        false,
-      );
-    } finally {
-      await explicitServer.stop();
-    }
-
-    await writeFile(invocationLog, "");
-    const inspectionFirstScanRoot = path.join(
-      fixtureRoot,
-      "inspection-first-scans",
-    );
-    const inspectionFirstServer = startServer(serverBundlePath, {
-      CODEX_HOME: path.join(fixtureRoot, "inspection-first-codex-home"),
-      CODEX_SECURITY_SCAN_ROOT: inspectionFirstScanRoot,
-      CODEX_SECURITY_STATE_DIR: undefined,
-      FAKE_PYTHON_ALWAYS_FAIL: undefined,
-      FAKE_PYTHON_FAILURE:
-        "sqlite3.OperationalError: unable to open database file",
-      FAKE_PYTHON_LOG: invocationLog,
-      FAKE_PYTHON_PERSISTENT_SUCCESSES: "1",
-      FAKE_REAL_PYTHON: realPython,
-      PYTHON: fakePythonPath,
-    });
-    try {
-      await initialize(inspectionFirstServer, 15);
-      assertNoError(await inspectTarget(inspectionFirstServer, 16, targetPath));
-      assertNoError(await openWorkspace(inspectionFirstServer, 17, targetPath));
-      const fallbackStateDir = path.join(
-        inspectionFirstScanRoot,
-        "workbench-state",
-      );
-      const invocationStateDirs = (await readJsonLines(invocationLog)).map(
-        (entry) => entry.stateDir,
-      );
-      assert.deepEqual(invocationStateDirs.slice(0, 2), [null, null]);
-      assert.equal(
-        invocationStateDirs
-          .slice(2)
-          .every((stateDir) => stateDir === fallbackStateDir),
-        true,
-      );
-      assert.ok(invocationStateDirs.length > 2);
-      const fallbackEvents = inspectionFirstServer
-        .stderrEvents()
-        .filter((event) => event.event === "state_fallback_pinned");
-      assert.equal(fallbackEvents.length, 1);
-      assert.equal(await pathExists(fallbackStateDir), true);
-    } finally {
-      await inspectionFirstServer.stop();
-    }
-
-    await writeFile(invocationLog, "");
-    const provenScanRoot = path.join(fixtureRoot, "proven-scans");
-    const provenServer = startServer(serverBundlePath, {
-      CODEX_HOME: path.join(fixtureRoot, "proven-codex-home"),
-      CODEX_SECURITY_SCAN_ROOT: provenScanRoot,
-      CODEX_SECURITY_STATE_DIR: undefined,
-      FAKE_PYTHON_ALWAYS_FAIL: undefined,
-      FAKE_PYTHON_FAILURE:
-        "sqlite3.OperationalError: unable to open database file",
-      FAKE_PYTHON_LOG: invocationLog,
-      FAKE_PYTHON_PERSISTENT_SUCCESSES: "1",
-      FAKE_REAL_PYTHON: realPython,
-      PYTHON: fakePythonPath,
-    });
-    try {
-      await initialize(provenServer, 18);
-      assertNoError(
-        await openWorkspace(provenServer, 19, targetPath, "proven-thread-1"),
-      );
-      assertToolError(
-        await openWorkspace(provenServer, 20, targetPath, "proven-thread-2"),
-        /unable to open database file/,
-      );
-      assert.deepEqual(
-        (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
-        [null, null],
-      );
-      assert.equal(
-        provenServer
-          .stderrEvents()
-          .some((event) => event.event === "state_fallback_pinned"),
-        false,
-      );
-      assert.equal(
-        await pathExists(path.join(provenScanRoot, "workbench-state")),
-        false,
-      );
-    } finally {
-      await provenServer.stop();
-    }
-
-    await writeFile(invocationLog, "");
-    const genericScanRoot = path.join(fixtureRoot, "generic-scans");
-    const genericServer = startServer(serverBundlePath, {
-      CODEX_SECURITY_SCAN_ROOT: genericScanRoot,
-      CODEX_SECURITY_STATE_DIR: undefined,
-      FAKE_PYTHON_ALWAYS_FAIL: "1",
-      FAKE_PYTHON_FAILURE:
-        "sqlite3.OperationalError: database disk image is malformed",
-      FAKE_PYTHON_LOG: invocationLog,
-      FAKE_REAL_PYTHON: realPython,
-      PYTHON: fakePythonPath,
-    });
-    try {
-      await initialize(genericServer, 20);
-      assertToolError(
-        await inspectTarget(genericServer, 21, targetPath),
-        /database disk image is malformed/,
-      );
-      assert.deepEqual(
-        (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
-        [null],
-      );
-      assert.equal(
-        genericServer
-          .stderrEvents()
-          .some((event) => event.event === "state_fallback_pinned"),
-        false,
-      );
-    } finally {
-      await genericServer.stop();
     }
   } finally {
     await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
   }
-}
-
-async function writeFakePython(executablePath: string) {
-  await writeFile(
-    executablePath,
-    [
-      "#!/usr/bin/env node",
-      'import { appendFileSync, readFileSync } from "node:fs";',
-      'import { spawnSync } from "node:child_process";',
-      // Root resolution does not open SQLite and must bypass the injected database failure.
-      "if (process.argv[3] !== 'resolve-scan-root') {",
-      "let priorInvocations = 0;",
-      "try { priorInvocations = readFileSync(process.env.FAKE_PYTHON_LOG, 'utf8').split(/\\r?\\n/).filter(Boolean).length; } catch {}",
-      "appendFileSync(process.env.FAKE_PYTHON_LOG, JSON.stringify({ stateDir: process.env.CODEX_SECURITY_STATE_DIR || null }) + '\\n');",
-      "const persistentSuccesses = Number(process.env.FAKE_PYTHON_PERSISTENT_SUCCESSES || 0);",
-      "if (process.env.FAKE_PYTHON_ALWAYS_FAIL === '1' || (!process.env.CODEX_SECURITY_STATE_DIR && priorInvocations >= persistentSuccesses)) {",
-      "  console.error(process.env.FAKE_PYTHON_FAILURE || 'sqlite3.OperationalError: unable to open database file');",
-      "  process.exit(1);",
-      "}",
-      "}",
-      "const result = spawnSync(process.env.FAKE_REAL_PYTHON, process.argv.slice(2), { env: process.env, stdio: 'inherit' });",
-      "process.exit(result.status ?? 1);",
-      "",
-    ].join("\n"),
-  );
-  await chmod(executablePath, 0o755);
 }
 
 function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
@@ -535,29 +465,6 @@ function startPromptOnlyScan(
   });
 }
 
-function submitSetup(
-  server: ReturnType<typeof startServer>,
-  id: number,
-  sessionId: string,
-  targetPath: string,
-) {
-  return server.request(id, "tools/call", {
-    name: "submit_codex_security_setup",
-    arguments: { sessionId, targetPath, scope: ".", mode: "standard" },
-  });
-}
-
-function startScan(
-  server: ReturnType<typeof startServer>,
-  id: number,
-  sessionId: string,
-) {
-  return server.request(id, "tools/call", {
-    name: "start_codex_security_scan",
-    arguments: { sessionId },
-  });
-}
-
 function openWorkspace(
   server: ReturnType<typeof startServer>,
   id: number,
@@ -567,19 +474,6 @@ function openWorkspace(
   return server.request(id, "tools/call", {
     name: "open_codex_security_workspace",
     arguments: { targetPath, scope: ".", mode: "standard" },
-    _meta: { "openai/threadId": threadId },
-  });
-}
-
-function reopenWorkspace(
-  server: ReturnType<typeof startServer>,
-  id: number,
-  sessionId: string,
-  threadId = "state-fallback-thread",
-) {
-  return server.request(id, "tools/call", {
-    name: "open_codex_security_workspace",
-    arguments: { sessionId },
     _meta: { "openai/threadId": threadId },
   });
 }
