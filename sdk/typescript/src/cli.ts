@@ -7442,6 +7442,14 @@ async function runFindingPatches(
             parsed.data.files,
           );
         } else if (
+          parsed.data.status === "no_change" &&
+          changedFiles.length > 0
+        ) {
+          patch = failed(
+            "Patch reported no change but changed files.",
+            changedFiles,
+          );
+        } else if (
           parsed.data.status === "verified" &&
           changedFiles.length === 0
         ) {

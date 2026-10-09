@@ -2574,7 +2574,7 @@ describe("scan and patch workflow", () => {
     async ({ emptyFirstReport, renameFix, nested }) => {
       const root = await temporaryDirectory("codex-security-reviewed-patch-");
       const gitRoot = join(root, "repository");
-      const repository = nested ? join(gitRoot, " package ") : gitRoot;
+      const repository = nested ? join(gitRoot, " package") : gitRoot;
       const remote = join(root, "remote.git");
       await mkdir(join(repository, "src"), { recursive: true });
       const git = repositoryGit(gitRoot);
@@ -2699,9 +2699,115 @@ describe("scan and patch workflow", () => {
             .split("\0")
             .filter(Boolean),
         ).toEqual(
-          expectedFiles.map((file) => (nested ? ` package /${file}` : file)),
+          expectedFiles.map((file) => (nested ? ` package/${file}` : file)),
         );
         expect(git("status", "--porcelain")).toBe("");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "publishes an earlier reviewed patch only when a later no_change result leaves it untouched: %p",
+    async (editsReviewedFile) => {
+      const root = await temporaryDirectory("codex-security-no-change-review-");
+      const repository = join(root, "repository");
+      const remote = join(root, "remote.git");
+      await mkdir(repository, { recursive: true });
+      const git = repositoryGit(repository);
+      const result = resultWithFindings(["high", "high"]);
+      const commands: string[][] = [];
+      let authors = 0;
+      let reviews = 0;
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        await writeFile(join(repository, "app.ts"), "unsafe\n");
+        git("add", "--", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        git("push", "--set-upstream", "origin", "main");
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "--scan",
+            "scan",
+            "--review-minimality",
+            "--create-pr",
+            "--json",
+          ],
+          {
+            currentDirectory: repository,
+            result,
+            onWorkbench: () => savedScan(result, "scan", repository),
+            onRepositoryCommand: (command, args, directory, options) => {
+              commands.push([command, ...args]);
+              return command === "git"
+                ? runGitRepositoryCommand(command, args, directory, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.com/example/repository/pull/1";
+            },
+            onCodex: async (_args, output) => {
+              if (output!.appServer!.sandbox === "read-only") {
+                reviews += 1;
+                expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
+                  "safe\n",
+                );
+                output!.stdout.write(
+                  JSON.stringify({ status: "approved", findings: [] }),
+                );
+              } else {
+                authors += 1;
+                if (authors === 1 || editsReviewedFile)
+                  await writeFile(
+                    join(repository, "app.ts"),
+                    authors === 1 ? "safe\n" : "unreviewed\n",
+                  );
+                output!.stdout.write(
+                  JSON.stringify({
+                    patches: [
+                      {
+                        occurrenceId: `occ_${authors}`,
+                        status: authors === 1 ? "verified" : "no_change",
+                        files: authors === 1 ? ["app.ts"] : [],
+                        verification:
+                          "The issue is fixed and focused checks pass.",
+                      },
+                    ],
+                  }),
+                );
+              }
+              return 0;
+            },
+          },
+        );
+        expect(authors).toBe(2);
+        expect(reviews).toBe(1);
+        expect(outcome.exitCode, outcome.stderr).toBe(
+          editsReviewedFile ? 2 : 0,
+        );
+        expect(
+          JSON.parse(outcome.stdout).patches.map(
+            (patch: { status: string }) => patch.status,
+          ),
+        ).toEqual(["verified", editsReviewedFile ? "failed" : "no_change"]);
+        expect(
+          commands.some(
+            ([command, ...args]) =>
+              command === "gh" ||
+              args.includes("commit") ||
+              args.includes("push"),
+          ),
+        ).toBe(!editsReviewedFile);
+        if (editsReviewedFile)
+          expect(outcome.stderr).toContain(
+            "reported no change but changed files",
+          );
       } finally {
         await rm(root, { recursive: true, force: true });
       }
