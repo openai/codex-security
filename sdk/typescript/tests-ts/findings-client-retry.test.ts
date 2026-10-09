@@ -10,8 +10,14 @@ const neighborhood = {
   potentialDuplicates: [],
 };
 
-test("lookup preserves the service error code and explanation", async () => {
-  const message = "No current embedding exists in the requested repository.";
+const errorMediaTypes = [
+  "Application/JSON; charset=utf-8",
+  "application/problem+json",
+  "Application/vnd.synthetic.findings+JSON; charset=utf-8",
+];
+
+test.each(errorMediaTypes)("lookup retains %s errors", async (mediaType) => {
+  const message = "No current embedding exists in the requested repository. 🧪";
   const client = new FindingsClient(
     "http://synthetic.test",
     undefined,
@@ -20,7 +26,7 @@ test("lookup preserves the service error code and explanation", async () => {
         { error: "finding_not_indexed", message },
         {
           status: 404,
-          headers: { "Content-Type": "Application/JSON; charset=utf-8" },
+          headers: { "Content-Type": mediaType },
         },
       ),
   );
@@ -55,14 +61,14 @@ test("publishing preserves conflict details without retrying", async () => {
   expect(requests).toBe(1);
 });
 
-test("publishing preserves cancellation while reading an error response", async () => {
+test.each(errorMediaTypes)("publish cancels %s reads", async (mediaType) => {
   const controller = new AbortController();
   const reason = new Error("Synthetic caller cancellation");
   const request = mock(async (_url: URL, init: RequestInit) => {
     expect(init.signal).toBe(controller.signal);
     const response = new Response(null, {
       status: 409,
-      headers: { "Content-Type": "application/json; charset=utf-8" },
+      headers: { "Content-Type": mediaType },
     });
     response.json = async () => {
       controller.abort(reason);
