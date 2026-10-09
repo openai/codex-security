@@ -5944,47 +5944,62 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await readdir(root)).toEqual(["scan"]);
   });
 
-  test("preserves an unwritable SQLite failure and its Python traceback", async () => {
-    const root = await temporaryDirectory();
-    const pluginRoot = join(root, "plugin");
-    const stateDirectory = join(root, "persistent-state");
-    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
-    await writeFile(
-      join(pluginRoot, "scripts", "workbench_db.py"),
-      [
-        "import sqlite3",
-        "def connect():",
-        "    raise sqlite3.OperationalError('unable to open database file')",
-        "connect()",
-      ].join("\n"),
-    );
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
+  for (const readonly of [false, true]) {
+    test
+      .skipIf(
+        readonly && (process.platform === "win32" || process.getuid?.() === 0),
+      )
+      .each(["list-scans", "database-info"])(
+      `preserves SQLite ${readonly ? "readonly" : "open"} diagnostics and recovery guidance for %s`,
+      async (command) => {
+        const root = await temporaryDirectory();
+        const stateDirectory = join(root, "state");
+        const databasePath = join(stateDirectory, "workbench.sqlite3");
+        await mkdir(stateDirectory);
+        if (readonly) await writeFile(databasePath, "", { mode: 0o400 });
+        else await mkdir(databasePath);
+        try {
+          let failure: unknown;
+          try {
+            await runWorkbench(
+              {
+                pluginRoot: PLUGIN_ROOT,
+                environment: {
+                  ...process.env,
+                  CODEX_SECURITY_STATE_DIR: stateDirectory,
+                },
+                failureMessage: "Could not read Codex Security scan history",
+              },
+              [command],
+            );
+          } catch (error) {
+            failure = error;
+          }
 
-    let failure: unknown;
-    try {
-      await runWorkbench(
-        {
-          python: python!,
-          pluginRoot,
-          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
-          failureMessage: "Could not save the Codex Security scan",
-        },
-        ["register-cli-scan"],
-      );
-    } catch (error) {
-      failure = error;
-    }
-
-    expect(failure).toBeInstanceOf(Error);
-    const message = (failure as Error).message;
-    expect(message).toContain("Could not save the Codex Security scan");
-    expect(message).toContain(
-      "sqlite3.OperationalError: unable to open database file",
+          expect(failure).toBeInstanceOf(Error);
+          const message = (failure as Error).message;
+          expect(message).toContain(
+            "Could not read Codex Security scan history",
+          );
+          expect(message).toContain(
+            readonly
+              ? "attempt to write a readonly database"
+              : "unable to open database file",
+          );
+          expect(message).toContain(databasePath);
+          expect(message).toContain("SQLite journal files");
+          expect(message).toContain("CODEX_SECURITY_STATE_DIR");
+          if (command === "list-scans") {
+            expect(message).toContain("sqlite3.OperationalError");
+            expect(message).toContain("Traceback");
+          }
+          expect((failure as Error).cause).toBeInstanceOf(Error);
+        } finally {
+          if (readonly) await chmod(databasePath, 0o600);
+        }
+      },
     );
-    expect(message).toContain("Traceback");
-    expect((failure as Error).cause).toBeInstanceOf(Error);
-  });
+  }
 
   test.each(["plain-missing-target", "readonly database", "disk i/o error"])(
     "preserves missing-target diagnostics containing %s",
