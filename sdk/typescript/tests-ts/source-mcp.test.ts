@@ -774,16 +774,16 @@ for (const transport of [
       } else {
         const child = JSON.parse(await readFile(captured, "utf8"));
         expect(await realpath(child.cwd)).toBe(await realpath(repository));
-        expect(
+        const normalizedEnvironment = (environment: JsonObject) =>
           Object.fromEntries(
-            Object.entries(source.server["env"] as JsonObject).map(
-              ([key, value]) => [
-                process.platform === "win32" ? key.toUpperCase() : key,
-                value,
-              ],
-            ),
-          ),
-        ).toEqual(child.environment);
+            Object.entries(environment).map(([key, value]) => [
+              process.platform === "win32" ? key.toUpperCase() : key,
+              value,
+            ]),
+          );
+        expect(
+          normalizedEnvironment(source.server["env"] as JsonObject),
+        ).toEqual(normalizedEnvironment(child.environment));
         expect(child.environment).toEqual({
           OPENAI_API_KEY: "synthetic-source-key",
           CODEX_HOME: "synthetic-source-home",
