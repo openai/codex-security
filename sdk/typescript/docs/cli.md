@@ -1314,6 +1314,22 @@ codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 supports JSON for saved findings, literal text, and files. Each finding gets a
 saved Codex desktop task. `--model` and `--effort` control the model.
 
+Use `--review-minimality` and `--review-style` with `patch` or `scan --patch`
+to review generated changes before accepting or publishing them. Both reviews
+are off by default. Each selected stage can request one author revision by
+default; `--max-review-revisions N` instead sets a shared revision budget and
+restarts the selected reviews after a later stage requests changes. Set it to
+`0` to require approval without author revisions. A blocked, malformed, or
+unapproved review prevents patch publication. Reviews compare the complete candidate
+with the state before patching, so existing user edits remain distinguishable. Review explanations
+are printed on failure. Custom validation instructions run in author stages;
+`--external-sandbox`, when selected for patching, also applies to review tasks.
+
+```bash
+codex-security scan . --patch --review-minimality --review-style
+codex-security patch --scan SCAN_ID --review-style --max-review-revisions 2
+```
+
 `--validation-prompt-file PATH` supplies setup, authorized targets, expected
 results, and cleanup for dynamic validation. It works with saved findings,
 text/files, and Linear inputs. Paths resolve from the invocation directory, even

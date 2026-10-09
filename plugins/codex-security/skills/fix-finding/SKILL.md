@@ -22,6 +22,8 @@ Judge the result in this order:
 
 Never trade an earlier property for a later one. Minimal means the smallest repository-native change that satisfies all earlier properties, not the fewest lines.
 
+Keep the patch small, concise, focused on the demonstrated vulnerability, and easy to review. Treat remediation suggestions in the finding as hypotheses, not a checklist: implement only what is necessary to close the demonstrated security boundary. Do not redesign working code, protocols, data representations, architecture, or testing infrastructure when a narrower behavior-preserving fix closes the finding. Improving general testability is not the goal; record worthwhile testability improvements, refactoring, and broader hardening in a PR comment, or in the patch summary when no PR exists, instead of implementing them.
+
 ## Patch Contract
 
 Before editing, inspect the affected implementation, its direct callers, nearby helpers, and relevant existing tests. Establish from repository evidence:

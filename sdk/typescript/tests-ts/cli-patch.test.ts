@@ -5,7 +5,15 @@ import { parse as parseToml } from "smol-toml";
 import { describe, expect, test, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -17,6 +25,7 @@ import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const CURRENT_REPOSITORY = resolve("/current/repository");
 const SAVED_REPOSITORY = resolve("/saved/repository");
@@ -1627,6 +1636,9 @@ describe("scan and patch workflow", () => {
       ["--model", "gpt-6-astra"],
       ["--linear-issue", "SEC-123"],
       ["--create-pr"],
+      ["--review-minimality"],
+      ["--review-style"],
+      ["--max-review-revisions", "5"],
       ["--assess-patch-risk"],
       ["--validation-prompt-file", "validation.md"],
       ["--external-sandbox"],
@@ -2337,6 +2349,1168 @@ describe("scan and patch workflow", () => {
       expect(onCodex).not.toHaveBeenCalled();
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("runs independent review stages for scan and saved-finding patching", async () => {
+    for (const arguments_ of [
+      ["scan", "--patch"],
+      ["patch", "--scan", "scan-1"],
+      ["patch", "--scan", "scan-1", "--external-sandbox"],
+    ]) {
+      const result = resultWithFindings(["high"]);
+      const stages: string[] = [];
+      const outcome = await runWorkflow(
+        [...arguments_, "--review-style", "--review-minimality"],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onCodex: (args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            if (sandbox === "read-only") {
+              expect(output!.appServer!.externalSandbox).toBe(
+                arguments_.includes("--external-sandbox") ? true : undefined,
+              );
+              expect(prompt).toContain(JSON.stringify(["src/finding-1.ts"]));
+              const stage = ["minimality", "local-coding-style"].find((value) =>
+                prompt.includes(`only the ${value} review`),
+              )!;
+              stages.push(stage);
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "approved",
+                  findings: [],
+                }),
+              );
+            } else {
+              expect(output!.appServer!.externalSandbox).toBe(
+                arguments_.includes("--external-sandbox") ? true : undefined,
+              );
+              stages.push("author");
+              completePatches(args, output);
+            }
+            return 0;
+          },
+        },
+      );
+
+      expect(outcome.exitCode).toBe(0);
+      expect(stages).toEqual(["author", "minimality", "local-coding-style"]);
+    }
+  });
+
+  test("passes the configured revision budget to scan and saved-finding patching", async () => {
+    for (const arguments_ of [
+      ["scan", "--patch"],
+      ["patch", "--scan", "scan-1"],
+    ]) {
+      const result = resultWithFindings(["high"]);
+      let reviews = 0;
+      const outcome = await runWorkflow(
+        [...arguments_, "--review-minimality", "--max-review-revisions", "2"],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onCodex: (args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify(
+                  reviews < 3
+                    ? {
+                        status: "revise",
+                        findings: [`Remove unrelated change ${reviews}.`],
+                      }
+                    : { status: "approved", findings: [] },
+                ),
+              );
+            } else {
+              completePatches(args, output);
+            }
+            return 0;
+          },
+        },
+      );
+
+      expect({
+        arguments_,
+        exitCode: outcome.exitCode,
+        stderr: outcome.stderr,
+      }).toMatchObject({ exitCode: 0 });
+      expect(reviews).toBe(3);
+    }
+  });
+
+  test("updates the independent review scope after an author revision", async () => {
+    const result = resultWithFindings(["high"]);
+    const scopes: string[][] = [];
+    let reviews = 0;
+    let revised = false;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "--scan",
+        "scan-1",
+        "--review-minimality",
+        "--review-style",
+        "--json",
+      ],
+      {
+        result,
+        onWorkbench: () => savedScan(result),
+        onRepositoryCommand: (_command, args) =>
+          args.includes("--name-only")
+            ? revised
+              ? "src/finding-1.ts\0src/existing-helper.ts\0"
+              : "src/finding-1.ts\0"
+            : "",
+        onCodex: (args, output) => {
+          const { prompt, sandbox } = output!.appServer!;
+          if (sandbox === "read-only") {
+            const lines = prompt.split("\n");
+            const scope = lines.findIndex((line) =>
+              line.startsWith("Candidate changes since the pre-author"),
+            );
+            scopes.push(JSON.parse(lines[scope + 1]!));
+            reviews += 1;
+            output!.stdout.write(
+              JSON.stringify(
+                reviews === 1
+                  ? { status: "revise", findings: ["Use the existing helper."] }
+                  : { status: "approved", findings: [] },
+              ),
+            );
+          } else if (reviews === 0) {
+            completePatches(args, output);
+          } else {
+            revised = true;
+            output!.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: ["src/existing-helper.ts"],
+                    verification: "The exploit fails and focused tests pass.",
+                  },
+                ],
+              }),
+            );
+          }
+          return 0;
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(0);
+    expect(scopes).toEqual([
+      ["src/finding-1.ts"],
+      ["src/finding-1.ts", "src/existing-helper.ts"],
+      ["src/finding-1.ts", "src/existing-helper.ts"],
+    ]);
+    expect(JSON.parse(outcome.stdout).patches[0].files).toEqual([
+      "src/finding-1.ts",
+      "src/existing-helper.ts",
+    ]);
+  });
+
+  test("does not create a pull request when an independent review rejects the patch", async () => {
+    const result = resultWithFindings(["high"]);
+    const commands: string[][] = [];
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "--scan",
+        "scan-1",
+        "--create-pr",
+        "--review-minimality",
+        "--json",
+      ],
+      {
+        result,
+        onWorkbench: () => savedScan(result),
+        onRepositoryCommand: (command, args) => {
+          commands.push([command, ...args]);
+          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+        },
+        onCodex: (args, output) => {
+          if (output!.appServer!.sandbox === "read-only") {
+            output!.stdout.write(
+              JSON.stringify({
+                status: "blocked",
+                findings: ["The patch is outside the production threat model."],
+              }),
+            );
+          } else {
+            completePatches(args, output);
+          }
+          return 0;
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(2);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      patches: [{ occurrenceId: "occ_1", status: "failed" }],
+    });
+    expect(
+      commands.some((args) =>
+        args.some((value) => ["commit", "push", "gh", "glab"].includes(value)),
+      ),
+    ).toBe(false);
+    expect(outcome.stderr).toContain('"status":"blocked"');
+    expect(outcome.stderr).toContain(
+      "The patch is outside the production threat model.",
+    );
+  });
+
+  test.each([
+    { emptyFirstReport: false, renameFix: false, nested: false },
+    { emptyFirstReport: true, renameFix: false, nested: false },
+    { emptyFirstReport: false, renameFix: true, nested: false },
+    { emptyFirstReport: false, renameFix: false, nested: true },
+  ])(
+    "publishes cumulative reviewed files (empty report: $emptyFirstReport, rename: $renameFix, nested: $nested)",
+    async ({ emptyFirstReport, renameFix, nested }) => {
+      const root = await temporaryDirectory("codex-security-reviewed-patch-");
+      const gitRoot = join(root, "repository");
+      const repository = nested ? join(gitRoot, " package") : gitRoot;
+      const remote = join(root, "remote.git");
+      await mkdir(join(repository, "src"), { recursive: true });
+      const git = repositoryGit(gitRoot);
+      const result = resultWithFindings(["high"]);
+      let authors = 0;
+      let reviews = 0;
+      const scopes: string[][] = [];
+      const unchanged = "unchanged context\n".repeat(12);
+      const expectedFiles = [
+        "src/finding-1.ts",
+        ...(renameFix ? ["src/renamed.ts"] : []),
+        "test.ts",
+      ];
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        if (nested) git("config", "diff.relative", "true");
+        await writeFile(
+          join(repository, "src/finding-1.ts"),
+          `${unchanged}unsafe\n`,
+        );
+        git("add", "--", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        git("push", "--set-upstream", "origin", "main");
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "--scan",
+            "scan",
+            "--review-minimality",
+            "--create-pr",
+            ...(nested ? ["--assess-patch-risk"] : []),
+            "--json",
+          ],
+          {
+            currentDirectory: repository,
+            result,
+            onWorkbench: () => savedScan(result, "scan", repository),
+            onRepositoryCommand: (command, args, directory, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, directory, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.com/example/repository/pull/1",
+            onCodex: async (_args, output) => {
+              const { prompt, sandbox } = output!.appServer!;
+              if (prompt.includes("$codex-security:assess-patch-risk")) {
+                const artifact = JSON.parse(
+                  prompt
+                    .split("\n")
+                    .find((line) => line.startsWith('{"path":'))!,
+                );
+                expect(await readFile(artifact.path, "utf8")).toContain(
+                  "+safe",
+                );
+                output!.stdout.write(patchRiskAssessment().report);
+                return 0;
+              }
+              if (sandbox === "read-only") {
+                const lines = prompt.split("\n");
+                const index = lines.findIndex((line) =>
+                  line.startsWith("Candidate changes since the pre-author"),
+                );
+                scopes.push(JSON.parse(lines[index + 1]!));
+                reviews += 1;
+                output!.stdout.write(
+                  JSON.stringify(
+                    reviews === 1
+                      ? {
+                          status: "revise",
+                          findings: ["Add the focused regression test."],
+                        }
+                      : { status: "approved", findings: [] },
+                  ),
+                );
+              } else {
+                authors += 1;
+                const file = authors === 1 ? "src/finding-1.ts" : "test.ts";
+                await writeFile(
+                  join(repository, file),
+                  authors === 1 ? `${unchanged}safe\n` : "regression\n",
+                );
+                if (authors === 2 && renameFix)
+                  await rename(
+                    join(repository, "src/finding-1.ts"),
+                    join(repository, "src/renamed.ts"),
+                  );
+                output!.stdout.write(
+                  JSON.stringify({
+                    patches: [
+                      {
+                        occurrenceId: "occ_1",
+                        status: "verified",
+                        files: authors === 1 && emptyFirstReport ? [] : [file],
+                        verification:
+                          "The exploit fails and the regression passes.",
+                      },
+                    ],
+                  }),
+                );
+              }
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(authors).toBe(2);
+        expect(reviews).toBe(2);
+        expect(scopes).toEqual([["src/finding-1.ts"], expectedFiles]);
+        expect(JSON.parse(outcome.stdout).patches[0].files).toEqual(
+          expectedFiles,
+        );
+        expect(
+          gitText(
+            ["show", "--format=", "--name-only", "--no-renames", "-z", "HEAD"],
+            { cwd: gitRoot },
+          )
+            .split("\0")
+            .filter(Boolean),
+        ).toEqual(
+          expectedFiles.map((file) => (nested ? ` package/${file}` : file)),
+        );
+        expect(git("status", "--porcelain")).toBe("");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "publishes an earlier reviewed patch only when a later no_change result leaves it untouched: %p",
+    async (editsReviewedFile) => {
+      const root = await temporaryDirectory("codex-security-no-change-review-");
+      const repository = join(root, "repository");
+      const remote = join(root, "remote.git");
+      await mkdir(repository, { recursive: true });
+      const git = repositoryGit(repository);
+      const result = resultWithFindings(["high", "high"]);
+      const commands: string[][] = [];
+      let authors = 0;
+      let reviews = 0;
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        await writeFile(join(repository, "app.ts"), "unsafe\n");
+        git("add", "--", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        git("push", "--set-upstream", "origin", "main");
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "--scan",
+            "scan",
+            "--review-minimality",
+            "--create-pr",
+            "--json",
+          ],
+          {
+            currentDirectory: repository,
+            result,
+            onWorkbench: () => savedScan(result, "scan", repository),
+            onRepositoryCommand: (command, args, directory, options) => {
+              commands.push([command, ...args]);
+              return command === "git"
+                ? runGitRepositoryCommand(command, args, directory, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.com/example/repository/pull/1";
+            },
+            onCodex: async (_args, output) => {
+              if (output!.appServer!.sandbox === "read-only") {
+                reviews += 1;
+                expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
+                  "safe\n",
+                );
+                output!.stdout.write(
+                  JSON.stringify({ status: "approved", findings: [] }),
+                );
+              } else {
+                authors += 1;
+                if (authors === 1 || editsReviewedFile)
+                  await writeFile(
+                    join(repository, "app.ts"),
+                    authors === 1 ? "safe\n" : "unreviewed\n",
+                  );
+                output!.stdout.write(
+                  JSON.stringify({
+                    patches: [
+                      {
+                        occurrenceId: `occ_${authors}`,
+                        status: authors === 1 ? "verified" : "no_change",
+                        files: authors === 1 ? ["app.ts"] : [],
+                        verification:
+                          "The issue is fixed and focused checks pass.",
+                      },
+                    ],
+                  }),
+                );
+              }
+              return 0;
+            },
+          },
+        );
+        expect(authors).toBe(2);
+        expect(reviews).toBe(1);
+        expect(outcome.exitCode, outcome.stderr).toBe(
+          editsReviewedFile ? 2 : 0,
+        );
+        expect(
+          JSON.parse(outcome.stdout).patches.map(
+            (patch: { status: string }) => patch.status,
+          ),
+        ).toEqual(["verified", editsReviewedFile ? "failed" : "no_change"]);
+        expect(
+          commands.some(
+            ([command, ...args]) =>
+              command === "gh" ||
+              args.includes("commit") ||
+              args.includes("push"),
+          ),
+        ).toBe(!editsReviewedFile);
+        if (editsReviewedFile)
+          expect(outcome.stderr).toContain(
+            "reported no change but changed files",
+          );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("skips selected reviews when a direct-input patch makes no changes", async () => {
+    let invocations = 0;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "Synthetic security issue",
+        "--review-minimality",
+        "--review-style",
+      ],
+      {
+        onRepositoryCommand: () => "",
+        onCodex: (_args, output) => {
+          invocations += 1;
+          output!.stdout.write(
+            output!.appServer!.sandbox === "read-only"
+              ? JSON.stringify({ status: "approved", findings: [] })
+              : "The existing code is already safe.",
+          );
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("No patch was applied");
+    expect(outcome.stdout).toContain("The existing code is already safe.");
+    expect(invocations).toBe(1);
+  });
+
+  test("excludes non-Git review baselines inside the target from patch files", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "excludes non-Git review baselines inside the target from patch files",
+      )
+    )
+      return;
+    const root = await temporaryDirectory("codex-security-review-temp-");
+    const repository = join(root, "repository");
+    const temporary = join(repository, "temp");
+    const previous = Object.fromEntries(
+      ["TMPDIR", "TMP", "TEMP"].map((key) => [key, process.env[key]]),
+    );
+    const result = resultWithFindings(["high"]);
+    const scopes: string[][] = [];
+    try {
+      await mkdir(temporary, { recursive: true });
+      await writeFile(join(repository, "app.ts"), "unsafe\n");
+      for (const key of Object.keys(previous)) process.env[key] = temporary;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan", "--review-minimality", "--json"],
+        {
+          currentDirectory: repository,
+          result,
+          onWorkbench: () => savedScan(result, "scan", repository),
+          onRepositoryCommand: () => {
+            throw new Error("fatal: not a git repository");
+          },
+          onCodex: async (args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            if (sandbox === "read-only") {
+              const lines = prompt.split("\n");
+              const index = lines.findIndex((line) =>
+                line.startsWith("Candidate changes since the pre-author"),
+              );
+              scopes.push(JSON.parse(lines[index + 1]!));
+              output!.stdout.write(
+                JSON.stringify({ status: "approved", findings: [] }),
+              );
+            } else {
+              await writeFile(join(repository, "app.ts"), "safe\n");
+              completePatches(args, output);
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(scopes).toEqual([["app.ts"]]);
+      expect(JSON.parse(outcome.stdout).patches[0].files).toEqual(["app.ts"]);
+      expect(await readdir(temporary)).toEqual([]);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["git", "directory"])(
+    "preserves the pre-author %s baseline for review and revision",
+    async (kind) => {
+      const root = await temporaryDirectory("codex-security-review-baseline-");
+      const repository = join(root, "repository");
+      const validation = join(root, "validation.md");
+      await mkdir(repository);
+      const git = repositoryGit(repository);
+      const before = "unsafe\npre-existing user edit\n";
+      const validationInstructions =
+        "Create a validation output directory, run the regression, and remove the output directory.";
+      let authors = 0;
+      let reviews = 0;
+      let copiedBaseline: string | undefined;
+      let baselineTree: string | undefined;
+      try {
+        await writeFile(join(repository, "app.ts"), "unsafe\n");
+        if (kind === "git") {
+          git("init", "--initial-branch=main");
+          git("config", "user.name", "Synthetic User");
+          git("config", "user.email", "synthetic@example.test");
+          git("config", "commit.gpgsign", "false");
+          git("add", "--", ".");
+          git("commit", "-m", "Initial synthetic checkout");
+        }
+        await writeFile(join(repository, "app.ts"), before);
+        await writeFile(validation, validationInstructions);
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "Synthetic issue",
+            "--review-minimality",
+            "--validation-prompt-file",
+            validation,
+            "--external-sandbox",
+          ],
+          {
+            currentDirectory: repository,
+            onRepositoryCommand: (command, args, directory, options) => {
+              if (kind === "directory")
+                throw new Error("fatal: not a git repository");
+              return runGitRepositoryCommand(command, args, directory, options);
+            },
+            onCodex: async (_args, output) => {
+              const { prompt, sandbox, externalSandbox } = output!.appServer!;
+              expect(externalSandbox).toBe(true);
+              if (sandbox === "read-only" || authors > 0) {
+                const lines = prompt.split("\n");
+                const index = lines.indexOf(
+                  "Pre-author baseline and current candidate snapshot (JSON):",
+                );
+                const baseline = JSON.parse(lines[index + 1]!);
+                if (kind === "git") {
+                  baselineTree ??= baseline.tree;
+                  expect(baseline.tree).toBe(baselineTree);
+                  expect(git("show", `${baseline.tree}:app.ts`)).toBe(
+                    before.trim(),
+                  );
+                  const diff = git("diff", baseline.tree, baseline.head);
+                  expect(diff).toContain("-unsafe");
+                  expect(diff).toContain("+safe");
+                  expect(diff).not.toContain("+pre-existing user edit");
+                } else {
+                  copiedBaseline ??= baseline.directory;
+                  expect(baseline.directory).toBe(copiedBaseline);
+                  expect(
+                    await readFile(join(baseline.directory, "app.ts"), "utf8"),
+                  ).toBe(before);
+                }
+              }
+              if (sandbox === "read-only") {
+                expect(prompt).not.toContain(validationInstructions);
+                expect(prompt).not.toContain(
+                  "Custom patch validation instructions",
+                );
+                reviews += 1;
+                output!.stdout.write(
+                  JSON.stringify(
+                    reviews === 1
+                      ? {
+                          status: "revise",
+                          findings: [
+                            "Keep the focused explanation beside the fix.",
+                          ],
+                        }
+                      : { status: "approved", findings: [] },
+                  ),
+                );
+              } else {
+                expect(prompt).toContain(validationInstructions);
+                authors += 1;
+                await writeFile(
+                  join(repository, "app.ts"),
+                  `safe\npre-existing user edit\n${authors === 2 ? "focused explanation\n" : ""}`,
+                );
+                output!.stdout.write(
+                  authors === 1
+                    ? "Verified patch."
+                    : JSON.stringify({
+                        status: "verified",
+                        report: "Verified patch.",
+                      }),
+                );
+              }
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(authors).toBe(2);
+        expect(reviews).toBe(2);
+        expect(await readFile(join(repository, "app.ts"), "utf8")).toContain(
+          "pre-existing user edit",
+        );
+        if (copiedBaseline !== undefined)
+          await expect(
+            readFile(join(copiedBaseline, "app.ts")),
+          ).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(["blocked", "failed", "no_change"] as const)(
+    "preserves the explanation for a %s author revision",
+    async (status) => {
+      const result = resultWithFindings(["high"]);
+      const reason =
+        "Regression failed: synthetic-api-key-value\nThe original failure still reproduces.";
+      let authors = 0;
+      let reviews = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan", "--review-minimality", "--json"],
+        {
+          result,
+          onWorkbench: () => savedScan(result, "scan"),
+          onCodex: (args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "revise",
+                  findings: ["Add the regression test."],
+                }),
+              );
+            } else if (++authors === 1) {
+              completePatches(args, output);
+            } else {
+              output!.stdout.write(
+                JSON.stringify({
+                  patches: [
+                    {
+                      occurrenceId: "occ_1",
+                      status,
+                      files: [],
+                      ...(status === "no_change"
+                        ? { verification: reason }
+                        : { reason }),
+                      ...(status === "blocked"
+                        ? { verification: "Additional validation details." }
+                        : {}),
+                    },
+                  ],
+                }),
+              );
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(authors).toBe(2);
+      expect(reviews).toBe(1);
+      expect(JSON.parse(outcome.stdout).patches[0].status).toBe("failed");
+      expect(outcome.stderr).toContain(reason);
+      if (status === "blocked")
+        expect(outcome.stderr).toContain("Additional validation details.");
+    },
+  );
+
+  test("preserves direct-input diagnostics when an author revision reverts its edits", async () => {
+    const reason =
+      "Regression failed: synthetic-api-key-value\nThe original failure still reproduces.";
+    let authors = 0;
+    let reviews = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic security issue", "--review-minimality", "--json"],
+      {
+        onRepositoryCommand: (_command, args) =>
+          args.includes("--name-only") && authors === 1 ? "app.ts\0" : "",
+        onCodex: (_args, output) => {
+          if (output!.appServer!.sandbox === "read-only") {
+            reviews += 1;
+            output!.stdout.write(
+              JSON.stringify({
+                status: "revise",
+                findings: ["Add the regression test."],
+              }),
+            );
+          } else {
+            authors += 1;
+            output!.stdout.write(
+              authors === 1
+                ? "Initial verified patch."
+                : JSON.stringify({ status: "verified", report: reason }),
+            );
+          }
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode).toBe(2);
+    expect(authors).toBe(2);
+    expect(reviews).toBe(1);
+    expect(outcome.stderr).toContain(reason);
+  });
+
+  test.each(["edit", "delete"] as const)(
+    "keeps original issue-file contents across author, review, and revision after %s",
+    async (operation) => {
+      const repository = await temporaryDirectory(
+        "codex-security-review-input-",
+      );
+      const input = join(repository, "finding.md");
+      const original = `Original synthetic finding for ${operation}.`;
+      const stages: string[] = [];
+      let authors = 0;
+      let reviews = 0;
+      try {
+        await writeFile(input, original);
+        await writeFile(join(repository, "app.ts"), "unsafe\n");
+        const outcome = await runWorkflow(
+          ["patch", "finding.md", "--review-minimality", "--json"],
+          {
+            currentDirectory: repository,
+            onRepositoryCommand: () => {
+              throw new Error("not a git repository");
+            },
+            onCodex: async (_args, output) => {
+              const { prompt, sandbox } = output!.appServer!;
+              expect(JSON.parse(prompt.split("\n").at(-1)!)).toEqual([
+                original,
+              ]);
+              if (sandbox === "read-only") {
+                stages.push("review");
+                reviews += 1;
+                output!.stdout.write(
+                  JSON.stringify(
+                    reviews === 1
+                      ? {
+                          status: "revise",
+                          findings: ["Add the focused regression test."],
+                        }
+                      : { status: "approved", findings: [] },
+                  ),
+                );
+              } else {
+                stages.push("author");
+                authors += 1;
+                if (authors === 1) {
+                  await writeFile(join(repository, "app.ts"), "safe\n");
+                  if (operation === "edit")
+                    await writeFile(input, "Modified finding.");
+                  else await rm(input);
+                } else {
+                  await writeFile(join(repository, "test.ts"), "regression\n");
+                }
+                output!.stdout.write(
+                  authors === 1
+                    ? "Verified patch."
+                    : JSON.stringify({
+                        status: "verified",
+                        report: "Verified patch.",
+                      }),
+                );
+              }
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(stages).toEqual(["author", "review", "author", "review"]);
+      } finally {
+        await rm(repository, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
+    { outcome: "verified", json: false },
+    { outcome: "verified", json: true },
+    { outcome: "blocked", json: true },
+    { outcome: "failed", json: true },
+    { outcome: "no_change", json: true },
+    { outcome: "malformed", json: true },
+    { outcome: "empty_report", json: true },
+    { outcome: "nonzero", json: true },
+    { outcome: "interrupt", json: true },
+  ])(
+    "requires a verified private author revision before direct-input publication: $outcome (JSON: $json)",
+    async ({ outcome: revisionOutcome, json }) => {
+      const root = await temporaryDirectory("codex-security-revision-outcome-");
+      const repository = join(root, "repository");
+      const remote = join(root, "remote.git");
+      await mkdir(repository, { recursive: true });
+      const git = repositoryGit(repository);
+      const commands: string[][] = [];
+      const report =
+        "Complete report: synthetic-api-key-value\nValidation details remain unchanged.\n";
+      let authors = 0;
+      let reviews = 0;
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        await writeFile(join(repository, "app.ts"), "unsafe\n");
+        git("add", "--", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        git("push", "--set-upstream", "origin", "main");
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "Synthetic security issue",
+            "--review-minimality",
+            "--create-pr",
+            ...(json ? ["--json"] : []),
+          ],
+          {
+            currentDirectory: repository,
+            onRepositoryCommand: (command, args, directory, options) => {
+              commands.push([command, ...args]);
+              return command === "git"
+                ? runGitRepositoryCommand(command, args, directory, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.com/example/repository/pull/1";
+            },
+            onCodex: async (_args, output) => {
+              if (output!.appServer!.sandbox === "read-only") {
+                reviews += 1;
+                output!.stdout.write(
+                  JSON.stringify(
+                    reviews === 1
+                      ? {
+                          status: "revise",
+                          findings: ["Add the focused regression test."],
+                        }
+                      : { status: "approved", findings: [] },
+                  ),
+                );
+                return 0;
+              }
+              authors += 1;
+              await writeFile(
+                join(repository, "app.ts"),
+                authors === 1 ? "safe\n" : "revised\n",
+              );
+              if (authors === 1) {
+                output!.stdout.write("Initial verified patch.");
+              } else if (
+                revisionOutcome === "nonzero" ||
+                revisionOutcome === "interrupt"
+              ) {
+                output!.stderr.write(report);
+                return revisionOutcome === "nonzero" ? 3 : 130;
+              } else if (revisionOutcome === "malformed") {
+                output!.stdout.write(
+                  "Malformed outcome: synthetic-api-key-value",
+                );
+              } else {
+                output!.stdout.write(
+                  JSON.stringify({
+                    status:
+                      revisionOutcome === "empty_report"
+                        ? "verified"
+                        : revisionOutcome,
+                    report:
+                      revisionOutcome === "empty_report" ? " \n " : report,
+                  }),
+                );
+              }
+              return 0;
+            },
+          },
+        );
+        const verified = revisionOutcome === "verified";
+        expect(outcome.exitCode, outcome.stderr).toBe(
+          verified
+            ? 0
+            : revisionOutcome === "nonzero"
+              ? 3
+              : revisionOutcome === "interrupt"
+                ? 130
+                : 2,
+        );
+        expect(authors).toBe(2);
+        expect(reviews).toBe(verified ? 2 : 1);
+        expect(
+          commands.some(
+            ([command, ...args]) =>
+              command === "gh" ||
+              args.includes("commit") ||
+              args.includes("push"),
+          ),
+        ).toBe(verified);
+        if (verified) {
+          expect(
+            json ? JSON.parse(outcome.stdout).report : outcome.stdout,
+          ).toBe(report);
+        } else if (revisionOutcome === "malformed") {
+          expect(outcome.stderr).toContain(
+            "Malformed outcome: synthetic-api-key-value",
+          );
+        } else if (revisionOutcome === "empty_report") {
+          expect(outcome.stderr).toContain("invalid outcome");
+        } else {
+          expect(outcome.stderr).toContain(report);
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(["initial", "review", "revision", "throw"] as const)(
+    "preserves captured diagnostics when the %s stage fails",
+    async (failureStage) => {
+      let authors = 0;
+      let reviews = 0;
+      const commands: string[][] = [];
+      const report =
+        "\u001b[31mCaptured stdout: synthetic-api-key-value\u001b[0m\nSecond line.";
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          onRepositoryCommand: (command, args) => {
+            commands.push([command, ...args]);
+            return args.includes("--name-only") ? "app.ts\0" : "";
+          },
+          onCodex: (_args, output) => {
+            const review = output!.appServer!.sandbox === "read-only";
+            if (review) reviews += 1;
+            else authors += 1;
+            const fail = review
+              ? failureStage === "review"
+              : authors === 1
+                ? failureStage === "initial" || failureStage === "throw"
+                : failureStage === "revision";
+            if (fail) {
+              output!.stdout.write(report);
+              output!.stderr.write("Native diagnostic remains visible.\n");
+              if (failureStage === "throw")
+                throw new Error("Synthetic runner failure");
+              return 3;
+            }
+            output!.stdout.write(
+              review
+                ? JSON.stringify({
+                    status: "revise",
+                    findings: ["Add the focused check."],
+                  })
+                : "Initial verified patch.",
+            );
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(failureStage === "throw" ? 2 : 3);
+      expect(outcome.stderr).toContain(
+        "Captured stdout: synthetic-api-key-value\nSecond line.",
+      );
+      expect(outcome.stderr).toContain("Native diagnostic remains visible.");
+      expect(outcome.stderr).not.toContain("\u001b");
+      if (failureStage === "throw")
+        expect(outcome.stderr).toContain("Synthetic runner failure");
+      expect(JSON.parse(outcome.stdout).ok).toBe(false);
+      expect(outcome.stdout).not.toContain("Captured stdout");
+      expect(authors).toBe(failureStage === "revision" ? 2 : 1);
+      expect(reviews).toBe(
+        failureStage === "review" || failureStage === "revision" ? 1 : 0,
+      );
+      expect(
+        commands.some(
+          ([command, ...args]) =>
+            command === "gh" ||
+            args.includes("commit") ||
+            args.includes("push"),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  test.each([false, true])(
+    "preserves malformed saved-finding output (revision: %p)",
+    async (revision) => {
+      const result = resultWithFindings(["high"]);
+      const report = "Malformed author report: synthetic-api-key-value";
+      let authors = 0;
+      let reviews = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan", "--review-minimality", "--json"],
+        {
+          result,
+          onWorkbench: () => savedScan(result, "scan"),
+          onCodex: (args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "revise",
+                  findings: ["Add the focused check."],
+                }),
+              );
+            } else if (++authors === 1 && revision)
+              completePatches(args, output);
+            else output!.stdout.write(report);
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(report);
+      expect(JSON.parse(outcome.stdout).patches[0].status).toBe("failed");
+      expect(reviews).toBe(revision ? 1 : 0);
+    },
+  );
+
+  test.each([false, true])(
+    "preserves the author report when subject inspection fails (revision: %p)",
+    async (revision) => {
+      const report = "Author report: synthetic-api-key-value";
+      let authors = 0;
+      let reviews = 0;
+      const commands: string[][] = [];
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          onRepositoryCommand: (command, args) => {
+            commands.push([command, ...args]);
+            if (args.includes("read-tree") && authors >= (revision ? 2 : 1))
+              throw new Error("Synthetic snapshot failure");
+            return args.includes("--name-only") ? "app.ts\0" : "";
+          },
+          onCodex: (_args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "revise",
+                  findings: ["Add the focused check."],
+                }),
+              );
+            } else {
+              authors += 1;
+              output!.stdout.write(
+                authors === 1
+                  ? report
+                  : JSON.stringify({ status: "verified", report }),
+              );
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(report);
+      expect(outcome.stderr).toContain("Synthetic snapshot failure");
+      expect(JSON.parse(outcome.stdout).ok).toBe(false);
+      expect(reviews).toBe(revision ? 1 : 0);
+      expect(
+        commands.some(
+          ([command, ...args]) =>
+            command === "gh" ||
+            args.includes("commit") ||
+            args.includes("push"),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  test("rejects optional patch reviews without an explicit patch request", async () => {
+    for (const flag of ["--review-minimality", "--review-style"]) {
+      let started = false;
+      const outcome = await runWorkflow(["scan", flag], {
+        onCodex: () => {
+          started = true;
+          return 0;
+        },
+      });
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("Patch review options require --patch");
+      expect(started).toBe(false);
     }
   });
 });
