@@ -2,7 +2,6 @@ import { codexWithRun } from "./support/codex.js";
 import { createCliTest } from "./support/cli-run.js";
 import { gitText, nodeCommand } from "./support/shell.js";
 import { resolving } from "./support/promises.js";
-import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
@@ -53,6 +52,7 @@ import {
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting, throwing } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } =
@@ -1015,6 +1015,33 @@ test("component inventory reports broken Git configuration without walking ignor
   expect(planned).toBe(false);
 });
 
+test("component inventory preserves non-ASCII Git failure diagnostics", async () => {
+  const paths = await fixture();
+  const name = "git-日本語-😀";
+  const metadata = join(paths.root, name);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "init",
+    "-q",
+    "--separate-git-dir",
+    metadata,
+  ]);
+  execFileSync("git", [
+    "--git-dir",
+    metadata,
+    "config",
+    "core.worktree",
+    paths.repository,
+  ]);
+  await writeFile(join(metadata, "index"), "broken index");
+  const response = mock(() => ({ components: [components[0]!] }));
+  await expect(
+    planComponents(paths.repository, { codex: fakeCodex(response) }),
+  ).rejects.toThrow(name);
+  expect(response).not.toHaveBeenCalled();
+});
+
 test("plans from a Git inventory without tools or ignored files", async () => {
   const paths = await fixture();
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);
@@ -1120,7 +1147,7 @@ test("plans Unicode files when directory entry types are unknown", async () => {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts", "résumé/🙂.ts"];
-  for (const path of [...paths, "excluded/.git/ignored.ts"]) {
+  for (const path of [...paths, "nested/.git/ignored.ts"]) {
     await mkdir(dirname(join(repository, path)), { recursive: true });
     await writeFile(join(repository, path), "export {};\n");
   }
