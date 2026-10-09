@@ -151,6 +151,7 @@ import {
   AuthenticationRequiredError,
   ConfigurationError,
   InvalidTargetError,
+  IncompleteScanError,
   LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -9148,20 +9149,22 @@ function scanFailureMessage(
       "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
     );
   }
+  const detail =
+    error instanceof IncompleteScanError ? `${diagnosticValue(error)}\n` : "";
   switch (classification) {
     case "unauthorized":
-      return authenticationFailureMessage(authentication);
+      return detail + authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
-        return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
+        return `${detail}The configured Codex provider denied access. Check the command credentials and provider permissions.`;
       }
       return authentication?.method === "api_key"
-        ? `The API key from ${authentication.source} cannot access the configured model. ` +
+        ? `${detail}The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
-        : "The stored ChatGPT credentials cannot access the configured model. " +
+        : `${detail}The stored ChatGPT credentials cannot access the configured model. ` +
             "Use an account or API key with model access.";
     case "rate_limited":
-      return "The configured account reached its rate limit. Wait and retry.";
+      return `${detail}The configured account reached its rate limit. Wait and retry.`;
     case "network_error":
     case "timeout":
     case "unknown":

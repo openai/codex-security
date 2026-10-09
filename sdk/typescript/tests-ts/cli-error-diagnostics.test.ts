@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { readCodexHomeConfig } from "../src/auth.js";
 import { main } from "../src/cli.js";
+import { IncompleteScanError } from "../src/errors.js";
 import { parseImportedFindings } from "../src/findings-import.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { dependencies } from "./cli-fixtures.js";
@@ -104,6 +105,61 @@ for (const scenario of [
     expect(failure.cause).toBe(cause);
   });
 }
+
+test.each([
+  {
+    label: "filesystem",
+    diagnostic:
+      "EACCES: permission denied, open /synthetic/scan/artifacts/candidates.jsonl",
+    advice: "cannot access the configured model",
+  },
+  {
+    label: "authentication",
+    diagnostic: "401 synthetic unauthorized request",
+    advice: "Authentication failed",
+  },
+  {
+    label: "authorization",
+    diagnostic: "403 synthetic model access denied",
+    advice: "cannot access the configured model",
+  },
+  {
+    label: "rate limit",
+    diagnostic: "429 synthetic quota exceeded",
+    advice: "reached its rate limit",
+  },
+])(
+  "retains incomplete worker $label diagnostics alongside advice",
+  async ({ diagnostic, advice }) => {
+    const cause = new Error("Synthetic worker cause");
+    const failure = new IncompleteScanError(`${diagnostic}; ${detail}`, {
+      cause,
+    });
+    for (const json of [false, true]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies({
+        onRun: () => {
+          throw failure;
+        },
+      });
+      expect(
+        await runCli(["scan", ".", ...(json ? ["--json"] : [])], deps),
+      ).toBe(2);
+      const expected = `${diagnostic}; ${escapedSingleLineDetail}`;
+      expect(stderr.text()).toContain(expected);
+      expect(stderr.text()).toContain(advice);
+      expect(stderr.text()).not.toContain(controls);
+      if (json) {
+        const output = JSON.parse(stdout.text());
+        expect(output).toMatchObject({ status: "failed", code: "SCAN_FAILED" });
+        expect(output.message).toContain(expected);
+        expect(output.message).toContain(advice);
+      } else expect(stdout.text()).toBe("");
+      expect(failure.message).toBe(`${diagnostic}; ${detail}`);
+      expect(failure.cause).toBe(cause);
+    }
+  },
+);
 
 test("successful raw exports preserve terminal controls as artifact bytes", async () => {
   const deps = dependencies();
