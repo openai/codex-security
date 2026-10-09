@@ -18,7 +18,8 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
-import type { ScanOptions } from "../src/api.js";
+import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
+import type { JsonObject } from "../src/config.js";
 import { runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { workflowDigest } from "../src/finding-workflow.js";
@@ -43,7 +44,7 @@ async function interruptedScan(
     | "auth"
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
-  > = {},
+  > & { config?: JsonObject } = {},
   resolvedDeep = false,
   modelProvider?: string,
 ) {
@@ -912,7 +913,24 @@ test.each([
 ] as const)(
   "resume restores saved launch settings with %s auth (bulk: %p)",
   async (auth, bulk) => {
+    const profile =
+      auth === "chatgpt"
+        ? "review.v2"
+        : auth === "api-key"
+          ? "review mode"
+          : "分析";
+    const selected = {
+      model: `synthetic-${auth ?? "auto"}-model`,
+      model_reasoning_effort: "high",
+      features: { goals: false },
+    };
     const settings = {
+      config: scanPreflightCodexConfig({
+        model: "synthetic-root-model",
+        model_reasoning_effort: "low",
+        profile,
+        profiles: { [profile]: selected },
+      }),
       auth,
       cyberAccessProgram: "daybreak_blue" as const,
       safetyIdentifier:
@@ -938,6 +956,7 @@ test.each([
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
       resumeDependencies(f, (options) => {
+        expect(options.config).toMatchObject(selected);
         expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
           settings.safetyIdentifier,
         );

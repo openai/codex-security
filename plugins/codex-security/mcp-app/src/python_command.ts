@@ -22,6 +22,12 @@ const MISSING_PYTHON_HELPER_MESSAGE =
 export async function resolvePythonCommand(
   options: ResolvePythonCommandOptions = {},
 ): Promise<string> {
+  if (
+    options.configuredPython === undefined &&
+    process.env.CODEX_SECURITY_PYTHON_COMMAND
+  ) {
+    return process.env.CODEX_SECURITY_PYTHON_COMMAND;
+  }
   const configuredPython = options.configuredPython ?? process.env.PYTHON;
   if (configuredPython?.trim()) {
     return configuredPython.trim();

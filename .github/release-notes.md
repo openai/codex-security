@@ -176,6 +176,7 @@
 - simplify workbench history and usage readers ([#1495](https://github.com/openai/codex-security/pull/1495))
 - consolidate GitHub release publication ([#1474](https://github.com/openai/codex-security/pull/1474))
 - simplify scan configuration processing ([#1459](https://github.com/openai/codex-security/pull/1459))
+- preserve worker settings and executable selection ([#1501](https://github.com/openai/codex-security/pull/1501))
 
 <!-- release-section: highlights:end -->
 
