@@ -107,10 +107,9 @@ export async function recordPublishedIssues(
   }
 
   return created.map((value, index) => {
-    const expectedIssue = ordered[index];
+    const expectedIssue = ordered[index]!;
     const issue = readPublicationRecord(value);
     if (
-      expectedIssue === undefined ||
       issue.findingId !== expectedIssue.findingId ||
       issue.occurrenceId !== expectedIssue.occurrenceId ||
       issue.issueIdentifier !== expectedIssue.issueIdentifier ||

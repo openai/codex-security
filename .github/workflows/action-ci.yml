@@ -1,16 +1,12 @@
 name: Action CI
 
 on:
-  push:
+  push: &action-changes
     paths:
       - action.yml
       - github-action/**
       - .github/workflows/action-ci.yml
-  pull_request:
-    paths:
-      - action.yml
-      - github-action/**
-      - .github/workflows/action-ci.yml
+  pull_request: *action-changes
   workflow_dispatch:
 
 permissions:
