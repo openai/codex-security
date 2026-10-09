@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -131,6 +138,8 @@ assert.equal(overrideProbeCount, 0);
 const executableFixtureRoot = await mkdtemp(
   path.join(tmpdir(), "codex-security-python-command-"),
 );
+const previousPython = process.env.PYTHON;
+const previousResolvedPython = process.env.CODEX_SECURITY_PYTHON_COMMAND;
 try {
   const directoryCandidate = path.join(executableFixtureRoot, "directory");
   const fileCandidate = path.join(executableFixtureRoot, "python3");
@@ -140,6 +149,19 @@ try {
     await isUsablePythonExecutable(directoryCandidate, "linux"),
     false,
   );
+  const resolvedPython =
+    process.platform === "win32" ? process.execPath : `${fileCandidate} `;
+  if (process.platform !== "win32")
+    await symlink(process.execPath, resolvedPython);
+  process.env.PYTHON = ` ${fileCandidate} `;
+  process.env.CODEX_SECURITY_PYTHON_COMMAND = resolvedPython;
+  assert.equal(await resolvePythonCommand(), resolvedPython);
+  assert.equal(
+    await resolvePythonCommand({ configuredPython: "  /custom/python  " }),
+    "/custom/python",
+  );
+  delete process.env.CODEX_SECURITY_PYTHON_COMMAND;
+  assert.equal(await resolvePythonCommand(), fileCandidate);
   if (process.platform !== "win32") {
     assert.equal(await isUsablePythonExecutable(fileCandidate, "linux"), false);
     await chmod(fileCandidate, 0o755);
@@ -148,6 +170,11 @@ try {
   }
   assert.equal(await isUsablePythonExecutable(fileCandidate, "win32"), true);
 } finally {
+  if (previousPython === undefined) delete process.env.PYTHON;
+  else process.env.PYTHON = previousPython;
+  if (previousResolvedPython === undefined)
+    delete process.env.CODEX_SECURITY_PYTHON_COMMAND;
+  else process.env.CODEX_SECURITY_PYTHON_COMMAND = previousResolvedPython;
   await rm(executableFixtureRoot, { force: true, recursive: true });
 }
 
