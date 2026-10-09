@@ -154,6 +154,25 @@ test.each([
     advice: "cannot access the configured model",
   },
   {
+    label: "wrapped filesystem",
+    diagnostic:
+      "EACCES: permission denied, mkdtemp /synthetic/codex-output-schema",
+    causeCode: "EACCES",
+    advice: undefined,
+  },
+  {
+    label: "native refresh recovery",
+    diagnostic:
+      "Synthetic context: your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again. Synthetic artifact recovery failed.",
+    advice: "Please sign in again.",
+  },
+  {
+    label: "expired native refresh",
+    diagnostic:
+      "Synthetic context: your access token could not be refreshed because your refresh token has expired. Please log out and sign in again. Synthetic artifact recovery failed.",
+    advice: "stored ChatGPT sign-in could not be refreshed",
+  },
+  {
     label: "authentication",
     diagnostic: "401 synthetic unauthorized request",
     advice: "Authentication failed",
@@ -169,9 +188,11 @@ test.each([
     advice: "reached its rate limit",
   },
 ])(
-  "retains incomplete worker $label diagnostics alongside advice",
-  async ({ diagnostic, advice }) => {
-    const cause = new Error("Synthetic worker cause");
+  "retains incomplete worker $label diagnostics",
+  async ({ diagnostic, advice, ...scenario }) => {
+    const cause = Object.assign(new Error("Synthetic worker cause"), {
+      code: "causeCode" in scenario ? scenario.causeCode : undefined,
+    });
     const failure = new IncompleteScanError(`${diagnostic}; ${detail}`, {
       cause,
     });
@@ -187,13 +208,27 @@ test.each([
       ).toBe(2);
       const expected = `${diagnostic}; ${escapedSingleLineDetail}`;
       expect(stderr.text()).toContain(expected);
-      expect(stderr.text()).toContain(advice);
+      if (advice === undefined) {
+        expect(stderr.text()).not.toContain(
+          "cannot access the configured model",
+        );
+      } else {
+        expect(stderr.text()).toContain(advice);
+        expect(stderr.text().split(advice)).toHaveLength(2);
+      }
       expect(stderr.text()).not.toContain(controls);
       if (json) {
         const output = JSON.parse(stdout.text());
         expect(output).toMatchObject({ status: "failed", code: "SCAN_FAILED" });
         expect(output.message).toContain(expected);
-        expect(output.message).toContain(advice);
+        if (advice === undefined) {
+          expect(output.message).not.toContain(
+            "cannot access the configured model",
+          );
+        } else {
+          expect(output.message).toContain(advice);
+          expect(output.message.split(advice)).toHaveLength(2);
+        }
       } else expect(stdout.text()).toBe("");
       expect(failure.message).toBe(`${diagnostic}; ${detail}`);
       expect(failure.cause).toBe(cause);
