@@ -20,6 +20,8 @@ inputs:
   model:
     description: Model with access through your API key. Cost limits require CLI pricing support for the model.
     default: gpt-5.6-sol
+  cyber-access-program:
+    description: 'Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately.'
   effort:
     description: 'Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).'
     default: xhigh

@@ -9,7 +9,7 @@ import { importSource } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 
 const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
-  new URL("../src/deep-scan/store.ts", import.meta.url).pathname,
+  join(import.meta.dirname, "../src/deep-scan/store.ts"),
 );
 
 await testBeginProtocolAndParsing();
