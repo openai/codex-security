@@ -2822,7 +2822,6 @@ describe("scan and patch workflow", () => {
         "Synthetic security issue",
         "--review-minimality",
         "--review-style",
-        "--json",
       ],
       {
         onRepositoryCommand: () => "",
@@ -2839,6 +2838,7 @@ describe("scan and patch workflow", () => {
     );
     expect(outcome.exitCode).toBe(2);
     expect(outcome.stderr).toContain("No patch was applied");
+    expect(outcome.stdout).toContain("The existing code is already safe.");
     expect(invocations).toBe(1);
   });
 
@@ -3020,8 +3020,8 @@ describe("scan and patch workflow", () => {
     },
   );
 
-  test.each(["blocked", "failed"] as const)(
-    "preserves the reason for a %s author revision",
+  test.each(["blocked", "failed", "no_change"] as const)(
+    "preserves the explanation for a %s author revision",
     async (status) => {
       const result = resultWithFindings(["high"]);
       const reason =
@@ -3048,7 +3048,14 @@ describe("scan and patch workflow", () => {
               output!.stdout.write(
                 JSON.stringify({
                   patches: [
-                    { occurrenceId: "occ_1", status, files: [], reason },
+                    {
+                      occurrenceId: "occ_1",
+                      status,
+                      files: [],
+                      ...(status === "no_change"
+                        ? { verification: reason }
+                        : { reason }),
+                    },
                   ],
                 }),
               );
@@ -3064,6 +3071,41 @@ describe("scan and patch workflow", () => {
       expect(outcome.stderr).toContain(reason);
     },
   );
+
+  test("preserves direct-input diagnostics when an author revision reverts its edits", async () => {
+    const reason =
+      "Regression failed: synthetic-api-key-value\nThe original failure still reproduces.";
+    let authors = 0;
+    let reviews = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic security issue", "--review-minimality", "--json"],
+      {
+        onRepositoryCommand: (_command, args) =>
+          args.includes("--name-only") && authors === 1 ? "app.ts\0" : "",
+        onCodex: (_args, output) => {
+          if (output!.appServer!.sandbox === "read-only") {
+            reviews += 1;
+            output!.stdout.write(
+              JSON.stringify({
+                status: "revise",
+                findings: ["Add the regression test."],
+              }),
+            );
+          } else {
+            authors += 1;
+            output!.stdout.write(
+              authors === 1 ? "Initial verified patch." : reason,
+            );
+          }
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode).toBe(2);
+    expect(authors).toBe(2);
+    expect(reviews).toBe(1);
+    expect(outcome.stderr).toContain(reason);
+  });
 
   test("rejects optional patch reviews without an explicit patch request", async () => {
     for (const flag of ["--review-minimality", "--review-style"]) {

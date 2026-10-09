@@ -7541,7 +7541,10 @@ async function parsePatchReviewSubject(
     if (!patches.some(({ status }) => status === "verified"))
       return {
         status: "empty",
-        reasons: patches.flatMap(({ reason }) => (reason ? [reason] : [])),
+        reasons: patches.flatMap(({ reason, verification }) => {
+          const explanation = reason ?? verification;
+          return explanation ? [explanation] : [];
+        }),
       };
   }
 
@@ -7576,7 +7579,7 @@ async function parsePatchReviewSubject(
     );
   }
   if (reported === undefined && context.paths.length === 0)
-    return { status: "empty", reasons: [] };
+    return { status: "empty", reasons: [response] };
   if (reported !== undefined) {
     if (context.paths.length === 0) return { status: "invalid" };
     response = JSON.stringify({
