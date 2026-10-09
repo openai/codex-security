@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   mkdtemp,
   readFile,
@@ -679,6 +680,125 @@ describe("CLI MCP command processes", () => {
           } catch {}
         }
         await operation;
+      }
+    },
+  );
+
+  test
+    .skipIf(process.platform === "win32")
+    .each(["cancel-before-exit", "cancel-after-exit", "flush-after-exit"])(
+    "handles inherited Node command pipes during %s",
+    async (mode) => {
+      const options = await script("");
+      const node = nodeCommand().command;
+      const fixture = join(options.cwd, "stdio.mjs");
+      await symlink(
+        join(import.meta.dir, "../node_modules"),
+        join(options.cwd, "node_modules"),
+        "dir",
+      );
+      await build({
+        entryPoints: [join(import.meta.dir, "fixtures/mcp-command-stdio.mjs")],
+        outfile: fixture,
+        bundle: true,
+        platform: "node",
+        format: "esm",
+        packages: "external",
+        define: {
+          "import.meta.url": JSON.stringify(
+            new URL("../src/version.ts", import.meta.url).href,
+          ),
+        },
+      });
+      const descendant = `
+      process.on("SIGTERM", () => {});
+      process.on("SIGINT", () => {});
+      process.on("SIGUSR1", () => process.stdout.write("x".repeat(1024 * 1024), () => process.exit(0)));
+      process.stderr.write(JSON.stringify({ descendant: process.pid }) + "\\n");
+      setInterval(() => {}, 1000);
+    `;
+      await writeFile(
+        join(options.cwd, "codex.mjs"),
+        `#!${node}
+      import { spawn } from "node:child_process";
+      process.stderr.write(JSON.stringify({ codex: process.pid }) + "\\n");
+      const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: "inherit", env: {} });
+      child.unref();
+      if (${JSON.stringify(mode)} === "cancel-before-exit") setInterval(() => {}, 1000);
+    `,
+        { mode: 0o700 },
+      );
+      const child = spawn(node, [fixture, "runner"], {
+        cwd: options.cwd,
+        env: options.environment,
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+      });
+      const closed = once(child, "close");
+      const ready = Promise.withResolvers<void>();
+      const completed = Promise.withResolvers<{
+        exitCode: number;
+        output?: string;
+        error?: string;
+      }>();
+      const pids: Record<string, number> = {};
+      let progress = "";
+      child.stderr!.on("data", (chunk) => {
+        progress += chunk;
+      });
+      child.on(
+        "message",
+        (message: {
+          chunk?: string;
+          result?: { exitCode: number; output?: string; error?: string };
+        }) => {
+          if (message.result) completed.resolve(message.result);
+          if (message.chunk) {
+            progress += message.chunk;
+            for (const [, name, pid] of progress.matchAll(
+              /"(cli|codex|descendant)":(\d+)/gu,
+            ))
+              pids[name!] = Number(pid);
+            if (Object.keys(pids).length === 3) ready.resolve();
+          }
+        },
+      );
+      child.once("exit", () => {
+        const error = new Error(
+          `Fixture exited before completion: ${progress}`,
+        );
+        ready.reject(error);
+        completed.reject(error);
+      });
+      try {
+        await ready.promise;
+        if (mode !== "cancel-before-exit")
+          expect(await processHasExited(pids["cli"]!)).toBe(true);
+        if (mode === "flush-after-exit")
+          process.kill(pids["descendant"]!, "SIGUSR1");
+        else child.send("cancel");
+        const result = await completed.promise;
+        if (mode === "flush-after-exit") {
+          expect(result.exitCode).toBe(0);
+          expect(result.output).toBe("x".repeat(1024 * 1024));
+        } else {
+          expect(result).toMatchObject({
+            exitCode: 130,
+            error: "Command cancelled.",
+          });
+        }
+        expect((await closed)[0]).toBe(0);
+        for (const pid of Object.values(pids))
+          expect(await processHasExited(pid)).toBe(true);
+      } finally {
+        child.kill("SIGKILL");
+        for (const pid of Object.values(pids)) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+        await closed;
       }
     },
   );

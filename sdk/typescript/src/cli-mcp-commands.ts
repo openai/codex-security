@@ -310,7 +310,12 @@ export async function runCliMcpCommand(
       cancelled = true;
       cancellationSignal =
         options.signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM";
-      termination = terminateProcess(child, cancellationSignal);
+      termination = terminateProcess(
+        child,
+        child.exitCode !== null || child.signalCode !== null
+          ? "SIGKILL"
+          : cancellationSignal,
+      );
       // The CLI owns its subprocess cleanup, including detached workers and
       // their termination grace periods. Wait for that cleanup before closing.
     };
@@ -353,11 +358,15 @@ export async function runCliMcpCommand(
     child.once("error", (error) => {
       startError = error;
     });
+    child.once("exit", () => {
+      // Descendants can retain the pipes after the CLI finishes its cleanup.
+      // Reap them now so `close` can finish draining the command's output.
+      if (cancelled && process.platform !== "win32") {
+        terminateProcessGroup(child, "SIGKILL");
+      }
+    });
     child.once("close", (code, signal) => {
       void (termination ?? Promise.resolve()).then(() => {
-        if (cancelled && process.platform !== "win32") {
-          terminateProcessGroup(child, "SIGKILL");
-        }
         options.signal?.removeEventListener("abort", abort);
         options.forceSignal?.removeEventListener("abort", force);
         const result = parseCliMcpResult(
