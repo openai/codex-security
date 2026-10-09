@@ -7806,10 +7806,14 @@ async function runSkill(
           ...(options.reviewStyle ? ["local-coding-style" as const] : []),
         ]
       : [];
+  const directory = options.directory ?? dependencies.currentDirectory();
+  let inputContents: Promise<string[]> | undefined;
+  const resolveInputs = () =>
+    (inputContents ??= readSkillInputContents(inputs, directory));
   const run = (output: Writable, stageOptions: SkillRunOptions = options) =>
     runSkillStage(
       skill,
-      inputs,
+      resolveInputs,
       configuration,
       output,
       stderr,
@@ -7818,7 +7822,6 @@ async function runSkill(
     );
   if (stages.length === 0) return run(stdout);
 
-  const directory = options.directory ?? dependencies.currentDirectory();
   const base =
     options.patchBase ?? (await snapshotPatchState(directory, dependencies));
   let snapshotDirectory: string | undefined;
@@ -7861,68 +7864,11 @@ async function runSkill(
   }
 }
 
-async function runSkillStage(
-  skill: "validation" | "fix-finding" | "verify-fix" | "assess-patch-risk",
+async function readSkillInputContents(
   inputs: readonly (string | ImportedIssue)[],
-  configuration: SkillConfiguration,
-  stdout: Writable,
-  stderr: Writable,
-  dependencies: CliDependencies,
-  options: SkillRunOptions = {},
-): Promise<number> {
-  const { codex, model: selectedModel, effort } = configuration;
-  const overrides = parseCodexOverrides(codex, selectedModel, effort);
-  if (
-    Object.entries(overrides).some(
-      ([key, value]) =>
-        key !== "model" &&
-        key !== "model_reasoning_effort" &&
-        key !== "model_provider" &&
-        key !== "model_providers" &&
-        !(
-          key === "analytics" &&
-          isJsonObject(value) &&
-          Object.keys(value).every((key) => key === "enabled")
-        ),
-    )
-  ) {
-    throw new CodexSecurityError(
-      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
-    );
-  }
-  if (options.serviceTier !== undefined)
-    overrides["service_tier"] = options.serviceTier;
-  const { model, reasoningEffort } = scanModelConfiguration(
-    await mergedCodexConfig({ codexOverrides: overrides }),
-  );
-  const provider =
-    options.provider ?? (overrides["model_provider"] as string | undefined);
-  const providerConfiguration =
-    options.providerConfiguration ??
-    (provider === undefined
-      ? undefined
-      : ((
-          overrides["model_providers"] as Record<string, JsonObject> | undefined
-        )?.[provider] ??
-        (isExternalModelProvider(provider)
-          ? EXTERNAL_CODEX_PROVIDERS[provider]
-          : undefined)));
-  const effectiveOverrides = resolveCommandAuthConfig(
-    mergeCodexOverrides(
-      overrides,
-      provider === undefined
-        ? {}
-        : {
-            model_provider: provider,
-            ...(providerConfiguration === undefined
-              ? {}
-              : { model_providers: { [provider]: providerConfiguration } }),
-          },
-    ),
-    configuredCodexHome(options.environment ?? dependencies.environment),
-  );
-  const directory = options.directory ?? dependencies.currentDirectory();
-  const contents: Array<string | Finding> = [...(options.findings ?? [])];
+  directory: string,
+): Promise<string[]> {
+  const contents: string[] = [];
   for (const input of inputs) {
     if (typeof input !== "string") {
       contents.push(
@@ -7998,6 +7944,74 @@ async function runSkillStage(
     }
     contents.push(contentsOrLiteral);
   }
+  return contents;
+}
+
+async function runSkillStage(
+  skill: "validation" | "fix-finding" | "verify-fix" | "assess-patch-risk",
+  resolveInputs: () => Promise<readonly string[]>,
+  configuration: SkillConfiguration,
+  stdout: Writable,
+  stderr: Writable,
+  dependencies: CliDependencies,
+  options: SkillRunOptions = {},
+): Promise<number> {
+  const { codex, model: selectedModel, effort } = configuration;
+  const overrides = parseCodexOverrides(codex, selectedModel, effort);
+  if (
+    Object.entries(overrides).some(
+      ([key, value]) =>
+        key !== "model" &&
+        key !== "model_reasoning_effort" &&
+        key !== "model_provider" &&
+        key !== "model_providers" &&
+        !(
+          key === "analytics" &&
+          isJsonObject(value) &&
+          Object.keys(value).every((key) => key === "enabled")
+        ),
+    )
+  ) {
+    throw new CodexSecurityError(
+      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
+    );
+  }
+  if (options.serviceTier !== undefined)
+    overrides["service_tier"] = options.serviceTier;
+  const { model, reasoningEffort } = scanModelConfiguration(
+    await mergedCodexConfig({ codexOverrides: overrides }),
+  );
+  const provider =
+    options.provider ?? (overrides["model_provider"] as string | undefined);
+  const providerConfiguration =
+    options.providerConfiguration ??
+    (provider === undefined
+      ? undefined
+      : ((
+          overrides["model_providers"] as Record<string, JsonObject> | undefined
+        )?.[provider] ??
+        (isExternalModelProvider(provider)
+          ? EXTERNAL_CODEX_PROVIDERS[provider]
+          : undefined)));
+  const effectiveOverrides = resolveCommandAuthConfig(
+    mergeCodexOverrides(
+      overrides,
+      provider === undefined
+        ? {}
+        : {
+            model_provider: provider,
+            ...(providerConfiguration === undefined
+              ? {}
+              : { model_providers: { [provider]: providerConfiguration } }),
+          },
+    ),
+    configuredCodexHome(options.environment ?? dependencies.environment),
+  );
+  const directory = options.directory ?? dependencies.currentDirectory();
+  const contents: Array<string | Finding> = [
+    ...(options.findings ?? []),
+    ...(await resolveInputs()),
+  ];
   const plugin = await bundledPluginRoot();
   const pluginVersion = await pluginMetadata(plugin).then(
     (metadata) => metadata.version,

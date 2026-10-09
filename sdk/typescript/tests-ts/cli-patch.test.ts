@@ -3107,6 +3107,70 @@ describe("scan and patch workflow", () => {
     expect(outcome.stderr).toContain(reason);
   });
 
+  test.each(["edit", "delete"] as const)(
+    "keeps original issue-file contents across author, review, and revision after %s",
+    async (operation) => {
+      const repository = await temporaryDirectory(
+        "codex-security-review-input-",
+      );
+      const input = join(repository, "finding.md");
+      const original = `Original synthetic finding for ${operation}.`;
+      const stages: string[] = [];
+      let authors = 0;
+      let reviews = 0;
+      try {
+        await writeFile(input, original);
+        await writeFile(join(repository, "app.ts"), "unsafe\n");
+        const outcome = await runWorkflow(
+          ["patch", "finding.md", "--review-minimality", "--json"],
+          {
+            currentDirectory: repository,
+            onRepositoryCommand: () => {
+              throw new Error("not a git repository");
+            },
+            onCodex: async (_args, output) => {
+              const { prompt, sandbox } = output!.appServer!;
+              expect(JSON.parse(prompt.split("\n").at(-1)!)).toEqual([
+                original,
+              ]);
+              if (sandbox === "read-only") {
+                stages.push("review");
+                reviews += 1;
+                output!.stdout.write(
+                  JSON.stringify(
+                    reviews === 1
+                      ? {
+                          status: "revise",
+                          findings: ["Add the focused regression test."],
+                        }
+                      : { status: "approved", findings: [] },
+                  ),
+                );
+              } else {
+                stages.push("author");
+                authors += 1;
+                if (authors === 1) {
+                  await writeFile(join(repository, "app.ts"), "safe\n");
+                  if (operation === "edit")
+                    await writeFile(input, "Modified finding.");
+                  else await rm(input);
+                } else {
+                  await writeFile(join(repository, "test.ts"), "regression\n");
+                }
+                output!.stdout.write("Verified patch.");
+              }
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(stages).toEqual(["author", "review", "author", "review"]);
+      } finally {
+        await rm(repository, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("rejects optional patch reviews without an explicit patch request", async () => {
     for (const flag of ["--review-minimality", "--review-style"]) {
       let started = false;
