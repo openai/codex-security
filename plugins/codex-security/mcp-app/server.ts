@@ -2188,14 +2188,24 @@ function logDeepScanEvent(event: {
   );
 }
 
+interface WorkbenchOptions {
+  isolatedPython?: boolean;
+}
+
 export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
+  options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbenchWithStateSelection(pythonCommand, args, input);
+    return await executeWorkbenchWithStateSelection(
+      pythonCommand,
+      args,
+      input,
+      options,
+    );
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -2213,13 +2223,26 @@ export async function runWorkbench(
 async function executeWorkbenchWithStateSelection(
   pythonCommand: string,
   args: string[],
-  input?: string | Buffer,
+  input: string | Buffer | undefined,
+  options: WorkbenchOptions,
 ): Promise<JsonObject> {
   if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
+    return await executeWorkbench(
+      pythonCommand,
+      args,
+      undefined,
+      input,
+      options,
+    );
   }
   if (CONFIGURED_WORKBENCH_STATE_DIR) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
+    return await executeWorkbench(
+      pythonCommand,
+      args,
+      undefined,
+      input,
+      options,
+    );
   }
   if (fallbackWorkbenchStateDir) {
     return await executeWorkbench(
@@ -2227,10 +2250,17 @@ async function executeWorkbenchWithStateSelection(
       args,
       await fallbackWorkbenchStateDir,
       input,
+      options,
     );
   }
   if (persistentWorkbenchStateSucceeded) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
+    return await executeWorkbench(
+      pythonCommand,
+      args,
+      undefined,
+      input,
+      options,
+    );
   }
   return await workbenchStateSelectionLock.run(async () => {
     if (fallbackWorkbenchStateDir) {
@@ -2239,10 +2269,17 @@ async function executeWorkbenchWithStateSelection(
         args,
         await fallbackWorkbenchStateDir,
         input,
+        options,
       );
     }
     if (persistentWorkbenchStateSucceeded) {
-      return await executeWorkbench(pythonCommand, args, undefined, input);
+      return await executeWorkbench(
+        pythonCommand,
+        args,
+        undefined,
+        input,
+        options,
+      );
     }
     try {
       const result = await executeWorkbench(
@@ -2250,6 +2287,7 @@ async function executeWorkbenchWithStateSelection(
         args,
         undefined,
         input,
+        options,
       );
       persistentWorkbenchStateSucceeded = true;
       return result;
@@ -2273,6 +2311,7 @@ async function executeWorkbenchWithStateSelection(
         args,
         fallbackStateDir,
         input,
+        options,
       );
     }
   });
@@ -2283,6 +2322,7 @@ async function executeWorkbench(
   args: string[],
   stateDir?: string,
   input?: string | Buffer,
+  options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
   const timeout = [
     "begin-deep-scan",
@@ -2314,7 +2354,12 @@ async function executeWorkbench(
     : 30_000;
   const execution = execFileAsync(
     pythonCommand,
-    ["-I", "-X", "utf8", "-B", "-c", WORKBENCH_PYTHON, workbenchScriptPath()],
+    [
+      ...(options.isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      "-c",
+      WORKBENCH_PYTHON,
+      workbenchScriptPath(),
+    ],
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,

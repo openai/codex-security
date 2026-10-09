@@ -943,15 +943,9 @@ model_reasoning_summary = "none"
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.deepEqual(launch.args.slice(0, 5), [
-            "-I",
-            "-X",
-            "utf8",
-            "-B",
-            "-c",
-          ]);
+          assert.equal(launch.args[0], "-c");
           assert.equal(launch.args.at(-1), workbenchPath);
-          assert.equal(launch.args.length, 7);
+          assert.equal(launch.args.length, 3);
           assert.equal(launch.cwd, pluginRoot);
         }
       }
@@ -1087,7 +1081,20 @@ async function testCliDeepScanEngine({
   const completed = await register("cli-engine-completed");
   const startIndex = (await readLogLines(environment.FAKE_CODEX_START_LOG!))
     .length;
+  const helperStartIndex = (
+    await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
+  ).length;
   const result = await launch(completed.scanId);
+  const helperLaunches = (
+    await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
+  ).slice(helperStartIndex);
+  assert.ok(helperLaunches.length > 0);
+  for (const launch of helperLaunches) {
+    assert.deepEqual(launch.args.slice(0, 5), ["-I", "-X", "utf8", "-B", "-c"]);
+    assert.equal(launch.args.at(-1), workbenchPath);
+    assert.equal(launch.args.length, 7);
+    assert.equal(launch.cwd, pluginRoot);
+  }
   assert.deepEqual(JSON.parse(result.stdout), {
     scanId: completed.scanId,
     manifestPath: path.join(completed.scanDir, "scan-manifest.json"),

@@ -28,6 +28,7 @@ interface WorkbenchModule {
     args: string[],
     stateDir?: string,
     input?: string | Buffer,
+    options?: { isolatedPython?: boolean },
   ): Promise<Record<string, unknown>>;
 }
 const invocations: {
@@ -95,36 +96,116 @@ try {
 }
 
 const { executeWorkbench } = await loadWorkbenchProcess();
-await test("workbench ignores configured Python startup hooks and preserves its environment", async () => {
-  const root = await temporaryDirectory("workbench-python-startup-");
-  const hooks = path.join(root, "startup-hooks");
-  const marker = path.join(root, "startup-ran");
-  const python = process.env.PYTHON?.trim() || "python3";
-  const originalPythonPath = process.env.PYTHONPATH;
-  try {
-    await mkdir(hooks);
-    await writeFile(
-      path.join(hooks, "sitecustomize.py"),
-      `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("startup hook ran")\n`,
-    );
-    await promisify(execFile)(python, ["-c", "pass"], {
-      env: { ...process.env, PYTHONPATH: hooks },
-    });
-    assert.equal(await readFile(marker, "utf8"), "startup hook ran");
-    await rm(marker);
+async function userSitePython(): Promise<string> {
+  // A caller's virtualenv may intentionally disable user-site imports.
+  const { stdout } = await promisify(execFile)(
+    process.env.PYTHON?.trim() || "python3",
+    ["-I", "-X", "utf8", "-B", "-c", "import sys; print(sys._base_executable)"],
+  );
+  return stdout.trim();
+}
 
-    process.env.PYTHONPATH = hooks;
-    const result = await executeWorkbench(
-      python,
-      ["list-scans", "--limit", "1"],
-      path.join(root, "state"),
+async function fixtureWorkbench(root: string, source: string) {
+  const script = path.join(root, "workbench_db.py");
+  await writeFile(script, source);
+  const { executeWorkbench } = await loadWorkbenchProcess((source) =>
+    source.replace(
+      'return join(PLUGIN_ROOT, "scripts", "workbench_db.py");',
+      `return ${JSON.stringify(script)};`,
+    ),
+  );
+  return executeWorkbench as WorkbenchModule["executeWorkbench"];
+}
+
+for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
+  await test(`isolated workbench ignores ${variable} startup hooks and preserves its environment`, async () => {
+    const root = await temporaryDirectory("workbench-python-startup-");
+    const marker = path.join(root, "startup-ran");
+    const python = await userSitePython();
+    const original = process.env[variable];
+    try {
+      process.env[variable] = path.join(root, "startup-hooks");
+      const hooks =
+        variable === "PYTHONPATH"
+          ? process.env[variable]
+          : (
+              await promisify(execFile)(python, [
+                "-E",
+                "-X",
+                "utf8",
+                "-B",
+                "-c",
+                "import site; print(site.getusersitepackages())",
+              ])
+            ).stdout.trim();
+      await mkdir(hooks, { recursive: true });
+      await writeFile(
+        path.join(hooks, "sitecustomize.py"),
+        `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("startup hook ran")\n`,
+      );
+      await promisify(execFile)(python, ["-X", "utf8", "-B", "-c", "pass"]);
+      assert.equal(await readFile(marker, "utf8"), "startup hook ran");
+      await rm(marker);
+
+      const executeFixture = await fixtureWorkbench(
+        root,
+        'import json\ndef main():\n    print(json.dumps({"scans": []}))\n',
+      );
+      const result = await executeFixture(
+        python,
+        ["list-scans", "--limit", "1"],
+        path.join(root, "state"),
+        undefined,
+        { isolatedPython: true },
+      );
+      assert.deepEqual(result.scans, []);
+      await assert.rejects(stat(marker), { code: "ENOENT" });
+      assert.equal(process.env[variable], path.join(root, "startup-hooks"));
+    } finally {
+      if (original === undefined) delete process.env[variable];
+      else process.env[variable] = original;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+await test("workbench can import dependencies installed in the Python user site", async () => {
+  const root = await temporaryDirectory("workbench-python-user-site-");
+  const originalUserBase = process.env.PYTHONUSERBASE;
+  try {
+    const python = await userSitePython();
+    process.env.PYTHONUSERBASE = path.join(root, "user-base");
+    const { stdout: userSite } = await promisify(execFile)(python, [
+      "-E",
+      "-X",
+      "utf8",
+      "-B",
+      "-c",
+      "import site; print(site.getusersitepackages())",
+    ]);
+    await mkdir(userSite.trim(), { recursive: true });
+    await writeFile(
+      path.join(userSite.trim(), "synthetic_dependency.py"),
+      'VALUE = "user-site dependency"\n',
     );
-    assert.deepEqual(result.scans, []);
-    await assert.rejects(stat(marker), { code: "ENOENT" });
-    assert.equal(process.env.PYTHONPATH, hooks);
+    const { stdout: imported } = await promisify(execFile)(python, [
+      "-E",
+      "-X",
+      "utf8",
+      "-B",
+      "-c",
+      "from synthetic_dependency import VALUE; print(VALUE)",
+    ]);
+    assert.equal(imported.trim(), "user-site dependency");
+    const executeFixture = await fixtureWorkbench(
+      root,
+      'import json\nfrom synthetic_dependency import VALUE\ndef main():\n    print(json.dumps({"dependency": VALUE}))\n',
+    );
+    assert.deepEqual(await executeFixture(python, ["list-scans"]), {
+      dependency: "user-site dependency",
+    });
   } finally {
-    if (originalPythonPath === undefined) delete process.env.PYTHONPATH;
-    else process.env.PYTHONPATH = originalPythonPath;
+    if (originalUserBase === undefined) delete process.env.PYTHONUSERBASE;
+    else process.env.PYTHONUSERBASE = originalUserBase;
     await rm(root, { recursive: true, force: true });
   }
 });
