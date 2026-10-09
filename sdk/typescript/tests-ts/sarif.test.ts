@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { runNodePython } from "./support/python-probe.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -20,11 +20,9 @@ function finding(overrides: Partial<Finding> = {}): Finding {
 function buildSarif(findings: Finding[]) {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
-  const result = spawnSync(
+  const result = runNodePython(
     python!,
     [
-      "-I",
-      "-B",
       "-c",
       [
         "import json, sys",
@@ -36,7 +34,6 @@ function buildSarif(findings: Finding[]) {
       join(PLUGIN_ROOT, "scripts"),
     ],
     {
-      encoding: "utf8",
       input: JSON.stringify({ manifest, findings: { ...document, findings } }),
     },
   );

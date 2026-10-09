@@ -78,10 +78,8 @@ export class AsyncLock {
 
   async run<T>(operation: () => Promise<T>): Promise<T> {
     const predecessor = this.tail;
-    let release!: () => void;
-    this.tail = new Promise<void>((resolvePromise) => {
-      release = resolvePromise;
-    });
+    const { promise, resolve: release } = Promise.withResolvers<void>();
+    this.tail = promise;
     await predecessor;
     try {
       return await operation();
