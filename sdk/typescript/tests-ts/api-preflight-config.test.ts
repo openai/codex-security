@@ -1,5 +1,6 @@
 import { pythonExecutable } from "./support/python.js";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { runNodePython } from "./support/python-probe.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,20 +49,14 @@ function runPreflight(
 ): { status: number | null; payload: Record<string, unknown> } {
   const interpreter = pythonExecutable(false);
   expect(interpreter).not.toBeNull();
-  const result = spawnSync(
-    interpreter!,
-    [
-      "-I",
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-      "--profile",
-      profile,
-      "--config",
-      config,
-      ...options,
-    ],
-    { encoding: "utf8" },
-  );
+  const result = runNodePython(interpreter!, [
+    join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+    "--profile",
+    profile,
+    "--config",
+    config,
+    ...options,
+  ]);
   expect(result.error).toBeUndefined();
   return {
     status: result.status,
@@ -174,21 +169,16 @@ describe("CodexSecurity preflight configuration", () => {
 
       const interpreter = pythonExecutable();
       expect(interpreter).not.toBeNull();
-      const result = spawnSync(
+      const result = runNodePython(
         interpreter!,
         [
-          "-I",
-          "-B",
           join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
           "--profile",
           "security_scan",
           "--cwd",
           repository,
         ],
-        {
-          encoding: "utf8",
-          env: { PATH: process.env["PATH"], CODEX_HOME: codexHome },
-        },
+        { env: { PATH: process.env["PATH"], CODEX_HOME: codexHome } },
       );
       expect(result.error).toBeUndefined();
       const payload = JSON.parse(result.stdout) as Record<string, unknown>;

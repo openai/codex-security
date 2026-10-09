@@ -2434,15 +2434,22 @@ try {
   );
 
   const handoffClaimToken = randomUUID();
-  const claimedHandoff = await testServer.callTool(2002, {
-    name: "claim_codex_security_scan_handoff_delivery",
-    arguments: { claimToken: handoffClaimToken, scanId },
-  });
-  assertNoError(claimedHandoff);
-  assert.equal(
-    claimedHandoff.result.structuredContent.workspace.results.handoffClaimToken,
-    handoffClaimToken,
-  );
+  for (const [index, name] of [
+    "claim_codex_security_scan_handoff_delivery",
+    "release_codex_security_scan_handoff_delivery",
+    "claim_codex_security_scan_handoff_delivery",
+  ].entries()) {
+    const claimedHandoff = await testServer.callTool(200200 + index, {
+      name,
+      arguments: { claimToken: handoffClaimToken, scanId },
+    });
+    assertNoError(claimedHandoff);
+    assert.equal(
+      claimedHandoff.result.structuredContent.workspace.results
+        .handoffClaimToken,
+      index === 1 ? null : handoffClaimToken,
+    );
+  }
   const attachedHandoff = await testServer.callTool(20021, {
     name: "attach_codex_security_scan_continuation_thread",
     arguments: {
@@ -2912,20 +2919,28 @@ try {
     },
   );
 
-  const requestedPatch = await testServer.callTool(61, {
-    name: "request_codex_security_finding_remediation",
-    arguments: {
-      actionToken: generationActionToken,
-      occurrenceId,
-      requestId: remediationRequestId,
-    },
-  });
-  assertNoError(requestedPatch);
-  assert.equal(
-    requestedPatch.result.structuredContent.scan.findings[0].remediationState
-      .state,
-    "requested",
-  );
+  for (const [index, name] of [
+    "request_codex_security_finding_remediation",
+    "release_codex_security_finding_remediation_claim",
+    "claim_codex_security_finding_remediation_resend",
+  ].entries()) {
+    const requestedPatch = await testServer.callTool(6100 + index, {
+      name,
+      arguments: {
+        actionToken: generationActionToken,
+        occurrenceId,
+        requestId: remediationRequestId,
+      },
+    });
+    assertNoError(requestedPatch);
+    const remediation =
+      requestedPatch.result.structuredContent.scan.findings[0].remediationState;
+    assert.equal(remediation.state, "requested");
+    assert.equal(
+      remediation.actionClaimToken,
+      index === 1 ? null : generationActionToken,
+    );
+  }
   const rejectedPendingClose = await testServer.callTool(161, {
     name: "set_codex_security_finding_triage",
     arguments: { occurrenceId, status: "closed", closeReason: "already_fixed" },

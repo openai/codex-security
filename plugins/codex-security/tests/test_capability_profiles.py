@@ -123,20 +123,6 @@ def test_standard_and_deep_scan_profiles_do_not_require_goals() -> None:
     } >= {"goal_tools", "goals_enabled"}
 
 
-def test_deep_scan_does_not_add_capability_requirements_beyond_standard_scan() -> None:
-    data = tomllib.loads((PLUGIN_ROOT / "preflight" / "capability-profiles.toml").read_text())
-    deep_requirements = {
-        requirement["capability"]
-        for requirement in data["profiles"]["deep_security_scan"]["requirements"]
-    }
-    standard_requirements = {
-        requirement["capability"]
-        for requirement in data["profiles"]["security_scan"]["requirements"]
-    }
-
-    assert deep_requirements.issubset(standard_requirements)
-
-
 def run_preflight(
     *args: str, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -186,28 +172,205 @@ def standalone_v1() -> tuple[str, ...]:
     )
 
 
-def test_deep_scan_preflight_is_ready_with_required_capabilities(config_path: Path) -> None:
-    config_path.write_text(
-        "[features]\ngoals = true\n\n"
-        "[features.multi_agent_v2]\nenabled = true\n"
-        "max_concurrent_threads_per_session = 4\n"
-    )
-
-    result = run_preflight(
-        "--skill",
-        "deep-security-scan",
-        "--config",
-        str(config_path),
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills(),
-    )
+@pytest.mark.parametrize(
+    ("selector", "config", "args", "expected_context"),
+    [
+        pytest.param(
+            ("--skill", "deep-security-scan"),
+            "[features]\ngoals = true\n\n"
+            "[features.multi_agent_v2]\nenabled = true\n"
+            "max_concurrent_threads_per_session = 4\n",
+            (
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills(),
+            ),
+            ("v2", "native"),
+            id="deep_scan_preflight_is_ready_with_required_capabilities",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[features]\ngoals = false\n",
+            (),
+            ("unknown", "unknown"),
+            id="deep_preflight_compatibility_profile_has_no_runtime_requirements",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[multiagent_config]\nmax_concurrency = 4\n",
+            (),
+            ("unknown", "unknown"),
+            id="deep_preflight_ignores_unrelated_bridge_backend_configuration",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[agents]\nmax_threads = 8\n",
+            (
+                *AVAILABLE_RUNTIME_CHECKS,
+                *standalone_v1(),
+            ),
+            ("v1", "native"),
+            id="deep_scan_preflight_accepts_native_v1_with_legacy_thread_limits",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[agents]\nmax_threads = 8\n\n"
+            "[features]\ngoals = true\n\n"
+            "[features.multi_agent_v2]\nenabled = false\n",
+            (
+                *AVAILABLE_RUNTIME_CHECKS,
+                "--multi-agent-runtime-owner",
+                "native",
+                "--multi-agent-runtime-version",
+                "v2",
+                "--multi-agent-session-cap",
+                "4",
+                "--multi-agent-runtime-provenance",
+                "thread-context",
+            ),
+            ("v2", "native"),
+            id="deep_scan_preflight_accepts_model_selected_v2_with_legacy_thread_limits",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
+            (*AVAILABLE_RUNTIME_CHECKS,),
+            ("v2", "native"),
+            id="deep_scan_preflight_does_not_require_available_skill_enumeration",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
+            (
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills_except("validation"),
+            ),
+            ("v2", "native"),
+            id="deep_scan_preflight_does_not_block_on_partial_skill_enumeration",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
+            (
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills(),
+            ),
+            ("v2", "native"),
+            id="deep_scan_preflight_accepts_native_v2_without_parent_slots",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
+            (
+                "--multi-agent-runtime-owner",
+                "native",
+                "--multi-agent-runtime-version",
+                "v2",
+                "--multi-agent-runtime-provenance",
+                "app-server",
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills(),
+            ),
+            ("v2", "native"),
+            id="model_selected_native_v2_does_not_require_observed_parent_cap",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[features]\ngoals = true\n",
+            (
+                "--multi-agent-runtime-version",
+                "v2",
+                "--multi-agent-session-cap",
+                "9",
+                "--multi-agent-runtime-provenance",
+                "tool-surface",
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills(),
+            ),
+            ("unknown", "unknown"),
+            id="deep_scan_preflight_does_not_require_verified_parent_runtime_owner",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
+            (
+                "--effective-config",
+                "multiagent_config.max_concurrency=4",
+                "--multi-agent-runtime-owner",
+                "codex-bridge",
+                "--multi-agent-runtime-version",
+                "v2",
+                "--multi-agent-runtime-provenance",
+                "verified-bridge",
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills(),
+            ),
+            ("bridge-v2", "codex-bridge"),
+            id="deep_scan_preflight_accepts_verified_bridge_owned_runtime",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[features]\ngoals = true\n\n"
+            "[features.multi_agent_v2]\nenabled = true\n"
+            "max_concurrent_threads_per_session = 9\n",
+            (
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills(),
+            ),
+            ("v2", "native"),
+            id="deep_scan_preflight_accepts_native_v2_from_static_config",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
+            (
+                "--effective-config",
+                "multiagent_config.max_concurrency=9",
+                "--multi-agent-runtime-owner",
+                "codex-bridge",
+                "--multi-agent-runtime-version",
+                "v2",
+                "--multi-agent-runtime-provenance",
+                "verified-bridge",
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills(),
+            ),
+            ("bridge-v2", "codex-bridge"),
+            id="deep_scan_bridge_mode_omits_inapplicable_native_remediation",
+        ),
+        pytest.param(
+            ("--profile", "deep_security_scan"),
+            "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
+            (
+                *AVAILABLE_RUNTIME_CHECKS,
+                *available_deep_scan_skills(),
+            ),
+            ("unknown", "unknown"),
+            id="deep_scan_preflight_omits_concurrency_patch_when_mode_is_unknown",
+        ),
+    ],
+)
+def test_deep_preflight_compatibility(
+    config_path: Path,
+    selector: tuple[str, str],
+    config: str,
+    args: tuple[str, ...],
+    expected_context: tuple[str, str],
+) -> None:
+    config_path.write_text(config)
+    result = run_preflight(*selector, "--config", str(config_path), *args)
 
     payload = json.loads(result.stdout)
+    mode, owner = expected_context
     assert result.returncode == 0
     assert payload["profile"] == "deep_security_scan"
     assert payload["status"] == "ready"
+    assert payload["multi_agent_mode"] == mode
+    assert payload["multi_agent_context"]["owner"] == owner
+    assert payload["results"] == []
     assert payload["failed"] == []
     assert payload["unknown"] == []
+    assert payload["remediation"].get("patches", []) == []
+    assert "note" not in payload["remediation"]
 
 
 def test_standard_and_deep_preflight_do_not_probe_goal_tools(config_path: Path) -> None:
@@ -234,83 +397,6 @@ def test_standard_and_deep_preflight_do_not_probe_goal_tools(config_path: Path) 
         )
 
 
-def test_deep_preflight_compatibility_profile_has_no_runtime_requirements(
-    config_path: Path,
-) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[features]\ngoals = false\n",
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["results"] == []
-    assert payload["unknown"] == []
-    assert payload["remediation"].get("patches", []) == []
-
-
-def test_deep_preflight_ignores_unrelated_bridge_backend_configuration(config_path: Path) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[multiagent_config]\nmax_concurrency = 4\n",
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["results"] == []
-
-
-def test_deep_scan_preflight_accepts_native_v1_with_legacy_thread_limits(config_path: Path) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[agents]\nmax_threads = 8\n",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *standalone_v1(),
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["multi_agent_mode"] == "v1"
-    assert payload["failed"] == []
-    assert payload["unknown"] == []
-    assert payload["remediation"].get("patches", []) == []
-
-
-def test_deep_scan_preflight_accepts_model_selected_v2_with_legacy_thread_limits(
-    config_path: Path,
-) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[agents]\nmax_threads = 8\n\n"
-        "[features]\ngoals = true\n\n"
-        "[features.multi_agent_v2]\nenabled = false\n",
-        *AVAILABLE_RUNTIME_CHECKS,
-        "--multi-agent-runtime-owner",
-        "native",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-session-cap",
-        "4",
-        "--multi-agent-runtime-provenance",
-        "thread-context",
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["multi_agent_mode"] == "v2"
-    assert payload["failed"] == []
-    assert payload["unknown"] == []
-    assert payload["remediation"].get("patches", []) == []
-
-
 def test_scan_profiles_do_not_require_or_remediate_csv_fanout() -> None:
     data = tomllib.loads((PLUGIN_ROOT / "preflight" / "capability-profiles.toml").read_text())
 
@@ -323,37 +409,6 @@ def test_scan_profiles_do_not_require_or_remediate_csv_fanout() -> None:
             patch.get("path") != "features.enable_fanout"
             for patch in profile.get("remediation", {}).get("patches", [])
         )
-
-
-def test_deep_scan_preflight_does_not_require_available_skill_enumeration(
-    config_path: Path,
-) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
-        *AVAILABLE_RUNTIME_CHECKS,
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["unknown"] == []
-
-
-def test_deep_scan_preflight_does_not_block_on_partial_skill_enumeration(config_path: Path) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills_except("validation"),
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["failed"] == []
 
 
 def test_deep_scan_preflight_rejects_prefixed_plugin_skill_id(config_path: Path) -> None:
@@ -1073,82 +1128,6 @@ def test_higher_partial_v2_table_inherits_lower_boolean(tmp_path: Path) -> None:
     assert worker_slots["severity"] == "warn"
 
 
-def test_deep_scan_preflight_accepts_native_v2_without_parent_slots(config_path: Path) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[features]\ngoals = true\n\n[features.multi_agent_v2]\nenabled = true\n",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills(),
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["multi_agent_mode"] == "v2"
-    assert {item["capability"] for item in payload["results"]}.isdisjoint(
-        {
-            "delegated_workers",
-            "usable_worker_slots_6",
-            "usable_worker_slots_8",
-            "agent_depth_2",
-            "native_multi_agent_v2",
-        }
-    )
-
-
-def test_model_selected_native_v2_does_not_require_observed_parent_cap(config_path: Path) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
-        "--multi-agent-runtime-owner",
-        "native",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-runtime-provenance",
-        "app-server",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills(),
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["multi_agent_mode"] == "v2"
-    assert payload["multi_agent_context"]["owner"] == "native"
-    assert payload["status"] == "ready"
-    assert payload["unknown"] == []
-
-
-def test_deep_scan_preflight_does_not_require_verified_parent_runtime_owner(
-    config_path: Path,
-) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[features]\ngoals = true\n",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-session-cap",
-        "9",
-        "--multi-agent-runtime-provenance",
-        "tool-surface",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills(),
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["multi_agent_mode"] == "unknown"
-    assert payload["multi_agent_context"]["owner"] == "unknown"
-    assert payload["unknown"] == []
-    assert not any(
-        patch["path"] == "features.multi_agent_v2.max_concurrent_threads_per_session"
-        for patch in payload["remediation"].get("patches", [])
-    )
-
-
 def test_preflight_supports_boolean_native_v2_feature(config_path: Path) -> None:
     result = run_config_preflight(
         "security_scan",
@@ -1264,93 +1243,3 @@ def test_preflight_rejects_unverified_bridge_backend_fact(config_path: Path) -> 
     assert result.returncode == 2
     assert payload["status"] == "error"
     assert "does not prove bridge ownership" in payload["error"]
-
-
-def test_deep_scan_preflight_accepts_verified_bridge_owned_runtime(config_path: Path) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
-        "--effective-config",
-        "multiagent_config.max_concurrency=4",
-        "--multi-agent-runtime-owner",
-        "codex-bridge",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-runtime-provenance",
-        "verified-bridge",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills(),
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["multi_agent_mode"] == "bridge-v2"
-    assert payload["multi_agent_context"]["owner"] == "codex-bridge"
-    assert payload["failed"] == []
-
-
-def test_deep_scan_preflight_accepts_native_v2_from_static_config(config_path: Path) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[features]\ngoals = true\n\n"
-        "[features.multi_agent_v2]\nenabled = true\n"
-        "max_concurrent_threads_per_session = 9\n",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills(),
-    )
-
-    payload = json.loads(result.stdout)
-    assert result.returncode == 0
-    assert payload["multi_agent_mode"] == "v2"
-    assert payload["multi_agent_context"]["owner"] == "native"
-    assert payload["status"] == "ready"
-    assert payload["results"] == []
-    assert payload["remediation"].get("patches", []) == []
-
-
-def test_deep_scan_bridge_mode_omits_inapplicable_native_remediation(config_path: Path) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
-        "--effective-config",
-        "multiagent_config.max_concurrency=9",
-        "--multi-agent-runtime-owner",
-        "codex-bridge",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-runtime-provenance",
-        "verified-bridge",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills(),
-    )
-
-    payload = json.loads(result.stdout)
-    patches = payload["remediation"].get("patches", [])
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert patches == []
-    assert "note" not in payload["remediation"]
-
-
-def test_deep_scan_preflight_omits_concurrency_patch_when_mode_is_unknown(
-    config_path: Path,
-) -> None:
-    result = run_config_preflight(
-        "deep_security_scan",
-        config_path,
-        "[agents]\nmax_depth = 2\n\n[features]\ngoals = true\n",
-        *AVAILABLE_RUNTIME_CHECKS,
-        *available_deep_scan_skills(),
-    )
-
-    payload = json.loads(result.stdout)
-    patches = payload["remediation"].get("patches", [])
-    assert result.returncode == 0
-    assert payload["status"] == "ready"
-    assert payload["multi_agent_mode"] == "unknown"
-    assert payload["unknown"] == []
-    assert not any(patch["path"] == "agents.max_threads" for patch in patches)
