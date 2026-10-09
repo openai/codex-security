@@ -2100,6 +2100,42 @@ test("readback interruption distinguishes acknowledged findings from verified fi
   }
 });
 
+test("repository selection is sent on every discovery page", async () => {
+  const f = await fixture();
+  const repository = `${f.destination().url}.git`;
+  const queries: URLSearchParams[] = [];
+  const prepared = await prepareExternalPublication(
+    f.file,
+    { ...options, repository },
+    {
+      ...f.deps,
+      fetch: async (input, init) => {
+        const url = new URL(input);
+        if (!url.pathname.endsWith("/repositories"))
+          return f.deps.fetch(input, init);
+        queries.push(url.searchParams);
+        const first = queries.length === 1;
+        return Response.json({
+          object: "page",
+          data: first ? [] : [f.destination()],
+          has_more: first,
+          next: first ? "next-page" : null,
+        });
+      },
+    },
+  );
+  expect(prepared.preview.destination.id).toBe(options.repository);
+  expect(queries.map((query) => query.get("repository"))).toEqual([
+    repository,
+    repository,
+  ]);
+  expect(queries.map((query) => query.get("page"))).toEqual([
+    null,
+    "next-page",
+  ]);
+  expect(f.posts).toHaveLength(0);
+});
+
 test("repository URLs and IDs share the same resumable destination", async () => {
   const f = await fixture();
   f.state.loseResponse = true;

@@ -294,7 +294,7 @@ export async function prepareExternalPublication(
   do {
     const result = validateRepositories(
       await request(
-        `/repositories?limit=100${page ? `&page=${encodeURIComponent(page)}` : ""}`,
+        `/repositories?limit=20&repository=${encodeURIComponent(options.repository)}${page ? `&page=${encodeURIComponent(page)}` : ""}`,
       ),
     );
     destinations.push(
