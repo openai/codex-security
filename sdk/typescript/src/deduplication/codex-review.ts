@@ -465,7 +465,7 @@ export class CodexReviewRunner {
       let validationFailure: string | undefined;
       let finalResponse: string | undefined;
       let turns = 0;
-      const startTurn = (prompt: string) => {
+      const sendTurn = (prompt: string) => {
         this.signal?.throwIfAborted();
         turns++;
         turnId = undefined;
@@ -481,6 +481,21 @@ export class CodexReviewRunner {
             input: [{ type: "text", text: prompt, text_elements: [] }],
           },
         });
+      };
+      let pendingPrompt = review.prompt;
+      const startTurn = (prompt: string) => {
+        if (source) {
+          pendingPrompt = prompt;
+          send({
+            id: "source-status",
+            method: "mcpServerStatus/list",
+            params: {
+              threadId,
+              serverName: source.name,
+              detail: "toolsAndAuthOnly",
+            },
+          });
+        } else sendTurn(prompt);
       };
       try {
         this.signal?.throwIfAborted();
@@ -632,17 +647,7 @@ export class CodexReviewRunner {
               event: "review.event",
               details: { method: "thread/started", threadId },
             });
-            if (source)
-              send({
-                id: "source-status",
-                method: "mcpServerStatus/list",
-                params: {
-                  threadId,
-                  serverName: source.name,
-                  detail: "toolsAndAuthOnly",
-                },
-              });
-            else startTurn(review.prompt);
+            startTurn(review.prompt);
           } else if (message.id === "source-status" && source) {
             const status = message.result?.data?.find(
               (server) => server.name === source.name,
@@ -653,7 +658,7 @@ export class CodexReviewRunner {
                 `Required source MCP server ${JSON.stringify(source.name)} is not connected (${status?.runtimeStatus ?? "unavailable"}).${status?.toolsError ? ` ${status.toolsError}` : ""}`,
                 "The required source MCP server is not connected.",
               );
-            startTurn(review.prompt);
+            sendTurn(pendingPrompt);
           } else if (message.id === 3 + state.attempts) {
             turnId = message.result?.turn?.id ?? turnId;
           } else if (
@@ -737,13 +742,29 @@ export class CodexReviewRunner {
       } finally {
         lines.close();
         const canceledSource = source !== undefined && this.signal?.aborted;
-        let force = Boolean(canceledSource);
+        child.stdin.end();
+        let force = false;
         try {
-          // Stopping stdio children lets native startup unwind and reap them.
-          // HTTP startup has no child and must be stopped in the app-server.
-          if (canceledSource) force = stopSourceChildren(child) === 0;
+          if (canceledSource) {
+            child.stdout.resume();
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              // EOF lets native teardown terminate remote executor processes.
+              // Match source discovery's grace before forcing stalled startup.
+              await Promise.race([
+                closed,
+                new Promise<void>((resolve) => {
+                  timer = setTimeout(resolve, 1_000);
+                }),
+              ]);
+            } finally {
+              clearTimeout(timer);
+            }
+            force = true;
+            // Stop descendants while their parent can still reap them.
+            force = stopSourceChildren(child) === 0;
+          }
         } finally {
-          child.stdin.end();
           if (child.exitCode === null)
             child.kill(force ? "SIGKILL" : "SIGTERM");
           await closed;

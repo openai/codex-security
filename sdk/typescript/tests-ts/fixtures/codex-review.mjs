@@ -137,6 +137,18 @@ for await (const line of createInterface({ input: process.stdin })) {
       },
     });
   } else if (message.method === "mcpServerStatus/list") {
+    if (scenario === "source-cancel-output") {
+      process.stdin.once("end", () => {
+        process.stdout.write("x".repeat(2 * 1024 * 1024), () =>
+          process.exit(0),
+        );
+      });
+      process.stderr.write("synthetic source ready\n");
+      continue;
+    }
+    const disconnected =
+      scenario === "source-failed" ||
+      (scenario === "source-disconnected-correction" && turns > 0);
     assert.deepEqual(message.params, {
       threadId: "review-thread",
       serverName: "sourcegraph",
@@ -154,10 +166,10 @@ for await (const line of createInterface({ input: process.stdin })) {
                   runtimeStatus:
                     scenario === "source-disabled"
                       ? "disabled"
-                      : scenario === "source-failed"
+                      : disconnected
                         ? "failed"
                         : "connected",
-                  ...(scenario === "source-failed"
+                  ...(disconnected
                     ? {
                         toolsError:
                           "Synthetic source transport error: token synthetic-source-auth",
@@ -254,6 +266,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       scenario === "refusal-text" ||
       ([
         "text-only-correction",
+        "source-disconnected-correction",
         "cancel-continuation",
         "required-source-error-after-text",
       ].includes(scenario) &&

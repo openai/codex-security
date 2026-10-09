@@ -246,6 +246,8 @@ const failureReasons: Record<string, string> = {
     'Required source MCP server "sourcegraph" is not connected (unavailable).',
   "source-failed":
     'Required source MCP server "sourcegraph" is not connected (failed). Synthetic source transport error: token synthetic-source-auth',
+  "source-disconnected-correction":
+    'Required source MCP server "sourcegraph" is not connected (failed). Synthetic source transport error: token synthetic-source-auth',
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
   "required-source-error":
@@ -325,6 +327,16 @@ const transportCases: {
   },
   { scenario: "correction", name: "HTTP source MCP", sourceMcp: "http" },
   { scenario: "correction", name: "stdio source MCP", sourceMcp: "stdio" },
+  {
+    scenario: "source-cancel-output",
+    name: "source MCP shutdown drains output",
+    sourceMcp: "http",
+  },
+  {
+    scenario: "text-only-correction",
+    name: "source MCP corrective turn",
+    sourceMcp: "http",
+  },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
   { scenario: "accepted-no-replay" },
@@ -338,11 +350,7 @@ const transportCases: {
     "cancel",
   ].map((scenario) => ({
     scenario,
-    ...(["source-disabled", "source-unavailable", "source-failed"].includes(
-      scenario,
-    )
-      ? { sourceMcp: "http" as const }
-      : {}),
+    ...(scenario.startsWith("source-") ? { sourceMcp: "http" as const } : {}),
   })),
   {
     scenario: "correction",
@@ -547,7 +555,9 @@ for (const {
             child.once("spawn", () =>
               controller.abort("synthetic cancellation"),
             );
-          if (scenario === "cancel-continuation")
+          if (
+            ["cancel-continuation", "source-cancel-output"].includes(scenario)
+          )
             child.stderr.once("data", () =>
               controller.abort("synthetic cancellation"),
             );
@@ -657,7 +667,12 @@ for (const {
         });
         expect(validate).toHaveBeenCalledTimes(1);
       } else if (
-        ["cancel", "cancel-continuation", "cancel-backoff"].includes(scenario)
+        [
+          "cancel",
+          "cancel-continuation",
+          "cancel-backoff",
+          "source-cancel-output",
+        ].includes(scenario)
       ) {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
@@ -694,6 +709,7 @@ for (const {
               "invalid-submission",
               "text-only",
               "required-source-error-after-text",
+              "source-disconnected-correction",
             ].includes(scenario)
               ? 2
               : 1) * sessions,
@@ -711,6 +727,7 @@ for (const {
                           "source-disabled",
                           "source-unavailable",
                           "source-failed",
+                          "source-disconnected-correction",
                         ].includes(scenario)
                       ? "The required source MCP server is not connected."
                       : ["request-error", "credential-error"].includes(scenario)
@@ -765,7 +782,7 @@ for (const {
           .map((line) => JSON.parse(line))
           .find((message) => message.method === "thread/start");
         expect(request.params.config.mcp_servers.sourcegraph).toMatchObject({
-          required: true,
+          required: false,
           enabled: true,
           default_tools_approval_mode: "prompt",
           tools: {
@@ -806,6 +823,18 @@ for (const {
           expect(methods.indexOf("turn/start")).toBeGreaterThan(
             methods.indexOf("mcpServerStatus/list"),
           );
+        if (
+          ["text-only-correction", "source-disconnected-correction"].includes(
+            scenario,
+          )
+        ) {
+          expect(
+            methods.filter((method) => method === "mcpServerStatus/list"),
+          ).toHaveLength(2);
+          expect(
+            methods.filter((method) => method === "turn/start"),
+          ).toHaveLength(scenario === "text-only-correction" ? 2 : 1);
+        }
         if (sourceMcp === "http")
           expect(
             request.params.config.shell_environment_policy.exclude,
@@ -881,6 +910,7 @@ for (const {
                       "source-disabled",
                       "source-unavailable",
                       "source-failed",
+                      "source-cancel-output",
                     ].includes(scenario)
                   ? 0
                   : 1) * sessions,
@@ -894,6 +924,7 @@ for (const {
       );
       expect(existsSync(join(modelHome, "auth.json"))).toBe(false);
       expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
+      if (scenario === "source-cancel-output") expect(child!.exitCode).toBe(0);
       expect(existsSync(directory!)).toBe(false);
       expect(existsSync(checkout)).toBe(true);
     } finally {

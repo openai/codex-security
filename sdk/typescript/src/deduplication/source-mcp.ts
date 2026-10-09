@@ -387,7 +387,9 @@ export async function resolveSourceMcp(
   const server: JsonObject = {
     ...structuredClone(selected),
     enabled: true,
-    required: true,
+    // Check the native connection before each review turn. Nonblocking startup
+    // lets Codex register the thread and cancel its owned MCP connection.
+    required: false,
     // Read-only source tools still need authorization for their repository and revision.
     default_tools_approval_mode: "prompt",
   };

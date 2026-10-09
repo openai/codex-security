@@ -4,6 +4,7 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { constants, existsSync } from "node:fs";
+import { once } from "node:events";
 import { createServer } from "node:http";
 import {
   copyFile,
@@ -14,6 +15,7 @@ import {
 } from "node:fs/promises";
 import { delimiter, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify } from "smol-toml";
 import type { JsonObject, JsonValue } from "../src/config.js";
@@ -374,7 +376,7 @@ test("source MCP preserves native settings and requires an enabled configured se
     http_headers: { Authorization: "token synthetic-static-auth" },
     env_http_headers: { Authorization: authorization },
     enabled: true,
-    required: true,
+    required: false,
     default_tools_approval_mode: "prompt",
     tools: {
       read_source: { approval_mode: "prompt", output_token_limit: 321 },
@@ -1574,14 +1576,18 @@ process.exit(1);`,
 test.each([
   "local",
   "executor",
+  "websocket-executor",
+  "websocket-startup",
   "cold-executor",
   "http",
   ...(process.platform === "win32" ? [] : ["missing-ps", "failing-ps"]),
 ])(
-  "canceling required %s MCP startup reaps its children without stopping another review",
+  "canceling required %s MCP review reaps its children without stopping another review",
   async (kind) => {
     const originalPath = process.env["PATH"];
     const isHttp = kind === "http";
+    const isWebSocket = kind.startsWith("websocket-");
+    const connectedSource = kind === "websocket-executor";
     const home = await temporaryDirectory();
     const noPs = join(home, "no-ps");
     await mkdir(noPs);
@@ -1595,6 +1601,20 @@ test.each([
 import { request } from "node:http";
 const ready = request(process.argv[2] + "/ready/" + (process.argv[3] ?? process.env.SOURCE_REQUEST), { method: "POST" });
 ready.end(String(process.pid));
+${
+  connectedSource
+    ? `
+import { createInterface } from "node:readline";
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  const result = message.method === "initialize"
+    ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "synthetic-source", version: "1" } }
+    : { tools: [] };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+});`
+    : ""
+}
 setInterval(() => {}, 1000);
 `,
     );
@@ -1603,6 +1623,10 @@ setInterval(() => {}, 1000);
       Promise.withResolvers<number>(),
     ];
     let modelRequests = 0;
+    const modelReady = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
     let coldStarted = 0;
     const endpoint = createServer((request, response) => {
       if (request.url?.startsWith("/ready/")) {
@@ -1635,7 +1659,10 @@ setInterval(() => {}, 1000);
           // Leave initialization waiting until the review is canceled.
         });
       } else {
-        if (request.url?.includes("responses")) modelRequests++;
+        if (request.url?.includes("responses")) {
+          modelReady[modelRequests++]!.resolve();
+          if (isWebSocket) return;
+        }
         response
           .writeHead(200, { "Content-Type": "application/json" })
           .end('{"data":[]}');
@@ -1648,6 +1675,8 @@ setInterval(() => {}, 1000);
     const children: ChildProcessWithoutNullStreams[] = [];
     const sourcePids: number[] = [];
     const results: Promise<unknown>[] = [];
+    let executor: ChildProcessWithoutNullStreams | undefined;
+    let executorClosed: Promise<unknown> | undefined;
     const alive = (pid: number): boolean => {
       if (!pid) return false;
       try {
@@ -1667,22 +1696,44 @@ setInterval(() => {}, 1000);
         CODEX_SECURITY_STATE_DIR: join(home, "state"),
         OPENAI_API_KEY: "synthetic-review-key",
       };
-      if (kind === "executor" || kind === "cold-executor")
+      let executorUrl: string | undefined;
+      if (isWebSocket) {
+        executor = spawn(
+          resolveCodexCommand(environment).command,
+          ["exec-server", "--listen", "ws://127.0.0.1:0"],
+          {
+            env: environment,
+            stdio: ["pipe", "pipe", "pipe"],
+            windowsHide: true,
+          },
+        );
+        executorClosed = once(executor, "close");
+        executor.stderr.resume();
+        const lines = createInterface({ input: executor.stdout });
+        [executorUrl] = (await once(lines, "line")) as [string];
+        lines.close();
+        expect(executorUrl).toStartWith("ws://127.0.0.1:");
+      }
+      if (kind === "executor" || kind === "cold-executor" || isWebSocket)
         await writeFile(
           join(home, "environments.toml"),
           stringify({
             environments: [
               {
                 id: "source-executor",
-                program:
-                  kind === "cold-executor"
-                    ? process.execPath
-                    : resolveCodexCommand(environment).command,
-                args:
-                  kind === "cold-executor"
-                    ? [sourceScript, url, "cold"]
-                    : ["exec-server", "--listen", "stdio"],
-                cwd: repository,
+                ...(executorUrl
+                  ? { url: executorUrl }
+                  : {
+                      program:
+                        kind === "cold-executor"
+                          ? process.execPath
+                          : resolveCodexCommand(environment).command,
+                      args:
+                        kind === "cold-executor"
+                          ? [sourceScript, url, "cold"]
+                          : ["exec-server", "--listen", "stdio"],
+                      cwd: repository,
+                    }),
               },
             ],
           }),
@@ -1708,7 +1759,7 @@ setInterval(() => {}, 1000);
                     cwd: repository,
                   }),
               startup_timeout_sec: 60,
-              ...(kind === "executor" || kind === "cold-executor"
+              ...(kind === "executor" || kind === "cold-executor" || isWebSocket
                 ? { environment_id: "source-executor" }
                 : {}),
             },
@@ -1754,6 +1805,7 @@ setInterval(() => {}, 1000);
             .catch((error: unknown) => error),
         );
         await ready[index]!.promise;
+        if (connectedSource) await modelReady[index]!.promise;
       }
       sourcePids.push(
         ...(await Promise.all(ready.map(({ promise }) => promise))),
@@ -1768,19 +1820,28 @@ setInterval(() => {}, 1000);
         if (originalPath === undefined) delete process.env["PATH"];
         else process.env["PATH"] = originalPath;
       }
-      expect(alive(sourcePids[0]!)).toBe(false);
+      const sourceAlive = alive(sourcePids[0]!);
+      expect(
+        sourceAlive,
+        sourceAlive && process.platform === "linux"
+          ? await readFile(`/proc/${sourcePids[0]}/status`, "utf8").catch(
+              () => "Process exited before status read",
+            )
+          : undefined,
+      ).toBe(false);
       expect(
         children[0]!.exitCode !== null || children[0]!.signalCode !== null,
       ).toBe(true);
       expect(alive(sourcePids[1]!)).toBe(!isHttp);
       expect(alive(children[1]!.pid!)).toBe(true);
+      if (executor) expect(alive(executor.pid!)).toBe(true);
       controllers[1]!.abort(cancellation);
       expect(await results[1]).toBe(cancellation);
       expect(alive(sourcePids[1]!)).toBe(false);
       expect(
         children[1]!.exitCode !== null || children[1]!.signalCode !== null,
       ).toBe(true);
-      expect(modelRequests).toBe(0);
+      expect(modelRequests).toBe(connectedSource ? 2 : 0);
     } finally {
       if (originalPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = originalPath;
@@ -1789,6 +1850,8 @@ setInterval(() => {}, 1000);
       await Promise.all(results);
       for (const pid of sourcePids)
         if (alive(pid)) process.kill(pid, "SIGKILL");
+      executor?.kill("SIGKILL");
+      await executorClosed;
       endpoint.closeAllConnections();
       await new Promise<void>((resolve) => endpoint.close(() => resolve()));
     }
