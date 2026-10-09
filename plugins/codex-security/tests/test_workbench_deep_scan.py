@@ -1253,14 +1253,19 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("dirty", [False, True])
-def test_deep_scan_join_preserves_repository_provenance(tmp_path: Path, dirty: bool) -> None:
+@pytest.mark.parametrize(
+    "remote", ["https://github.com/example/original.git", r"git@example.test:C:\repos\project.git"]
+)
+def test_deep_scan_join_preserves_repository_provenance(
+    tmp_path: Path, dirty: bool, remote: str
+) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     if dirty:
         (target / "README.md").write_text("tracked local changes\n")
-    remote = "https://github.com/example/original.git"
+    expected_remote = None if "\\" in remote else remote
     subprocess.run(["git", "remote", "add", "origin", remote], cwd=target, check=True)
     first = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     subprocess.run(
@@ -1271,10 +1276,17 @@ def test_deep_scan_join_preserves_repository_provenance(tmp_path: Path, dirty: b
     second = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     assert second["startDisposition"] == "joined"
     assert second["deepScan"]["scanId"] == first["deepScan"]["scanId"]
+    resumed = resume_deep_scan(
+        state_dir,
+        str(first["deepScan"]["scanId"]),
+        "thread-deep-scan",
+        environment=deep_environment(codex_home),
+    )
+    assert resumed["startDisposition"] == "joined"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
             "SELECT target_remote, target_repository_path, target_provenance_recorded FROM scans"
-        ).fetchall() == [(remote, ".", 1)]
+        ).fetchall() == [(expected_remote, ".", 1)]
 
     scan_id = str(first["deepScan"]["scanId"])
     scan_dir = Path(str(first["deepScan"]["scanDir"]))
@@ -1298,7 +1310,10 @@ def test_deep_scan_join_preserves_repository_provenance(tmp_path: Path, dirty: b
         assert completed["progress"]["status"] == "complete"
         manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
         saved_target = manifest["scan"]["target"]
-        assert saved_target["remote"] == remote
+        if expected_remote is None:
+            assert "remote" not in saved_target
+        else:
+            assert saved_target["remote"] == expected_remote
         assert saved_target["repositoryPath"] == "."
         assert saved_target["revision"] == revision
         if dirty:

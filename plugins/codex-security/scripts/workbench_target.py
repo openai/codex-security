@@ -20,6 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
+from finalize_scan_contract import ContractError, _validate_remote
 from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
@@ -852,7 +853,12 @@ def git_repository_provenance(target: Path) -> tuple[str | None, str | None]:
         host = f"{host}:{port}"
     # This is an SCM locator, not an authenticated clone URL. User info never
     # belongs in a retained scan artifact that can later be published.
-    return urlunsplit((parsed.scheme, host, parsed.path, "", "")), repository_path
+    canonical_remote = urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    try:
+        _validate_remote(canonical_remote, "scan.target.remote")
+    except ContractError:
+        return None, repository_path
+    return canonical_remote, repository_path
 
 
 def git_target_metadata(target: Path) -> dict[str, Any]:

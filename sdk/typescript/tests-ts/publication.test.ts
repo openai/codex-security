@@ -341,30 +341,69 @@ describe("scan publication preparation", () => {
     expect(description).not.toContain("unexpected-heading");
   });
 
-  test("only links source locations for a full immutable GitHub revision", async () => {
-    const scanDirectory = await copyExample();
-    const manifestPath = join(scanDirectory, "scan-manifest.json");
-    const manifest = await readJson<ScanManifest>(manifestPath);
-    manifest.scan.target.kind = "git_revision";
-    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
-    delete manifest.scan.target.snapshotDigest;
-    await writeJson(manifestPath, manifest);
+  test.each([
+    [undefined, ""],
+    [".", ""],
+    ["packages/service", "packages/service/"],
+    ["packages/service space", "packages/service%20space/"],
+  ])(
+    "links immutable source locations under saved repository prefix %s",
+    async (prefix, expectedPrefix) => {
+      const scanDirectory = await copyExample();
+      const manifestPath = join(scanDirectory, "scan-manifest.json");
+      const manifest = await readJson<ScanManifest>(manifestPath);
+      manifest.scan.target.kind = "git_revision";
+      manifest.scan.target.revision =
+        "0123456789abcdef0123456789abcdef01234567";
+      if (prefix !== undefined) manifest.scan.target.repositoryPath = prefix;
+      delete manifest.scan.target.snapshotDigest;
+      await writeJson(manifestPath, manifest);
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+      const { description } = (
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
+      ).issues[0]!;
 
-    expect(description).toContain(
-      "https://github.com/example/repo/blob/0123456789abcdef0123456789abcdef01234567/src/extract.py#L41-L44",
-    );
-    expect(description).toContain(
-      "**Revision:** 0123456789abcdef0123456789abcdef01234567",
-    );
-    expect(description).not.toContain("Snapshot digest");
-  });
+      expect(description).toContain(
+        `https://github.com/example/repo/blob/0123456789abcdef0123456789abcdef01234567/${expectedPrefix}src/extract.py#L41-L44`,
+      );
+      expect(description).toContain(
+        "**Revision:** 0123456789abcdef0123456789abcdef01234567",
+      );
+      expect(description).not.toContain("Snapshot digest");
+    },
+  );
+
+  test.each([
+    "../outside",
+    "/outside",
+    "packages\\service",
+    "packages/%2e%2e/outside",
+  ])(
+    "preserves locations without links for unsafe repository prefix %s",
+    async (prefix) => {
+      const scanDirectory = await copyExample();
+      const manifestPath = join(scanDirectory, "scan-manifest.json");
+      const manifest = await readJson<ScanManifest>(manifestPath);
+      manifest.scan.target.kind = "git_revision";
+      manifest.scan.target.revision =
+        "0123456789abcdef0123456789abcdef01234567";
+      manifest.scan.target.repositoryPath = prefix;
+      delete manifest.scan.target.snapshotDigest;
+      await writeJson(manifestPath, manifest);
+
+      const { description } = (
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
+      ).issues[0]!;
+      expect(description).toContain("**Sink:** `src/extract.py:41-44`");
+      expect(description).not.toContain("/blob/");
+    },
+  );
 
   test("does not turn non-HTTPS repository remotes into source links", async () => {
     const scanDirectory = await copyExample();

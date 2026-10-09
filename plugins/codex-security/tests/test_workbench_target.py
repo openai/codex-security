@@ -40,6 +40,8 @@ def initialize_unborn_git_repository(target: Path) -> None:
         (r"C:\repos\project", None),
         ("C:/repos/project", None),
         (r"C:relative\project", None),
+        (r"git@example.test:C:\repos\project.git", None),
+        ("https://example.test/team/repo\x7f.git", None),
     ],
 )
 def test_repository_provenance_records_identity_without_clone_credentials(

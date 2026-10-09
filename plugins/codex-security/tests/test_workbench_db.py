@@ -3266,13 +3266,16 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
 
 
 @pytest.mark.parametrize("dirty", [False, True])
+@pytest.mark.parametrize(
+    "original",
+    ["https://github.com/example/original.git", r"git@example.test:C:\repos\project.git"],
+)
 def test_completion_preserves_original_repository_after_origin_changes(
-    tmp_path: Path, dirty: bool
+    tmp_path: Path, dirty: bool, original: str
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
-    original = "https://github.com/example/original.git"
     subprocess.run(["git", "remote", "add", "origin", original], cwd=target, check=True)
     if dirty:
         (target / "README.md").write_text("tracked local changes\n")
@@ -3299,7 +3302,10 @@ def test_completion_preserves_original_repository_after_origin_changes(
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    assert manifest["scan"]["target"]["remote"] == original
+    if "\\" in original:
+        assert "remote" not in manifest["scan"]["target"]
+    else:
+        assert manifest["scan"]["target"]["remote"] == original
     assert manifest["scan"]["target"]["repositoryPath"] == "."
     assert manifest["scan"]["target"]["revision"] == revision
     if dirty:
