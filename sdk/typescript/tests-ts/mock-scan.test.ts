@@ -1,4 +1,4 @@
-import type { ScanOptions } from "../src/index.js";
+import type { JsonObject, ScanOptions } from "../src/index.js";
 import {
   mkdir,
   mkdtemp,
@@ -140,6 +140,27 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       ["list-scans", "--repository", repository],
     );
     expect(history["scans"]).toHaveLength(2);
+    const saved = await runWorkbench(
+      { python, pluginRoot: PLUGIN_ROOT, environment },
+      ["get-scan", "--scan-id", first.manifest.scan.id],
+    );
+    const savedScan = saved["scan"] as JsonObject;
+    expect(typeof savedScan["updatedAt"]).toBe("string");
+    const showOutput = capture(true);
+    const showDiagnostics = capture();
+    expect(
+      await main(
+        ["scans", "show", first.manifest.scan.id],
+        showOutput.stream,
+        showDiagnostics.stream,
+        dependencies({ onWorkbench: async () => saved }),
+      ),
+    ).toBe(0);
+    expect(showDiagnostics.text()).toContain(
+      `updated ${savedScan["updatedAt"]}`,
+    );
+    expect(showOutput.text()).toContain("UPDATED");
+    expect(showOutput.text()).toContain(savedScan["updatedAt"] as string);
     const recipe = await runWorkbench(
       { python, pluginRoot: PLUGIN_ROOT, environment },
       ["get-scan-recipe", "--scan-id", first.manifest.scan.id],

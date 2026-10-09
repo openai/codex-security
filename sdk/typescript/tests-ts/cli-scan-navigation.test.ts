@@ -46,7 +46,7 @@ describe("scan navigation", () => {
           scanId: completedId,
           targetPath: join(root, "repository"),
           mode: "deep",
-          startedAt: "2026-01-01T12:00:00Z",
+          updatedAt: "2026-01-01T12:00:00Z",
           progress: { status: "complete" },
           findings: [],
         };
@@ -54,7 +54,7 @@ describe("scan navigation", () => {
           ...completed,
           scanId: latestId,
           continuationThreadId: "latest-thread",
-          startedAt,
+          updatedAt: startedAt,
           progress: { status },
         };
         const calls: string[][] = [];
@@ -82,7 +82,9 @@ describe("scan navigation", () => {
           expect(show.stderr.text()).toContain(
             "Selected latest completed scan",
           );
-          expect(show.stderr.text()).toContain(completed.startedAt);
+          expect(show.stderr.text()).toContain(
+            `updated ${completed.updatedAt}`,
+          );
           expect(show.stderr.text()).toContain(`scans logs ${completedId}`);
           expect(show.stderr.text()).not.toContain(latestId);
 
@@ -92,7 +94,7 @@ describe("scan navigation", () => {
           expect(logs.stderr.text()).toContain(
             "including failed and active runs",
           );
-          expect(logs.stderr.text()).toContain(startedAt);
+          expect(logs.stderr.text()).toContain(`updated ${latest.updatedAt}`);
           expect(logs.stderr.text()).toContain(`scans show ${latestId}`);
           expect(logs.stderr.text()).not.toContain(completedId);
         }
@@ -139,7 +141,9 @@ describe("scan navigation", () => {
     );
     expect(JSON.parse(cli.stdout.text())).toEqual(result.toJSON());
     expect(cli.stderr.text()).toContain(`Scan ${completedId} · complete`);
-    expect(cli.stderr.text()).toContain(result.manifest.scan.startedAt);
+    expect(cli.stderr.text()).toContain(
+      `started ${result.manifest.scan.startedAt}`,
+    );
     expect(cli.stderr.text()).toContain(`scans show ${completedId}`);
     expect(cli.stderr.text()).toContain(`scans logs ${completedId}`);
     expect(cli.stderr.text()).toContain(result.scanDir);

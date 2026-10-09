@@ -262,6 +262,8 @@ export function renderScanHistory(
     );
     if (typeof result["startedAt"] === "string") {
       lines.push(`  ${strong("STARTED")}  ${clean(result["startedAt"])}`);
+    } else if (typeof result["updatedAt"] === "string") {
+      lines.push(`  ${strong("UPDATED")}  ${clean(result["updatedAt"])}`);
     }
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);

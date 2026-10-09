@@ -22,7 +22,7 @@ try {
     scanId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     targetPath: join(root, "repository"),
     mode: "standard",
-    startedAt: "2026-01-01T12:00:00Z",
+    updatedAt: "2026-01-01T12:00:00Z",
     continuationThreadId: "saved-thread",
     progress: { status: "complete" },
     findings: [],

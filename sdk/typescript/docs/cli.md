@@ -1070,7 +1070,8 @@ least eight characters.
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
 selects the latest scan of any status. After a successful scan followed by a
 failed or active scan, these defaults refer to different runs. Human output
-identifies the selected run and gives matching commands with its full scan ID:
+identifies the selected run, labels its saved update time, and gives matching
+commands with its full scan ID:
 
 ```bash
 codex-security scans show SCAN_ID
