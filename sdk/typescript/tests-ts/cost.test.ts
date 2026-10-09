@@ -819,7 +819,7 @@ describe("live scan cost tracking", () => {
     ["EPERM", true],
     ["EPERM", false],
   ] as const)(
-    "retains and retries a %s worker when its parent appears later (already identified: %p)",
+    "retains and retries a %s worker when its parent appears later (already identified: %j)",
     async (code, identified) => {
       const home = await codexHome();
       const usage = (input_tokens: number) => ({
