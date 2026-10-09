@@ -726,6 +726,89 @@ def test_ambiguous_surfaces_preserve_only_host_projections(
     assert result.read_bytes() == original
 
 
+@pytest.mark.parametrize("duplicate_ids", [False, True], ids=["distinct-ids", "legacy-alias"])
+@pytest.mark.parametrize(
+    "reviewed",
+    [False, "partial", True],
+    ids=["unreviewed", "partial-projection", "accepted-projection"],
+)
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+def test_ambiguous_surface_receipts_keep_one_copy_per_source(
+    workbench_api, workbench_db, publication_scan, monkeypatch, duplicate_ids, reviewed, retry
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
+            ("deep-scan-mcp/v1", scan.scan_id),
+        )
+    initial = add_worker(workbench_db, scan)
+    worker_id = initial.parent.name
+    output = scan.scan_dir / "artifacts" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    receipt = output / "artifacts" / "review.txt"
+    receipt.parent.mkdir()
+    receipt.write_text("Synthetic source evidence.\n")
+    surfaces = [
+        {
+            "id": "review" if duplicate_ids else f"review-{index}",
+            "label": f"Independent source review {index}",
+            "disposition": "needs_follow_up",
+            "receiptRefs": ["artifacts/review.txt"],
+        }
+        for index in (1, 2)
+    ]
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "completeness": "partial", "surfaces": surfaces},
+            }
+        )
+    )
+    expected_receipts = [receipt.relative_to(scan.scan_dir).as_posix()]
+    projected = [
+        {
+            **surface,
+            "id": f"{worker_id}-attempt-1-surface-{index}",
+            "receiptRefs": expected_receipts,
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": surface["id"]},
+        }
+        for index, surface in enumerate(surfaces, 1)
+    ]
+    if reviewed:
+        publish_review_projection(
+            workbench_api,
+            workbench_db,
+            scan,
+            {
+                **scan.coverage,
+                "completeness": "partial",
+                "surfaces": projected[:1] if reviewed == "partial" else projected,
+                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+            },
+        )
+    originals = {path: path.read_bytes() for path in (result, receipt)}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert len(coverage["surfaces"]) == 2
+    assert {row["label"] for row in coverage["surfaces"]} == {
+        surface["label"] for surface in surfaces
+    }
+    assert len({row["id"] for row in coverage["surfaces"]}) == 2
+    assert all(row["receiptRefs"] == expected_receipts for row in coverage["surfaces"])
+    if reviewed:
+        assert coverage["surfaces"] == projected
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 @pytest.mark.parametrize("field", ["explicitExclusions", "openQuestions"])
 @pytest.mark.parametrize(
     "missing", [False, True], ids=["complete-projection", "partial-projection"]
