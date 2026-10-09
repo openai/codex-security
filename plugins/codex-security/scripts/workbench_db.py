@@ -1539,14 +1539,25 @@ def complete_scan_locked(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                completion_warnings=warnings,
+                recover_drafts=scan["mode"] != "deep",
+                refresh_completion_warnings=add_warning,
                 draft_documents=draft_documents,
             )
-        add_warning()
         wrote = True
-        manifest, findings, _ = _write_prepared_scan_finalization(
-            prepared, projection_warnings=warnings
+        snapshots = (
+            saved_results._snapshot_published_outputs(scan_dir)
+            if already_sealed and not prepared[5]
+            else None
         )
+        try:
+            manifest, findings, _ = _write_prepared_scan_finalization(
+                prepared, projection_warnings=warnings
+            )
+        except Exception:
+            if snapshots is not None:
+                saved_results._restore_published_outputs(scan_dir, snapshots)
+            raise
     except ContractError as exc:
         if wrote or (
             scan["mode"] == "deep"

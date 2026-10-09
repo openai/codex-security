@@ -343,6 +343,7 @@ export interface CoverageDocument {
     followUpPrompt?: string;
     [k: string]: unknown;
   }[];
+  warnings?: string[];
   [k: string]: unknown;
 }
 
