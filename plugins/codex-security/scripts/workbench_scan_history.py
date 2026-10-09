@@ -20,7 +20,7 @@ from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
-from workbench_validation import reject_non_finite_json
+from workbench_validation import register_timestamp_collation, reject_non_finite_json, timestamp_key
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -204,6 +204,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
+    register_timestamp_collation(connection)
     connection.create_function("casefold", 1, str.casefold, deterministic=True)
     if os.name == "nt":
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
@@ -297,8 +298,9 @@ def list_scans(
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
-            MAX(scans.updated_at, progress.updated_at) DESC,
-            scans.started_at DESC,
+            MAX(scans.updated_at COLLATE codex_security_timestamp, progress.updated_at)
+                COLLATE codex_security_timestamp DESC,
+            scans.started_at COLLATE codex_security_timestamp DESC,
             scans.id
         {pagination}
         """,
@@ -337,7 +339,11 @@ def list_scans(
                 "targetPath": row["target_path"],
                 "targetRevision": row["target_revision"],
                 "targetSummary": row["target_summary"],
-                "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
+                "updatedAt": max(
+                    row["updated_at"],
+                    row["progress_updated_at"],
+                    key=lambda value: (timestamp_key(value), value),
+                ),
                 **(
                     {"warnings": json.loads(row["completion_warnings_json"])}
                     if row["completion_warnings_json"] != "[]"
