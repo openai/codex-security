@@ -92,17 +92,12 @@ export class DeepScanCoordinator {
   private readonly artifacts: DeepScanArtifacts;
   private readonly workers: DeepScanWorkerRunner;
   private readonly discoveryWorkers: DeepScanWorkerRunner;
-  private readonly terminalPromise: Promise<DeepScanRunState>;
+  private readonly terminalResult: PromiseWithResolvers<DeepScanRunState>;
   private readonly schedulerWork = new Set<Promise<unknown>>();
   private heartbeatTimeout: ReturnType<typeof setTimeout> | undefined;
   private discoveryTimeout: ReturnType<typeof setTimeout> | undefined;
   private ownershipCheck: Promise<boolean> | undefined;
-  private resolveTerminal!: (state: DeepScanRunState) => void;
-  private rejectTerminal!: (error: unknown) => void;
-  private resolveCancellationReady!: () => void;
-  private readonly cancellationReady = new Promise<void>((resolvePromise) => {
-    this.resolveCancellationReady = resolvePromise;
-  });
+  private readonly cancellationReady = Promise.withResolvers<void>();
   private cancellationPersistence?: {
     promise: Promise<void>;
     resolve: () => void;
@@ -150,10 +145,7 @@ export class DeepScanCoordinator {
       },
       { once: true },
     );
-    this.terminalPromise = new Promise((resolvePromise, rejectPromise) => {
-      this.resolveTerminal = resolvePromise;
-      this.rejectTerminal = rejectPromise;
-    });
+    this.terminalResult = Promise.withResolvers<DeepScanRunState>();
   }
 
   start(): void {
@@ -168,7 +160,7 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: errorKind(error),
       });
-      if (this.stopLocally()) this.rejectTerminal(error);
+      if (this.stopLocally()) this.terminalResult.reject(error);
     });
   }
 
@@ -177,7 +169,7 @@ export class DeepScanCoordinator {
   }
 
   settled(): Promise<DeepScanRunState> {
-    return this.terminalPromise.then(cloneState);
+    return this.terminalResult.promise.then(cloneState);
   }
 
   async wait(signal: AbortSignal | undefined): Promise<DeepScanRunState>;
@@ -209,7 +201,7 @@ export class DeepScanCoordinator {
           signal?.removeEventListener("abort", onAbort);
         };
         signal?.addEventListener("abort", onAbort, { once: true });
-        void this.terminalPromise.then(
+        void this.terminalResult.promise.then(
           (state) => {
             cleanup();
             resolvePromise(cloneState(state));
@@ -245,15 +237,9 @@ export class DeepScanCoordinator {
   ): Promise<DeepScanRunState> {
     if (this.terminal || this.state.status !== "running")
       return await this.settled();
-    if (!this.cancellationPersistence) {
-      let resolve!: () => void;
-      const promise = new Promise<void>((resolvePromise) => {
-        resolve = resolvePromise;
-      });
-      this.cancellationPersistence = { promise, resolve };
-    }
+    this.cancellationPersistence ??= Promise.withResolvers<void>();
     this.cancel(reason);
-    await this.cancellationReady;
+    await this.cancellationReady.promise;
     try {
       await persistCancellation();
     } catch (error) {
@@ -389,7 +375,7 @@ export class DeepScanCoordinator {
       // persisted. Publish saved output only after every local writer settles.
       await this.settleSchedulerWork();
       await this.ownershipCheck;
-      this.resolveCancellationReady();
+      this.cancellationReady.resolve();
       await this.cancellationPersistence?.promise;
       if (this.options.onStopped && this.options.threadId) {
         let current: DeepScanRunState | undefined;
@@ -463,7 +449,8 @@ export class DeepScanCoordinator {
         throw this.cancellationPersistence.failure.error;
       }
       if (this.canceled) this.state = { ...this.state, status: "canceled" };
-      if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
+      if (this.stopLocally())
+        this.terminalResult.resolve(cloneState(this.state));
     }
   }
 
