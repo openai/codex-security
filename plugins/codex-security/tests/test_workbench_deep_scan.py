@@ -1926,7 +1926,9 @@ def test_invalid_discovery_error_threshold_fails_before_scan_creation(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
 
 
-@pytest.mark.parametrize("invalid_hours", ("0", "-0.5", "true", '"2"', "nan", "inf", "96.5"))
+@pytest.mark.parametrize(
+    "invalid_hours", ("0", "-0.5", "true", '"2"', "nan", "inf", "96.5", "9" * 400)
+)
 def test_invalid_discovery_time_limit_fails_before_scan_creation(
     tmp_path: Path, invalid_hours: str
 ) -> None:
@@ -2431,26 +2433,12 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
     assert deep_scan["config"]["maxDiscoveryRuns"] == 1
     scan_id = str(deep_scan["scanId"])
     scan_dir = Path(str(deep_scan["scanDir"]))
-    worker_id = str(uuid.uuid4())
-    prompt, artifact_dir, result = worker_paths(scan_dir, "singleton-worker")
-    upsert_worker(
+    worker_id, prompt, artifact_dir, result = dispatch_discovery_worker(
         state_dir,
         codex_home,
         scan_id=scan_id,
-        worker_id=worker_id,
-        prompt_path=prompt,
-        artifact_dir=artifact_dir,
-    )
-    result.write_text("{}\n")
-    upsert_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        worker_id=worker_id,
-        status="succeeded",
-        prompt_path=prompt,
-        artifact_dir=artifact_dir,
-        result_path=result,
+        scan_dir=scan_dir,
+        name="singleton-worker",
     )
     reducer_id = str(uuid.uuid4())
     reducer_prompt, reducer_dir, reducer_result = worker_paths(scan_dir, "singleton-reducer")
