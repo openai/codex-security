@@ -2099,6 +2099,42 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("retains the registered scan ID when continuation storage becomes unavailable", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const document = join(root, "architecture.md");
+    await writeFile(document, "Synthetic original architecture.");
+    const onScanRegistered = mock();
+    const createCodex = mock(() =>
+      fail("No worker can start without its saved context"),
+    );
+    const failedScans: Array<readonly string[]> = [];
+    await using client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: async (_options, args, input) => {
+        const result = mockWorkbench(args, input);
+        if (args[0] === "register-cli-scan") {
+          // Simulate storage disappearing after the database accepts registration.
+          await rm(scanDir, { recursive: true });
+        }
+        if (args[0] === "fail-scan") failedScans.push(args);
+        return result;
+      },
+      createCodex,
+    });
+    await expect(
+      client.run(repository, {
+        knowledgeBasePaths: [document],
+        onScanRegistered,
+      }),
+    ).rejects.toThrow("ENOENT");
+    expect(onScanRegistered.mock.calls).toEqual([
+      [{ scanId: "scan_example_001", scanDir }],
+    ]);
+    expect(failedScans).toHaveLength(1);
+    expect(failedScans[0]).toContain("scan_example_001");
+    expect(createCodex).not.toHaveBeenCalled();
+  });
+
   test("identifies stored credential types without exposing stored secrets", async () => {
     for (const [storedAuthentication, expected] of [
       [
