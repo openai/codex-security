@@ -63,7 +63,7 @@ async function bundledWorkerExecutor(
     "resolveCodexPath",
     "executablePathForSpawn",
     "workerSubagentConfig",
-    "appendSafeItemDiagnostic",
+    "appendItemDiagnostic",
     "classifyCodexWorkerError",
     `${source}\nreturn CodexSdkWorkerExecutor;`,
   )(
