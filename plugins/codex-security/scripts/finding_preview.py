@@ -13,7 +13,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_projection import merged_root_cause
-from workbench.json_numbers import is_json_integer
+from workbench.json_numbers import dumps_json, is_json_integer
 from workbench_constants import (
     FINDING_ATTACK_PATH_PREVIEW_BYTES,
     FINDING_CODE_EVIDENCE_LIMIT,
@@ -339,7 +339,7 @@ def merged_bounded_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any
 
 def json_size(value: Any) -> int:
     # ASCII output gives byte length; strings can use the cached default encoder.
-    return len(json.dumps(value, separators=None if isinstance(value, str) else (",", ":")))
+    return len(dumps_json(value, separators=None if isinstance(value, str) else (",", ":")))
 
 
 def bounded_json_value(

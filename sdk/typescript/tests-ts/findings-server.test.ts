@@ -807,6 +807,31 @@ print(json.dumps(db.execute('SELECT details_json FROM findings').fetchone()[0]))
   }
 });
 
+test("direct stores reject unsupported finding numbers before persisting any entry", async () => {
+  const { store, environment } = await fixture();
+  for (const value of [NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    const entries = [embedded(1), embedded(2)];
+    entries[1]!.finding.extensions = { nested: [{ value }] };
+    await expect(store.insert(entries)).rejects.toThrow(
+      "JSON numbers are not supported",
+    );
+    expect(
+      await readdir(dirname(environment.CODEX_SECURITY_STATE_DIR)),
+    ).toEqual([]);
+  }
+  const entries = [0.125, Number.MAX_SAFE_INTEGER, -0].map((value, index) => {
+    const entry = embedded(index + 1, [Number.MAX_SAFE_INTEGER + 1, 0]);
+    entry.finding.extensions = { nested: [{ value }] };
+    return entry;
+  });
+  expect(await store.insert(entries)).toEqual(
+    entries.map(({ finding }) => finding.findingId),
+  );
+  expect((await store.list({ limit: 10, offset: 0 })).findings).toEqual(
+    entries.map(({ finding }) => JSON.parse(JSON.stringify(finding))),
+  );
+});
+
 test("bulk insert keeps startup dependencies and complete findings without creating scans", async () => {
   const { store, environment } = await fixture();
   const options = { store, embeddings: embedder, host: "127.0.0.1", port: 0 };
