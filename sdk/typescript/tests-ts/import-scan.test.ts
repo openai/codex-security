@@ -354,6 +354,24 @@ test.each(["csv", "json"] as const)(
       status: "complete",
       occurrence_count: 0,
     });
+    const manifestPath = join(result.scanDir, "scan-manifest.json");
+    const manifestText = await readFile(manifestPath, "utf8");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        ...result.manifest,
+        scan: {
+          ...result.manifest.scan,
+          artifacts: result.manifest.scan.artifacts.filter(
+            (artifact) => artifact.path !== sourceRef,
+          ),
+        },
+      }),
+    );
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("Import source is missing from sealed artifacts");
+    await writeFile(manifestPath, manifestText);
     await writeFile(retainedSource, `${source}\n`);
     await expect(
       loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
