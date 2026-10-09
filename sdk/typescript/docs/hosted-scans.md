@@ -169,20 +169,3 @@ and canceled results are not accepted completed scans.
 
 The host verifies receipt paths, hashes, sizes, scope, revision and seals before
 accepting output.
-
-## Unpublished Linux development bundles
-
-Install the repository's pinned dependencies and verified native artifacts as
-described in [the testing guide](../TESTING.md). From `sdk/typescript`, build on
-Linux x64 with a compatible Node executable:
-
-```sh
-node scripts/build-host-bundle.mjs /absolute/output/host-bundle.tar.gz
-```
-
-The archive contains `bin/node`, built `cli`, its matching plugin and locked
-production dependencies, and `runtime.json` with `hostProtocolVersion: 2`.
-Adjacent `.sha256` and `.json` files record the archive digest and build identity.
-The build binds packed CLI bytes, Node and plugin tree digest, including source
-changes. No package is published. Install outside the target checkout and verify
-archive/plugin digests before execution.
