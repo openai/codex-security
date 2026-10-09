@@ -1315,68 +1315,35 @@ try {
     code: "ENOENT",
   });
 
-  const launcher = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "open_codex_security_workspace",
-  );
-  const startPromptOnlyScan = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "start_codex_security_prompt_only_scan",
-  );
+  const findTool = (name: string) =>
+    toolList.result.tools.find((tool: { name: string }) => tool.name === name);
+
+  const launcher = findTool("open_codex_security_workspace");
+  const startPromptOnlyScan = findTool("start_codex_security_prompt_only_scan");
   assert.match(
     startPromptOnlyScan.description,
     /Standard and diff scans save progress checkpoints before their final semantic draft/,
     "Prompt-only scan instructions must align Diff callers with checkpointed handoffs",
   );
-  const startHeadlessStandardScan = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "start_codex_security_standard_scan",
+  const startHeadlessStandardScan = findTool(
+    "start_codex_security_standard_scan",
   );
-  const getScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "get_codex_security_scan",
+  const getScan = findTool("get_codex_security_scan");
+  const recoverScanResults = findTool("recover_codex_security_scan_results");
+  const listScans = findTool("list_codex_security_scans");
+  const listGlobalFindings = findTool("list_codex_security_global_findings");
+  const listRepositories = findTool("list_codex_security_repositories");
+  const getScanContext = findTool("get_codex_security_scan_context");
+  const updateScanContext = findTool("update_codex_security_scan_context");
+  const updateScanContextFromApp = findTool(
+    "update_codex_security_scan_context_from_app",
   );
-  const recoverScanResults = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "recover_codex_security_scan_results",
-  );
-  const listScans = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "list_codex_security_scans",
-  );
-  const listGlobalFindings = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "list_codex_security_global_findings",
-  );
-  const listRepositories = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "list_codex_security_repositories",
-  );
-  const getScanContext = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "get_codex_security_scan_context",
-  );
-  const updateScanContext = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_context",
-  );
-  const updateScanContextFromApp = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_context_from_app",
-  );
-  const renameScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "rename_codex_security_scan",
-  );
+  const renameScan = findTool("rename_codex_security_scan");
   assert.deepEqual(renameScan._meta.ui.visibility, ["app"]);
-  const submit = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "submit_codex_security_setup",
-  );
-  const inspectTarget = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "inspect_codex_security_target",
-  );
-  const inspectSetup = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "inspect_codex_security_setup",
-  );
-  const requestUserInput = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_user_input",
-  );
+  const submit = findTool("submit_codex_security_setup");
+  const inspectTarget = findTool("inspect_codex_security_target");
+  const inspectSetup = findTool("inspect_codex_security_setup");
+  const requestUserInput = findTool("request_codex_security_user_input");
   assert.ok(
     requestUserInput,
     "Expected the Codex Security user-input fallback tool.",
@@ -1580,83 +1547,45 @@ try {
     assertNoError(response);
     assert.deepEqual(response.result.structuredContent, { status });
   }
-  const start = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "start_codex_security_scan",
+  const start = findTool("start_codex_security_scan");
+  const startDeepScan = findTool("start_codex_security_deep_scan");
+  const cancel = findTool("cancel_codex_security_scan");
+  const cancelFromApp = findTool("cancel_codex_security_scan_from_app");
+  const markHandoff = findTool("mark_codex_security_scan_handoff_delivered");
+  const claimHandoff = findTool("claim_codex_security_scan_handoff_delivery");
+  const releaseHandoff = findTool(
+    "release_codex_security_scan_handoff_delivery",
   );
-  const startDeepScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "start_codex_security_deep_scan",
+  const attachHandoff = findTool(
+    "attach_codex_security_scan_continuation_thread",
   );
-  const cancel = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "cancel_codex_security_scan",
+  const progress = findTool("update_codex_security_scan_progress");
+  const complete = findTool("complete_codex_security_scan");
+  const fail = findTool("fail_codex_security_scan");
+  const setFindingTriage = findTool("set_codex_security_finding_triage");
+  const requestFindingRemediation = findTool(
+    "request_codex_security_finding_remediation",
   );
-  const cancelFromApp = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "cancel_codex_security_scan_from_app",
+  const requestFindingRemediationAction = findTool(
+    "request_codex_security_finding_remediation_action",
   );
-  const markHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "mark_codex_security_scan_handoff_delivered",
+  const claimFindingRemediationResend = findTool(
+    "claim_codex_security_finding_remediation_resend",
   );
-  const claimHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "claim_codex_security_scan_handoff_delivery",
+  const releaseFindingRemediationClaim = findTool(
+    "release_codex_security_finding_remediation_claim",
   );
-  const releaseHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "release_codex_security_scan_handoff_delivery",
+  const cancelFindingRemediationRequest = findTool(
+    "cancel_codex_security_finding_remediation_request",
   );
-  const attachHandoff = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "attach_codex_security_scan_continuation_thread",
+  const markFindingRemediationDelivered = findTool(
+    "mark_codex_security_finding_remediation_delivered",
   );
-  const progress = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "update_codex_security_scan_progress",
+  const setFindingRemediation = findTool(
+    "set_codex_security_finding_remediation",
   );
-  const complete = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "complete_codex_security_scan",
-  );
-  const fail = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "fail_codex_security_scan",
-  );
-  const setFindingTriage = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "set_codex_security_finding_triage",
-  );
-  const requestFindingRemediation = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_finding_remediation",
-  );
-  const requestFindingRemediationAction = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "request_codex_security_finding_remediation_action",
-  );
-  const claimFindingRemediationResend = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "claim_codex_security_finding_remediation_resend",
-  );
-  const releaseFindingRemediationClaim = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "release_codex_security_finding_remediation_claim",
-  );
-  const cancelFindingRemediationRequest = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "cancel_codex_security_finding_remediation_request",
-  );
-  const markFindingRemediationDelivered = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "mark_codex_security_finding_remediation_delivered",
-  );
-  const setFindingRemediation = toolList.result.tools.find(
-    (tool: { name: string }) =>
-      tool.name === "set_codex_security_finding_remediation",
-  );
-  const exportFindings = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "export_codex_security_findings",
-  );
-  const listFindings = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "list_codex_security_findings",
-  );
+  const exportFindings = findTool("export_codex_security_findings");
+  const listFindings = findTool("list_codex_security_findings");
   assert.ok(launcher);
   assert.ok(startPromptOnlyScan);
   assert.ok(startHeadlessStandardScan);
