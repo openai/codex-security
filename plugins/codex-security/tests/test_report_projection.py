@@ -1,24 +1,11 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
-from pathlib import Path
-from types import ModuleType
 
 import pytest
+from workbench_test_support import load_script
 
-PLUGIN_DIR = Path(__file__).resolve().parent.parent
-
-
-def load_script(name: str) -> ModuleType:
-    path = PLUGIN_DIR / "scripts" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
+pytestmark = pytest.mark.cross_platform
 
 PROJECTION = load_script("report_projection")
 
@@ -32,7 +19,7 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
                 "excludePaths": [],
                 "summary": "## Injected scope\n- nested item",
             },
-            "threatModel": {"summary": "# Injected threat heading\nThreat details"},
+            "threatModel": {"summary": "# Queue boundaries\n\nThreat details"},
         }
     }
     findings = {
@@ -62,17 +49,75 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
     return manifest, findings, coverage
 
 
-def test_projection_normalizes_multiline_and_block_structural_text() -> None:
+def test_projection_normalizes_structured_fields() -> None:
     markdown = PROJECTION.build_report_markdown(*canonical_documents())
 
     assert "\n## Injected" not in markdown
     assert "\n# Injected" not in markdown
     assert "\n```" not in markdown
     assert "Text: ## Injected scope - nested item" in markdown
-    assert "Text: # Injected threat heading Threat details" in markdown
+    assert "Text: # Queue boundaries Threat details" in markdown
+    assert "\n# Queue boundaries" not in markdown
     assert "Text: \\`\\`\\` code fence \\`\\`\\`" in markdown
     assert "Parser \\| boundary ## Injected finding heading" in markdown
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
+
+
+@pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
+def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    if linked_writeup:
+        finding["writeup"] = {"reportPath": "findings/parser/parser.md"}
+    finding["remediation"] = "Validate the record length."
+    finding["remediationTests"] = ["Reject a record longer than the allowed size."]
+    finding["preventiveControls"] = ["Centralize record validation."]
+    finding["provenance"] = {
+        "sourceFindings": [
+            {"id": "review-1:0", "finding": {"remediation": "Validate the record length."}},
+            {
+                "id": "review-2:0",
+                "finding": {
+                    "remediation": "Reject duplicate record keys.",
+                    "remediationTests": [
+                        "Reject a record longer than the allowed size.",
+                        "Cover duplicate keys in parser tests.",
+                    ],
+                    "preventiveControls": [
+                        "Centralize record validation.",
+                        "Track keys while parsing a record.",
+                    ],
+                },
+            },
+            {
+                "id": "review-3:0",
+                "finding": {
+                    "remediation": "Reject duplicate record keys.",
+                    "remediationTests": [
+                        "Cover duplicate keys in parser tests.",
+                        "Reject case-variant duplicate keys.",
+                    ],
+                    "preventiveControls": ["Track keys while parsing a record."],
+                },
+            },
+        ]
+    }
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    if linked_writeup:
+        assert "findings/parser/parser.md" in markdown
+    assert "Source review-2:0: Reject duplicate record keys." in markdown
+    for text in (
+        "Validate the record length.",
+        "Reject duplicate record keys.",
+        "Reject a record longer than the allowed size.",
+        "Cover duplicate keys in parser tests.",
+        "Reject case-variant duplicate keys.",
+        "Centralize record validation.",
+        "Track keys while parsing a record.",
+    ):
+        assert markdown.count(text) == 1
 
 
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
@@ -118,7 +163,8 @@ def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     assert "The runtime path inserts `local` without reusing the startup check." in markdown
 
 
-def test_projection_renders_nested_attack_path_code_evidence() -> None:
+@pytest.mark.parametrize("reference_key", ["evidenceRefs", "evidence_refs"])
+def test_projection_renders_nested_attack_path_code_evidence(reference_key: str) -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
     finding["codeEvidence"] = [
@@ -147,7 +193,7 @@ def test_projection_renders_nested_attack_path_code_evidence() -> None:
         },
         "reachability": {
             "summary": "An authenticated uploader can trigger extraction.",
-            "evidence_refs": ["archive-sink"],
+            reference_key: ["archive-sink"],
         },
     }
 
@@ -231,13 +277,16 @@ def test_projection_merges_top_level_and_reachability_preconditions() -> None:
 def test_projection_uses_top_level_attack_path_summary_as_reachability_fallback() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["attackPath"] = {
-        "summary": "An authenticated uploader can trigger archive extraction."
+        "summary": "An authenticated uploader can trigger parse_file to extract an archive."
     }
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     reachability = markdown.split("#### Reachability", 1)[1].split("#### Severity", 1)[0]
-    assert "An authenticated uploader can trigger archive extraction." in reachability
+    assert (
+        reachability.strip()
+        == r"An authenticated uploader can trigger parse\_file to extract an archive."
+    )
     assert "Reachability was not recorded" not in reachability
 
 
@@ -658,7 +707,7 @@ def test_projection_includes_exact_target_identity() -> None:
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert "- Target kind: git_diff" in markdown
+    assert "- Target kind: git\\_diff" in markdown
     assert "- Target ID: repo-1" in markdown
     assert "- Revision range: base-sha...head-sha" in markdown
     assert "- Snapshot digest: codex-security-snapshot/v1:sha256:" in markdown
@@ -885,3 +934,33 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
+
+
+@pytest.mark.parametrize(
+    ("source_path", "rendered_location"),
+    [
+        ("app/api/[id]/route.ts", "`app/api/[id]/route.ts:7`"),
+        ("app/api/`id`/route.ts", "``app/api/`id`/route.ts:7``"),
+        ("`route`.ts", "`` `route`.ts:7 ``"),
+    ],
+)
+def test_projection_preserves_identifier_text_and_code_path_spelling(
+    source_path: str, rendered_location: str
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["title"] = "__proto__ pollution"
+    finding["validation"] = {"evidenceRefs": ["source"]}
+    finding["codeEvidence"] = [
+        {
+            "id": "source",
+            "label": "Source control",
+            "path": source_path,
+            "startLine": 7,
+            "code": "handle(request)",
+            "explanation": "A source-backed operation.",
+        }
+    ]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "\\_\\_proto\\_\\_ pollution" in markdown
+    assert rendered_location in markdown

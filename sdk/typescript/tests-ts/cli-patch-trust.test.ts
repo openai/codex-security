@@ -1,15 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
@@ -18,6 +10,7 @@ import { parse as parseToml } from "smol-toml";
 import { readSkillCommandOutput } from "../src/cli.js";
 import { writeCodexConfig } from "../src/config.js";
 import { resolveCodexCommand } from "../src/runtime.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 test.each([
   [undefined, "patch"],
@@ -28,9 +21,7 @@ test.each([
 ] as const)(
   "preserves project trust and protects verification (%s, %s)",
   async (trust, mode) => {
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-patch-trust-")),
-    );
+    const root = await temporaryDirectory("codex-security-patch-trust-", true);
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const marker = join(root, "mcp-started");
@@ -219,8 +210,9 @@ test.each([
 test.each(["openai", undefined])(
   "app-server preserves explicit and native providers during ephemeral API-key login (%s)",
   async (selectedProvider) => {
-    const codexHome = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-key-login-")),
+    const codexHome = await temporaryDirectory(
+      "codex-security-key-login-",
+      true,
     );
     const stored = JSON.stringify({
       auth_mode: "apikey",

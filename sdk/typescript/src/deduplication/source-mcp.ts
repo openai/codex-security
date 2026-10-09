@@ -33,6 +33,7 @@ import { VERSION } from "../version.js";
 
 export interface SourceMcp {
   name: string;
+  configPath: string;
   server: JsonObject;
   environment: Record<string, string>;
   executor?: JsonObject;
@@ -85,39 +86,43 @@ async function readSourceConfig(
       windowsHide: true,
       signal,
     });
-    const loaded = Promise.withResolvers<JsonObject>();
-    let resolvedConfig: JsonObject | undefined;
-    let environmentId: string | undefined;
+    let processError: Error | undefined;
     let stderr = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
     const closed = new Promise<void>((resolve) => {
-      child.once("close", () => {
-        loaded.reject(
-          new ConfigurationError(
-            stderr.trim() ||
-              "Codex exited before returning source MCP configuration.",
-          ),
-        );
-        resolve();
-      });
+      child.once("close", () => resolve());
     });
-    child.once("error", loaded.reject);
-    child.stdin.on("error", loaded.reject);
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const failed = (error: Error): void => {
+      processError = error;
+      lines.close();
+    };
+    child.once("error", failed);
+    child.stdin.on("error", failed);
     const send = (message: object) =>
       child.stdin.write(`${JSON.stringify(message)}\n`);
-    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    lines.on("line", (line) => {
-      try {
+    try {
+      send({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codex-security", version: VERSION },
+          capabilities: { experimentalApi: true },
+        },
+      });
+      let resolvedConfig: JsonObject | undefined;
+      let environmentId: string | undefined;
+      for await (const line of lines) {
         const message = JSON.parse(line) as {
           id?: number;
           method?: string;
           error?: { message: string };
           result?: { config?: JsonObject; status?: string; error?: string };
         };
-        if (message.method !== undefined || message.id === undefined) return;
+        if (message.method !== undefined || message.id === undefined) continue;
         if (message.error) throw new ConfigurationError(message.error.message);
         if (message.id === 1) {
           send({ method: "initialized" });
@@ -145,35 +150,28 @@ async function readSourceConfig(
             environmentId === undefined ||
             (environmentId === "local" && typeof selected?.["url"] === "string")
           )
-            loaded.resolve(resolvedConfig);
-          else
-            send({
-              id: 3,
-              method: "environment/status",
-              params: { environmentId },
-            });
+            return resolvedConfig;
+          send({
+            id: 3,
+            method: "environment/status",
+            params: { environmentId },
+          });
         } else if (message.id === 3) {
           if (message.result?.status === "unknown")
             throw new ConfigurationError(
               message.result.error ??
                 `Unknown source MCP environment ${JSON.stringify(environmentId)}.`,
             );
-          loaded.resolve(resolvedConfig!);
+          return resolvedConfig!;
         }
-      } catch (error) {
-        loaded.reject(error);
       }
-    });
-    try {
-      send({
-        id: 1,
-        method: "initialize",
-        params: {
-          clientInfo: { name: "codex-security", version: VERSION },
-          capabilities: { experimentalApi: true },
-        },
-      });
-      return await loaded.promise;
+      throw (
+        processError ??
+        new ConfigurationError(
+          stderr.trim() ||
+            "Codex exited before returning source MCP configuration.",
+        )
+      );
     } catch (error) {
       signal?.throwIfAborted();
       throw error;
@@ -426,6 +424,7 @@ export async function resolveSourceMcp(
   }
   return {
     name,
+    configPath: join(configuredCodexHome(environment), "config.toml"),
     server,
     environment: credentials,
     ...(executor === undefined ? {} : { executor }),

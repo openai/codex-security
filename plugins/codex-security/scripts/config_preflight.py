@@ -12,14 +12,16 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
-    import tomli as tomllib
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench.runtime_toml import tomllib
+from workbench_constants import positive_int
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = PLUGIN_ROOT / "preflight" / "capability-profiles.toml"
-DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+DEFAULT_CODEX_HOME = Path(
+    os.environ["CODEX_HOME"] if os.environ.get("CODEX_HOME", "").strip() else "~/.codex"
+).expanduser()
 
 
 def default_system_config() -> Path:
@@ -145,13 +147,6 @@ def parse_bool(value: str) -> bool:
     if normalized == "false":
         return False
     raise ValueError(f"expected true or false, got {value!r}")
-
-
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("expected a positive integer")
-    return parsed
 
 
 def parse_assignment(raw: str) -> tuple[str, str]:
@@ -377,28 +372,6 @@ def config_profile_layer_path(profile: str | None) -> Path | None:
     return path if path.is_file() else None
 
 
-def parse_multi_agent_v2_enabled(feature_config: Any) -> bool | None:
-    if isinstance(feature_config, bool):
-        return feature_config
-    if not isinstance(feature_config, dict):
-        raise ValueError("features.multi_agent_v2 must be a boolean or table")
-    if "enabled" not in feature_config:
-        return None
-    enabled = feature_config["enabled"]
-    if not isinstance(enabled, bool):
-        raise ValueError("features.multi_agent_v2.enabled must be a boolean")
-    return enabled
-
-
-def merge_toml_value(base: Any, overlay: Any) -> Any:
-    if isinstance(base, dict) and isinstance(overlay, dict):
-        merged = dict(base)
-        for key, value in overlay.items():
-            merged[key] = merge_toml_value(merged[key], value) if key in merged else value
-        return merged
-    return overlay
-
-
 def lookup_multi_agent_v2_enabled(
     *,
     config_layers: list[tuple[Path, dict[str, Any]]],
@@ -412,38 +385,28 @@ def lookup_multi_agent_v2_enabled(
         return True, enabled, "effective-config"
 
     v2_configs = []
-    config_views = list(iter_config_views(config_layers, config_profile))
-    for source, config in reversed(config_views):
+    if "features.multi_agent_v2" in effective_config:
+        v2_configs.append(("effective-config", effective_config["features.multi_agent_v2"]))
+    for source, config in iter_config_views(config_layers, config_profile):
         found, feature_config = lookup_dotted(config, "features.multi_agent_v2")
         if found:
             v2_configs.append((source, feature_config))
 
-    if "features.multi_agent_v2" in effective_config:
-        v2_configs.append(("effective-config", effective_config["features.multi_agent_v2"]))
-
-    if not v2_configs:
-        return False, None, None
-
-    merged_v2_config: Any = None
-    enabled_source: str | None = None
-    for index, (source, feature_config) in enumerate(v2_configs):
-        tables_merge = isinstance(merged_v2_config, dict) and isinstance(feature_config, dict)
-        if index and not tables_merge:
-            enabled_source = None
-        merged_v2_config = (
-            merge_toml_value(merged_v2_config, feature_config) if index else feature_config
-        )
-        if isinstance(feature_config, bool) or (
-            isinstance(feature_config, dict) and "enabled" in feature_config
-        ):
-            enabled_source = source
-
-    enabled = parse_multi_agent_v2_enabled(merged_v2_config)
-    return (
-        (True, enabled, enabled_source)
-        if enabled is not None
-        else (True, False, "documented-default")
-    )
+    table_override = False
+    for source, feature_config in v2_configs:
+        if table_override and not isinstance(feature_config, (dict, bool)):
+            break
+        if isinstance(feature_config, bool):
+            return True, feature_config, source
+        if not isinstance(feature_config, dict):
+            raise ValueError("features.multi_agent_v2 must be a boolean or table")
+        if "enabled" in feature_config:
+            enabled = feature_config["enabled"]
+            if not isinstance(enabled, bool):
+                raise ValueError("features.multi_agent_v2.enabled must be a boolean")
+            return True, enabled, source
+        table_override = True
+    return (True, False, "documented-default") if table_override else (False, None, None)
 
 
 def resolve_multi_agent_context(
@@ -865,7 +828,6 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         if path in project_config_paths_set:
             # Codex strips project-local profile selection and definitions before
             # resolving the merged config. Mirror that denylist here.
-            config = dict(config)
             config.pop("profile", None)
             config.pop("profiles", None)
         config_layers.append((path, config))

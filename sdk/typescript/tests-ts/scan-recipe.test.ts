@@ -1,15 +1,15 @@
+import { createCliTest } from "./support/cli-run.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { runWorkbench } from "../src/runtime.js";
-import { capture, dependencies } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { dependencies } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { throwing } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -39,15 +39,10 @@ test.each(["standard", "deep"])(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-launch-key",
     };
-    const command = (args: readonly string[], input?: string) =>
-      runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
-        args,
-        input,
-      );
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const command = workbenchCommand(python, () => environment);
+    const { stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       [
         "scan",
         repository,
@@ -59,8 +54,6 @@ test.each(["standard", "deep"])(
         promptFile,
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({ environment, currentDirectory: root }),
         runWorkbench: command,
@@ -70,9 +63,7 @@ test.each(["standard", "deep"])(
             prepareRuntime: async () => preparedRuntime(codexHome),
             resolvePluginPython: async () => python,
             runWorkbench,
-            createCodex: () => {
-              throw new Error("Synthetic stop after registration");
-            },
+            createCodex: throwing("Synthetic stop after registration"),
           }),
       },
     );

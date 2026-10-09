@@ -1,10 +1,11 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
+import { buildNativeWrappers } from "./build_native_wrappers.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const maxChunkBytes = 140_000;
@@ -13,6 +14,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
   if (native !== "universal" && native !== "host") {
     throw new Error("Native packaging must be universal or host.");
   }
+  await buildNativeWrappers();
   const mcpDir = resolve(output);
   const nativeRoot = join(
     root,
@@ -58,52 +60,100 @@ export async function buildMcpApp({ output, native = "universal" }) {
     }
     const destination = join(mcpDir, "native", path);
     await mkdir(dirname(destination), { recursive: true });
-    await copyFile(join(nativeRoot, path), destination);
+    try {
+      await copyFile(join(nativeRoot, path), destination);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const preparation =
+        native === "host"
+          ? "Run node plugins/codex-security/mcp-app/scripts/build_native.mjs first."
+          : "Download a source-matched native-universal artifact as described in plugins/codex-security/native/README.md before running SDK tests or universal builds.";
+      throw new Error(
+        `Missing native payload ${path}. ${preparation} ${error.message}`,
+        {
+          cause: error,
+        },
+      );
+    }
   }
   await writeRuntime("helpers", "helpers-main.ts");
+  await build({
+    bundle: true,
+    entryPoints: [join(root, "src/deep-scan/permission-profile-preflight.ts")],
+    format: "esm",
+    outfile: join(mcpDir, "permission-profile-preflight.mjs"),
+    platform: "node",
+    target: "node20",
+  });
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
-    try {
-      await build({
-        bundle: true,
-        define: { "import.meta.url": "__filename" },
-        entryPoints: [join(root, entryPoint)],
-        external: ["fsevents"],
-        format: "cjs",
-        loader: { ".md": "text" },
-        logLevel: "info",
-        logOverride: { "empty-import-meta": "silent" },
-        outfile: bundle,
-        platform: "node",
-        target: "node20",
-      });
-      const runtime = brotliCompressSync(await readFile(bundle), {
-        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
-      });
-      const chunkPrefix = name + ".mjs.br.part-";
-      await writeFile(join(mcpDir, name + ".mjs"), loader(chunkPrefix), "utf8");
-      for (
-        let offset = 0, index = 0;
-        offset < runtime.length;
-        offset += maxChunkBytes, index += 1
-      ) {
-        await writeFile(
-          join(mcpDir, chunkPrefix + String(index).padStart(3, "0")),
-          runtime.subarray(offset, offset + maxChunkBytes),
-        );
-      }
-    } finally {
-      await rm(bundle, { force: true });
+    const result = await build({
+      bundle: true,
+      define: { "import.meta.url": "__filename" },
+      entryPoints: [join(root, entryPoint)],
+      external: ["fsevents"],
+      format: "cjs",
+      loader: { ".md": "text" },
+      logLevel: "info",
+      logOverride: { "empty-import-meta": "silent" },
+      outfile: bundle,
+      platform: "node",
+      plugins: [
+        {
+          name: "native-typescript-source",
+          setup(builder) {
+            builder.onResolve({ filter: /\.mjs$/ }, (args) => {
+              const source = resolve(args.resolveDir, args.path);
+              if (dirname(source) === resolve(root, "../native")) {
+                return { path: source.slice(0, -4) + ".mts" };
+              }
+            });
+          },
+        },
+      ],
+      target: "node20",
+      write: false,
+    });
+    const runtime = brotliCompressSync(result.outputFiles[0].contents, {
+      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
+    });
+    const chunkPrefix = name + ".mjs.br.part-";
+    await writeFile(join(mcpDir, name + ".mjs"), loader(chunkPrefix), "utf8");
+    for (
+      let offset = 0, index = 0;
+      offset < runtime.length;
+      offset += maxChunkBytes, index += 1
+    ) {
+      await writeFile(
+        join(mcpDir, chunkPrefix + String(index).padStart(3, "0")),
+        runtime.subarray(offset, offset + maxChunkBytes),
+      );
     }
   }
 }
 
-const invokedPath = process.argv[1];
-if (
-  invokedPath !== undefined &&
-  pathToFileURL(resolve(invokedPath)).href === import.meta.url
-) {
+function isMain() {
+  if (
+    process.execArgv.some(
+      (argument) =>
+        /^(?:--(?:eval|print)(?:=|$)|-(?:e|p|pe)$)/u.test(argument) ||
+        (process.versions["bun"] !== undefined && /^-[ep]/u.test(argument)),
+    )
+  )
+    return false;
+  try {
+    return (
+      process.argv[1] !== undefined &&
+      process.argv[1] !== "-" &&
+      realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   const args = process.argv.slice(2);
   if (
     args[0] !== "--output" ||

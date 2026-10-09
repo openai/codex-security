@@ -4,39 +4,28 @@ import { z } from "incur";
 import { deduplicateRecords, type DeduplicateRecordsInput } from "./records.js";
 
 const rpcId = z.union([z.string(), z.number().int()]);
-const request = z
-  .object({
+const request = z.strictObject({
+  jsonrpc: z.literal("2.0"),
+  id: rpcId,
+  method: z.literal("run"),
+  params: z.unknown(),
+});
+const cancellation = z.strictObject({
+  jsonrpc: z.literal("2.0"),
+  method: z.literal("cancel"),
+  params: z.strictObject({ id: rpcId }),
+});
+const response = z.union([
+  z.strictObject({ jsonrpc: z.literal("2.0"), id: rpcId, result: z.unknown() }),
+  z.strictObject({
     jsonrpc: z.literal("2.0"),
     id: rpcId,
-    method: z.literal("run"),
-    params: z.unknown(),
-  })
-  .strict();
-const cancellation = z
-  .object({
-    jsonrpc: z.literal("2.0"),
-    method: z.literal("cancel"),
-    params: z.object({ id: rpcId }).strict(),
-  })
-  .strict();
-const response = z.union([
-  z
-    .object({ jsonrpc: z.literal("2.0"), id: rpcId, result: z.unknown() })
-    .strict()
-    .refine((value) => Object.hasOwn(value, "result")),
-  z
-    .object({
-      jsonrpc: z.literal("2.0"),
-      id: rpcId,
-      error: z
-        .object({
-          code: z.number().int(),
-          message: z.string(),
-          data: z.unknown().optional(),
-        })
-        .strict(),
-    })
-    .strict(),
+    error: z.strictObject({
+      code: z.number().int(),
+      message: z.string(),
+      data: z.unknown().optional(),
+    }),
+  }),
 ]);
 type Output = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
@@ -55,10 +44,8 @@ export async function runRecordsProtocol(
   let pending:
     | { id: string; resolve(value: unknown): void; reject(error: Error): void }
     | undefined;
-  let complete!: (code: number) => void;
-  const completion = new Promise<number>((resolve) => {
-    complete = resolve;
-  });
+  const { promise: completion, resolve: complete } =
+    Promise.withResolvers<number>();
   const lines = createInterface({
     input,
     crlfDelay: Infinity,

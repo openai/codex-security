@@ -23,7 +23,8 @@ import {
 } from "../src/deduplication/codex-review.js";
 import { resolveSourceMcp } from "../src/deduplication/source-mcp.js";
 import { resolveCodexCommand } from "../src/runtime.js";
-import { createApiTestFixtures } from "./support/api-events.js";
+import { comparisonEnvironment } from "../src/scan-comparison.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -243,10 +244,20 @@ for (const transport of [
           : undefined,
       );
       const runner = new CodexReviewRunner(
-        environment,
-        undefined,
+        await comparisonEnvironment(environment),
+        (command, args, options) => {
+          const permissions = args.find((value) =>
+            value.startsWith("permissions.codex_security_review="),
+          );
+          expect(permissions).toContain(
+            `${JSON.stringify(join(home, "config.toml"))}="deny"`,
+          );
+          return spawn(command, args, options);
+        },
         AbortSignal.timeout(15_000),
         repository,
+        undefined,
+        undefined,
         undefined,
         source,
       );
@@ -527,7 +538,7 @@ test.each([
       runner,
       await workflow.sourceSnapshot(repository),
       { allRepositories: true },
-      await reviewSettingsDigest(environment, {
+      await reviewSettingsDigest(environment, undefined, {
         mcp: await resolveSourceMcp(
           "source",
           environment,
@@ -977,6 +988,8 @@ test.each([
           undefined,
           AbortSignal.timeout(15_000),
           repository,
+          undefined,
+          undefined,
           undefined,
           source,
         );

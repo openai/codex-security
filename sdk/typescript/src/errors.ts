@@ -5,6 +5,13 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function abortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    new DOMException("The operation was aborted.", "AbortError")
+  );
+}
+
 /** Base error for Codex Security SDK failures. */
 export class CodexSecurityError extends Error {
   public constructor(message: string, options?: ErrorOptions) {
@@ -39,6 +46,7 @@ export class DeduplicationReviewError extends CodexSecurityError {
 export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}
+export class LocalPluginBootstrapError extends PluginBootstrapError {}
 export class PluginPythonUnavailableError extends PluginBootstrapError {}
 export class SandboxUnavailableError extends CodexSecurityError {}
 export class InvalidTargetError extends CodexSecurityError {}

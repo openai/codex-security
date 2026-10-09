@@ -101,9 +101,8 @@ function detailLines(
       return [];
     }
     if (key === "level") {
-      const level = safeLine(entry);
       return [
-        `${indent}${level.replace(/^./u, (match) => match.toUpperCase())}`,
+        `${indent}${safeLine(entry).replace(/^./u, (match) => match.toUpperCase())}`,
       ];
     }
     if (

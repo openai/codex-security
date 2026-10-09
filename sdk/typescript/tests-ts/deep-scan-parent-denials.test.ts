@@ -4,6 +4,7 @@ import * as util from "node:util";
 import { expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { loadBundledRuntime } from "./plugin-root.js";
+import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 
 type Sandbox = { filesystemDenies: string[]; globScanMaxDepth?: number };
 
@@ -14,13 +15,17 @@ async function bundledPolicy() {
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
   const source = runtime.slice(start, end);
+  const recordSource = runtime.match(
+    /\/\/ src\/record\.ts\n[\s\S]*?(?=\n\/\/ )/u,
+  )?.[0];
+  expect(recordSource).toBeDefined();
   const imports = [
     ...new Set(source.match(/import_node_(?:path|url|util)\d*/gu)),
   ];
   const resolve = new Function(
     ...imports,
     "DeepScanNonRetryableError",
-    `${source}\nreturn resolveDeepWorkerParentSandbox;`,
+    `${recordSource}\n${source}\nreturn resolveDeepWorkerParentSandbox;`,
   )(
     ...imports.map((name) =>
       name.startsWith("import_node_path")
@@ -31,26 +36,20 @@ async function bundledPolicy() {
     ),
     Error,
   ) as (metadata: unknown) => Sandbox;
-  const serializer = [
-    "workerPermissionProfile",
-    "workerPermissionProfileConfigOverrides",
-    "tomlInlineValue",
-    "tomlKey",
-    "tomlString",
-  ]
-    .map((name) => {
-      const definition = new RegExp(
-        `function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n\\}`,
-        "u",
-      ).exec(runtime)?.[0];
-      if (!definition) throw new Error(`Missing bundled function: ${name}`);
-      return definition;
-    })
-    .join("\n");
-  const overrides = new Function(
-    "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
-    `${serializer}\nreturn sandbox => workerPermissionProfileConfigOverrides(workerPermissionProfile(sandbox));`,
-  )("codex_security_deep_scan_worker") as (sandbox: Sandbox) => string[];
+  const profileSource =
+    /function workerPermissionProfile\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
+      runtime,
+    )?.[0];
+  expect(profileSource).toBeDefined();
+  const profile = new Function(
+    `${profileSource}\nreturn workerPermissionProfile;`,
+  ) as () => (sandbox: Sandbox) => Record<string, unknown>;
+  const workerProfile = profile();
+  const overrides = (sandbox: Sandbox) =>
+    profileConfigOverrides({
+      default_permissions: "codex_security_deep_scan_worker",
+      "permissions.codex_security_deep_scan_worker": workerProfile(sandbox),
+    });
   return { resolve, overrides };
 }
 

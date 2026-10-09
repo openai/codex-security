@@ -26,7 +26,7 @@ bashTest(
   "selects workflow checks for workflow changes and main pushes",
   async () => {
     const scope = ci.jobs["validate-title"]!.steps.find(
-      (step) => step.name === "Decide CI mode",
+      (step) => step.name === "Select additional checks",
     )!;
     const directory = await mkdtemp(join(tmpdir(), "workflow-quality-"));
     try {
@@ -42,6 +42,7 @@ bashTest(
         ],
         ["pull_request", false, [".github/actionlint.yaml"], "true"],
         ["pull_request", false, [".github/zizmor.yml"], "true"],
+        ["pull_request", false, ["docker/verify-container-compose.sh"], "true"],
         ["pull_request", false, ["sdk/typescript/src/index.ts"], "false"],
         ["pull_request", false, ["README.md"], "false"],
       ] as const) {

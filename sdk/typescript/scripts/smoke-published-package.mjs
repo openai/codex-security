@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isMain } from "./is-main.mjs";
 import { resolveNpm } from "./package-smoke-npm.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 
@@ -21,6 +21,10 @@ function run(command, args, options) {
   });
 }
 
+/**
+ * @param {string} consumer
+ * @param {NodeJS.ProcessEnv} environment
+ */
 export async function verifyInstalledPackage(consumer, environment) {
   const installedRoot = join(
     consumer,
@@ -165,6 +169,6 @@ async function smokePublishedPackage() {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   await smokePublishedPackage();
 }
