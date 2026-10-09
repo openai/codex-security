@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
-import type { ScanAuthMode } from "./api.js";
+import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import {
   runReadOnlyCodex,
@@ -22,26 +22,24 @@ import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 /** @internal */
-export const componentPlanSchema = z
-  .object({
-    components: z
-      .array(
-        z
-          .object({
-            name: z.string().trim().min(1),
-            paths: z.array(z.string().min(1)).min(1),
-          })
-          .strict(),
-      )
-      .min(1),
-  })
-  .strict();
+export const componentPlanSchema = z.strictObject({
+  components: z
+    .array(
+      z.strictObject({
+        name: z.string().trim().min(1),
+        paths: z.array(z.string().min(1)).min(1),
+      }),
+    )
+    .min(1),
+});
 
 export interface ComponentPlan {
   components: Array<{ name: string; paths: string[] }>;
 }
 
 export interface ComponentPlanningOptions {
+  /** @internal Calling surface, inherited from the component scan. */
+  surface?: CodexSecuritySurface;
   /** @internal Authentication already selected by the calling scan. */
   auth?: ScanAuthMode;
   /** @internal Cyber access program already selected by the calling scan. */
@@ -83,7 +81,8 @@ export async function planComponents(
       z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
       { ...options, config: options.config ?? {}, workingDirectory: tmpdir() },
       {
-        surface: "cli",
+        surface: options.surface ?? "sdk",
+        command: "scan-components",
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
       },
     );
@@ -313,12 +312,25 @@ async function inventoryFiles(
   while (pending.length > 0) {
     signal?.throwIfAborted();
     const directory = pending.pop()!;
-    for (const entry of await readdir(join(repository, directory), {
-      withFileTypes: true,
-      encoding: "latin1",
-    })) {
+    const directoryPath = join(repository, directory);
+    // Bun's buffer encoding omits Dirent metadata even with withFileTypes.
+    const entries = process.versions["bun"]
+      ? await readdir(directoryPath, {
+          withFileTypes: true,
+          encoding: process.platform === "win32" ? "utf8" : "latin1",
+        })
+      : await readdir(directoryPath, {
+          withFileTypes: true,
+          encoding: "buffer",
+        });
+    for (const entry of entries) {
       if (!entry.isDirectory() && !entry.isFile()) continue;
-      const name = utf8.decode(Buffer.from(entry.name, "latin1"));
+      const name =
+        typeof entry.name === "string"
+          ? process.platform === "win32"
+            ? entry.name
+            : utf8.decode(Buffer.from(entry.name, "latin1"))
+          : utf8.decode(entry.name);
       if (name === ".git") continue;
       const path = directory ? `${directory}/${name}` : name;
       if (entry.isDirectory()) pending.push(path);

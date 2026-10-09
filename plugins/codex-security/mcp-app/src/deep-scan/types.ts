@@ -134,7 +134,8 @@ export interface CodexWorkerDiagnostic {
   code:
     | "sandbox_namespace_exhausted"
     | "file_change_failed"
-    | "artifact_tool_failed";
+    | "artifact_tool_failed"
+    | "worker_error";
   message: string;
 }
 

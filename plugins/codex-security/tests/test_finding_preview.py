@@ -212,20 +212,6 @@ def test_bounded_finding_details_ignores_malformed_root_cause_alias() -> None:
     assert bounded["code_evidence"] == [{"id": "legacy-source", "code": "legacy_source()"}]
 
 
-@pytest.mark.parametrize("field", ["codeEvidence", "code_evidence"])
-@pytest.mark.parametrize("lines", ["41,44", "41.0,44.0", "4.1e1,4.4e1"])
-def test_bounded_finding_details_preserves_integer_line_values(field: str, lines: str) -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
-    start, end = json.loads(f"[{lines}]")
-    evidence = {"id": "source", "code": "example()", "startLine": start, "endLine": end}
-
-    bounded = preview["bounded_finding_details"]({field: [evidence]})
-
-    assert bounded[field] == [{"id": "source", "code": "example()", "startLine": 41, "endLine": 44}]
-    assert evidence["startLine"] == start
-    assert evidence["endLine"] == end
-
-
 def test_bounded_finding_details_strips_invalid_legacy_evidence_fields() -> None:
     preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     original = {

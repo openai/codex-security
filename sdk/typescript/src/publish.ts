@@ -1,4 +1,4 @@
-import { findingEntry } from "./value.js";
+import { findingEntry, notify } from "./value.js";
 import {
   spawn,
   spawnSync,
@@ -204,6 +204,7 @@ type PublicationHandoffEvidence = {
   ownerFindingId?: string;
   resolution: ClaimResolution;
   possibleMutation?: boolean;
+  cause?: unknown;
 } & (
   | { status: "success" }
   | { status: "failure"; error: string }
@@ -390,14 +391,39 @@ export async function publishScanInternal(
       : invocation!.exitCode === 0
         ? "Codex did not create a Linear issue for this finding."
         : codexFailureMessage(invocation!.stderr, invocation!.exitCode);
-  const evidence: PublicationEvidence[] = [
-    ...collectPublicationEvents(
-      invocation?.stdout ?? "",
+  const events = collectPublicationEvents(
+    invocation?.stdout ?? "",
+    prepared,
+    failureMessage,
+  );
+  const connectorEvents = events.map((item) => item.rawLine);
+  let eventLogNotice: string | undefined;
+  const preserveConnectorEvents = async (): Promise<void> => {
+    if (eventLogNotice !== undefined || connectorEvents.length === 0) return;
+    try {
+      const file = await (dependencies.writeEvents ?? writePublicationEvents)(
+        handoff.directory,
+        connectorEvents,
+      );
+      eventLogNotice = `Linear connector-event evidence remains at ${file}.`;
+    } catch (error) {
+      eventLogNotice = `Could not preserve Linear connector-event evidence: ${errorMessage(error)}.`;
+    }
+  };
+  let handoffEvidence: PublicationHandoffEvidence[];
+  try {
+    handoffEvidence = await collectPublicationHandoffEvidence(
+      handoff.file,
       prepared,
-      failureMessage,
-    ),
-    ...(await collectPublicationHandoffEvidence(handoff.file, prepared)),
-  ];
+    );
+  } catch (error) {
+    await preserveConnectorEvents();
+    if (eventLogNotice === undefined) throw error;
+    throw new CodexSecurityError(`${errorMessage(error)} ${eventLogNotice}`, {
+      cause: error,
+    });
+  }
+  const evidence = [...events, ...handoffEvidence];
   const handoffResults = reconcilePublicationEvidence(
     prepared,
     evidence,
@@ -429,26 +455,17 @@ export async function publishScanInternal(
     }
   }
   const recoveryMessage = `The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`;
-  const connectorEvents = evidence.flatMap((item) =>
-    item.source === "event" ? [item.rawLine] : [],
-  );
-  let eventLogNotice: string | undefined;
-  const preserveConnectorEvents = async (): Promise<void> => {
-    if (eventLogNotice !== undefined || connectorEvents.length === 0) return;
-    try {
-      const file = await (dependencies.writeEvents ?? writePublicationEvents)(
-        handoff.directory,
-        connectorEvents,
-      );
-      eventLogNotice = `Linear connector-event evidence remains at ${file}.`;
-    } catch (error) {
-      eventLogNotice = `Could not preserve Linear connector-event evidence: ${errorMessage(error)}.`;
-    }
-  };
   if (handoffResults.indeterminate) {
     result.indeterminate = true;
     result.warnings = [
       `The Linear publication outcome is indeterminate; local history may not include every created issue. ${recoveryMessage}`,
+      ...evidence.flatMap((item) =>
+        item.source === "handoff" &&
+        item.status === "invalid" &&
+        item.ownerFindingId === undefined
+          ? [item.error]
+          : [],
+      ),
     ];
     await preserveConnectorEvents();
     if (eventLogNotice !== undefined) result.warnings.push(eventLogNotice);
@@ -498,7 +515,9 @@ export async function publishScanInternal(
         : `Could not persist created Linear issues: ${persistenceFailure.detail}`;
     const cause =
       persistenceFailure === undefined
-        ? options.signal?.reason
+        ? options.signal?.aborted
+          ? options.signal.reason
+          : handoffEvidence.find((item) => item.cause !== undefined)?.cause
         : persistenceFailure.cause;
     if (persistenceFailure !== undefined && !result.indeterminate) {
       throw new CodexSecurityError(`${reason}. ${recoveryDetails}`, { cause });
@@ -526,7 +545,6 @@ export async function publishScanInternal(
       `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
     ];
   }
-  options.signal?.throwIfAborted();
   reportPublicationProgress(progressObserver, {
     type: "completed",
     created: result.counts.created,
@@ -803,11 +821,7 @@ function reportPublicationProgress(
   event: PublishScanProgress,
 ): void {
   if (observer === undefined) return;
-  try {
-    void Promise.resolve(observer(event)).catch(() => {});
-  } catch {
-    // Optional progress reporting must not stop issue publication.
-  }
+  notify(() => observer(event));
 }
 
 function publicationPrompt(
@@ -923,7 +937,21 @@ async function collectPublicationHandoffEvidence(
   file: string,
   publication: PreparedScanPublication,
 ): Promise<PublicationHandoffEvidence[]> {
-  const content = await readPublicationHandoff(file);
+  let content: string;
+  try {
+    content = await readPublicationHandoff(file);
+  } catch (error) {
+    return [
+      {
+        source: "handoff",
+        status: "invalid",
+        possibleMutation: true,
+        resolution: resolveClaims([]),
+        error: errorMessage(error),
+        cause: error,
+      },
+    ];
+  }
 
   const expectedIssues = new Map(publication.issues.map(findingEntry));
   return content

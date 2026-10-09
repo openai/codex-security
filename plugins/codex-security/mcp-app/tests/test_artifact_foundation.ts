@@ -429,7 +429,7 @@ async function testSafeJsonAndJsonl() {
     ),
     /row 1 does not match its artifact schema: candidate_id: required/,
   );
-  if (process.platform !== "win32") {
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
     try {
       await chmod(destination, 0o000);
       for (const read of [

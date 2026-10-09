@@ -81,6 +81,16 @@ try {
   assert.equal(deepPreflight.maxTimeHours, 0.25);
   assert.deepEqual(deepPreflight.target.paths, ['example.ts']);
 
+  // Validate explicit program selection against the locked CLI, without model calls.
+  for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
+    const values: Record<string, string> = {mode, 'cyber-access-program':program, 'dry-run':'true'};
+    const args = scanArguments(parseInputs(name => values[name] ?? '', repository),
+      {repository}, join(root, `cyber-${mode}-${program}`));
+    const preflight = JSON.parse(run(args, 0));
+    assert.equal(preflight.dryRun, true);
+    assert.equal(preflight.mode, mode);
+  }
+
   // Normalization must not let a literal repository path become a framework option.
   await mkdir(join(repository, '--help'));
   await writeFile(join(repository, '--help/example.ts'), 'export const example = 1;\n');

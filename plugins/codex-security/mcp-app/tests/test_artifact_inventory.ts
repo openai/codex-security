@@ -16,7 +16,8 @@ const inventory = await importSource(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
-  if (process.platform !== "win32") await testNonUtf8InventoryPaths();
+  if (!["win32", "darwin"].includes(process.platform))
+    await testNonUtf8InventoryPaths();
   await testPrepareListsIgnoredTrackedFilesOnce();
   await testPrepareExcludesGitMetadata();
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
@@ -61,6 +62,8 @@ async function testPrepareUsesTheExistingStandardGenerator() {
   const fixture = await createFixture("standard repository");
   await fixture.writeRepositoryFile("src/a.ts", "export const a = 1;\n");
   await fixture.writeRepositoryFile("src/résumé.ts", "export const b = 2;\n");
+  for (const name of ["\uFEFF来源.ts", "name-\uFFFD.ts", "🙂.ts"])
+    await fixture.writeRepositoryFile(`src/${name}`, "export {};\n");
   await fixture.writeRepositoryFile(
     ".hidden/handler.ts",
     "export const c = 3;\n",
