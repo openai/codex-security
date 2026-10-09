@@ -3614,13 +3614,13 @@ export function sameFile(left: string, right: string): Promise<boolean> {
 /** @internal Preserve executable traversal when anchoring it to another cwd. */
 export function anchorExecutablePath(
   value: string,
-  directory = process.cwd(),
+  directory?: string,
 ): string {
   return process.platform === "win32"
-    ? resolve(directory, value)
+    ? resolve(directory ?? "", value)
     : isAbsolute(value)
       ? value
-      : `${directory}${sep}${value}`;
+      : `${directory ?? process.cwd()}${sep}${value}`;
 }
 
 export function expandExecutableHome(
