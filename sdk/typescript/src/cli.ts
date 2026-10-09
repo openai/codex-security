@@ -4097,7 +4097,7 @@ export async function main(
               }\n`,
             );
             exitCode = interruptedExitCode(controller.signal) ?? 2;
-            return undefined;
+            throw error;
           } finally {
             removeSignals();
           }

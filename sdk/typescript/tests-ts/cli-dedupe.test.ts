@@ -322,6 +322,43 @@ test("dedupe defaults to local storage without a findings URL", async () => {
   ).toBe(0);
 });
 
+test.each([
+  ["local", [], "requires --scan or --workflow-id"],
+  [
+    "service",
+    ["--findings-url", "http://127.0.0.1:3000"],
+    "requires --scan or --workflow-id",
+  ],
+])(
+  "dedupe does not emit an ok: true envelope when a scan is missing: %s",
+  async (_label, flags, expected) => {
+    const { stdout, stderr } = createCliTest(main);
+    expect(
+      await main(
+        ["dedupe", ...flags, "--json", "--full-output"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(expected);
+  },
+);
+
+test("dedupe does not emit an ok: true envelope for a failed structured dedupe run", async () => {
+  const deps = dependencies();
+  deps.deduplicateScan = async () => {
+    throw new Error("Finding has not been indexed");
+  };
+  const { stdout, stderr } = createCliTest(main);
+  expect(
+    await main([...args, "--full-output"], stdout.stream, stderr.stream, deps),
+  ).toBe(2);
+  expect(stdout.text()).toBe("");
+  expect(stderr.text()).toContain("Finding has not been indexed");
+});
+
 test("dedupe forwards cancellation and removes signal handlers", async () => {
   for (const [signal, expectedCode] of [
     ["SIGINT", 130],
