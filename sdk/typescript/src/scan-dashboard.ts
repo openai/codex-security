@@ -1,6 +1,8 @@
 import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { isRecord } from "./record.js";
+import type { ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
 import type {
   ComponentReceipt,
@@ -8,6 +10,12 @@ import type {
   ComponentScanResult,
 } from "./component-scan.js";
 import { formatUsd, type ScanCost, type ScanSessionEvent } from "./cost.js";
+import {
+  estimateScanCost,
+  formatScanCost,
+  formatScanCosts,
+  formatScanCostTokens,
+} from "./cost-model.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanMode } from "./targets.js";
 import { scanPhaseLabel, type ScanProgress } from "./worker-progress.js";
@@ -54,9 +62,9 @@ interface ScanDashboardOptions {
   mode?: ScanMode;
   model?: ScanModelConfiguration;
   maxCostUsd?: number;
+  showCost?: boolean;
   clock: DashboardClock;
   color?: boolean;
-  sanitize?: (value: string) => string;
   input?: DashboardInput;
   onInterrupt?: () => void;
 }
@@ -128,6 +136,12 @@ export class ScanDashboard {
   #files: ScanProgress | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
+  #budget: {
+    request: ScanBudget;
+    input: string;
+    error: string;
+    finish: (limit?: number) => void;
+  } | null = null;
   #timer: NodeJS.Timeout | null = null;
   #scrollOffset = 0;
   #view: "activity" | "details" = "activity";
@@ -139,6 +153,39 @@ export class ScanDashboard {
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const input =
       typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    if (this.#budget !== null) {
+      for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
+        []) {
+        const budget = this.#budget;
+        if (budget === null) break;
+        if (key === "\u0003" || key === "\u0004") {
+          budget.finish();
+          this.#options.onInterrupt?.();
+        } else if (key === "\u001B") {
+          budget.finish();
+        } else if (key === "\r" || key === "\n") {
+          const value = budget.input.trim();
+          const limit = Number(value);
+          const minimum = Math.max(
+            budget.request.maxCostUsd,
+            this.#cost?.estimatedUsd ?? budget.request.cost.estimatedUsd,
+          );
+          if (value === "") budget.finish();
+          else if (Number.isFinite(limit) && limit > minimum)
+            budget.finish(limit);
+          else
+            budget.error = `Enter a finite total above ${formatUsd(minimum)}.`;
+        } else if (key === "\u007F" || key === "\b") {
+          budget.input = budget.input.slice(0, -1);
+        } else if (key === "\u0015") {
+          budget.input = "";
+        } else if (!key.startsWith("\u001B") && key >= " ") {
+          budget.input += key;
+        }
+      }
+      this.#refresh();
+      return;
+    }
     if (this.#options.presentation === "components") {
       this.#componentInput(input);
       return;
@@ -218,7 +265,7 @@ export class ScanDashboard {
         input.on("data", this.#onInput);
         this.#stream.write(ENABLE_ALTERNATE_SCROLL);
       }
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch (error) {
       try {
         this.stop();
@@ -237,6 +284,7 @@ export class ScanDashboard {
     if (this.#timer === null) return;
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
+    this.#budget?.finish();
     const input = this.#options.input;
     try {
       if (input?.isTTY === true) {
@@ -366,9 +414,38 @@ export class ScanDashboard {
     this.#refresh();
   }
 
-  public setCost(cost: Readonly<ScanCost>): void {
+  public setCost(
+    cost: Readonly<ScanCost>,
+    maxCostUsd = this.#options.maxCostUsd,
+  ): void {
     this.#cost = cost;
+    this.#options.maxCostUsd = maxCostUsd;
     this.#refresh();
+  }
+
+  public requestBudgetIncrease(
+    request: ScanBudget,
+  ): Promise<number | undefined> {
+    if (
+      request.signal.aborted ||
+      this.#timer === null ||
+      this.#options.input?.isTTY !== true ||
+      this.#budget !== null
+    ) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise((resolve) => {
+      const abort = () => finish();
+      const finish = (limit?: number) => {
+        request.signal.removeEventListener("abort", abort);
+        this.#budget = null;
+        this.#refresh();
+        resolve(limit);
+      };
+      this.#budget = { request, input: "", error: "", finish };
+      request.signal.addEventListener("abort", abort, { once: true });
+      this.#refresh();
+    });
   }
 
   public note(description: string): void {
@@ -460,12 +537,8 @@ export class ScanDashboard {
   #refresh(): void {
     if (this.#timer === null) return;
     try {
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch {}
-  }
-
-  #render(): void {
-    this.#stream.write(this.#frame());
   }
 
   #frame(): string {
@@ -491,18 +564,9 @@ export class ScanDashboard {
     const files =
       this.#files === null
         ? "waiting for inventory"
-        : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
-    const tokens =
-      this.#cost === null
-        ? "waiting for usage"
-        : `${formatCount(this.#cost.inputTokens)} in · ${formatCount(this.#cost.cachedInputTokens)} cached · ${formatCount(this.#cost.outputTokens)} out`;
-    const cost =
-      this.#cost === null
-        ? this.#options.maxCostUsd === undefined
-          ? "waiting for usage"
-          : `— / ${formatUsd(this.#options.maxCostUsd)}`
-        : `${formatUsd(this.#cost.estimatedUsd)}${this.#options.maxCostUsd === undefined ? "" : ` / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
-
+        : this.#files.filesCompleted > 0
+          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
+          : `${formatCount(this.#files.filesTotal)} in scope`;
     const history = this.#activityLines(width);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
@@ -534,7 +598,7 @@ export class ScanDashboard {
       scrollStatus = `Esc components · ${scrollStatus}`;
     const model = this.#options.model;
 
-    const lines = [
+    return this.#formatFrame([
       `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
       divider,
       ...activity,
@@ -548,13 +612,17 @@ export class ScanDashboard {
             ...(this.#options.mode === "deep"
               ? []
               : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
-            `  TOKENS   ${tokens}`,
-            `  COST     ${cost}`,
+            ...this.#tokenLines(),
+            ...this.#costLines(),
+            ...(this.#budget === null
+              ? []
+              : [
+                  `  BUDGET   Raise total USD limit: ${this.#budget.input}_`,
+                  `           ${this.#budget.error || "Scan running. Enter blank/Esc keeps limit."}`,
+                ]),
           ]),
-      `  TIME     ${time}  ·  ${scrollStatus}`,
-    ];
-
-    return this.#formatFrame(lines);
+      `  TIME     ${time}  ·  ${this.#budget === null ? scrollStatus : "Enter to apply · Ctrl+C to exit"}`,
+    ]);
   }
 
   #formatFrame(lines: (string | DashboardActivityLine)[]): string {
@@ -564,12 +632,7 @@ export class ScanDashboard {
       lines
         .map((line, index) => {
           const text = typeof line === "string" ? line : line.text;
-          const clean = fitLine(
-            typeof line !== "string" && this.#view === "details"
-              ? text
-              : this.#options.sanitize?.(text) ?? text,
-            width,
-          );
+          const clean = fitLine(text, width);
           const colored =
             this.#options.color === true
               ? styleLine(
@@ -590,7 +653,6 @@ export class ScanDashboard {
                     ? styleInlineCode(colored, line)
                     : colored,
                   line.links,
-                  this.#options.sanitize,
                 );
           return `${ERASE_LINE}${formatted}`;
         })
@@ -640,7 +702,10 @@ export class ScanDashboard {
   }
 
   #componentRows(): number {
-    return Math.max(1, (this.#stream.rows ?? 24) - 11);
+    return Math.max(
+      1,
+      (this.#stream.rows ?? 24) - 10 - this.#componentCostLines().length,
+    );
   }
 
   #componentFrame(): string {
@@ -653,7 +718,16 @@ export class ScanDashboard {
         this.#components.length - rows,
       ),
     );
-    const nameWidth = Math.max(10, width - 61);
+    const costWidth = Math.max(
+      8,
+      ...this.#components.map(({ dashboard }) =>
+        dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
+      ),
+    );
+    const nameWidth = Math.max(
+      10,
+      width - 52 - (this.#showCost ? costWidth + 1 : 0),
+    );
     const row = (
       marker: string,
       name: string,
@@ -662,7 +736,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitLine(this.#options.sanitize?.(name) ?? name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)} ${cost.padStart(8)}`;
+      `  ${marker} ${fitLine(name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
     const table = this.#components
       .slice(first, first + rows)
       .map(({ receipt, dashboard }, index) => {
@@ -679,9 +753,7 @@ export class ScanDashboard {
           receipt.findingCount === undefined
             ? "—"
             : formatCount(receipt.findingCount),
-          dashboard.#cost === null
-            ? "—"
-            : formatUsd(dashboard.#cost.estimatedUsd),
+          dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost),
         );
       });
     if (table.length === 0) table.push(`  ${this.#stage}…`);
@@ -690,9 +762,6 @@ export class ScanDashboard {
       this.#components.filter(({ receipt }) => receipt.status === status)
         .length;
     const selected = this.#components[this.#selectedComponent]?.receipt;
-    const costs = this.#components.flatMap(({ dashboard }) =>
-      dashboard.#cost === null ? [] : [dashboard.#cost.estimatedUsd],
-    );
     const rawFindings = this.#components.reduce(
       (sum, { receipt }) => sum + (receipt.findingCount ?? 0),
       0,
@@ -712,10 +781,28 @@ export class ScanDashboard {
       divider,
       `  SCOPE    ${selected?.paths.join(", ") ?? "waiting for component plan"}`,
       `  STATUS   ${selected?.error ?? findings}`,
-      `  COST     ${costs.length === 0 ? "waiting for usage" : formatUsd(costs.reduce((sum, value) => sum + value, 0))} · component scans only`,
+      ...this.#componentCostLines(),
       `  STAGE    ${this.#stage}`,
       `  TIME     ${formatElapsed(Math.max(0, Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000)))} · ↑↓ select · Enter activity · Ctrl+C cancel`,
     ]);
+  }
+
+  get #showCost(): boolean {
+    return (
+      this.#options.showCost === true || this.#options.maxCostUsd !== undefined
+    );
+  }
+
+  #componentCostLines(): string[] {
+    if (!this.#showCost) return [];
+    const costs = this.#components.flatMap(({ dashboard }) =>
+      dashboard.#cost === null ? [] : [dashboard.#cost],
+    );
+    return wrapActivity(
+      "  COST     ",
+      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)} · component scans only`,
+      this.#width(),
+    );
   }
 
   #width(): number {
@@ -726,13 +813,47 @@ export class ScanDashboard {
     return Math.max(
       1,
       (this.#stream.rows ?? 24) -
-        FIXED_SCREEN_ROWS +
+        FIXED_SCREEN_ROWS -
+        (this.#budget === null ? 0 : 2) -
+        (this.#options.presentation === "publication" ||
+        this.#options.presentation === "verification"
+          ? 0
+          : this.#tokenLines().length - 1 + this.#costLines().length - 1) +
         (this.#options.presentation === "publication"
           ? 2
           : this.#options.mode === "deep"
             ? 2
             : 0),
     );
+  }
+
+  #tokenLines(): string[] {
+    const tokens =
+      this.#cost === null
+        ? "waiting for usage"
+        : formatScanCostTokens(this.#cost);
+    return wrapActivity("  TOKENS   ", tokens, this.#width());
+  }
+
+  #costLines(): string[] {
+    if (!this.#showCost) return [];
+    if (
+      this.#cost === null &&
+      this.#options.maxCostUsd === undefined &&
+      estimateScanCost(this.#options.model?.model, {
+        input_tokens: 0,
+        output_tokens: 0,
+      }) === null
+    ) {
+      return [];
+    }
+    const cost =
+      this.#cost === null
+        ? this.#options.maxCostUsd === undefined
+          ? "waiting for usage"
+          : `— / ${formatUsd(this.#options.maxCostUsd)}`
+        : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
+    return wrapActivity("  COST     ", cost, this.#width());
   }
 
   #activityLines(width: number): DashboardActivityLine[] {
@@ -837,7 +958,6 @@ export class ScanDashboard {
       value: string,
       kind: DashboardActivityLine["kind"],
     ): void => {
-      value = this.#options.sanitize?.(value) ?? value;
       if (kind !== "message" && kind !== "reasoning") {
         for (const text of wrapActivity(prefix, value, width)) {
           lines.push({ text, kind });
@@ -937,9 +1057,7 @@ function detailsDescription(
   const itemType = typeof payload["type"] === "string" ? payload["type"] : type;
   if (itemType === "token_count") return undefined;
   if (itemType === "message" || itemType === "agent_message") {
-    const role =
-      typeof payload["role"] === "string" ? payload["role"] : "assistant";
-    return `${role}: ${detailsText(payload["content"] ?? payload["message"])}`;
+    return `${typeof payload["role"] === "string" ? payload["role"] : "assistant"}: ${detailsText(payload["content"] ?? payload["message"])}`;
   }
   if (itemType === "reasoning" || itemType.startsWith("agent_reasoning")) {
     const text = detailsText(
@@ -975,10 +1093,6 @@ function detailsText(value: unknown): string {
     .join("\n");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function styleInlineCode(value: string, line: DashboardActivityLine): string {
   for (const text of line.bold ?? []) {
     value = value.replace(text, `\u001B[1m${text}\u001B[22m`);
@@ -995,10 +1109,9 @@ function styleInlineCode(value: string, line: DashboardActivityLine): string {
 function linkActivity(
   value: string,
   links: readonly DashboardActivityLink[] | undefined,
-  sanitize: ((value: string) => string) | undefined,
 ): string {
   for (const { label, target } of links ?? []) {
-    const safe = safeHyperlinkTarget(sanitize?.(target) ?? target);
+    const safe = safeHyperlinkTarget(target);
     if (safe !== undefined) {
       value = value.replace(
         label,
@@ -1155,11 +1268,7 @@ function styleLine(
     if (kind === "status" || kind === "warning") {
       return `${prefix}\u001B[${style}m${marker}${separator}${description}\u001B[0m`;
     }
-    const workerLabel =
-      worker === undefined ? "" : `\u001B[36m${worker}\u001B[39m`;
-    const prose =
-      kind === "message" ? `\u001B[1m${description}\u001B[22m` : description;
-    return `${prefix}\u001B[${style}m${marker}\u001B[39m${separator}${workerLabel}${prose}`;
+    return `${prefix}\u001B[${style}m${marker}\u001B[39m${separator}${worker === undefined ? "" : `\u001B[36m${worker}\u001B[39m`}${kind === "message" ? `\u001B[1m${description}\u001B[22m` : description}`;
   }
   return `\u001B[${style}m${value}\u001B[0m`;
 }

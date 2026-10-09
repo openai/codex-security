@@ -1,7 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { dependencies, fakeResult } from "./cli-fixtures.js";
+import { throwing } from "./support/errors.js";
+
+import { createCliTest } from "./support/cli-run.js";
 
 const cappedState: JsonObject = {
   terminalReason: "capped",
@@ -17,14 +20,12 @@ async function summary(
   options: Parameters<typeof dependencies>[0],
   args = ["--mode", "deep"],
 ) {
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
   const result = options?.result ?? fakeResult(["high"], "partial");
   expect(
-    await main(
+    await runCli(
       ["scan", ...args, "--json"],
-      stdout.stream,
-      stderr.stream,
       dependencies({ ...options, result }),
     ),
   ).toBe(result.coverage.completeness === "complete" ? 0 : 2);
@@ -100,13 +101,11 @@ describe("deep scan completion summary", () => {
           cached_input_tokens: 200,
           output_tokens: 30,
         }),
-        onWorkbench: () => {
-          throw new Error("The exceeded cost limit is already known");
-        },
+        onWorkbench: throwing("The exceeded cost limit is already known"),
       },
-      ["--mode", "deep", "--max-cost", "0.005"],
+      ["--mode", "deep", "--max-cost", "0.004"],
     );
-    expect(text).toContain("Reached the $0.005 cost limit");
+    expect(text).toContain("Reached the $0.004 cost limit");
     expect(text).toContain("higher --max-cost");
     expect(text).not.toContain("--max-discovery-runs");
   });
@@ -126,18 +125,15 @@ describe("deep scan completion summary", () => {
   );
 
   test("leaves standard scan summaries unchanged", async () => {
-    let reads = 0;
+    const onWorkbench = mock<() => {}>().mockReturnValue({});
     const text = await summary(
       {
         result: fakeResult(),
-        onWorkbench: () => {
-          reads++;
-          return {};
-        },
+        onWorkbench,
       },
       [],
     );
-    expect(reads).toBe(0);
+    expect(onWorkbench).toHaveBeenCalledTimes(0);
     expect(text).not.toContain("STOPPED");
   });
 });

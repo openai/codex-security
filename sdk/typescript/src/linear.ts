@@ -1,3 +1,4 @@
+import { parseJson } from "./value.js";
 import {
   AuthenticationLinearError,
   ForbiddenLinearError,
@@ -5,7 +6,7 @@ import {
   RatelimitedLinearError,
 } from "@linear/sdk";
 import type { JsonObject } from "./config.js";
-import { CodexSecurityError, safeErrorMessage } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 
 export type LinearClientFactory<
   Method extends keyof LinearClient = "issue" | "projects",
@@ -112,12 +113,24 @@ export async function importLinearIssues(options: {
       }
     }
 
-    return issues.map(({ identifier, title, url, description }) => ({
-      source: "linear",
-      id: identifier,
-      url,
-      text: `Title: ${title}\n\n${description ?? ""}`,
-    }));
+    const imports: ImportedIssue[] = [];
+    for (const issue of issues) {
+      const comments = await issue.comments({ first: 50 });
+      while (comments.pageInfo.hasNextPage) await comments.fetchNext();
+      imports.push({
+        source: "linear",
+        id: issue.identifier,
+        url: issue.url,
+        text: [
+          `Title: ${issue.title}`,
+          `<description>\n${issue.description ?? ""}\n</description>`,
+          ...comments.nodes.map(
+            ({ url, body }) => `<comment>\nURL: ${url}\n\n${body}\n</comment>`,
+          ),
+        ].join("\n\n"),
+      });
+    }
+    return imports;
   } catch (error) {
     if (error instanceof CodexSecurityError) throw error;
     if (
@@ -131,21 +144,15 @@ export async function importLinearIssues(options: {
         "Linear request was rate limited. Wait and retry.",
       );
     }
-    const message = safeErrorMessage(error);
     throw new CodexSecurityError(
-      `Linear request failed: ${message.includes(credential) ? "[redacted]" : message}`,
+      `Linear request failed: ${errorMessage(error)}`,
     );
   }
 }
 
 function linearIssueFilter(input: string | undefined): JsonObject {
   if (input === undefined) return {};
-  let filter: unknown;
-  try {
-    filter = JSON.parse(input);
-  } catch {
-    filter = null;
-  }
+  const filter = parseJson(() => input);
   if (typeof filter === "object" && filter !== null && !Array.isArray(filter)) {
     return filter as JsonObject;
   }
@@ -154,16 +161,22 @@ function linearIssueFilter(input: string | undefined): JsonObject {
   );
 }
 
-function linearIssueReference(input: string): {
+export function isLinearIssueIdentifier(input: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9_-]*-\d+$/u.test(input);
+}
+
+export function linearIssueReference(input: string): {
   id: string;
   workspace?: string;
 } {
   if (!/^https?:\/\//iu.test(input)) return { id: input };
   const url = new URL(input);
-  const match = /^\/([^/]+)\/issue\/([A-Z][A-Z0-9]*-\d+)(?:\/|$)/iu.exec(
-    url.pathname,
-  );
-  if (url.hostname !== "linear.app" || match === null) {
+  const match = /^\/([^/]+)\/issue\/([^/]+)(?:\/|$)/iu.exec(url.pathname);
+  if (
+    url.hostname !== "linear.app" ||
+    match === null ||
+    !isLinearIssueIdentifier(match[2]!)
+  ) {
     throw new CodexSecurityError("Linear issue URL is invalid.");
   }
   return { id: match[2]!, workspace: match[1]!.toLowerCase() };

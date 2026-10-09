@@ -1,41 +1,75 @@
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
-import { scanModelConfiguration, scanModelProvider } from "../src/config.js";
+import {
+  type JsonObject,
+  inlineToml,
+  modelProviderConfigOverride,
+  resolveCodexProfile,
+  scanModelConfiguration,
+  scanModelProvider,
+} from "../src/config.js";
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
-  type JsonObject,
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
+import {
+  prepareCodexSecurityCredentialHome,
+  requireSecureCredentialHome,
+  resolveCodexCommand,
+} from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-config-",
+  false,
+);
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
+afterEach(cleanup);
+
+test("inline Codex overrides omit optional null fields like the file writer", async () => {
+  for (const value of [null, { args: ["fixture", null] }]) {
+    expect(() => inlineToml(value)).toThrow(ConfigurationError);
+  }
+  expect(modelProviderConfigOverride({ model_providers: null })).toEqual([]);
+  const provider = {
+    fixture: {
+      auth: { command: "synthetic-helper", args: null },
+      enabled: true,
+    },
+  };
+  const root = await temporaryDirectory();
+  const config = await mergedCodexConfig({
+    codexOverrides: { model_providers: provider },
+  });
+  const path = join(root, "config.toml");
+  await writeCodexConfig(path, config);
+  const written = parse(await readFile(path, "utf8"));
+  expect(
+    parse(`model_providers = ${inlineToml(provider)}`)["model_providers"],
+  ).toEqual(written["model_providers"]);
+  expect(written["model_providers"]).toEqual({
+    fixture: { auth: { command: "synthetic-helper" }, enabled: true },
+  });
 });
 
-async function temporaryDirectory(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), "codex-security-config-"));
-  temporaryDirectories.push(path);
-  return path;
-}
-
-function runPinnedCodex(codexHome: string, arguments_: readonly string[]) {
+function runPinnedCodex(
+  codexHome: string,
+  arguments_: readonly string[],
+  overrides: NodeJS.ProcessEnv = {},
+) {
   const node = Bun.which("node");
   if (node === null) {
     throw new Error("The pinned Codex CLI requires Node.js.");
   }
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
+    ...overrides,
     CODEX_HOME: codexHome,
   };
   delete environment["OPENAI_API_KEY"];
@@ -84,21 +118,27 @@ function macOsSandboxUnavailable(): boolean {
 
 async function scanSandboxFixture() {
   const root = await temporaryDirectory();
-  const codexHome = join(root, "codex-home");
-  const workspace = join(root, "workspace");
   const stateDirectory = join(root, "state");
+  const codexHome = await prepareCodexSecurityCredentialHome({
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  });
+  const workspace = join(stateDirectory, "scans", "workspace");
+  const temporary = join(root, "temp");
   await Promise.all(
-    [codexHome, workspace, stateDirectory].map((path) => mkdir(path)),
+    [workspace, temporary].map((path) => mkdir(path, { recursive: true })),
   );
   await writeCodexConfig(
     join(codexHome, "config.toml"),
-    scanRuntimeCodexConfig(
-      await mergedCodexConfig({}),
-      stateDirectory,
-      codexHome,
-    ),
+    scanRuntimeCodexConfig(await mergedCodexConfig({}), codexHome),
   );
-  return { root, codexHome, workspace };
+  return {
+    root,
+    codexHome,
+    stateDirectory,
+    workspace,
+    // Native sandbox temp grants must not cover the credential-home ancestry.
+    environment: { TEMP: temporary, TMP: temporary, TMPDIR: temporary },
+  };
 }
 
 describe("Codex configuration", () => {
@@ -217,8 +257,13 @@ describe("Codex configuration", () => {
   test("rejects invalid model settings from the selected Codex profile", async () => {
     for (const [profile, message] of [
       [{ model: " " }, "model must be a nonempty string"],
+      [{ model: 12 }, "model must be a nonempty string"],
       [
         { model_reasoning_effort: " " },
+        "reasoning effort must be a nonempty string",
+      ],
+      [
+        { model_reasoning_effort: false },
         "reasoning effort must be a nonempty string",
       ],
     ] as const) {
@@ -227,6 +272,93 @@ describe("Codex configuration", () => {
       });
 
       expect(() => scanModelConfiguration(config)).toThrow(message);
+    }
+  });
+
+  test("still requires root model and effort when the profile omits them", async () => {
+    for (const field of ["model", "model_reasoning_effort"]) {
+      const config = await mergedCodexConfig({
+        codexOverrides: {
+          [field]: null,
+          profile: "review",
+          profiles: { review: { model: null, model_reasoning_effort: null } },
+        },
+      });
+      expect(() => scanModelConfiguration(config)).toThrow(ConfigurationError);
+    }
+  });
+
+  test("disables reasoning summaries by default for the selected Bedrock provider", async () => {
+    const scenarios: JsonObject[] = [
+      { model_provider: "amazon-bedrock" },
+      {
+        model_provider: "openai",
+        profile: "cloud",
+        profiles: { cloud: { model_provider: "amazon-bedrock" } },
+      },
+      {
+        model_provider: "amazon-bedrock",
+        profile: "cloud",
+        profiles: { cloud: { model: "openai.gpt-5.6-luna" } },
+      },
+    ];
+    for (const overrides of scenarios) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)).toMatchObject({
+        model_reasoning_summary: "none",
+        model_reasoning_effort: "xhigh",
+      });
+    }
+  });
+
+  test("keeps reasoning summaries when the selected provider is not Bedrock", async () => {
+    const scenarios: JsonObject[] = [
+      {
+        model_provider: "amazon-bedrock",
+        profile: "direct",
+        profiles: { direct: { model_provider: "openai" } },
+      },
+      {
+        model_provider: "openai",
+        profiles: { cloud: { model_provider: "amazon-bedrock" } },
+      },
+    ];
+    for (const overrides of scenarios) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)["model_reasoning_summary"]).toBe(
+        "detailed",
+      );
+    }
+  });
+
+  test("preserves explicit Bedrock reasoning summary settings", async () => {
+    for (const [overrides, expected] of [
+      [
+        { model_provider: "amazon-bedrock", model_reasoning_summary: "auto" },
+        "auto",
+      ],
+      [
+        {
+          model_reasoning_summary: "concise",
+          profile: "cloud",
+          profiles: { cloud: { model_provider: "amazon-bedrock" } },
+        },
+        "concise",
+      ],
+      [
+        {
+          model_provider: "amazon-bedrock",
+          model_reasoning_summary: "none",
+          profile: "cloud",
+          profiles: { cloud: { model_reasoning_summary: "detailed" } },
+        },
+        "detailed",
+      ],
+    ] as const) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)["model_reasoning_summary"]).toBe(
+        expected,
+      );
     }
   });
 
@@ -282,7 +414,7 @@ describe("Codex configuration", () => {
     });
 
     expect(merged).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       profiles: {
         elevated: {
           features: { elevated_windows_sandbox: true },
@@ -354,18 +486,16 @@ describe("Codex configuration", () => {
   });
 
   test("retains the Windows sandbox in the hardened scan profile", async () => {
-    const stateDirectory = join(tmpdir(), "codex-security-windows-state");
     const merged = await mergedCodexConfig({});
 
-    expect(scanRuntimeCodexConfig(merged, stateDirectory)).toMatchObject({
-      windows: { sandbox: "unelevated" },
+    expect(scanRuntimeCodexConfig(merged)).toMatchObject({
+      windows: { sandbox: "elevated" },
       default_permissions: "codex_security_scan",
       permissions: {
         codex_security_scan: {
           filesystem: {
             ":root": "read",
             ":workspace_roots": "write",
-            [stateDirectory]: "write",
           },
         },
       },
@@ -373,43 +503,50 @@ describe("Codex configuration", () => {
   });
 
   test("writes scan permissions accepted by the pinned Codex CLI", async () => {
-    const { codexHome, workspace } = await scanSandboxFixture();
-    const result = runPinnedCodex(codexHome, [
-      "--cd",
-      workspace,
-      "features",
-      "list",
-    ]);
+    const { codexHome, workspace, environment } = await scanSandboxFixture();
+    const result = runPinnedCodex(
+      codexHome,
+      ["--cd", workspace, "features", "list"],
+      environment,
+    );
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(result.stdout.length).toBeGreaterThan(0);
   });
 
   test.skipIf(macOsSandboxUnavailable())(
-    "denies writes outside the scan workspace and state directory",
+    "allows scan helpers to write workspace files without writable credential ancestry",
     async () => {
-      const { root, codexHome, workspace } = await scanSandboxFixture();
+      const { root, codexHome, stateDirectory, workspace, environment } =
+        await scanSandboxFixture();
       const node = Bun.which("node");
       expect(node).not.toBeNull();
       const attemptWrite = (path: string) =>
-        runPinnedCodex(codexHome, [
-          "sandbox",
-          "--config",
-          "permissions.codex_security_scan.network.enabled=true",
-          "--permission-profile",
-          "codex_security_scan",
-          "--cd",
-          workspace,
-          node!,
-          "-e",
-          "require('node:fs').writeFileSync(process.argv[1], 'probe')",
-          path,
-        ]);
+        runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--config",
+            "permissions.codex_security_scan.network.enabled=true",
+            "--permission-profile",
+            "codex_security_scan",
+            "--cd",
+            workspace,
+            node!,
+            "-e",
+            "require('node:fs').writeFileSync(process.argv[1], 'probe')",
+            path,
+          ],
+          environment,
+        );
 
       const allowed = join(workspace, "inside.txt");
       const permitted = attemptWrite(allowed);
       const outside = join(root, "outside.txt");
       expect(attemptWrite(outside).exitCode).not.toBe(0);
       await expect(stat(outside)).rejects.toMatchObject({ code: "ENOENT" });
+      const stateFile = join(stateDirectory, "outside.txt");
+      expect(attemptWrite(stateFile).exitCode).not.toBe(0);
+      await expect(stat(stateFile)).rejects.toMatchObject({ code: "ENOENT" });
       if (permitted.exitCode !== 0) {
         const details = new TextDecoder().decode(permitted.stderr);
         if (
@@ -428,6 +565,172 @@ describe("Codex configuration", () => {
         );
       }
       expect(await readFile(allowed, "utf8")).toBe("probe");
+
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await writeFile(join(repository, "fixture.txt"), "synthetic source\n");
+      const inventory = join(workspace, "in-scope-files.txt");
+      const python =
+        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      expect(python).not.toBeNull();
+      const helper = runPinnedCodex(
+        codexHome,
+        [
+          "sandbox",
+          "--config",
+          "permissions.codex_security_scan.network.enabled=true",
+          "--permission-profile",
+          "codex_security_scan",
+          "--cd",
+          workspace,
+          python!,
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          ".",
+          "--out",
+          inventory,
+        ],
+        environment,
+      );
+      expect(helper.exitCode, new TextDecoder().decode(helper.stderr)).toBe(0);
+      const inventoryPaths = (await readFile(inventory, "utf8"))
+        .trim()
+        .split(/\r?\n/u)
+        .map((path) => resolve(repository, path));
+      expect(inventoryPaths).toEqual([join(repository, "fixture.txt")]);
+      await requireSecureCredentialHome(codexHome);
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        }),
+      ).toBe(codexHome);
+    },
+  );
+
+  test.skipIf(macOsSandboxUnavailable())(
+    "reads scoped policy source without exposing sibling files or changing host files",
+    async () => {
+      const { root, codexHome, workspace, stateDirectory, environment } =
+        await scanSandboxFixture();
+      const source = join(root, "repository", "component");
+      await mkdir(source, { recursive: true });
+      const sourceFile = join(source, "fixture.txt");
+      await writeFile(sourceFile, "source");
+      const config = scanRuntimeCodexConfig(
+        await mergedCodexConfig({}),
+        codexHome,
+      );
+      const permissions = config["permissions"] as Record<
+        string,
+        { filesystem: Record<string, string> }
+      >;
+      permissions["codex_security_policy"]!.filesystem[source] = "read";
+      // The debug sandbox re-execs Codex, which may live outside OS read roots.
+      permissions["codex_security_policy"]!.filesystem[
+        resolveCodexCommand({}).command
+      ] = "read";
+      await writeCodexConfig(join(codexHome, "config.toml"), config);
+      const sandbox = (operation: "read" | "write", path: string) =>
+        runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--config",
+            "permissions.codex_security_policy.network.enabled=true",
+            "--permission-profile",
+            "codex_security_policy",
+            "--cd",
+            workspace,
+            ...(process.platform === "win32"
+              ? [
+                  join(
+                    process.env["SystemRoot"] ?? "C:\\Windows",
+                    "System32",
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe",
+                  ),
+                  "-NoLogo",
+                  "-NoProfile",
+                  "-NonInteractive",
+                  "-Command",
+                  operation === "read"
+                    ? "$ErrorActionPreference = 'Stop'; [Console]::Write((Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw))"
+                    : "$ErrorActionPreference = 'Stop'; [System.IO.File]::WriteAllText($env:POLICY_PROBE_PATH, 'probe')",
+                ]
+              : [
+                  "/bin/sh",
+                  "-c",
+                  operation === "read"
+                    ? 'cat "$POLICY_PROBE_PATH"'
+                    : 'printf probe > "$POLICY_PROBE_PATH"',
+                ]),
+          ],
+          { ...environment, POLICY_PROBE_PATH: path },
+        );
+      const evidence = join(workspace, "previous-SECURITY.md");
+      await writeFile(evidence, "original");
+      const read = sandbox("read", evidence);
+      if (read.exitCode !== 0) {
+        const details = new TextDecoder().decode(read.stderr);
+        if (
+          (process.platform === "linux" &&
+            /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
+              details,
+            )) ||
+          (process.platform === "win32" &&
+            (details.includes(
+              "Restricted read-only access requires the elevated Windows sandbox backend",
+            ) ||
+              details.includes(
+                "elevated Windows sandbox requires effective `:root` read access",
+              )))
+        ) {
+          expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
+            0,
+          );
+          return;
+        }
+        throw new Error(
+          `The pinned Codex CLI rejected an allowed policy read: ${details}`,
+        );
+      }
+      expect(new TextDecoder().decode(read.stdout)).toBe("original");
+      const inspected = sandbox("read", sourceFile);
+      expect(
+        inspected.exitCode,
+        new TextDecoder().decode(inspected.stderr),
+      ).toBe(0);
+      expect(new TextDecoder().decode(inspected.stdout)).toBe("source");
+      for (const path of [
+        join(root, "repository", "sibling.txt"),
+        join(stateDirectory, "private.txt"),
+        join(codexHome, "private.txt"),
+      ]) {
+        await writeFile(path, "SYNTHETIC_PRIVATE");
+        const denied = sandbox("read", path);
+        expect(denied.exitCode).not.toBe(0);
+        expect(new TextDecoder().decode(denied.stdout)).not.toContain(
+          "SYNTHETIC_PRIVATE",
+        );
+      }
+      for (const path of [
+        sourceFile,
+        join(workspace, "inside.txt"),
+        join(root, "outside.txt"),
+        join(stateDirectory, "policy.txt"),
+        join(codexHome, "policy.txt"),
+        evidence,
+      ]) {
+        sandbox("write", path);
+        if (path === sourceFile)
+          expect(await readFile(path, "utf8")).toBe("source");
+        else if (path === evidence)
+          expect(await readFile(path, "utf8")).toBe("original");
+        else await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
     },
   );
 
@@ -437,7 +740,7 @@ describe("Codex configuration", () => {
     await writeCodexConfig(path, await mergedCodexConfig({}));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
     });
 
     const result = runPinnedCodex(root, ["features", "list"]);
@@ -458,31 +761,14 @@ describe("Codex configuration", () => {
         },
       },
     });
-    const nativeConfig = structuredClone(config);
-    delete nativeConfig["profile"];
-    delete nativeConfig["profiles"];
-    const profileConfig = (config["profiles"] as JsonObject)[
-      "elevated"
-    ] as JsonObject;
-    const profilePath = join(root, "elevated.config.toml");
-    await writeCodexConfig(path, nativeConfig);
-    await writeCodexConfig(profilePath, profileConfig);
+    await writeCodexConfig(path, resolveCodexProfile(config));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
-    });
-    expect(parse(await readFile(profilePath, "utf8"))).toMatchObject({
       features: { elevated_windows_sandbox: true },
       windows: { sandbox: "elevated" },
     });
 
-    const result = runPinnedCodex(root, [
-      "--profile",
-      "elevated",
-      "mcp",
-      "list",
-      "--json",
-    ]);
+    const result = runPinnedCodex(root, ["mcp", "list", "--json"]);
     if (result.exitCode !== 0) {
       throw new Error(
         `The pinned Codex CLI rejected the selected Windows sandbox profile: ${new TextDecoder().decode(result.stderr)}`,
@@ -541,7 +827,7 @@ describe("Codex configuration", () => {
       model_reasoning_summary: "detailed",
       show_raw_agent_reasoning: true,
       windows: {
-        sandbox: "unelevated",
+        sandbox: "elevated",
       },
     });
   });
@@ -570,6 +856,16 @@ describe("Codex configuration", () => {
         },
       }),
     ).rejects.toThrow("owns plugin loading configuration");
+    for (const owned of ["plugins", "marketplaces"] as const) {
+      await expect(
+        mergedCodexConfig({
+          codexOverrides: {
+            profile: "disabled",
+            profiles: { disabled: { [owned]: {} } },
+          },
+        }),
+      ).rejects.toThrow("owns plugin loading configuration");
+    }
     await expect(
       mergedCodexConfig({
         codexOverrides: {

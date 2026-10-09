@@ -1,25 +1,27 @@
-import { chmod, cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { ThreadEvent } from "@openai/codex-sdk";
+import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
 import { CodexSecurity, runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
-import { PLUGIN_ROOT } from "../plugin-root.js";
+import { PLUGIN_ROOT, copyCompletedScan } from "../plugin-root.js";
 
 type PreparedRuntime = Awaited<
   ReturnType<
     NonNullable<
-      ConstructorParameters<typeof CodexSecurity>[1]["prepareRuntime"]
+      NonNullable<
+        ConstructorParameters<typeof CodexSecurity>[1]
+      >["prepareRuntime"]
     >
   >
 >;
 
-export function preparedRuntime(codexHome: string): PreparedRuntime {
+export function preparedRuntime(
+  codexHome: string,
+  marketplaceRoot = PLUGIN_ROOT,
+): PreparedRuntime {
   return {
     codexHome,
     plugin: {
       pluginRoot: PLUGIN_ROOT,
-      marketplaceRoot: PLUGIN_ROOT,
+      marketplaceRoot,
       installedRoot: PLUGIN_ROOT,
       marketplaceName: "codex-security-sdk",
       name: "codex-security",
@@ -30,64 +32,29 @@ export function preparedRuntime(codexHome: string): PreparedRuntime {
   };
 }
 
+export function scanRuntimeDependencies(codexHome: string, scanDir: string) {
+  return {
+    prepareRuntime: async () => preparedRuntime(codexHome),
+    resolvePluginPython: async () => "/managed/python",
+    prepareOutputDir: async () => scanDir,
+    repositoryRevision: async () => "deadbeef",
+  };
+}
+
 export type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
 >[0];
 
-type ScanEventOptions = Pick<
+type ScanEventOptions = Omit<
   Parameters<typeof runScanEvents>[0],
-  | "authentication"
-  | "expectedFilesTotal"
-  | "onActivity"
-  | "onObserverError"
-  | "onProgress"
-  | "onReconnect"
-  | "onScanStarted"
-  | "onTrustedAccessStatus"
-  | "onWarning"
-  | "onWorkerStatus"
+  "thread" | "events" | "signal" | "scanDir" | "pluginRoot" | "expectation"
 > & { abortController?: AbortController };
 
-export function createApiTestFixtures() {
-  const temporaryDirectories: string[] = [];
-
+export function completedTurn(): Extract<
+  ThreadEvent,
+  { type: "turn.completed" }
+> {
   return {
-    async cleanup(): Promise<void> {
-      await Promise.all(
-        temporaryDirectories
-          .splice(0)
-          .map((path) => rm(path, { recursive: true, force: true })),
-      );
-    },
-
-    async copyCompletedScan(root: string): Promise<string> {
-      const scanDir = join(root, "scan");
-      await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
-        recursive: true,
-      });
-      await chmod(scanDir, 0o700);
-      await writeFile(join(scanDir, "report.md"), "# Scan report\n");
-      return scanDir;
-    },
-
-    async temporaryDirectory(): Promise<string> {
-      const path = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-api-")),
-      );
-      temporaryDirectories.push(path);
-      return path;
-    },
-  };
-}
-
-export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: "thread-1" };
-  yield { type: "turn.started" };
-  yield {
-    type: "item.completed",
-    item: { id: "message-1", type: "agent_message", text: "scan complete" },
-  };
-  yield {
     type: "turn.completed",
     usage: {
       input_tokens: 10,
@@ -99,31 +66,78 @@ export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
   };
 }
 
+export async function* completedEvents(
+  threadId = "thread-1",
+  events?: AsyncIterable<ThreadEvent>,
+): AsyncGenerator<ThreadEvent> {
+  yield { type: "thread.started", thread_id: threadId };
+  yield { type: "turn.started" };
+  if (events) yield* events;
+  else {
+    yield {
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "scan complete" },
+    };
+  }
+  yield completedTurn();
+}
+
 export function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
   options: ScanEventOptions = {},
+  repositoryRevision = "deadbeef",
 ): ReturnType<typeof runScanEvents> {
-  const { abortController = new AbortController(), ...observers } = options;
   return runScanEvents({
-    thread: {
-      id: null,
-      async runStreamed() {
-        return { events };
-      },
-    },
+    thread: { id: null },
     events,
-    signal: abortController.signal,
+    signal: (options.abortController ?? new AbortController()).signal,
     scanDir,
     pluginRoot: PLUGIN_ROOT,
     model: "gpt-5.6-sol",
-    ...observers,
+    ...options,
     expectation: {
       repository: "/repository",
-      repositoryRevision: "deadbeef",
+      repositoryRevision,
       target: { kind: "repository", paths: [] },
       mode: "standard",
       pluginVersion: "0.1.0",
     },
   });
 }
+
+export async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+  yield {
+    type: "turn.failed",
+    error: { message: "Could not draft fixes." },
+  };
+}
+
+export function completedCodex(root: string, threadId: string | null = null) {
+  return (_options: CodexOptions) => ({
+    startThread: () => ({
+      id: threadId,
+      async runStreamed() {
+        await copyCompletedScan(root);
+        return { events: completedEvents() };
+      },
+    }),
+  });
+}
+
+export function collectObserverErrors(errors: [ScanObserverName, string][]) {
+  return (observer: ScanObserverName, error: unknown) => {
+    errors.push([observer, (error as Error).message]);
+  };
+}
+
+export function codexFactory<Run>(
+  runStreamed: Run,
+  threadId: string | null = null,
+) {
+  return () => ({
+    startThread: () => ({ id: threadId, runStreamed }),
+  });
+}
+
+export const failedPostScanEvents = failedEvents;

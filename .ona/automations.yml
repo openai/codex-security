@@ -1,0 +1,46 @@
+tasks:
+  install:
+    name: Install dependencies
+    command: sh .devcontainer/install.sh
+    triggeredBy:
+      - manual
+      - prebuild
+
+  findings-start:
+    name: Start findings service
+    command: >-
+      docker compose -f compose.findings.yaml -f .ona/compose.findings.yaml up --detach --no-build findings &&
+      ona environment port open 3000 --name findings --admission creator_only
+    triggeredBy:
+      - manual
+      - postDevcontainerStart
+      - postEnvironmentStart
+
+  findings-stop:
+    name: Stop findings service
+    command: >-
+      docker compose -f compose.findings.yaml -f .ona/compose.findings.yaml stop findings
+    triggeredBy:
+      - manual
+
+  build:
+    name: Build
+    command: pnpm --dir sdk/typescript run build
+    dependsOn:
+      - install
+    triggeredBy:
+      - manual
+      - prebuild
+
+  # First download the source-matched universal native artifact described in
+  # sdk/typescript/TESTING.md. Dependency installation does not provide it.
+  test:
+    name: Run tests
+    command: |
+      pnpm --dir sdk/typescript run test
+      pnpm --dir sdk/typescript run test:mcp
+      python -m pytest plugins/codex-security/tests -q
+    dependsOn:
+      - build
+    triggeredBy:
+      - manual
