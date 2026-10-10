@@ -127,6 +127,8 @@ test("finding helper help exits without reading stdin", async () => {
     "find-potential-duplicates",
     "store-dedupe-groups",
     "list-dedupe-groups",
+    "severity-classification",
+    "read-severity-classification",
   ];
   for (const command of commands) {
     // execFile leaves stdin open; help must exit without waiting for JSON.

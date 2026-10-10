@@ -410,6 +410,8 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
       }),
   });
   expect(stderr.text()).toContain("Synthetic transport disconnected");
+  expect(stderr.text()).toContain(`scans show ${f.scanId}`);
+  expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
   expect(code).not.toBe(0);
   expect(resumedThread).toBe(f.threadId);
   expect(
