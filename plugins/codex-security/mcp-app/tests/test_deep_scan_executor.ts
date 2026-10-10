@@ -2227,6 +2227,16 @@ async function testWorkerCyberAccessSettings() {
       },
     },
     {
+      name: "red",
+      configuration:
+        '[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+      program: "daybreak_red",
+      features: {
+        api_key_cyber_access_programs: true,
+        api_key_model_discovery: true,
+      },
+    },
+    {
       name: "explicit-false",
       configuration:
         'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',

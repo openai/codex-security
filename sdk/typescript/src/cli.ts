@@ -7,7 +7,7 @@ import {
   execFileSync,
   spawn,
 } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   constants,
@@ -22,6 +22,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   readlink,
@@ -203,12 +204,14 @@ import {
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   executablePathForSpawn,
+  environmentWithGit,
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
   pluginMetadata,
   runWorkbench,
+  workbenchEnvironment,
   sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -256,11 +259,16 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  gitMarkerRoot,
+  normalizeRepository,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+} from "./trusted-executable.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
@@ -956,6 +964,7 @@ interface ScanArguments extends ResolvedScanSettings {
   pluginPath?: string;
   pythonPath?: string;
   patch?: boolean;
+  validate?: boolean;
   patchSeverity?: FailureSeverity;
   createPr?: boolean;
   showCost?: boolean;
@@ -1113,7 +1122,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
-  ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  ): Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
@@ -1175,6 +1184,8 @@ interface CliDependencies {
     input?: string,
     signal?: AbortSignal,
     pythonPath?: string,
+    protectedRoot?: string,
+    gitProtectedRoots?: readonly string[],
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1259,18 +1270,42 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return options?.trim === false ? stdout : stdout.trim();
   },
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath) => {
-    const environment = {
-      ...exportEnvironment(),
-      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
-    };
+  runWorkbench: async (
+    args,
+    input,
+    signal,
+    pythonPath,
+    protectedRoot,
+    gitProtectedRoots = [],
+  ) => {
+    let environment: NodeJS.ProcessEnv =
+      protectedRoot === undefined
+        ? {
+            ...exportEnvironment(),
+            CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
+          }
+        : workbenchEnvironment(process.env);
+    if (protectedRoot !== undefined) {
+      protectedRoot =
+        (await gitMarkerRoot(protectedRoot, signal, "outermost")) ??
+        protectedRoot;
+    }
+    const python = await resolvePluginPython({
+      configuredPath: pythonPath,
+      environment,
+      signal,
+      protectedRoot,
+    });
+    if (protectedRoot !== undefined) {
+      const git = await inspectTrustedExecutable("git", environment, [
+        protectedRoot,
+        ...gitProtectedRoots,
+      ]);
+      environment = environmentWithGit(git.environment, git);
+    }
     return await runWorkbench(
       {
-        python: await resolvePluginPython({
-          configuredPath: pythonPath,
-          environment,
-          signal,
-        }),
+        python,
         pluginRoot: await bundledPluginRoot(),
         environment,
         signal,
@@ -3610,6 +3645,10 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Patch and verify confirmed findings after the scan."),
+          validate: z
+            .boolean()
+            .default(false)
+            .describe("Run standalone finding validation after the scan."),
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -3650,10 +3689,16 @@ export async function main(
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
+        .refine((options) => !options.validate || !options.dryRun, {
+          message: "--validate cannot be combined with --dry-run.",
+        })
         .refine(
-          (options) => !options.mock || (!options.dryRun && !options.patch),
+          (options) =>
+            !options.mock ||
+            (!options.dryRun && !options.patch && !options.validate),
           {
-            message: "--mock cannot be combined with --dry-run or --patch.",
+            message:
+              "--mock cannot be combined with --dry-run, --patch, or --validate.",
           },
         ),
       output: scanOutputSchema("SCAN_FAILED"),
@@ -3707,6 +3752,11 @@ export async function main(
               "--archive-existing requires --output-dir.",
             );
           }
+          if (options.validate && settings.maxCostUsd !== undefined) {
+            throw new CodexSecurityError(
+              "--validate cannot be combined with a scan cost limit because standalone validation is not cost-tracked.",
+            );
+          }
           outcome = await runScan(
             {
               ...settings,
@@ -3720,6 +3770,7 @@ export async function main(
               pluginPath: options.pluginPath,
               pythonPath: options.python,
               patch: options.patch,
+              validate: options.validate,
               patchSeverity: options.patchSeverity,
               createPr: options.createPr,
               showCost: options.showCost,
@@ -8277,8 +8328,7 @@ async function executeScan(
   };
   signalHandlers(dependencies, "add", onInterrupt, onTerminate);
 
-  let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
-    null;
+  let security: ReturnType<CliDependencies["createSecurity"]> | null = null;
   let result: ScanResult | null = null;
   let preflight: ScanPreflight | null = null;
   let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
@@ -8287,6 +8337,8 @@ async function executeScan(
   let providerOptions: SkillRunOptions = { provider: "openai" };
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
+  let validation: Record<string, unknown> | undefined;
+  let validationExitCode = 0;
   let patchServiceTier: JsonValue | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
@@ -8295,6 +8347,12 @@ async function executeScan(
   try {
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
+    if (arguments_.validate) {
+      repository = await normalizeRepository(
+        resolve(directory, expandHome(repository)),
+        preparationAbortController.signal,
+      );
+    }
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
@@ -8740,13 +8798,17 @@ async function executeScan(
         }
       },
     };
+    if (
+      ((arguments_.validate && !arguments_.dryRun) ||
+        arguments_.rerunInputIdentity !== undefined) &&
+      options.knowledgeBasePaths?.length
+    ) {
+      options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
+        options.knowledgeBasePaths,
+        preparationAbortController.signal,
+      );
+    }
     if (arguments_.rerunInputIdentity !== undefined) {
-      if (options.knowledgeBasePaths?.length) {
-        options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
-          options.knowledgeBasePaths,
-          preparationAbortController.signal,
-        );
-      }
       const previousInputs = arguments_.rerunInputIdentity;
       const currentInputs = scanInputIdentity(
         options.scanPrompt,
@@ -8781,6 +8843,113 @@ async function executeScan(
       result = await security.run(repository, options);
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
+      if (arguments_.validate) {
+        const findings = result.findings.findings;
+        if (targetWarnings.length > 0) {
+          validation = {
+            status: "skipped",
+            reason: "The scan target changed during execution.",
+          };
+        } else if (findings.length === 0) {
+          try {
+            const context = await dependencies.runWorkbench(
+              [
+                "get-scan",
+                "--scan-id",
+                result.manifest.scan.id,
+                "--check-target",
+              ],
+              undefined,
+              preparationAbortController.signal,
+              config.pythonPath,
+              repository,
+              options.knowledgeBaseSnapshot?.protectedRoots,
+            );
+            const scan = context["scan"];
+            if (
+              !isJsonObject(scan) ||
+              scan["targetPath"] !== (await realpath(repository))
+            ) {
+              throw new CodexSecurityError(
+                "The recorded scan target does not match the validation repository.",
+              );
+            }
+            validation = { status: "complete", findings: 0 };
+          } catch (error) {
+            validationExitCode = 2;
+            const message = errorMessage(error);
+            validation = { status: "failed", findings: 0, message };
+            errorOutput.write(
+              `codex-security: Validation failed: ${diagnosticValue(message)}\n`,
+            );
+          }
+        } else {
+          stopPresentation();
+          try {
+            progress?.stage(`Validating ${findings.length} scan findings`);
+          } catch {}
+          try {
+            const scanDirectory = result.scanDir;
+            let reportPath = join(scanDirectory, "validation.md");
+            const report = await open(reportPath, "wx", 0o600).catch(
+              async (error: unknown) => {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+                  throw error;
+                reportPath = join(
+                  scanDirectory,
+                  `validation-${randomUUID()}.md`,
+                );
+                return await open(reportPath, "wx", 0o600);
+              },
+            );
+            validation = { status: "failed", findings: 0, reportPath };
+            let completed = 0;
+            try {
+              for (const finding of findings) {
+                const assessment = await security.validate({
+                  repositoryPath: repository,
+                  scanId: result.manifest.scan.id,
+                  workflowId: arguments_.workflowId,
+                  knowledgeBasePaths: options.knowledgeBasePaths,
+                  knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
+                  finding,
+                  auth,
+                  cyberAccessProgram: arguments_.cyberAccessProgram,
+                  safetyIdentifier: arguments_.safetyIdentifier,
+                  signal: preparationAbortController.signal,
+                });
+                await report.writeFile(
+                  `${completed === 0 ? "" : "\n---\n\n"}## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}\n`,
+                );
+                completed += 1;
+                validation = { ...validation, findings: completed };
+              }
+            } finally {
+              await report.close();
+            }
+            validation = {
+              status: "complete",
+              findings: findings.length,
+              reportPath,
+            };
+            try {
+              progress?.stage(`Finding validation saved to ${reportPath}`);
+            } catch {}
+          } catch (error) {
+            validationExitCode = 2;
+            const message = errorMessage(error);
+            validation = { ...validation, status: "failed", message };
+            errorOutput.write(
+              `codex-security: Validation failed: ${diagnosticValue(message)}\n`,
+            );
+            if (validation["reportPath"] !== undefined) {
+              errorOutput.write(
+                `Partial validation report: ${diagnosticValue(validation["reportPath"])}\n`,
+              );
+            }
+          }
+        }
+      }
     }
   } catch (error) {
     failed = true;
@@ -8810,6 +8979,19 @@ async function executeScan(
       signal: requestedSignal,
       partial_output: scanDir !== null,
     });
+    if (result !== null && arguments_.validate) {
+      const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
+      errorOutput.write(
+        `codex-security: Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.\n`,
+      );
+      return {
+        exitCode,
+        data: {
+          ...result.toJSON(),
+          validation: { ...validation, status: "failed", exitCode },
+        },
+      };
+    }
     const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
@@ -8917,6 +9099,7 @@ async function executeScan(
     targetWarnings.length === 0
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
+  if (validation !== undefined) scanData = { ...scanData, validation };
   const incomplete = result.coverage.completeness !== "complete";
   let deepScanStop: DeepScanStop | undefined;
   if (arguments_.mode === "deep") {
@@ -8966,6 +9149,9 @@ async function executeScan(
       ...(error === undefined ? {} : { coverageError: error }),
     };
   };
+  if (validationExitCode !== 0) {
+    return completedScan(validationExitCode);
+  }
   if (targetWarnings.length > 0) {
     const message =
       "Scan target changed during execution; results do not represent the current checkout.";

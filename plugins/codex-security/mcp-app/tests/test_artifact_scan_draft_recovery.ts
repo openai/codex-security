@@ -1012,6 +1012,13 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           f.write(input),
         );
       await f.write(f.draft({ deferred: [pending] }));
+      const checkpoints = path.join(f.root, "checkpoints");
+      for (const name of await readdir(checkpoints))
+        await utimes(path.join(checkpoints, name), 1, 1);
+      for (const name of layout === "worker"
+        ? ["result.json", "checkpoint-head.json"]
+        : ["coverage.json", "scan-manifest.json", "findings.json"])
+        await utimes(path.join(f.root, name), 1, 1);
       await fail(closing);
       await f.write(f.draft({}, true));
       assert.deepEqual((await f.read()).deferred, []);

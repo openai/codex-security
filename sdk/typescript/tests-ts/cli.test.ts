@@ -1,14 +1,18 @@
 import { resolving } from "./support/promises.js";
 import { parseJsonLines } from "./support/json.js";
+import { writeFileSync } from "node:fs";
 import {
   mkdir,
+  mkdtemp,
   readFile,
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, join, normalize, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, join, normalize, relative, resolve } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -31,6 +35,7 @@ import {
   PluginPythonUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
+  ScanResult,
   VERSION,
 } from "../src/index.js";
 import {
@@ -40,6 +45,7 @@ import {
   resolveCliPath,
 } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
@@ -109,6 +115,21 @@ const profileScenarios = [
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+
+function scanResultAt(
+  scanDir: string,
+  levels: Parameters<typeof fakeResult>[0],
+): ScanResult {
+  const base = fakeResult(levels);
+  return new ScanResult({
+    manifest: base.manifest,
+    findings: base.findings,
+    coverage: base.coverage,
+    scanDir,
+    threadId: base.threadId,
+    turnResult: base.turnResult,
+  });
+}
 
 function sampleUsage() {
   return {
@@ -209,6 +230,448 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("synthetic-user");
   });
 
+  test("validates each finding with the scan client before closing it", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "scan-validation-")),
+    );
+    const scanDir = join(root, "scan");
+    const repository = join(root, "repository");
+    await mkdir(scanDir);
+    await mkdir(repository);
+    try {
+      const result = scanResultAt(scanDir, ["high", "low"]);
+      const knowledgePath = join(root, "synthetic-policy.md");
+      await writeFile(knowledgePath, "Synthetic validation policy.");
+      const stdout = capture();
+      const lifecycle: string[] = [];
+      const validated: unknown[] = [];
+      const documents: string[] = [];
+      let knowledgeSnapshot: ScanOptions["knowledgeBaseSnapshot"];
+      let scanSignal: AbortSignal | undefined;
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            "--validate",
+            "--knowledge-base",
+            knowledgePath,
+            "--safety-identifier",
+            "synthetic-user",
+            "--fail-on-severity",
+            "high",
+            "--json",
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result,
+            currentDirectory: repository,
+            onTurn: (_repository, options) => {
+              lifecycle.push("scan");
+              scanSignal = (options as ScanOptions).signal;
+              knowledgeSnapshot = options.knowledgeBaseSnapshot;
+              writeFileSync(knowledgePath, "Changed during the scan.");
+            },
+            onValidate: async (options) => {
+              lifecycle.push("validate");
+              validated.push(options.finding);
+              expect(options).toMatchObject({
+                repositoryPath: repository,
+                scanId: "scan",
+                safetyIdentifier: "synthetic-user",
+                knowledgeBasePaths: [knowledgePath],
+                signal: scanSignal,
+              });
+              expect(options.outputDir).toBeUndefined();
+              const snapshot =
+                options.knowledgeBaseSnapshot ??
+                (await readKnowledgeBaseSnapshot(options.knowledgeBasePaths!));
+              documents.push(...Object.values(snapshot.documents));
+              expect(options.knowledgeBaseSnapshot).toBe(knowledgeSnapshot);
+              await writeFile(knowledgePath, "Changed between assessments.");
+              return {
+                disposition: "suppressed",
+                report: "# Supplemental assessment",
+                outputDir: join(repository, `evidence-${validated.length}`),
+                threadId: "validation-thread",
+              };
+            },
+            onClose: () => {
+              lifecycle.push("close");
+            },
+          }),
+        ),
+      ).toBe(1);
+      expect(validated).toEqual(result.findings.findings);
+      expect(documents).toEqual([
+        "Synthetic validation policy.",
+        "Synthetic validation policy.",
+      ]);
+      expect(Object.values(knowledgeSnapshot!.documents)).toEqual([
+        "Synthetic validation policy.",
+      ]);
+      expect(lifecycle).toEqual(["scan", "validate", "validate", "close"]);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        validation: {
+          status: "complete",
+          findings: 2,
+          reportPath: join(scanDir, "validation.md"),
+        },
+      });
+      const report = await readFile(join(scanDir, "validation.md"), "utf8");
+      expect(report).toContain("# Supplemental assessment");
+      expect(report).toContain(join(repository, "evidence-1"));
+      expect(report).toContain(join(repository, "evidence-2"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not overwrite a validation path created during the scan", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    const outsideDir = await mkdtemp(
+      join(tmpdir(), "scan-validation-outside-"),
+    );
+    const reportPath = join(scanDir, "validation.md");
+    const outsidePath = join(outsideDir, "outside.txt");
+    try {
+      await writeFile(outsidePath, "keep");
+      if (process.platform === "win32") {
+        await writeFile(reportPath, "keep");
+      } else {
+        await symlink(outsidePath, reportPath);
+      }
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ".", "--validate", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result: scanResultAt(scanDir, ["high"]),
+            currentDirectory: await realpath(tmpdir()),
+          }),
+        ),
+      ).toBe(0);
+      const output = JSON.parse(stdout.text());
+      expect(output).toMatchObject({ validation: { status: "complete" } });
+      expect(output.validation.reportPath).not.toBe(reportPath);
+      expect(await readFile(output.validation.reportPath, "utf8")).toContain(
+        "Additional evidence is needed.",
+      );
+      expect(await readFile(reportPath, "utf8")).toBe("keep");
+      expect(await readFile(outsidePath, "utf8")).toBe("keep");
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["ordinary", "validation failed"],
+    ["terminal controls", "synthetic\u001b[31m failure\u0007"],
+  ])(
+    "retains a completed scan and escapes validation diagnostics: %s",
+    async (_kind, message) => {
+      const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+      const stdout = capture();
+      const stderr = capture();
+      try {
+        expect(
+          await main(
+            ["scan", ".", "--validate", "--json"],
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              result: scanResultAt(scanDir, ["high"]),
+              currentDirectory: await realpath(tmpdir()),
+              onValidate: async () => {
+                throw new Error(message);
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { status: "completed" } },
+          validation: { status: "failed", message },
+        });
+        expect(stderr.text()).not.toContain("\u001b");
+        expect(stderr.text()).not.toContain("\u0007");
+        expect(stderr.text()).toContain(
+          message.startsWith("synthetic") ? "failure" : "validation failed",
+        );
+      } finally {
+        await rm(scanDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("skips standalone model calls when the scan has no findings", async () => {
+    const repository = await realpath(tmpdir());
+    let validations = 0;
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--validate", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          currentDirectory: repository,
+          onWorkbench: async (args) => {
+            expect(args).toEqual([
+              "get-scan",
+              "--scan-id",
+              "scan",
+              "--check-target",
+            ]);
+            return { scan: { targetPath: repository } };
+          },
+          onValidate: async () => {
+            validations += 1;
+            throw new Error("No findings to validate");
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(validations).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      validation: { status: "complete", findings: 0 },
+    });
+  });
+
+  test("does not report success or patch findings when validation rejects a changed target", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    const repository = await realpath(tmpdir());
+    let patches = 0;
+    const stdout = capture();
+    try {
+      expect(
+        await main(
+          ["scan", ".", "--validate", "--patch", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result: scanResultAt(scanDir, ["high"]),
+            currentDirectory: repository,
+            onValidate: async () => {
+              throw new Error("The recorded scan target changed.");
+            },
+            onCodex: () => {
+              patches += 1;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(patches).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        manifest: { scan: { status: "completed" } },
+        validation: { status: "failed" },
+      });
+      expect(await readFile(join(scanDir, "validation.md"), "utf8")).toBe("");
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["directory link", "home-relative"])(
+    "uses the same canonical %s repository for scanning and validation",
+    async (kind) => {
+      const root = await mkdtemp(
+        join(
+          kind === "home-relative" ? homedir() : tmpdir(),
+          "scan-validation-link-",
+        ),
+      );
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir);
+      const canonical = await realpath(repository);
+      await symlink(
+        repository,
+        join(root, "linked"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const repositories: string[] = [];
+      try {
+        expect(
+          await main(
+            [
+              "scan",
+              kind === "directory link"
+                ? "linked"
+                : `~/${relative(homedir(), repository)}`,
+              "--validate",
+              "--json",
+            ],
+            capture().stream,
+            capture().stream,
+            dependencies({
+              result: scanResultAt(scanDir, ["high"]),
+              currentDirectory: root,
+              onTurn: (path) => {
+                repositories.push(path);
+              },
+              onValidate: async (options) => {
+                repositories.push(options.repositoryPath);
+                return {
+                  disposition: "deferred",
+                  report: "Assessment",
+                  outputDir: join(root, "evidence"),
+                  threadId: null,
+                };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(repositories).toEqual([canonical, canonical]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(["failure", "SIGINT", "SIGTERM"])(
+    "retains completed assessments and stops patching after validation %s",
+    async (signal) => {
+      const root = await mkdtemp(join(tmpdir(), "scan-validation-partial-"));
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir);
+      const signals = new FakeSignals();
+      const stdout = capture();
+      let validations = 0;
+      let commands = 0;
+      const exitCode =
+        signal === "failure" ? 2 : signal === "SIGINT" ? 130 : 143;
+      try {
+        expect(
+          await main(
+            ["scan", ".", "--validate", "--patch", "--json"],
+            stdout.stream,
+            capture().stream,
+            dependencies({
+              signals,
+              result: scanResultAt(scanDir, ["high", "low"]),
+              currentDirectory: repository,
+              onValidate: async ({ signal: abort }) => {
+                validations += 1;
+                if (validations === 1) {
+                  return {
+                    disposition: "reportable",
+                    report: "Completed first assessment.",
+                    outputDir: join(root, "first-evidence"),
+                    threadId: "first",
+                  };
+                }
+                expect(
+                  await readFile(join(scanDir, "validation.md"), "utf8"),
+                ).toContain("Completed first assessment.");
+                if (signal === "failure")
+                  throw new Error("Second assessment failed.");
+                signals.emit(signal);
+                abort!.throwIfAborted();
+                throw new Error("unreachable");
+              },
+              onCodex: () => {
+                commands += 1;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(exitCode);
+        expect(validations).toBe(2);
+        expect(commands).toBe(0);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { status: "completed" } },
+          validation: {
+            status: "failed",
+            findings: 1,
+            reportPath: join(scanDir, "validation.md"),
+            ...(signal === "failure" ? {} : { exitCode }),
+          },
+        });
+        const report = await readFile(join(scanDir, "validation.md"), "utf8");
+        expect(report).toContain("Completed first assessment.");
+        expect(report).toContain(join(root, "first-evidence"));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("keeps earlier reports when retrying validation for a completed workflow scan", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scan-validation-retry-"));
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir);
+    const paths: string[] = [];
+    const deps = dependencies({
+      result: scanResultAt(scanDir, ["high"]),
+      currentDirectory: repository,
+      onValidate: async (options) => {
+        expect(options.workflowId).toBe("validation-retry");
+        return {
+          disposition: "deferred",
+          report: "Saved assessment.",
+          outputDir: join(root, "evidence"),
+          threadId: "validation",
+        };
+      },
+    });
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const stdout = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--workflow-id",
+              "validation-retry",
+              "--validate",
+              "--json",
+            ],
+            stdout.stream,
+            capture().stream,
+            deps,
+          ),
+        ).toBe(0);
+        const output = JSON.parse(stdout.text());
+        expect(output.validation.status).toBe("complete");
+        paths.push(output.validation.reportPath);
+      }
+      expect(paths[0]).toBe(join(scanDir, "validation.md"));
+      expect(paths[1]).not.toBe(paths[0]);
+      expect(await readFile(paths[0]!, "utf8")).toBe(
+        await readFile(paths[1]!, "utf8"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a cost limit the standalone validator cannot enforce", async () => {
+    let started = false;
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", "--validate", "--max-cost", "1", "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({ onRun: () => (started = true) }),
+      ),
+    ).toBe(2);
+    expect(started).toBe(false);
+    expect(stderr.text()).toContain(
+      "standalone validation is not cost-tracked",
+    );
+  });
+
   test("exposes Incur help, schemas, manifests, and completions", async () => {
     const root = capture();
     const stderr = capture();
@@ -264,6 +727,7 @@ describe("CLI", () => {
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           patch: { type: "boolean" },
+          validate: { type: "boolean", default: false },
           patchSeverity: { enum: ["critical", "high", "medium", "low"] },
           createPr: { type: "boolean" },
           headless: { type: "boolean" },
@@ -4272,14 +4736,9 @@ describe("CLI", () => {
           const result = fakeResult(["high"], completeness);
           const stdout = capture();
           const stderr = capture();
-          const deps = dependencies();
-          deps.createSecurity = () => ({
-            run: async (_repository, options) => {
-              options?.onWarning?.(warning, { kind: "target_changed" });
-              return result;
-            },
-            close: async () => {},
-            preflight: async () => fakePreflight(),
+          const deps = scanDependencies(async (_repository, options) => {
+            options?.onWarning?.(warning, { kind: "target_changed" });
+            return result;
           });
           expect(
             await main(
@@ -5304,6 +5763,7 @@ describe("CLI", () => {
 
     const failing = dependencies();
     failing.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new OutputInsideProtectedRootError(output, worktree);
       },
@@ -5352,6 +5812,7 @@ describe("CLI", () => {
 
     const failing = dependencies();
     failing.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new OutputInsideProtectedRootError(
           temporary,

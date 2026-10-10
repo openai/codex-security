@@ -27,6 +27,14 @@ from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 _WINDOWS = os.name == "nt"
 
 
+class UnreadableLocalFile(SystemExit):
+    """Source contents are unavailable for an optional review cache."""
+
+
+class UnsupportedLocalFileType(SystemExit):
+    """An entry cannot be read as source content for a review cache."""
+
+
 def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision: str) -> str:
     digest = hashlib.sha256(
         f"codex-security-diff/v1\0{kind}\0{base_revision}\0{head_revision}".encode()
@@ -418,21 +426,54 @@ def worktree_content_digest(target: Path) -> str:
 
 
 def remediation_checkout_snapshot(
-    scan: sqlite3.Row, *, expected_revision: str | None = None
+    scan: sqlite3.Row,
+    *,
+    expected_revision: str | None = None,
+    head_changed_message: str = (
+        "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
+    ),
 ) -> tuple[str, str | None]:
     target = require_scan_target_identity(scan)
     revision = git_revision(target)
     required_revision = expected_revision or scan["target_revision"]
     if revision != required_revision:
-        raise SystemExit(
-            "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
-        )
+        raise SystemExit(head_changed_message)
     content_digest = (
         worktree_content_digest(target)
         if revision != "unversioned"
         else directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
     )
     return revision, content_digest
+
+
+def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
+    head_changed_message = "Repository HEAD changed. Run a new scan before validating its findings."
+    if (
+        scan["diff_target_kind"] not in {"working_tree", "commit", "range"}
+        and scan["target_snapshot_digest"] is None
+        and scan["mode"] != "diff"
+        and scan["target_revision"] != "unversioned"
+    ):
+        # Legacy Git records bind only the revision, not working-tree contents.
+        target = require_scan_target_identity(scan)
+        if git_revision(target) != scan["target_revision"]:
+            raise SystemExit(head_changed_message)
+        require_clean_submodule_worktrees(target)
+        return
+    _, current_digest = remediation_checkout_snapshot(
+        scan, head_changed_message=head_changed_message
+    )
+    if scan["diff_target_kind"] == "working_tree":
+        expected_digest = scan["diff_content_digest"]
+    elif scan["diff_target_kind"] in {"commit", "range"}:
+        expected_digest = clean_worktree_content_digest()
+    else:
+        expected_digest = scan["target_snapshot_digest"]
+    if current_digest != expected_digest:
+        raise SystemExit(
+            "Scan target contents changed since the scan. "
+            "Run a new scan before validating its findings."
+        )
 
 
 def worktree_content_digest_for_context(
@@ -797,6 +838,7 @@ def source_directory_snapshot_paths(
     target: Path,
     excluded: tuple[Path, ...] = (),
     *,
+    include_git_metadata: bool = False,
     onerror: Callable[[OSError], None] | None = None,
 ) -> list[Path]:
     paths: list[Path] = []
@@ -806,7 +848,7 @@ def source_directory_snapshot_paths(
         parent = Path(directory)
         for name in directories[:]:
             path = parent / name
-            if name == ".git" or path in excluded:
+            if (name == ".git" and not include_git_metadata) or path in excluded:
                 directories.remove(name)
                 continue
             paths.append(path)
@@ -814,13 +856,19 @@ def source_directory_snapshot_paths(
             if getattr(path.lstat(), "st_reparse_tag", 0) & 0x20000000:
                 directories.remove(name)
         paths.extend(
-            parent / name for name in files if name != ".git" and parent / name not in excluded
+            parent / name
+            for name in files
+            if (name != ".git" or include_git_metadata) and parent / name not in excluded
         )
     return sorted(paths)
 
 
 def directory_content_digest(
-    target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
+    target: Path,
+    *,
+    excluded: tuple[Path, ...] = (),
+    include_ignored: bool = False,
+    include_git_metadata: bool = False,
 ) -> str:
     def raise_walk_error(error: OSError) -> None:
         raise error
@@ -829,7 +877,9 @@ def directory_content_digest(
         path.relative_to(target) for path in excluded if path.is_relative_to(target)
     ]
     paths = (
-        source_directory_snapshot_paths(target, excluded, onerror=raise_walk_error)
+        source_directory_snapshot_paths(
+            target, excluded, include_git_metadata=include_git_metadata, onerror=raise_walk_error
+        )
         if include_ignored
         else git_directory_snapshot_paths(target)
     )
@@ -844,7 +894,7 @@ def directory_content_digest(
         try:
             metadata = path.lstat()
         except OSError as exc:
-            raise SystemExit(f"Could not read local file: {relative_path}") from exc
+            raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
         mode = metadata.st_mode
         link_target = (
             os.readlink(path)
@@ -868,12 +918,12 @@ def directory_content_digest(
                         content_digest.update(chunk)
                         content_size += len(chunk)
             except OSError as exc:
-                raise SystemExit(f"Could not read local file: {relative_path}") from exc
+                raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
             update_digest_field(digest, b"kind", b"file")
             update_digest_field(digest, b"size", str(content_size).encode())
             update_digest_field(digest, b"content-sha256", content_digest.digest())
         else:
-            raise SystemExit(f"Unsupported local file type: {relative_path}")
+            raise UnsupportedLocalFileType(f"Unsupported local file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 

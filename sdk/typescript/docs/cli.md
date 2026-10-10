@@ -281,6 +281,11 @@ changes. Deep scans support whole repositories and path scopes. Working-tree
 snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
 
+Committed-diff scans require a clean, full checkout at the requested head
+revision, including when using `--validate`. A different checkout revision or
+local changes are rejected before scanning; check out the requested head and
+commit or stash local changes before retrying.
+
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
 explicit unsupported binary files are rejected. Bulk scans share this context
@@ -318,6 +323,37 @@ stderr-only failures, including when `--full-output` is selected.
 Diagnostics stay on stderr. Each command's `--schema --format json` describes
 its successful output and failure codes.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
+
+### Follow-up finding validation
+
+Scans already validate findings against local source. Add `--validate` to run
+the existing standalone validation workflow for each reported finding after
+the scan, using the same selected Cyber access program. Each assessment uses a
+separate evidence directory; the combined report is saved as
+`<scan-dir>/validation.md`, or a uniquely suffixed report
+if that path already exists. Each completed assessment is saved immediately;
+failed or interrupted runs retain the partial report. JSON scan output includes
+the execution status, completed assessment count, and report path. Completion means the assessments finished,
+not that every finding was confirmed. A scan with no findings needs no second
+pass.
+
+With `--workflow-id`, retries reuse completed assessments for unchanged findings,
+source, validation settings, and saved evidence. Missing or changed evidence
+causes validation to run again, as do older assessments without recorded evidence
+fingerprints. By default, regeneration uses a new evidence directory. An explicit
+SDK validation `outputDir` reuses an assessment only when it points to the same
+evidence directory. A different destination starts a new assessment. The requested
+directory must be empty when regenerating; existing files are never overwritten.
+When `--knowledge-base` is supplied, the scan and all follow-up assessments use
+one captured copy of those documents. A workflow retry must use the same document
+contents. Use a new workflow ID if they changed or if the workflow was created
+before document snapshots were bound to follow-up validation.
+
+The report is supplemental: its assessments are not applied to the saved
+findings or the `--fail-on-severity` decision. Validation failures exit with
+`2` while retaining the completed scan. The additional model calls are not
+cost-tracked, so `--validate` cannot be combined with `--max-cost` (including a
+configured scan cost limit), `--dry-run`, or `--mock`.
 
 ### Project files
 
