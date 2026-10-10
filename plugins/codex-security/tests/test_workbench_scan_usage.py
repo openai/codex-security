@@ -1130,6 +1130,63 @@ def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
     assert "usage" not in failed
 
 
+@pytest.mark.parametrize("complete_first", [False, True])
+@pytest.mark.parametrize("tail", ["complete", "partial", "invalid"])
+def test_rollout_copies_prefer_parsed_cache_and_model_corrections(
+    tmp_path: Path, workbench_api, complete_first: bool, tail: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    prefix = _rollout(
+        tmp_path,
+        "worker",
+        [
+            _event(start, "turn_context", {"turn_id": "scan-turn", "model": "model-before"}),
+            _token_event(start, 1_000_000, 0),
+        ],
+    )
+    complete = tmp_path / "complete.jsonl"
+    tokens = dict(
+        input_tokens=1_000_000, cached_input_tokens=900_000, output_tokens=0, total_tokens=1_000_000
+    )
+    receipt = _event(
+        start,
+        "token_usage_record",
+        dict(
+            response_id="response-one",
+            thread_id="worker",
+            turn_id="scan-turn",
+            model="model-receipt",
+            usage=tokens,
+            thread_token_usage=tokens,
+        ),
+    )
+    complete.write_bytes(prefix.read_bytes() + json.dumps(receipt).encode() + b"\n")
+    if tail == "partial":
+        with complete.open("ab") as stream:
+            stream.write(b'{"type":"event_msg"')
+    elif tail == "invalid":
+        with complete.open("ab") as stream:
+            stream.write(b"invalid-record\n")
+    paths = [prefix, complete] if not complete_first else [complete, prefix]
+    models = {}
+    counts, warnings = reader._read_rollout_copies_usage(
+        [reader.RolloutSession("worker", None, path) for path in paths],
+        started_at=start,
+        completed_at=None,
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    expected = _counts(1_000_000, 900_000, 0)
+    assert counts == expected
+    assert models == {"model-receipt": expected}
+    assert warnings == (
+        set()
+        if tail == "complete"
+        else {"rollout_record_incomplete" if tail == "partial" else "rollout_record_invalid"}
+    )
+
+
 def test_rollout_usage_reconciles_stale_cumulative_events_and_models(
     tmp_path: Path, workbench_api
 ) -> None:

@@ -304,7 +304,7 @@ def _read_rollout_copies_usage(
     for session in copies:
         local_models: dict[str | None, dict[str, int]] = {}
         try:
-            usage, warnings = _read_rollout_usage(
+            usage, warnings, parsed_events = _read_rollout_usage_with_extent(
                 session,
                 started_at=started_at,
                 completed_at=completed_at,
@@ -313,7 +313,7 @@ def _read_rollout_copies_usage(
             )
         except (OSError, UnicodeError, ValueError):
             continue
-        readings.append((usage, warnings, local_models))
+        readings.append((usage, warnings, local_models, parsed_events))
     if not readings:
         raise ValueError("No readable rollout copy.")
     attributable = [
@@ -329,11 +329,13 @@ def _read_rollout_copies_usage(
         )
     ]
     # Restored indexes can reference a prefix and its complete continuation.
-    # Keep totals and model attribution from the same copy, counting it once.
-    usage, warnings, selected_models = max(
+    # Equal totals can precede later cache corrections or model receipts. Prefer
+    # the parsed continuation, keeping all accounting from that one copy.
+    usage, warnings, selected_models, _ = max(
         attributable or readings,
         key=lambda reading: (
             reading[0]["totalTokens"],
+            reading[3],
             "rollout_record_incomplete" not in reading[1],
         ),
     )
@@ -726,6 +728,25 @@ def _read_rollout_usage(
     owner_turn_id: str | None = None,
     model_usage: dict[str | None, dict[str, int]] | None = None,
 ) -> tuple[dict[str, int], set[str]]:
+    usage, warnings, _ = _read_rollout_usage_with_extent(
+        session,
+        started_at=started_at,
+        completed_at=completed_at,
+        owner_turn_id=owner_turn_id,
+        model_usage=model_usage,
+    )
+    return usage, warnings
+
+
+def _read_rollout_usage_with_extent(
+    session: RolloutSession,
+    *,
+    started_at: datetime,
+    completed_at: datetime | None,
+    owner_turn_id: str | None = None,
+    model_usage: dict[str | None, dict[str, int]] | None = None,
+) -> tuple[dict[str, int], set[str], int]:
+    parsed_events = 0
     total = _empty_token_usage()
     counter_total = _empty_token_usage()
     warnings: set[str] = set()
@@ -760,6 +781,8 @@ def _read_rollout_usage(
                     warnings.add("rollout_record_invalid")
                 continue
             payload = event.get("payload")
+            if isinstance(payload, dict):
+                parsed_events += 1
             if event.get("type") in {"session_meta", "turn_context"} and isinstance(payload, dict):
                 model = payload.get("model")
                 if isinstance(model, str) and model:
@@ -767,17 +790,17 @@ def _read_rollout_usage(
             if line_number == 1:
                 if event.get("type") != "session_meta" or not isinstance(payload, dict):
                     warnings.add("thread_identity_mismatch")
-                    return total, warnings
+                    return total, warnings, parsed_events
                 session_started_at = _timestamp(payload.get("timestamp"))
                 recorded_id = payload.get("id") or payload.get("session_id")
                 if recorded_id != session.thread_id:
                     warnings.add("thread_identity_mismatch")
-                    return total, warnings
+                    return total, warnings, parsed_events
                 recorded_parent = _session_parent_thread_id(payload)
                 if session.parent_thread_id is not None:
                     if recorded_parent != session.parent_thread_id:
                         warnings.add("thread_identity_mismatch")
-                        return total, warnings
+                        return total, warnings, parsed_events
                 boundary_reached = (
                     session.parent_thread_id is None
                     and not recorded_parent
@@ -796,12 +819,12 @@ def _read_rollout_usage(
                     task_started_at = _timestamp(event.get("timestamp"))
                     if task_started_at is None:
                         warnings.add("thread_ownership_unavailable")
-                        return total, warnings
+                        return total, warnings, parsed_events
                     if task_started_at < started_at or (
                         completed_at is not None and task_started_at > completed_at
                     ):
                         warnings.add("thread_outside_scan_window")
-                        return total, warnings
+                        return total, warnings, parsed_events
                     boundary_reached = True
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
@@ -920,7 +943,7 @@ def _read_rollout_usage(
         warnings.add("thread_ownership_unavailable")
     elif not usage_observed:
         warnings.add("token_usage_unavailable")
-    return total, warnings
+    return total, warnings, parsed_events
 
 
 def _session_parent_thread_id(payload: Mapping[str, Any]) -> str | None:
