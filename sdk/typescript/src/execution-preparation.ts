@@ -1,3 +1,4 @@
+import { restoreProviderProfile } from "./provider-profile.js";
 import { readFile, realpath } from "node:fs/promises";
 import { parse as parseToml } from "smol-toml";
 import { accountStatus, configuredCodexHome } from "./auth.js";
@@ -535,7 +536,11 @@ export async function nativeScanConfiguration(
 ): Promise<JsonObject> {
   if (input.recipe?.["config"] !== undefined)
     return scanCompositionOverrides(
-      input.recipe["config"] as JsonObject,
+      await restoreProviderProfile(
+        input.recipe["config"] as JsonObject,
+        input.recipe["providerProfile"],
+        environment,
+      ),
       subagents,
     );
   const ambientPath = join(

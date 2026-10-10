@@ -89,6 +89,7 @@ await new Promise(() => {});
   ).version;
   const environment = {
     ...process.env,
+    CODEX_HOME: codexHome,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
     SYNTHETIC_SCAN_SETTING: "selected-value",
     CODEX_SAFETY_IDENTIFIER: "synthetic-ambient-identifier",
@@ -105,6 +106,7 @@ await new Promise(() => {});
         ...(native ? { inheritedPermissions } : {}),
         prepareRuntime: async () => ({
           codexHome,
+          preserveCodexHomeConfig: true,
           environment,
           credentialsAvailable: true,
           persistentCredentialHome: true,
@@ -191,12 +193,33 @@ await new Promise(() => {});
   expect(recipe["inheritedPermissions"]).toEqual(inheritedPermissions);
   expect(recipe["safetyIdentifier"]).toBe("synthetic-saved-identifier");
   expect(recipe["preserveProviderEnvironment"]).toBe(true);
-  expect(recipe["config"]).toMatchObject(savedSettings);
+  expect(recipe["config"]).not.toHaveProperty("model_providers");
+  expect(JSON.stringify(recipe)).not.toContain("saved-provider-header");
+  expect(recipe["providerProfile"]).toMatchObject({ home: "ambient" });
   expect(recipe["config"]).not.toHaveProperty("plugins");
   expect(recipe["config"]).not.toHaveProperty("marketplaces");
   expect(recipe["config"]).not.toHaveProperty("features.plugins");
   environment.CODEX_SAFETY_IDENTIFIER = "synthetic-other-host-identifier";
-  const resumed = makeClient(false, recipe["config"] as JsonObject);
+  let replayConfig: JsonObject | undefined;
+  const replayError = capture();
+  expect(
+    await main(
+      ["scans", "rerun", saved["scanId"] as string, "--json"],
+      capture().stream,
+      replayError.stream,
+      dependencies({
+        environment,
+        currentDirectory: repository,
+        onWorkbench: () => saved,
+        onConfig: (config) => {
+          replayConfig = config.codexOverrides as JsonObject;
+        },
+      }),
+    ),
+    replayError.text(),
+  ).toBe(0);
+  expect(replayConfig).toMatchObject(savedSettings);
+  const resumed = makeClient(false, replayConfig!);
   try {
     await expect(
       resumed.run(repository, {

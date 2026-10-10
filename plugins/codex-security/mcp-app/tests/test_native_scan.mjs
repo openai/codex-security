@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, sep } from "node:path";
+import { delimiter, dirname, join, relative, sep } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -836,7 +836,15 @@ test(
         mkdir(repositoryBin),
         mkdir(join(repository, ".git")),
         mkdir(selectedTools),
+        mkdir(join(root, "alias")),
+        mkdir(join(root, "real-child")),
       ]);
+      await symlink(join(root, "real-child"), join(root, "alias", "link"));
+      await writeFile(
+        join(root, "alias", "codex"),
+        "inert lexical-path decoy",
+        { mode: 0o700 },
+      );
       await writeFile(
         join(repositoryBin, "codex"),
         "inert executable fixture",
@@ -878,6 +886,11 @@ if (process.argv.includes("app-server")) {
         ["merge", "recipe"],
         ["merge", "config"],
       ]) {
+        if (programSource === "recipe") {
+          process.env.CODEX_CLI_PATH = `${relative(process.cwd(), root)}/alias/link/../codex`;
+        } else {
+          delete process.env.CODEX_CLI_PATH;
+        }
         const selectedProgram =
           programSource === "recipe" ? "daybreak_red" : "daybreak_blue";
         const cwd = join(root, `${role}-${programSource}`);

@@ -2536,3 +2536,114 @@ def test_stopped_composition_preserves_opaque_parent_scope(
         if isinstance(parent_sources, list)
         else parent_sources
     )
+
+
+@pytest.mark.parametrize(
+    ("terminal_reason", "child_state"),
+    [("capped", "complete"), ("saturated", "complete"), ("capped", "failed")],
+)
+@pytest.mark.parametrize("with_model", [False, True])
+@pytest.mark.parametrize("parent_context", [False, True])
+def test_terminal_composition_seals_recovered_child_context(
+    tmp_path: Path, terminal_reason: str, child_state: str, with_model: bool, parent_context: bool
+) -> None:
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
+    parent = register(state, target, tmp_path / "parent", mode="deep", paths=["app.py"])
+    parent_dir = Path(parent["scanDir"])
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(
+        state, target, child_dir, parent=parent["scanId"], role="deep_pass", paths=["app.py"]
+    )
+    write_completed_contract(
+        child_dir,
+        child["scanId"],
+        target,
+        relative_path="app.py",
+        include_paths=["app.py"],
+        coverage_mode="scoped_path",
+        inventory_strategy="scoped_path",
+    )
+    model = {"format": "markdown", "content": "# Child context\n", "origin": "generated"}
+    child_manifest_path = child_dir / "scan-manifest.json"
+    child_manifest = json.loads(child_manifest_path.read_text())
+    child_manifest["scan"]["scope"].update(
+        summary="Child scope", assumptions=["Synthetic trust boundary."]
+    )
+    if with_model:
+        child_manifest["scan"]["threatModel"] = model
+    child_manifest_path.write_text(json.dumps(child_manifest))
+    if child_state == "complete":
+        run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    else:
+        run_workbench(
+            state,
+            "fail-scan",
+            "--scan-id",
+            child["scanId"],
+            "--defer-publication",
+            "--message",
+            "Synthetic discovery deadline.",
+        )
+    child_originals = {
+        path.relative_to(child_dir): path.read_bytes()
+        for path in child_dir.rglob("*")
+        if path.is_file()
+    }
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+        ],
+        terminal=terminal_reason,
+    )
+    write_completed_contract(
+        parent_dir,
+        parent["scanId"],
+        target,
+        relative_path="app.py",
+        include_paths=["app.py"],
+        coverage_mode="scoped_path",
+        inventory_strategy="scoped_path",
+    )
+    parent_manifest_path = parent_dir / "scan-manifest.json"
+    parent_manifest = json.loads(parent_manifest_path.read_text())
+    if parent_context:
+        parent_manifest["scan"]["scope"]["summary"] = "Authoritative parent scope"
+        parent_manifest["scan"]["scope"]["sourceScans"] = {"parentOwned": "opaque context"}
+        if with_model:
+            parent_manifest["scan"]["threatModel"] = {**model, "content": "# Parent context\n"}
+    parent_manifest_path.write_text(json.dumps(parent_manifest))
+    (parent_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    run_workbench(state, "prepare-scan-completion", "--scan-id", parent["scanId"])
+    run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])
+    result = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert result["progress"]["status"] == "complete"
+    assert result["findingCount"] == 1
+    assert result["threatModelAvailable"] is with_model
+    saved = json.loads(parent_manifest_path.read_text())["scan"]
+    assert saved["target"] == parent_manifest["scan"]["target"]
+    for key in ("includePaths", "excludePaths"):
+        assert saved["scope"].get(key) == parent_manifest["scan"]["scope"].get(key)
+    assert saved["scope"]["summary"] == (
+        "Authoritative parent scope" if parent_context else "Child scope"
+    )
+    assert saved["scope"]["assumptions"] == ["Synthetic trust boundary."]
+    if parent_context:
+        assert saved["scope"]["sourceScans"] == {"parentOwned": "opaque context"}
+    else:
+        assert saved["scope"]["sourceScans"][0]["scanId"] == child["scanId"]
+    if with_model:
+        expected_model = "# Parent context\n" if parent_context else model["content"]
+        assert saved["threatModel"]["content"] == expected_model
+        exported = run_workbench(
+            state, "export-findings", "--scan-id", parent["scanId"], "--artifact", "threat-model"
+        )
+        assert expected_model in Path(exported["export"]["path"]).read_text()
+    sealed = {
+        name: (parent_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])
+    assert {name: (parent_dir / name).read_bytes() for name in sealed} == sealed
+    assert {path: (child_dir / path).read_bytes() for path in child_originals} == child_originals

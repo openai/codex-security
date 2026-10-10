@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -1300,7 +1301,15 @@ def complete_scan_locked(
                     coverage = read_json_object(scan_dir / ARTIFACTS["coverage"])
                     coverage["completeness"] = "partial"
                     saved_results.merge_coverage(coverage, recovered["coverage"])
-                    documents = current_manifest, {"findings": recovered["findings"]}, coverage
+                    recovered_manifest = copy.deepcopy(current_manifest)
+                    recovered_scan = recovered_manifest["scan"]
+                    saved_results._retain_missing_scope(
+                        recovered_scan, recovered, completion_binding
+                    )
+                    if "threatModel" not in recovered_scan and "threatModel" in recovered:
+                        recovered_scan["threatModel"] = copy.deepcopy(recovered["threatModel"])
+                        recovered_scan["threatModel"]["origin"] = "recovered"
+                    documents = recovered_manifest, {"findings": recovered["findings"]}, coverage
                 elif scan["mode"] != "deep":
                     documents = saved_results.merge_saved_results(
                         scan_dir,

@@ -1,3 +1,4 @@
+import { restoreProviderProfile } from "../src/provider-profile.js";
 import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
 import { randomUUID } from "node:crypto";
 import * as childProcess from "node:child_process";
@@ -113,8 +114,22 @@ test.each([
   { budget: true, firstChildBudget: true },
   { budget: false, native: "discovery" },
   { budget: false, native: "discovery", queuedNativeKnowledge: true },
-  { budget: false, native: "discovery", provider: { env_key: "PROVIDER_KEY" } },
-  { budget: false, native: "sealed", provider: { env_key: "PROVIDER_KEY" } },
+  {
+    budget: false,
+    native: "discovery",
+    provider: {
+      env_key: "PROVIDER_KEY",
+      experimental_bearer_token: "synthetic-inline-private-provider-token",
+    },
+  },
+  {
+    budget: false,
+    native: "sealed",
+    provider: {
+      env_key: "PROVIDER_KEY",
+      experimental_bearer_token: "synthetic-inline-private-provider-token",
+    },
+  },
 ] as {
   budget: boolean;
   firstChildBudget?: boolean;
@@ -424,6 +439,7 @@ process.exit(0);
           },
           prepareRuntime: async () => ({
             codexHome,
+            preserveCodexHomeConfig: true,
             environment,
             credentialsAvailable: true,
             persistentCredentialHome: true,
@@ -1197,7 +1213,13 @@ process.exit(0);
               registeredScan!.scanId,
             ])
           )["recipe"] as JsonObject;
-          expect(nativeRecipe["config"]).toMatchObject(nativeSettings);
+          expect(
+            await restoreProviderProfile(
+              nativeRecipe["config"] as JsonObject,
+              nativeRecipe["providerProfile"],
+              environment,
+            ),
+          ).toMatchObject(nativeSettings);
           ambientConfig = stringifyToml({
             model: "competing-ambient-model",
             model_reasoning_effort: "low",
@@ -1311,10 +1333,19 @@ process.exit(0);
       if (provider !== undefined) {
         for (const registration of registrations.values()) {
           const saved = registration["recipe"] as JsonObject;
+          expect(JSON.stringify(saved)).not.toContain(
+            "synthetic-inline-private-provider-token",
+          );
           expect(saved["preserveProviderEnvironment"]).toBe(true);
-          expect(
-            (saved["config"] as JsonObject)["model_providers"],
-          ).toMatchObject({ custom: provider });
+          expect(saved["config"]).not.toHaveProperty("model_providers");
+          const restored = await restoreProviderProfile(
+            saved["config"] as JsonObject,
+            saved["providerProfile"],
+            environment,
+          );
+          expect(restored["model_providers"]).toMatchObject({
+            custom: provider,
+          });
           expect(
             (saved["config"] as JsonObject)["cli_auth_credentials_store"],
           ).toBe("file");

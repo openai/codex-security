@@ -191,7 +191,9 @@ function absoluteCodexPath(
   if (isAbsolute(value) || (platform === "win32" && win32.isAbsolute(value))) {
     return value;
   }
-  return resolve(originalCwd, value);
+  return platform === "win32"
+    ? resolve(originalCwd, value)
+    : `${originalCwd}/${value}`;
 }
 
 function isNativeWindowsRootRelativePath(value: string): boolean {

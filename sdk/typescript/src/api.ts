@@ -1660,7 +1660,7 @@ export class CodexSecurity {
           threadId: null,
         };
       }
-      const recipe = prepareSavedScanRecipe({
+      const recipe = await prepareSavedScanRecipe({
         expectation,
         session,
         options,
@@ -4035,7 +4035,7 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
 }
 
 /** Save the configuration and instructions needed to resume the same execution. */
-function prepareSavedScanRecipe({
+async function prepareSavedScanRecipe({
   expectation,
   session,
   options,
@@ -4061,7 +4061,7 @@ function prepareSavedScanRecipe({
   knowledgeBaseSha256?: string;
   scanKnowledge?: KnowledgeBaseSnapshot;
   deepScan?: Required<DeepScanOptions>;
-}): JsonObject {
+}): Promise<JsonObject> {
   const {
     runtime,
     runtimeHome,
@@ -4103,6 +4103,32 @@ function prepareSavedScanRecipe({
     for (const key of ["model_providers", ...CODEX_AUTH_CONFIG_KEYS]) {
       if (nativeConfig[key] !== undefined)
         savedConfig[key] = nativeConfig[key]!;
+    }
+  }
+  if (
+    session.inheritedPermissions !== undefined ||
+    session.source.preserveProviderEnvironment
+  ) {
+    const savedConfig = recipe["config"] as JsonObject;
+    const providers = resolveCodexProfile(savedConfig)["model_providers"];
+    if (isRecord(providers) && Object.keys(providers).length > 0) {
+      // Scan history is readable. Keep replay provider credentials in the
+      // same denied home as live profiles, while retaining other saved settings.
+      const saved = await createProviderProfile(runtimeHome, {
+        model_providers: providers as JsonObject,
+      });
+      recipe["providerProfile"] = {
+        name: saved.name,
+        home: runtime.preserveCodexHomeConfig ? "ambient" : "managed",
+      };
+      for (const layer of [
+        savedConfig,
+        ...(isRecord(savedConfig["profiles"])
+          ? Object.values(savedConfig["profiles"])
+          : []),
+      ]) {
+        if (isRecord(layer)) delete layer["model_providers"];
+      }
     }
   }
   if (session.source.preserveProviderEnvironment)

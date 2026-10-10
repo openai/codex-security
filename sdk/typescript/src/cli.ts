@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { restoreProviderProfile } from "./provider-profile.js";
 import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
@@ -2325,6 +2326,7 @@ export async function main(
                   : undefined,
             },
             dependencies.currentDirectory(),
+            dependencies.environment,
           );
           if (scanArguments.mode !== "deep")
             throw new CodexSecurityError(
@@ -2488,6 +2490,7 @@ export async function main(
                     ),
             },
             dependencies.currentDirectory(),
+            dependencies.environment,
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
@@ -4727,6 +4730,7 @@ export async function main(
                             : undefined,
                       },
                       currentDirectory,
+                      dependencies.environment,
                     );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
@@ -6326,6 +6330,7 @@ async function prepareScanArgumentsFromRecipe(
     "scanPrompt" | "scanPromptFile" | "validationPromptFile"
   >,
   directory: string,
+  environment: NodeJS.ProcessEnv,
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -6501,6 +6506,11 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
+  const replayConfig = await restoreProviderProfile(
+    config,
+    recipe["providerProfile"],
+    environment,
+  );
   return {
     repository,
     inheritedPermissions:
@@ -6525,9 +6535,9 @@ async function prepareScanArgumentsFromRecipe(
     mode,
     ...deepScan.data,
     archiveExisting: false,
-    codexOverrides: Object.hasOwn(config, "approval_policy")
-      ? config
-      : { ...config, approval_policy: "never" },
+    codexOverrides: Object.hasOwn(replayConfig, "approval_policy")
+      ? replayConfig
+      : { ...replayConfig, approval_policy: "never" },
     failureSeverity: threshold.data,
     maxCostUsd,
     dryRun: false,
