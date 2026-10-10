@@ -36,7 +36,11 @@ import {
 } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
-import { DiffTarget, type ScanMode } from "./targets.js";
+import {
+  DiffTarget,
+  UNSUPPORTED_GIT_ENVIRONMENT,
+  type ScanMode,
+} from "./targets.js";
 import {
   meetsSeverity,
   type ScanPromptSettings,
@@ -1180,18 +1184,14 @@ async function checkoutRevision(
   githubHost?: string,
 ): Promise<void> {
   const environment = { ...process.env };
-  const repositoryVariables = new Set([
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  ]);
   for (const name of Object.keys(environment)) {
-    if (repositoryVariables.has(name.toUpperCase())) delete environment[name];
+    if (UNSUPPORTED_GIT_ENVIRONMENT.has(name.toUpperCase()))
+      delete environment[name];
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  environment["GIT_DEFAULT_HASH"] =
+    task.revision.length === 64 ? "sha256" : "sha1";
   const command = await resolveTrustedExecutable(
     "git",
     environment,
