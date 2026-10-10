@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { codexWithRun, jsonCodex } from "./support/codex.js";
-import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
