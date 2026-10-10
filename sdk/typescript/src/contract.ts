@@ -607,21 +607,32 @@ async function validateSeal(
     }
   }
 
+  const requireSealedReference = (reference: unknown, context: string) => {
+    throwIfAborted(signal);
+    if (typeof reference !== "string") {
+      throw new ContractValidationError(`${context}: expected a string.`);
+    }
+    const normalized = portableRelativePath(reference, context.toLowerCase());
+    if (!normalized.startsWith("artifacts/")) {
+      throw new ContractValidationError(
+        `${context} must be under artifacts/: ${reference}`,
+      );
+    }
+    if (!artifactPaths.has(normalized)) {
+      throw new ContractValidationError(
+        `${context} is missing from sealed artifacts: ${reference}`,
+      );
+    }
+  };
   for (const surface of coverage.surfaces) {
     for (const receipt of surface.receiptRefs) {
-      throwIfAborted(signal);
-      const normalized = portableRelativePath(receipt, "coverage receipt");
-      if (!normalized.startsWith("artifacts/")) {
-        throw new ContractValidationError(
-          `Coverage receipt must be under artifacts/: ${receipt}`,
-        );
-      }
-      if (!artifactPaths.has(normalized)) {
-        throw new ContractValidationError(
-          `Coverage receipt is missing from sealed artifacts: ${receipt}`,
-        );
-      }
+      requireSealedReference(receipt, "Coverage receipt");
     }
+  }
+  const extensions = scan["extensions"];
+  const imported = isRecord(extensions) ? extensions["import"] : undefined;
+  if (isRecord(imported) && "sourceRef" in imported) {
+    requireSealedReference(imported["sourceRef"], "Import source");
   }
 
   for (const [index, finding] of findings.findings.entries()) {

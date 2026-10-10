@@ -24,9 +24,7 @@ import { importSource } from "./import-module.ts";
 
 const {
   compactDiscoveryCandidateSchema,
-  discoveryCandidatesInputSchema,
   listCodexSecurityCandidates,
-  listCodexSecurityCandidatesInputSchema,
   recordCodexSecurityDiscoveryCandidates,
   workbenchDiscoveryCandidatesInputSchema,
   workbenchListCodexSecurityCandidatesInputSchema,
@@ -81,9 +79,6 @@ assert.equal(
   false,
 );
 assert.equal(definitions.$defs.discoveryCandidate.additionalProperties, true);
-assert.deepEqual(toolSchemas.$defs.recordDiscoveryCandidatesInput.required, [
-  "candidates",
-]);
 assert.deepEqual(
   toolSchemas.$defs.workbenchRecordDiscoveryCandidatesInput.required,
   ["scanId", "candidates"],
@@ -130,7 +125,10 @@ try {
 
 async function verifyInputSchema() {
   const parseCandidate = (value: unknown) =>
-    discoveryCandidatesInputSchema.safeParse({ candidates: [value] });
+    workbenchDiscoveryCandidatesInputSchema.safeParse({
+      scanId: "scan-fixture",
+      candidates: [value],
+    });
   const candidate = rawCandidate();
   assert.equal(parseCandidate(candidate).success, true);
   assert.equal(
@@ -183,17 +181,9 @@ async function verifyInputSchema() {
     false,
   );
   assert.equal(
-    discoveryCandidatesInputSchema.safeParse({ candidates: [] }).success,
-    true,
-  );
-  assert.equal(
-    discoveryCandidatesInputSchema.safeParse({ rows: [candidate] }).success,
-    false,
-  );
-  assert.equal(
-    discoveryCandidatesInputSchema.safeParse({
+    workbenchDiscoveryCandidatesInputSchema.safeParse({
       scanId: "scan-fixture",
-      candidates: [],
+      rows: [candidate],
     }).success,
     false,
   );
@@ -207,16 +197,6 @@ async function verifyInputSchema() {
   assert.equal(
     workbenchDiscoveryCandidatesInputSchema.safeParse({
       candidates: [],
-    }).success,
-    false,
-  );
-  assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({}).success,
-    true,
-  );
-  assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
     }).success,
     false,
   );
@@ -231,15 +211,24 @@ async function verifyInputSchema() {
     false,
   );
   assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({ cursor: "01" }).success,
+    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
+      scanId: "scan-fixture",
+      cursor: "01",
+    }).success,
     false,
   );
   assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({ limit: 0 }).success,
+    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
+      scanId: "scan-fixture",
+      limit: 0,
+    }).success,
     false,
   );
   assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({ limit: 1001 }).success,
+    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
+      scanId: "scan-fixture",
+      limit: 1001,
+    }).success,
     false,
   );
 }

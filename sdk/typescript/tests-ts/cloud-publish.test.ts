@@ -1,11 +1,13 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
+import { VERSION } from "../src/version.js";
 import type { FindingsDocument, ScanManifest } from "../src/models.js";
 import { responding } from "./support/responses.js";
 import { once } from "node:events";
 import { rejecting } from "./support/errors.js";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -122,6 +124,79 @@ async function addSecondFinding(scan: string): Promise<void> {
 }
 
 describe("Cloud publication", () => {
+  test("rejects invalid CSV UTF-8 before credentials or upload", async () => {
+    const path = await csvFixture();
+    const { environment } = await fixture();
+    const [prefix, suffix] = `${csvHeader}\n${csvRow}\n`.split(
+      "including nested entries",
+    );
+    const fetchMock = mock(rejecting("unexpected request"));
+    const reading = spyOn(fs, "readFile");
+    try {
+      for (const bytes of [Buffer.from([0xff]), Buffer.from([0xe2, 0x82])]) {
+        let decodeError: Error | undefined;
+        try {
+          new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch (error) {
+          decodeError = error as Error;
+        }
+        expect(decodeError).toBeInstanceOf(TypeError);
+        await writeFile(
+          path,
+          Buffer.concat([Buffer.from(prefix!), bytes, Buffer.from(suffix!)]),
+        );
+        await expect(
+          publishFindingsCsvToCloud(path, { environment, fetch: fetchMock }),
+        ).rejects.toMatchObject({
+          name: "CodexSecurityError",
+          message: `Could not read findings CSV. ${decodeError!.message}`,
+          cause: expect.objectContaining({ message: decodeError!.message }),
+        });
+      }
+      expect(reading.mock.calls.map(([file]) => file)).toEqual([path, path]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      reading.mockRestore();
+    }
+  });
+
+  test("preserves the filesystem cause when the selected CSV is missing", async () => {
+    const path = join(await temporaryDirectory(), "missing.csv");
+    const fetchMock = mock(rejecting("unexpected request"));
+    await expect(
+      publishFindingsCsvToCloud(path, { dryRun: true, fetch: fetchMock }),
+    ).rejects.toMatchObject({
+      name: "CodexSecurityError",
+      message: expect.stringContaining("ENOENT"),
+      cause: expect.objectContaining({ code: "ENOENT" }),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("preserves valid Unicode and BOM-bearing CSV source identities", async () => {
+    const path = await csvFixture();
+    const fetchMock = mock(rejecting("unexpected request"));
+    for (const marker of ["�", "😀"]) {
+      for (const bom of ["", "\uFEFF"]) {
+        const source = `${bom}${csvHeader}\n${csvRow.replace("including nested entries", marker)}\n`;
+        await writeFile(path, source);
+        const result = await publishFindingsCsvToCloud(path, {
+          dryRun: true,
+          fetch: fetchMock,
+        });
+        expect(result.findings?.[0]?.title).toBe(
+          `Unsafe archive extraction, ${marker}`,
+        );
+        expect(result.scanId).toBe(
+          `scan_csv_${sha256(
+            ["codex-security-csv-import/v1", VERSION, source].join("\0"),
+          ).slice(0, 24)}`,
+        );
+      }
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test("previews a validated findings export CSV without credentials or network access", async () => {
     const path = await csvFixture();
     const fetchMock = mock(rejecting("unexpected request"));

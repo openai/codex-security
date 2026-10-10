@@ -14,7 +14,7 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
-[findings service guide](docs/findings-service.md), or
+[findings guide](docs/findings-service.md), or
 [online documentation](https://learn.chatgpt.com/docs/security) for setup and examples.
 
 Before version `1.0.0`, minor releases may change the public API.
@@ -239,6 +239,11 @@ same effective provider for both the parent and workers. Otherwise, the scan
 stops before model work with the plugin upgrade message.
 When no provider is selected, discovery, reducer, and resumed workers inherit the
 same native configuration as the parent.
+
+Custom plugins must support the current workbench protocol for scan comparison
+and archival. Update an older custom plugin or omit `pluginPath` to use the
+bundled version. The SDK no longer adapts payloads or archives scan directories
+on behalf of older workbench implementations.
 
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
@@ -480,33 +485,20 @@ grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-clou
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
 
-## Findings service (preview)
+## Findings storage and deduplication
 
-The findings service stores findings and duplicate groups in SQLite and provides
-a read-only dashboard. It has no built-in authentication; keep it on loopback or
-behind an authenticated TLS proxy. Imports send complete finding JSON to the
-configured embeddings endpoint.
-
-See the [findings service guide](docs/findings-service.md) for its HTTP API,
-Docker setup, publishing, and deduplication. For records stored in your own
-system, see [SDK records deduplication](docs/dedupe-records.md).
-
-### Running without Docker
+Saved-scan deduplication uses local SQLite directly:
 
 ```bash
-cs serve --port 3000
+cs dedupe --scan SCAN_ID --json
 ```
 
-Open `http://127.0.0.1:3000/dashboard`. Startup and listing need no API key;
-imports that generate embeddings need `OPENAI_API_KEY` or `CODEX_API_KEY`.
-A ChatGPT login is not an embedding API credential. See
-[local service setup](docs/findings-service.md#run-without-docker) for storage settings.
-
-### Upgrades and backups
-
-Stop the service and back up its entire state directory before upgrading.
-Keep the state volume when replacing a container. See
-[backup and restore instructions](docs/findings-service.md#storage-upgrades-and-backups).
+The [findings guide](docs/findings-service.md) covers local storage, embedding
+credentials, deduplication, backups, and independently operated HTTP endpoints.
+The local `serve` command and browser dashboard have been removed. Existing
+scans, findings, and duplicate groups remain in the workbench database.
+For records stored in your own system, see
+[SDK records deduplication](docs/dedupe-records.md).
 
 ## Containerized bulk scans
 
@@ -536,6 +528,6 @@ paths. Keep state and scan artifacts private and outside the repository.
 
 - [Online SDK guide](https://learn.chatgpt.com/docs/security/sdk)
 - [CLI reference](docs/cli.md)
-- [Findings service guide](docs/findings-service.md)
+- [Findings guide](docs/findings-service.md)
 - [GitHub issues](https://github.com/openai/codex-security/issues) for bugs and feature requests
 - [Security policy](https://github.com/openai/codex-security/blob/main/SECURITY.md) for private vulnerability reporting

@@ -53,8 +53,6 @@ const workbenchUsage: Record<string, string> = {
     "Usage: store-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.groups containing arrays of finding IDs.",
   "list-dedupe-groups":
     "Usage: list-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.findingId.",
-  dashboard:
-    "Usage: dashboard\nReads a JSON object from stdin with an absolute stateDirectory and payload containing view (findings or groups), sort, limit and offset; direction, query, repository and id are optional.",
 };
 if (!isMainThread) {
   parentPort!.postMessage(normalizeCandidateBatch(workerData));

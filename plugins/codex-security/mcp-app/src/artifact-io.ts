@@ -184,20 +184,13 @@ export function paginateArtifactRows<Row>(
   page: ArtifactPage,
   label: string,
 ): ArtifactPageResult<Row> {
-  const cursor = page.cursor ?? "0";
-  if (!/^(?:0|[1-9][0-9]*)$/u.test(cursor)) {
-    throw new Error(label + ": cursor must be a non-negative integer string.");
-  }
-  const start = Number(cursor);
+  // The MCP tool schemas validate cursor syntax and limit bounds.
+  const start = Number(page.cursor ?? "0");
   if (!Number.isSafeInteger(start) || start > rows.length) {
     throw new Error(label + ": cursor is outside the available rows.");
   }
 
   const limit = page.limit ?? 200;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
-    throw new Error(label + ": limit must be an integer from 1 through 1000.");
-  }
-
   const end = Math.min(rows.length, start + limit);
   return {
     rows: rows.slice(start, end),

@@ -13,7 +13,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
-from workbench_validation import bounded_output_text, register_timestamp_collation, timestamp_key
+from workbench_validation import bounded_output_text, timestamp_key
 
 
 def list_global_findings(
@@ -75,7 +75,6 @@ def list_global_findings(
 
 
 def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]]:
-    register_timestamp_collation(connection)
     parents: dict[tuple[str, str], tuple[str, str]] = {}
 
     def group(identity: tuple[str, str]) -> tuple[str, str]:
@@ -102,7 +101,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
 
     latest_scan_by_target = dict(
         connection.execute(
-            "SELECT target_id, id FROM scans WHERE status = 'complete' ORDER BY started_at COLLATE codex_security_timestamp, id"
+            "SELECT target_id, id FROM scans WHERE status = 'complete' ORDER BY julianday(upper(started_at)), id"
         )
     )
 
@@ -204,14 +203,13 @@ def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    register_timestamp_collation(connection)
     scans = scan_history.list_scans(connection)["scans"]
     scans_by_id = {scan["scanId"]: scan for scan in scans}
     scan_count_by_target = dict(Counter(scan["targetId"] for scan in scans))
 
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(
-        "SELECT id, target_id FROM scans ORDER BY started_at COLLATE codex_security_timestamp DESC, id DESC"
+        "SELECT id, target_id FROM scans ORDER BY julianday(upper(started_at)) DESC, id DESC"
     ):
         latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
 

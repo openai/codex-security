@@ -86,14 +86,22 @@ export async function publishFindingsCsvToCloud(
   dependencies.signal?.throwIfAborted();
   let source: string;
   try {
-    source = await readFile(csvPath, "utf8");
+    source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      await readFile(csvPath),
+    );
   } catch (error) {
-    throw new CodexSecurityError("Could not read findings CSV.", {
-      cause: error,
-    });
+    throw new CodexSecurityError(
+      `Could not read findings CSV. ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
   dependencies.signal?.throwIfAborted();
   const rows = parseFindingsCsv(source);
+  if (rows.length === 0) {
+    throw new CodexSecurityError(
+      "Findings CSV must contain at least one finding.",
+    );
+  }
   const digest = sha256(source);
   const scanId = `scan_csv_${sha256(
     ["codex-security-csv-import/v1", VERSION, source].join("\0"),

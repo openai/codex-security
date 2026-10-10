@@ -149,65 +149,8 @@ function readScope(
   sources?: ReadonlyMap<string, CandidateSource>,
 ): Set<string> {
   const contents = decodeUtf8(readFile(path));
-  const lines = contents.split("\n");
-  const listedRows = new Set(lines);
-  const isScopeFile = (value: string): boolean => {
-    try {
-      relativeFile(value, root, sources);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const carriageRows = new Map<string, [boolean, boolean]>();
-  if (!windows) {
-    for (const line of lines) {
-      if (line.endsWith("\r") && line !== "\r") {
-        carriageRows.set(line, [
-          isScopeFile(line),
-          isScopeFile(line.slice(0, -1)),
-        ]);
-      }
-    }
-  }
-  const crlfEvidence = lines.slice(0, -1).some((line) => {
-    if (line === "\r") return true;
-    const paths = carriageRows.get(line);
-    return paths !== undefined && paths[1] && !paths[0];
-  });
-  const literalEvidence = [...carriageRows.values()].some(
-    ([literal, stripped]) => literal && !stripped,
-  );
   const scope = new Set<string>();
-  for (const [index, row] of lines.entries()) {
-    let line = row;
-    const finalLiteral = index === lines.length - 1;
-    if (!finalLiteral && (windows || line === "\r")) {
-      if (line.endsWith("\r")) line = line.slice(0, -1);
-    } else if (!finalLiteral && line.endsWith("\r")) {
-      const [literal, stripped] = carriageRows.get(line)!;
-      const trimmed = line.slice(0, -1);
-      if (allowMissing && literal && !stripped && !listedRows.has(trimmed)) {
-        throw new Error(
-          `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
-        );
-      }
-      if (stripped && !literal) {
-        line = trimmed;
-      } else if (stripped && literal) {
-        if (!listedRows.has(trimmed)) {
-          if (crlfEvidence && !literalEvidence) {
-            line = trimmed;
-          } else if (!literalEvidence || crlfEvidence) {
-            throw new Error(
-              `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
-            );
-          }
-        }
-      } else if (!literal && crlfEvidence) {
-        line = trimmed;
-      }
-    }
+  for (const [index, line] of contents.split(/\r?\n/u).entries()) {
     if (line === "") continue;
     try {
       scope.add(relativeFile(line, root, sources)[0]);

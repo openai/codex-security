@@ -1986,6 +1986,97 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_seals_import_source_without_claiming_coverage(self) -> None:
+        for with_surface in (False, True):
+            for format in ("csv", "json"):
+                with self.subTest(with_surface=with_surface, format=format):
+                    source_ref = f"artifacts/import/source.{format}"
+                    source = b"synthetic imported source\n"
+                    self.manifest["scan"]["extensions"] = {
+                        "import": {"format": format, "sourceRef": source_ref}
+                    }
+                    self.findings["findings"] = []
+                    self.coverage["completeness"] = "unknown"
+                    self.coverage["surfaces"] = (
+                        [
+                            {
+                                "id": "import",
+                                "label": "import",
+                                "disposition": "reported",
+                                "receiptRefs": [source_ref],
+                            }
+                        ]
+                        if with_surface
+                        else []
+                    )
+                    self.write_scan()
+                    source_path = self.scan_dir / source_ref
+                    source_path.parent.mkdir(parents=True, exist_ok=True)
+                    source_path.write_bytes(source)
+                    FINALIZER.finalize_scan(self.scan_dir)
+                    manifest = self.read_json("scan-manifest.json")
+                    records = [
+                        record
+                        for record in manifest["scan"]["artifacts"]
+                        if record["path"] == source_ref
+                    ]
+                    self.assertEqual(
+                        records,
+                        [
+                            {
+                                "path": source_ref,
+                                "sha256": hashlib.sha256(source).hexdigest(),
+                                "mediaType": "application/octet-stream",
+                            }
+                        ],
+                    )
+                    self.assertEqual(
+                        self.read_json("coverage.json")["surfaces"], self.coverage["surfaces"]
+                    )
+                    sealed = (self.scan_dir / "scan-manifest.json").read_bytes()
+                    FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), sealed)
+                    source_path.write_bytes(b"changed\n")
+                    with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
+                        FINALIZER.finalize_scan(self.scan_dir)
+                    source_path.unlink()
+                    with self.assertRaises(FINALIZER.ContractError):
+                        FINALIZER.build_findings_export(self.scan_dir, "json")
+                    source_path.write_bytes(source)
+                    manifest["scan"]["artifacts"].remove(records[0])
+                    self.write_json("scan-manifest.json", manifest)
+                    with self.assertRaisesRegex(
+                        FINALIZER.ContractError, "missing from sealed artifacts"
+                    ):
+                        FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_missing_or_unsafe_import_source(self) -> None:
+        self.findings["findings"] = []
+        self.coverage["completeness"] = "unknown"
+        self.coverage["surfaces"] = []
+        for source_ref in ("artifacts/import/missing.json", "../source.json", "findings.json"):
+            with self.subTest(source_ref=source_ref):
+                self.manifest["scan"]["extensions"] = {"import": {"sourceRef": source_ref}}
+                self.write_scan()
+                with self.assertRaises(FINALIZER.ContractError):
+                    FINALIZER.finalize_scan(self.scan_dir)
+                self.assertNotIn("artifacts", self.read_json("scan-manifest.json")["scan"])
+
+    def test_rejects_symlink_import_source(self) -> None:
+        source_ref = "artifacts/import/source.json"
+        self.manifest["scan"]["extensions"] = {"import": {"sourceRef": source_ref}}
+        self.findings["findings"] = []
+        self.coverage["completeness"] = "unknown"
+        self.coverage["surfaces"] = []
+        self.write_scan()
+        source_path = self.scan_dir / source_ref
+        source_path.parent.mkdir(parents=True)
+        target = source_path.with_name("retained.json")
+        target.write_bytes(b"{}\n")
+        source_path.symlink_to(target)
+        with self.assertRaisesRegex(FINALIZER.ContractError, "non-symlink"):
+            FINALIZER.finalize_scan(self.scan_dir)
+
     def test_verifies_legacy_aliased_receipt_ref(self) -> None:
         receipt_ref = "artifacts/02_discovery/work_ledger.jsonl"
         legacy_ref = "artifacts/02_discovery/./work_ledger.jsonl"

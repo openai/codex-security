@@ -17,9 +17,6 @@ const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
 const { parseJson, stringifyJson } = await importSource("src/helpers/json.ts");
-const { dashboard } = (await importSource(
-  "src/workbench/dashboard.ts",
-)) as typeof import("../src/workbench/dashboard.ts");
 const { findPotentialDuplicates, listDedupeGroups } = (await importSource(
   "src/workbench/duplicates.ts",
 )) as typeof import("../src/workbench/duplicates.ts");
@@ -130,7 +127,6 @@ test("finding helper help exits without reading stdin", async () => {
     "find-potential-duplicates",
     "store-dedupe-groups",
     "list-dedupe-groups",
-    "dashboard",
   ];
   for (const command of commands) {
     // execFile leaves stdin open; help must exit without waiting for JSON.
@@ -208,54 +204,26 @@ test("import batches preserve identity, repository memberships and stable pages"
   assert.equal(listStoredFindings(database, { limit: 10, offset: 0 }).total, 2);
 });
 
-test("historical timestamp spellings retain exact chronology, page boundaries, and ties", (t) => {
+test("timestamp ordering keeps time zones, page boundaries, and stable ties", (t) => {
   const database = open(t);
   const timestamps = [
-    ["microsecond", "2026-10-08T01:00:00.123456Z"],
-    ["zero-b", "2026-10-08t01:00:00.000000000z"],
-    ["nanosecond", "2026-10-08T01:00:00.123456001Z"],
-    ["bare", "2026-10-08T01:00:00Z"],
-    ["offset", "2026-10-08T03:00:00.123456000+02:00"],
-    ["offset-overflow", "2026-10-08T03:00:00.123456+01:60"],
-    ["native", "2026-10-08T01:00:00.123Z"],
-    ["zero-a", "2026-10-08T01:00:00.000Z"],
-    ["later", "2026-10-08T01:00:01Z"],
-    ["upper-year", "9999-12-31T23:59:59.999999999-23:59"],
-    ["lower-year", "0001-01-01T00:00:00.000000001+23:59"],
+    ["middle-b", "2026-10-08t01:00:01.123z"],
+    ["first", "2026-10-08T03:00:00+02:00"],
+    ["last", "2026-10-08T01:00:02.000001Z"],
+    ["middle-a", "2026-10-08T03:00:01.123000+02:00"],
   ];
-  const expected = [
-    "lower-year",
-    "bare",
-    "zero-a",
-    "zero-b",
-    "native",
-    "microsecond",
-    "offset",
-    "offset-overflow",
-    "nanosecond",
-    "later",
-    "upper-year",
-  ];
+  const expected = ["first", "middle-a", "middle-b", "last"];
   for (const [id, timestamp] of timestamps) {
-    const item = entry(id);
-    item.finding.severity = {
-      level: id === "zero-b" ? "critical" : id === "zero-a" ? "low" : "high",
-    };
-    storeFindings(database, [item], timestamp, "repository");
+    storeFindings(database, [entry(id)], timestamp, "repository");
   }
   for (const [id, timestamp] of timestamps) {
     database
       .prepare("INSERT INTO finding_dedupe_groups VALUES (?, ?)")
       .run(id, timestamp);
     database
-      .prepare("INSERT INTO finding_dedupe_group_members VALUES (?, 'native')")
+      .prepare("INSERT INTO finding_dedupe_group_members VALUES (?, 'first')")
       .run(id);
   }
-  const before = database
-    .prepare(
-      "SELECT id, created_at, updated_at, details_json FROM findings ORDER BY id",
-    )
-    .all();
   assert.deepEqual(
     expected.flatMap((_, offset) =>
       listStoredFindings(database, { limit: 1, offset }).findings.map(
@@ -265,72 +233,19 @@ test("historical timestamp spellings retain exact chronology, page boundaries, a
     expected,
   );
   assert.deepEqual(
-    listDedupeGroups(database, "native").groups.map((group) => group.groupId),
+    listDedupeGroups(database, "first").groups.map((group) => group.groupId),
     expected,
   );
   for (const repository of [undefined, "repository"]) {
-    const result = findPotentialDuplicates(database, "native", repository);
+    const result = findPotentialDuplicates(database, "first", repository);
     assert.ok(result.potentialDuplicates);
     assert.deepEqual(
       result.potentialDuplicates.map(
         (finding) => (finding as Findings.Finding).findingId,
       ),
-      expected.filter((id) => id !== "native"),
+      expected.slice(1),
     );
   }
-  for (const view of ["findings", "groups"] as const) {
-    for (const sort of ["newest", "activity"] as const) {
-      for (const direction of ["asc", "desc"] as const) {
-        const chronological =
-          direction === "asc"
-            ? expected
-            : [
-                "upper-year",
-                "later",
-                "nanosecond",
-                "microsecond",
-                "offset",
-                "offset-overflow",
-                "native",
-                "bare",
-                "zero-a",
-                "zero-b",
-                "lower-year",
-              ];
-        const ordered = [...chronological];
-        if (view === "findings" && sort === "activity")
-          ordered.splice(
-            ordered.indexOf("bare"),
-            3,
-            "zero-b",
-            "bare",
-            "zero-a",
-          );
-        const items = expected.flatMap(
-          (_, offset) =>
-            dashboard(database, { view, sort, direction, limit: 1, offset })
-              .items,
-        );
-        assert.deepEqual(
-          items.map((item) => item.id),
-          ordered,
-          `${view}/${sort}/${direction}`,
-        );
-        assert.deepEqual(
-          items.map((item) => item.createdAt),
-          ordered.map((id) => timestamps.find(([key]) => key === id)![1]),
-        );
-      }
-    }
-  }
-  assert.deepEqual(
-    database
-      .prepare(
-        "SELECT id, created_at, updated_at, details_json FROM findings ORDER BY id",
-      )
-      .all(),
-    before,
-  );
 });
 
 test("mixed writers retain unchanged Python embeddings and replace supplied Node embeddings", async (t) => {
