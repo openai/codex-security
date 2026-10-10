@@ -35,19 +35,34 @@ const bundle = await build({
           "./src/python_command.js": `
           export async function resolvePythonCommand() { return "fixture-python"; }
           export function missingPythonHelperMessage() {}
+          export async function runPythonWithInput() { throw new Error("unexpected artifact Python invocation"); }
           export function workbenchCommandTimeout() { return 30000; }`,
           "../../../sdk/typescript/src/scan-execution.js": `
           export const ScanPermissionError = fixture.ScanPermissionError;
           export const acquireScanExecution = (...args) => fixture.acquire?.(...args) ?? Promise.resolve(() => {});`,
           "node:child_process": `
+          import { PassThrough } from "node:stream";
           export function execFile() {}
-          execFile[Symbol.for("nodejs.util.promisify.custom")] = (_command, args) =>
-            fixture.workbench(args.slice(1)).then(result => ({ stdout: JSON.stringify(result) }));`,
+          execFile[Symbol.for("nodejs.util.promisify.custom")] = () => {
+            const stdin = new PassThrough();
+            let input = "";
+            const result = new Promise((resolve, reject) => {
+              stdin.on("data", chunk => { input += chunk; });
+              stdin.on("end", () => Promise.resolve().then(() => fixture.workbench(JSON.parse(input.split("\\n")[0]).flatMap(argument => {
+                  const split = argument.startsWith("--") ? argument.indexOf("=") : -1;
+                  return split < 0 ? [argument] : [argument.slice(0, split), argument.slice(split + 1)];
+                })))
+                .then(value => resolve({ stdout: JSON.stringify(value) }), reject));
+            });
+            return Object.assign(result, { child: { stdin } });
+          };`,
         };
         build.onResolve({ filter: /.*/ }, ({ path }) =>
           Object.hasOwn(modules, path)
             ? { path, namespace: "fixture" }
-            : undefined,
+            : path.endsWith("/python_command.js")
+              ? { path: "./src/python_command.js", namespace: "fixture" }
+              : undefined,
         );
         build.onLoad({ filter: /.*/, namespace: "fixture" }, ({ path }) => ({
           contents: modules[path],
@@ -523,7 +538,8 @@ for (const lostAcknowledgment of [false, true]) {
       });
     await publication.promise;
     const second = call();
-    await Promise.resolve();
+    // Framed stdin delivers the second mock request on the next event-loop turn.
+    await new Promise(setImmediate);
     assert.equal(firstSettled, false);
     release.resolve();
     const [firstResult, secondResult] = await Promise.all([first, second]);

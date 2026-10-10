@@ -21,6 +21,13 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
+const pluginVersion = JSON.parse(
+  await readFile(
+    new URL("../../.codex-plugin/plugin.json", import.meta.url),
+    "utf8",
+  ),
+).version;
+
 const bundle = await build({
   bundle: true,
   stdin: {
@@ -362,7 +369,7 @@ else {
             policy: "ordinary",
             source,
             inheritedPermissions: permissions,
-            runtime: { codexHome: root },
+            runtime: { codexHome: root, plugin: { version: pluginVersion } },
             runtimeHome: root,
             effectiveConfig: selected,
             preflightConfig: {},
@@ -377,9 +384,13 @@ else {
               role === "discovery"
                 ? prepareDiscoveryExecution(session)
                 : prepareMergeExecution(session, 2);
-            const { codex } = createExecutionCodex({ surface: "sdk" }, worker, {
-              NATIVE_PROFILE_CAPTURE: capture,
-            });
+            const { codex } = createExecutionCodex(
+              { surface: "sdk", command: "scan" },
+              worker,
+              {
+                NATIVE_PROFILE_CAPTURE: capture,
+              },
+            );
             for (const resumed of [false, true]) {
               const options = {
                 workingDirectory: root,
@@ -2872,7 +2883,7 @@ else {
                   ? prepareDiscoveryExecution(session)
                   : prepareMergeExecution(session, 2);
               const { codex } = createExecutionCodex(
-                { surface: "sdk" },
+                { surface: "sdk", command: "scan" },
                 worker,
                 {},
               );

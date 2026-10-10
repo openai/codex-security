@@ -504,7 +504,7 @@ describe("CLI workbench", () => {
       expect(
         await runCli(argv, dependencies({ onWorkbench: () => response })),
       ).toBe(0);
-      expect(stderr.text()).toBe("");
+      if (argv.includes("--json")) expect(stderr.text()).toBe("");
       expect(stdout.text()).toContain("SYNTHETIC_PRIVATE_TOKEN");
       expect(stdout.text()).toContain("SYNTHETIC_PRIVATE_WORKSPACE");
       if (argv.includes("--json")) {

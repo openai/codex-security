@@ -16,10 +16,13 @@ const { executeWorkbench } = await loadSourceModule(
           }));
           build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
             contents: `
+        import { PassThrough } from "node:stream";
         export function execFile() {}
-        execFile[Symbol.for("nodejs.util.promisify.custom")] = async (_command, _args, options) => {
-          if (globalThis.workbenchProcessFailure) throw globalThis.workbenchProcessFailure;
-          return { stdout: JSON.stringify({ timeout: options.timeout }) };
+        execFile[Symbol.for("nodejs.util.promisify.custom")] = (_command, _args, options) => {
+          const result = globalThis.workbenchProcessFailure
+            ? Promise.reject(globalThis.workbenchProcessFailure)
+            : Promise.resolve({ stdout: JSON.stringify({ timeout: options.timeout }) });
+          return Object.assign(result, { child: { stdin: new PassThrough() } });
         };
         export function spawn() { throw new Error("Unexpected process launch"); }
         export function execFileSync() { throw new Error("Unexpected process launch"); }

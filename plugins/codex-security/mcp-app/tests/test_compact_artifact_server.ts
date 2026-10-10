@@ -74,7 +74,9 @@ let shippedRuntime: string;
 const sourceRuntime = path.join(suiteRoot, "server.cjs");
 await buildServer(sourceRuntime, {
   define: {
-    "import.meta.url": "__filename",
+    "import.meta.url": JSON.stringify(
+      pathToFileURL(path.join(bundledPluginRoot, "mcp", "server.mjs")).href,
+    ),
     __dirname: JSON.stringify(path.join(bundledPluginRoot, "mcp")),
   },
 });
