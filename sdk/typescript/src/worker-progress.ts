@@ -4,6 +4,12 @@ import { isSafeNonNegativeInteger, parseJson } from "./value.js";
 const WORKER_STATUS_PREFIX = "CODEX_SECURITY_WORKER_STATUS ";
 const SCAN_PROGRESS_PREFIX = "CODEX_SECURITY_SCAN_PROGRESS ";
 const PREFLIGHT_COMMAND = /(?:^|[\\/])config_preflight\.py(?=$|["'\s])/u;
+const PREFLIGHT_EXIT_CODES = {
+  ready: 0,
+  blocked: 1,
+  incomplete: 2,
+  error: 2,
+} as const;
 const WORKER_PHASES = new Set([
   "ranking",
   "file_review",
@@ -138,6 +144,7 @@ function scanProgressFromMarker(marker: string): ScanProgress | null {
 function preflightStatus(
   item: Readonly<Record<string, unknown>>,
 ): ScanWorkerStatus | null {
+  if (item["status"] === "failed") return null;
   if (
     typeof item["command"] !== "string" ||
     !PREFLIGHT_COMMAND.test(item["command"]) ||
@@ -153,6 +160,25 @@ function preflightStatus(
     !Array.isArray(payload["results"])
   ) {
     return null;
+  }
+  const exitCode = item["exit_code"];
+  const payloadStatus = payload["status"];
+  if (typeof exitCode === "number") {
+    if (
+      typeof payloadStatus === "string" &&
+      Object.hasOwn(PREFLIGHT_EXIT_CODES, payloadStatus)
+    ) {
+      if (
+        exitCode !==
+        PREFLIGHT_EXIT_CODES[payloadStatus as keyof typeof PREFLIGHT_EXIT_CODES]
+      ) {
+        return null;
+      }
+    } else if (payloadStatus === undefined) {
+      if (exitCode !== 0) return null;
+    } else {
+      return null;
+    }
   }
   const results = payload["results"];
   const delegated = results.filter(
