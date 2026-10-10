@@ -9,7 +9,10 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
-import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type {
+  ScanDraftInput,
+  DeepScanPublication,
+} from "../src/artifact-scan-draft.js";
 import {
   DeepScanCoordinator,
   FakeExecutor,
@@ -118,7 +121,11 @@ async function testCoordinatorCommitResponseRecovery(
       threadId,
       executor: new FakeExecutor(),
       heartbeatIntervalMs: 60_000,
-      onComplete: async (draft: ScanDraftInput, signal: AbortSignal) => {
+      onComplete: async (
+        draft: ScanDraftInput,
+        signal: AbortSignal,
+        publication: DeepScanPublication,
+      ) => {
         const context = await createScanArtifactContext(
           run.scanId,
           runWorkbench,
@@ -132,6 +139,7 @@ async function testCoordinatorCommitResponseRecovery(
           draft,
           runWorkbench,
           signal,
+          publication,
         );
       },
     });
@@ -277,6 +285,11 @@ async function testRecoveredPublicationRejectsLateFailure() {
         "Publication recovery remains pending.",
       ),
       runWorkbench,
+      undefined,
+      {
+        coordinatorGeneration: claim.run.coordinatorGeneration,
+        resultPath: null,
+      },
     );
     await runWorkbench([
       "cancel-scan",
@@ -516,7 +529,20 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-integration-thread";
   const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = mock.fn(createWorkbenchRunner(environment));
+  const finishCalls: string[][] = [];
+  const executeWorkbench = createWorkbenchRunner(environment);
+  const runWorkbench = mock.fn(async (args: string[]) => {
+    const result = await executeWorkbench(args);
+    if (args[0] === "finish-deep-scan") {
+      finishCalls.push([...args]);
+      if (finishCalls.length === 1)
+        throw Object.assign(
+          new Error("Synthetic lost committed finish response"),
+          { code: "ETIMEDOUT" },
+        );
+    }
+    return result;
+  });
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
   try {
@@ -740,6 +766,8 @@ connection.rollback()`,
       omittedWorkerIds: [late.id],
     });
     assert.equal(finished.status, "succeeded");
+    assert.equal(finishCalls.length, 2);
+    assert.deepEqual(finishCalls[1], finishCalls[0]);
     assert.equal(finished.terminalReason, "saturated");
     assert.equal(finished.manifestPath, manifestPath);
 

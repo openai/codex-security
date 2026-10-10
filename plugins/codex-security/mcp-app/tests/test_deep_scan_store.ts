@@ -16,6 +16,7 @@ await testBeginProtocolAndParsing();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
 testRunErrorParsing();
+testWorkflowVersionParsing();
 testConfiguredMaximumDurationParsing();
 await testWriteSerializationAndRecovery();
 await testBeginUsesTheWriteQueue();
@@ -30,6 +31,30 @@ await testPersistenceRetryExhaustionPreservesDiagnostics();
 await testDeterministicPersistenceFailuresAreNotRetried();
 await testNonIdempotentMutationsAreNotRetried();
 testInvalidPersistedConfig();
+testOriginalUsageOwnerParsing();
+
+function testOriginalUsageOwnerParsing() {
+  const value = stateResult(randomUUID());
+  const usageOwner = {
+    threadId: "original-thread",
+    turnId: "original-turn",
+    startedAt: "2026-01-01T00:00:00Z",
+  };
+  assert.deepEqual(
+    parseDeepScan({ deepScan: { ...value.deepScan, usageOwner } }).usageOwner,
+    usageOwner,
+  );
+  assert.equal(
+    parseDeepScan({ deepScan: { ...value.deepScan, usageOwner: null } })
+      .usageOwner,
+    null,
+  );
+  assert.equal(
+    parseDeepScan(value).usageOwner,
+    null,
+    "old readers do not establish an original owner",
+  );
+}
 
 async function testBeginProtocolAndParsing() {
   const scanId = randomUUID();
@@ -77,7 +102,7 @@ async function testBeginProtocolAndParsing() {
   );
   assert.equal(
     flagValue(calls[0].args, "--workflow-version"),
-    "deep-scan-mcp/v1",
+    "deep-security-scan/v1",
   );
 
   const claimToken = randomUUID();
@@ -532,7 +557,7 @@ async function testPersistenceRetriesRemainInsideTheWriteQueue() {
     if (args[0] === "claim-deep-scan-dedup" && calls.length === 1) {
       throw new Error("sqlite3.OperationalError: database is locked");
     }
-    return {};
+    return stateResult(scanId);
   });
 
   const claim = store.claimDedup({
@@ -799,7 +824,7 @@ function idempotentPersistenceScenarios() {
     })),
     {
       operation: "claim-deep-scan-dedup",
-      result: {},
+      result: stateResult(scanId),
       invoke: (store: Store) =>
         store.claimDedup({
           id: reducerId,
@@ -977,5 +1002,49 @@ function flagValue(args: string[], flag: string) {
 function repeatedFlagValues(args: string[], flag: string) {
   return args.flatMap((value, index: number) =>
     value === flag ? [args[index + 1]] : [],
+  );
+}
+
+function testWorkflowVersionParsing() {
+  const value = stateResult(randomUUID()).deepScan;
+  const run = parseDeepScan({
+    deepScan: {
+      ...value,
+      schemaVersion: 1,
+      workflowVersion: "deep-scan-mcp/v1",
+      model: "original-model",
+      reasoningEffort: "high",
+    },
+  });
+  assert.equal(run.model, "original-model");
+  assert.equal(run.reasoningEffort, "high");
+  assert.equal(run.schemaVersion, 1);
+  assert.equal(run.workflowVersion, "deep-scan-mcp/v1");
+  const future = parseDeepScan({
+    deepScan: { ...value, schemaVersion: 99, workflowVersion: "future/v99" },
+  });
+  assert.equal(future.schemaVersion, 99);
+  assert.equal(
+    future.workflowVersion,
+    "future/v99",
+    "inspection preserves unsupported versions",
+  );
+}
+
+for (const version of [1, 99]) {
+  const finalizationInput = {
+    version,
+    resultPath: null,
+    resultSha256: null,
+    terminalReason: "capped",
+    omittedWorkerIds: ["fixture-worker"],
+    selectedAt: "2026-01-01T00:00:00Z",
+  };
+  assert.deepEqual(
+    parseDeepScan(
+      stateResult(randomUUID(), { deepScan: { finalizationInput } }),
+    ).finalizationInput,
+    finalizationInput,
+    "inspection preserves finalization input and version before execution compatibility checks",
   );
 }

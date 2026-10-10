@@ -936,6 +936,27 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
 
 
+@pytest.mark.parametrize("notes", [None, "The filesystem race remains untested."])
+def test_coverage_report_preserves_the_recorded_disposition_reason(notes) -> None:
+    manifest, findings, coverage = canonical_documents()
+    surface = {
+        "id": "filesystem-boundary",
+        "label": "Filesystem boundary",
+        "disposition": "needs_follow_up",
+        "reason": "The caller's filesystem policy is unknown.",
+        "receiptRefs": ["artifacts/filesystem-review.md"],
+    }
+    if notes is not None:
+        surface["notes"] = notes
+    coverage["completeness"] = "partial"
+    coverage["surfaces"] = [surface]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert surface["reason"] in markdown
+    if notes is not None:
+        assert notes in markdown
+    assert surface["receiptRefs"][0] in markdown
+
+
 @pytest.mark.parametrize(
     ("source_path", "rendered_location"),
     [

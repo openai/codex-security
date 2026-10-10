@@ -5434,6 +5434,44 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test.each([false, true])(
+    "reads private execution settings without changing older workbench entrypoints (%p)",
+    async (supportsPrivate) => {
+      const root = await temporaryDirectory();
+      const pluginRoot = join(root, "plugin");
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import json, os, sys",
+          supportsPrivate
+            ? "def main(*, with_execution_settings=False):"
+            : "def main():",
+          "    assert sys.flags.isolated and sys.dont_write_bytecode",
+          "    assert os.environ.get('OPENAI_API_KEY') is None",
+          "    assert sys.argv[1:] == ['get-scan', '--scan-id', 'synthetic-scan']",
+          supportsPrivate
+            ? "    print(json.dumps({'private': with_execution_settings}))"
+            : "    print(json.dumps({'private': False}))",
+          "if __name__ == '__main__': main()",
+        ].join("\n"),
+      );
+      const options = {
+        python: await resolvePluginPython(),
+        pluginRoot,
+        environment: {
+          PATH: process.env["PATH"],
+          OPENAI_API_KEY: "synthetic-unforwarded-key",
+        },
+      };
+      const args = ["get-scan", "--scan-id", "synthetic-scan"];
+      expect(await runWorkbench(options, args)).toEqual({ private: false });
+      expect(
+        await runWorkbench({ ...options, withExecutionSettings: true }, args),
+      ).toEqual({ private: supportsPrivate });
+    },
+  );
+
   test.each([
     ["unbound", false],
     ["bound", true],

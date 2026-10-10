@@ -142,6 +142,11 @@ const allowedFiles = new Set([
   ...pluginPaths.map((file) => `package/_bundled_plugin/${file}`),
   ...[
     "api",
+    "reasoning-summary",
+    "preflight-config",
+    "deep-scan-finalization",
+    "codex-session",
+    "accepted-audit",
     "artifact-export",
     "auth",
     "bulk-scan-discovery",

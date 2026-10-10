@@ -1,6 +1,14 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
+import { scanPreflightCodexConfig } from "./preflight-config.js";
+import { captureOriginalReasoningSummary } from "./reasoning-summary.js";
+export { scanPreflightCodexConfig } from "./preflight-config.js";
+import { resumeSelectedDeepScan } from "./deep-scan-finalization.js";
+import {
+  auditEvidence,
+  runAcceptedAudit,
+  type ScanDraftInput,
+} from "./accepted-audit.js";
 import {
   chmod,
   lstat,
@@ -41,6 +49,12 @@ import {
   type ProviderProfile,
 } from "./provider-profile.js";
 
+import {
+  readCodexSessionTurn,
+  type CodexSessionClient as CodexClientLike,
+  type CodexSessionThread as CodexThreadLike,
+  type CodexSessionEvent as ScanEvent,
+} from "./codex-session.js";
 import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
@@ -83,6 +97,7 @@ import {
   type ScanSessionEvent,
   type ScanWorkerEvent,
 } from "./cost.js";
+import type { ScanExecutionAttribution } from "./scan-sessions.js";
 import {
   DeepScanProgressTracker,
   type DeepScanProgress,
@@ -246,24 +261,6 @@ import {
   inspectTrustedExecutable,
   type InspectedExecutable,
 } from "./trusted-executable.js";
-
-interface CodexThreadLike {
-  readonly id: string | null;
-  runStreamed(
-    input: string,
-    options: TurnOptions,
-  ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
-}
-
-interface ScanEvent {
-  readonly type: string;
-  readonly [key: string]: unknown;
-}
-
-interface CodexClientLike {
-  startThread(options: ThreadOptions): CodexThreadLike;
-  resumeThread?(threadId: string, options: ThreadOptions): CodexThreadLike;
-}
 
 interface PreparedRuntime {
   codexHome: string;
@@ -1051,9 +1048,7 @@ export class CodexSecurity {
               `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
             ],
       );
-      const reportCost = (current: Readonly<ScanCost>): void => {
-        const total = addScanCosts(accumulatedCost, current);
-        if (completeCost) notifyObserver(options, "onCost")(total);
+      const enforceCostLimit = (total: Readonly<ScanCost>): void => {
         if (
           options.maxCostUsd !== undefined &&
           total.estimatedUsd > options.maxCostUsd
@@ -1064,6 +1059,11 @@ export class CodexSecurity {
             ),
           );
         }
+      };
+      const reportCost = (current: Readonly<ScanCost>): void => {
+        const total = addScanCosts(accumulatedCost, current);
+        if (completeCost) notifyObserver(options, "onCost")(total);
+        enforceCostLimit(total);
       };
       const outputSchema = securityPolicyStageOutputSchema();
       const run = async (
@@ -1088,6 +1088,10 @@ export class CodexSecurity {
             options.onCost === undefined && options.maxCostUsd === undefined
               ? undefined
               : reportCost,
+          onCostLowerBound:
+            options.maxCostUsd === undefined
+              ? undefined
+              : (cost) => enforceCostLimit(addScanCosts(accumulatedCost, cost)),
           onError: (error) => {
             if (options.maxCostUsd !== undefined) budgetController.abort(error);
             else
@@ -1133,15 +1137,15 @@ export class CodexSecurity {
             return { usage, cost };
           });
           stopped = true;
-          if (snapshot.cost === null) {
-            completeCost = false;
-            if (options.maxCostUsd !== undefined)
-              throw new CodexSecurityError(
-                "Could not verify the requested policy-generation cost limit.",
-              );
-          } else {
-            accumulatedCost = addScanCosts(accumulatedCost, snapshot.cost);
-          }
+          if (
+            options.maxCostUsd !== undefined &&
+            (snapshot.cost === null || snapshot.cost.coverage === "partial")
+          )
+            throw new CodexSecurityError(
+              "Could not verify the requested policy-generation cost limit.",
+            );
+          if (snapshot.cost === null) completeCost = false;
+          else accumulatedCost = addScanCosts(accumulatedCost, snapshot.cost);
           signal.throwIfAborted();
           try {
             return parseSecurityPolicyStageResult(
@@ -1247,14 +1251,35 @@ export class CodexSecurity {
     let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
+    let selectedDeepFinalization = false;
+    let observedScanThreadId: string | undefined;
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
+      mode: ScanMode;
     } | null = null;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    const recoverCompletedScan = async (
+      commandOptions: WorkbenchCommandOptions,
+      scanId: string,
+      error: unknown,
+      completionArgs: readonly string[],
+    ): Promise<JsonObject> => {
+      const saved = await workbench(commandOptions, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ]).catch(() => null);
+      const savedScan = saved?.["scan"];
+      const progress = isRecord(savedScan) ? savedScan["progress"] : null;
+      if (!isRecord(progress) || progress["status"] !== "complete") throw error;
+      // A lost response can follow a durable seal. Only the existing normal
+      // completion command can validate and return that committed receipt.
+      return workbench(commandOptions, completionArgs);
+    };
     try {
       const checkOpen = (): void => {
         this.#requireOpen();
@@ -1333,13 +1358,12 @@ export class CodexSecurity {
       const {
         runtime,
         runtimeHome,
-        effectiveConfig,
-        preflightConfig,
         modelProvider,
         authentication,
         approvalPolicy,
         python,
       } = session;
+      let { effectiveConfig, preflightConfig } = session;
       releaseCredentialHome = session.releaseCredentialHome;
       let git: InspectedExecutable = {
         executable: null,
@@ -1463,6 +1487,43 @@ export class CodexSecurity {
       }
       checkOpen();
 
+      if (mode === "deep" && options.resumeScanId === undefined) {
+        const summary = await captureOriginalReasoningSummary({
+          config: session.sessionConfig,
+          nativeProfile: runtime.providerProfile,
+          command: this.#codexCommand(),
+          cwd: scanDir,
+          environment: {
+            ...withoutOpenAiApiKeys(
+              this.#createSessionEnvironment(session, {}, options.auth),
+            ),
+            ...(session.externalProvider === null && session.apiKey !== null
+              ? { CODEX_API_KEY: session.apiKey }
+              : {}),
+          },
+          signal,
+        });
+        if (summary !== undefined) {
+          effectiveConfig = {
+            ...effectiveConfig,
+            model_reasoning_summary: summary,
+          };
+          preflightConfig = scanPreflightCodexConfig(effectiveConfig);
+          session.effectiveConfig = effectiveConfig;
+          session.preflightConfig = preflightConfig;
+          session.sessionConfig = {
+            ...session.sessionConfig,
+            model_reasoning_summary: summary,
+          };
+          if (runtime.configPath !== undefined)
+            await writeScanPreflightConfig(
+              runtime.configPath,
+              preflightConfig,
+              options.cyberAccessProgram,
+            );
+        }
+      }
+
       const shellPluginRoot = runtime.plugin.pluginRoot;
       const canonicalShellPluginRoot = await realpath(shellPluginRoot);
       const pluginRelativeToHome = relative(
@@ -1571,6 +1632,14 @@ export class CodexSecurity {
           "onWarning",
         )(`Could not track scan activity: ${errorMessage(error)}`);
       };
+      const enforceCostLimit = (cost: Readonly<ScanCost>): boolean => {
+        if (maxCostUsd === undefined || cost.estimatedUsd <= maxCostUsd)
+          return false;
+        costAbortController.abort(
+          new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
+        );
+        return true;
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
@@ -1597,15 +1666,7 @@ export class CodexSecurity {
             : (cost) => {
                 latestCost = cost;
                 notifyObserver(options, "onCost")(cost, maxCostUsd);
-                if (
-                  maxCostUsd !== undefined &&
-                  cost.estimatedUsd > maxCostUsd
-                ) {
-                  costAbortController.abort(
-                    new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
-                  );
-                  return;
-                }
+                if (enforceCostLimit(cost)) return;
                 const request = options.onBudgetApproaching;
                 if (
                   request === undefined ||
@@ -1664,6 +1725,8 @@ export class CodexSecurity {
                     }
                   });
               },
+        onCostLowerBound:
+          options.maxCostUsd === undefined ? undefined : enforceCostLimit,
         onError: reportTrackingError,
       });
       costTracker = tracker;
@@ -1845,7 +1908,27 @@ export class CodexSecurity {
           filesTotal: scopeFileCount,
         });
       }
-      activeScan = { id: scanId, options: workbenchOptions };
+      activeScan = { id: scanId, options: workbenchOptions, mode };
+      if (mode === "deep") {
+        tracker.setAttributionReader(async () => {
+          const context = await workbench(
+            {
+              ...workbenchOptions,
+              signal: undefined,
+              withExecutionSettings: true,
+            },
+            ["get-scan", "--scan-id", scanId],
+          );
+          const scan = context["scan"];
+          if (isRecord(scan) && !("executionAttribution" in scan))
+            return undefined;
+          return isRecord(scan) && isRecord(scan["executionAttribution"])
+            ? (scan[
+                "executionAttribution"
+              ] as unknown as ScanExecutionAttribution)
+            : null;
+        });
+      }
       notifyObserver(
         options,
         "onScanRegistered",
@@ -2040,6 +2123,7 @@ export class CodexSecurity {
           );
         }
         thread = codex.resumeThread(resumeThreadId, threadOptions);
+        observedScanThreadId = resumeThreadId;
         tracker.start(resumeThreadId);
         if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
         await tracker.refresh().catch(reportTrackingError);
@@ -2067,8 +2151,46 @@ export class CodexSecurity {
       if (postScanPrompt?.trim()) {
         runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
       }
-      const events = directDeepScan
-        ? (this.#dependencies.runDeepScan ?? runDeepScan)({
+      const recoverSelectedCompletion = async () => {
+        const threadId = observedScanThreadId ?? thread.id;
+        if (mode !== "deep" || !threadId || signal.aborted) return null;
+        const saved = await workbench(workbenchOptions, [
+          "get-deep-scan",
+          "--scan-id",
+          scanId,
+          "--thread-id",
+          threadId,
+        ]).catch(() => null);
+        const deep = saved?.["deepScan"];
+        if (
+          !isRecord(deep) ||
+          !isRecord(deep["finalizationInput"]) ||
+          (deep["status"] !== "running" && deep["status"] !== "succeeded")
+        )
+          return null;
+        selectedDeepFinalization = true;
+        await resumeSelectedDeepScan({
+          scanId,
+          threadId,
+          pluginRoot: runtime.plugin.installedRoot,
+          signal,
+          runWorkbench: (args) => workbench(workbenchOptions, args),
+        });
+        return {
+          status: "completed" as const,
+          threadId,
+          finalResponse: "",
+          usage: null,
+          lastStreamError: null,
+        };
+      };
+      const savedCompletion = resumeThreadId
+        ? await recoverSelectedCompletion()
+        : null;
+      const events = async function* (this: CodexSecurity) {
+        if (savedCompletion) return;
+        if (directDeepScan) {
+          yield* (this.#dependencies.runDeepScan ?? runDeepScan)({
             codexOptions,
             preflightCommand:
               await this.#providerPreflightCommand(effectiveConfig),
@@ -2078,15 +2200,19 @@ export class CodexSecurity {
             scanId,
             prompt,
             signal,
-          })
-        : (await thread.runStreamed(prompt, turnOptions)).events;
+          });
+        } else yield* (await thread.runStreamed(prompt, turnOptions)).events;
+      }.call(this);
       checkOpen();
 
       let result = await runScanEvents({
+        savedCompletion: savedCompletion ?? undefined,
+        recoverCompletion: recoverSelectedCompletion,
         thread,
         events,
         signal,
         scanDir,
+        scanId,
         pluginRoot: runtime.plugin.installedRoot,
         pythonPath: session.python,
         protectedRoot,
@@ -2096,6 +2222,7 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
+          observedScanThreadId = threadId;
           if (resumeThreadId !== undefined && threadId !== resumeThreadId) {
             throw new CodexSecurityError(
               "Codex did not resume the original scan session.",
@@ -2116,6 +2243,18 @@ export class CodexSecurity {
             return;
           }
           if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
+          if (directDeepScan) {
+            // The direct engine's control session makes no model calls.
+            tracker.recordUsage(
+              {
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 0,
+              },
+              threadId,
+            );
+          }
           tracker.start(threadId);
           try {
             await workbench(workbenchOptions, [
@@ -2133,6 +2272,7 @@ export class CodexSecurity {
           }
         },
         onFinalize: async (usage) => {
+          await recoverSelectedCompletion();
           if (options.validationPrompt !== undefined) {
             tracker.recordUsage(usage);
             await tracker.refresh().catch(reportTrackingError);
@@ -2195,7 +2335,10 @@ export class CodexSecurity {
             return { usage, cost: estimateScanCost(model, usage) };
           });
           throwIfAborted(signal, scanDir);
-          if (options.maxCostUsd !== undefined && snapshot.cost === null) {
+          if (
+            options.maxCostUsd !== undefined &&
+            (snapshot.cost === null || snapshot.cost.coverage === "partial")
+          ) {
             notifyObserver(
               options,
               "onWarning",
@@ -2262,14 +2405,20 @@ export class CodexSecurity {
         onObserverError: options.onObserverError,
       });
       checkOpen();
-      const completion = await workbench(workbenchOptions, [
+      const completionArgs = [
         "complete-scan",
         "--scan-id",
         scanId,
         ...(completionCost === null
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
-      ]);
+      ];
+      const completion = await workbench(
+        workbenchOptions,
+        completionArgs,
+      ).catch((error) =>
+        recoverCompletedScan(workbenchOptions, scanId, error, completionArgs),
+      );
       activeScan = null;
       if (directDeepScan) {
         result = new ScanResult({
@@ -2332,7 +2481,7 @@ export class CodexSecurity {
         let artifactRestorer: ScanArtifactRestorer | null = null;
         try {
           artifactRestorer = await prepareArtifactRestorer(
-            workbenchOptions,
+            { ...workbenchOptions, signal: undefined },
             scanDir,
           );
           const followUpResult = await runScanEvents({
@@ -2340,6 +2489,7 @@ export class CodexSecurity {
             events: (await followUp()).events,
             signal,
             scanDir,
+            scanId,
             pluginRoot: runtime.plugin.installedRoot,
             pythonPath: session.python,
             protectedRoot,
@@ -2482,16 +2632,56 @@ export class CodexSecurity {
         options.signal?.aborted !== true
       ) {
         try {
-          const completion = await workbench(
-            { ...activeScan.options, signal: undefined },
-            [
-              "complete-budget-exhausted-scan",
+          const budgetScanId = activeScan.id;
+          const budgetCost = snapshot?.cost ?? { lowerBound: failure.cost };
+          const completionSignal = AbortSignal.any([
+            this.#abortController.signal,
+            ...(options.signal === undefined ? [] : [options.signal]),
+          ]);
+          const completionOptions = {
+            ...activeScan.options,
+            signal: completionSignal,
+          };
+          const saved = await workbench(completionOptions, [
+            "get-deep-scan",
+            "--scan-id",
+            activeScan.id,
+            "--thread-id",
+            budgetRecovery.threadId,
+          ]).catch(() => null);
+          const deep = saved?.["deepScan"];
+          if (
+            isRecord(deep) &&
+            deep["status"] === "running" &&
+            isRecord(deep["finalizationInput"])
+          ) {
+            // Cost stops model work, but an already selected result can still
+            // finish through the local publisher. Caller cancellation remains live.
+            selectedDeepFinalization = true;
+            await resumeSelectedDeepScan({
+              scanId: activeScan.id,
+              threadId: budgetRecovery.threadId,
+              pluginRoot: budgetRecovery.pluginRoot,
+              signal: completionSignal,
+              runWorkbench: (args) => workbench(completionOptions, args),
+            });
+          }
+          const completion = await workbench(completionOptions, [
+            "complete-budget-exhausted-scan",
+            "--scan-id",
+            budgetScanId,
+            "--cost-json",
+            JSON.stringify(budgetCost),
+            `--message=${failure.message.slice(0, 2400)}`,
+          ]).catch((error) =>
+            recoverCompletedScan(completionOptions, budgetScanId, error, [
+              "complete-scan",
               "--scan-id",
-              activeScan.id,
-              "--cost-json",
-              JSON.stringify(snapshot?.cost ?? failure.cost),
-              `--message=${failure.message.slice(0, 2400)}`,
-            ],
+              budgetScanId,
+              ...(snapshot?.cost
+                ? ["--cost-json", JSON.stringify(snapshot.cost)]
+                : []),
+            ]),
           );
           activeScan = null;
           runPostScan = null;
@@ -2505,10 +2695,7 @@ export class CodexSecurity {
             scanDir,
             budgetRecovery.pluginRoot,
             budgetRecovery.expectation,
-            AbortSignal.any([
-              this.#abortController.signal,
-              ...(options.signal === undefined ? [] : [options.signal]),
-            ]),
+            completionSignal,
             true,
             budgetRecovery.pythonPath,
             budgetRecovery.protectedRoot,
@@ -2546,9 +2733,32 @@ export class CodexSecurity {
           return result;
         } catch {}
       }
-      // A failed attachment must not turn a resumable coordinator into a terminal failure.
-      // Deep Scan orchestration persists its own terminal failures and cancellations.
-      if (activeScan !== null && options.resumeScanId === undefined) {
+      const callerCanceledDeepScan =
+        activeScan?.mode === "deep" && options.signal?.aborted;
+      if (activeScan !== null && callerCanceledDeepScan) {
+        const workbenchOptions = { ...activeScan.options, signal: undefined };
+        // The workbench owns the running-state check and repeated cancellation.
+        // Selection may have committed before the SDK received its response.
+        await workbench(workbenchOptions, [
+          "cancel-scan",
+          "--scan-id",
+          activeScan.id,
+          ...(observedScanThreadId === undefined
+            ? []
+            : ["--thread-id", observedScanThreadId]),
+        ]).catch(() => undefined);
+      }
+      // Publication failures remain resumable. A cost stop or explicit client close
+      // still uses the existing failure path to retain partial results and stop work.
+      if (
+        activeScan !== null &&
+        !callerCanceledDeepScan &&
+        ((options.resumeScanId === undefined && !selectedDeepFinalization) ||
+          (selectedDeepFinalization &&
+            !options.signal?.aborted &&
+            (failure instanceof ScanCostLimitExceededError ||
+              this.#abortController.signal.aborted)))
+      ) {
         if (
           options.validationPrompt !== undefined &&
           !customValidationComplete
@@ -2824,22 +3034,14 @@ export class CodexSecurity {
     }
   }
 
-  async #createSessionCodex(
+  #createSessionEnvironment(
     session: PreparedSession,
-    command: string,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
-    config?: JsonObject,
-    configOverrides: string[] = [],
-  ): Promise<{
-    codex: CodexClientLike;
-    environment: ProcessEnvironment;
-    codexOptions: CodexOptions & { nativeProfile?: string };
-  }> {
+  ): ProcessEnvironment {
     const {
       runtime,
-      runtimeHome,
       python,
       modelProvider,
       externalProvider,
@@ -2876,6 +3078,30 @@ export class CodexSecurity {
     if (session.safetyIdentifier !== undefined) {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
+    return environment;
+  }
+
+  async #createSessionCodex(
+    session: PreparedSession,
+    command: string,
+    runtimePaths: Record<string, string>,
+    auth: ScanAuthMode = "auto",
+    git?: InspectedExecutable,
+    config?: JsonObject,
+    configOverrides: string[] = [],
+  ): Promise<{
+    codex: CodexClientLike;
+    environment: ProcessEnvironment;
+    codexOptions: CodexOptions & { nativeProfile?: string };
+  }> {
+    const { runtime, runtimeHome, externalProvider, apiKey, sessionConfig } =
+      session;
+    const environment = this.#createSessionEnvironment(
+      session,
+      runtimePaths,
+      auth,
+      git,
+    );
     const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
     // This snapshot outlives a Deep Scan when the client reuses its runtime.
     if (runtime.deepScanConfigPath !== undefined) {
@@ -3058,16 +3284,11 @@ export class CodexSecurity {
         );
       }
       if (runtime.configPath !== undefined) {
-        await writeCodexConfig(runtime.configPath, {
-          ...preflightConfig,
-          ...(options.cyberAccessProgram === undefined
-            ? {}
-            : {
-                codex_security: {
-                  cyber_access_program: options.cyberAccessProgram,
-                },
-              }),
-        });
+        await writeScanPreflightConfig(
+          runtime.configPath,
+          preflightConfig,
+          options.cyberAccessProgram,
+        );
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
@@ -3824,6 +4045,19 @@ export async function initialCredentialsAvailable(
   return await importer(ambientHome, isolatedHome);
 }
 
+async function writeScanPreflightConfig(
+  path: string,
+  config: JsonObject,
+  program: ScanSettings["cyberAccessProgram"],
+): Promise<void> {
+  await writeCodexConfig(path, {
+    ...config,
+    ...(program === undefined
+      ? {}
+      : { codex_security: { cyber_access_program: program } }),
+  });
+}
+
 // Reports a cleanup failure without letting it decide the result of the scan. Only the
 // message is forwarded, and it reaches the onWarning observer alone: unlike the fail-scan
 // path it is never written to the workbench, so it adds no persisted warning text.
@@ -3857,7 +4091,13 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
 }
 
 interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
-  thread: Pick<CodexThreadLike, "id">;
+  scanId?: string;
+  savedCompletion?: Awaited<ReturnType<typeof readCodexTurn>>;
+  recoverCompletion?: () => Promise<Awaited<
+    ReturnType<typeof readCodexTurn>
+  > | null>;
+  thread: Pick<CodexThreadLike, "id"> &
+    Partial<Pick<CodexThreadLike, "runStreamed">>;
   events: AsyncGenerator<ScanEvent>;
   signal: AbortSignal;
   scanDir: string;
@@ -3887,81 +4127,137 @@ export async function runScanEvents(
   let scanStarted = false;
   let tacStatusReported = false;
   try {
-    const turn = await readCodexTurn({
-      thread: options.thread,
-      events: options.events,
-      onEvent: async (event) => {
-        if (
-          !tacStatusReported &&
-          options.modelProvider !== "amazon-bedrock" &&
-          options.authentication?.method !== "aws_credentials"
-        ) {
-          const tacStatus = trustedAccessStatusFromEvent(event);
-          if (tacStatus !== null) {
-            tacStatusReported = true;
-            notifyObserver(options, "onTrustedAccessStatus")(tacStatus);
-            if (tacStatus !== "granted") {
-              notifyObserver(
-                options,
-                "onWarning",
-              )(trustedAccessWarning(tacStatus, options.authentication));
+    let completedTurn:
+      | (Awaited<ReturnType<typeof readCodexTurn>> & {
+          threadId: string;
+          status: "completed";
+        })
+      | undefined;
+    const execute = async () => {
+      const turn =
+        options.savedCompletion ??
+        (await readCodexTurn({
+          thread: options.thread,
+          events: options.events,
+          onEvent: async (event) => {
+            if (
+              !tacStatusReported &&
+              options.modelProvider !== "amazon-bedrock" &&
+              options.authentication?.method !== "aws_credentials"
+            ) {
+              const tacStatus = trustedAccessStatusFromEvent(event);
+              if (tacStatus !== null) {
+                tacStatusReported = true;
+                notifyObserver(options, "onTrustedAccessStatus")(tacStatus);
+                if (tacStatus !== "granted") {
+                  notifyObserver(
+                    options,
+                    "onWarning",
+                  )(trustedAccessWarning(tacStatus, options.authentication));
+                }
+              }
             }
-          }
-        }
-        for (const activity of scanActivitiesFromEvent(
-          event,
-          options.expectation.repository,
-        )) {
-          notifyObserver(options, "onActivity")(activity);
-        }
-        for (const progress of scanProgressUpdatesFromEvent(event)) {
-          notifyObserver(options, "onProgress")(progress);
-        }
-        const workerStatus = workerStatusFromEvent(event);
-        if (workerStatus !== null) {
-          notifyObserver(options, "onWorkerStatus")(workerStatus);
-        }
-        if (event.type === "thread.started") {
-          const startedThreadId = event["thread_id"];
-          if (typeof startedThreadId === "string") {
-            await options.onThreadStarted?.(startedThreadId);
-          }
-          if (!scanStarted) {
-            scanStarted = true;
-            notifyObserver(options, "onScanStarted")();
-          }
-        }
-      },
-      onReconnect: (message, reconnect) => {
-        notifyObserver(options, "onReconnect")(
-          ...reconnect,
-          reconnectDetails(message),
+            for (const activity of scanActivitiesFromEvent(
+              event,
+              options.expectation.repository,
+            )) {
+              notifyObserver(options, "onActivity")(activity);
+            }
+            for (const progress of scanProgressUpdatesFromEvent(event)) {
+              notifyObserver(options, "onProgress")(progress);
+            }
+            const workerStatus = workerStatusFromEvent(event);
+            if (workerStatus !== null) {
+              notifyObserver(options, "onWorkerStatus")(workerStatus);
+            }
+            if (event.type === "thread.started") {
+              const startedThreadId = event["thread_id"];
+              if (typeof startedThreadId === "string") {
+                await options.onThreadStarted?.(startedThreadId);
+              }
+              if (!scanStarted) {
+                scanStarted = true;
+                notifyObserver(options, "onScanStarted")();
+              }
+            }
+          },
+          onReconnect: (message, reconnect) => {
+            notifyObserver(options, "onReconnect")(
+              ...reconnect,
+              reconnectDetails(message),
+            );
+          },
+        }));
+      const { status, threadId, lastStreamError } = turn;
+      if (status !== "completed") {
+        throw new IncompleteScanError(
+          lastStreamError ??
+            "Codex Security event stream ended before the turn completed.",
         );
-      },
-    });
-    const { status, threadId, finalResponse, lastStreamError } = turn;
-    let { usage } = turn;
-    if (options.signal.aborted) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
+      }
+      if (threadId === null) {
+        throw new IncompleteScanError(
+          "Codex Security did not report a thread ID.",
+        );
+      }
+      return (completedTurn = { ...turn, threadId, status });
+    };
+    const accept = async () => {
+      // Matching, custom validation and the canonical seal remain with the caller.
+      const [manifest, findings, coverage] = await Promise.all(
+        ["scan-manifest.json", "findings.json", "coverage.json"].map(
+          async (name) =>
+            JSON.parse(
+              (
+                await readScanFile(options.scanDir, name, name, options.signal)
+              ).toString("utf8"),
+            ),
+        ),
       );
+      const helper = (
+        await import(
+          pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
+        )
+      ).default;
+      const draft: ScanDraftInput = await helper.readScanAuditDraft({
+        root: options.scanDir,
+        scanId: options.scanId ?? manifest.scan.id,
+        manifest,
+        findings,
+        coverage,
+      });
+      return auditEvidence(draft);
+    };
+    let audit;
+    try {
+      audit = await runAcceptedAudit({
+        signal: options.signal,
+        execute,
+        accept,
+      });
+    } catch (error) {
+      if (options.signal.aborted) throw error;
+      const saved = await options.recoverCompletion?.();
+      if (!saved || saved.status !== "completed" || saved.threadId === null)
+        throw error;
+      // The enclosing scan publishes its saved selection; acceptance then reads it.
+      const recovered = completedTurn ?? { ...saved, threadId: saved.threadId };
+      audit = await runAcceptedAudit({
+        signal: options.signal,
+        execute: async () => recovered,
+        accept,
+      });
     }
-    if (status !== "completed") {
+    if (audit.status === "checkpoint")
       throw new IncompleteScanError(
-        lastStreamError ??
-          "Codex Security event stream ended before the turn completed.",
+        "Codex Security produced only an unfinished audit checkpoint.",
       );
-    }
-    if (threadId === null) {
-      throw new IncompleteScanError(
-        "Codex Security did not report a thread ID.",
-      );
-    }
+    const { status, threadId, finalResponse } = audit.execution;
+    let { usage } = audit.execution;
     if (options.onFinalize !== undefined) {
       usage = (await options.onFinalize(usage)) ?? usage;
     }
-    const result = await collectResult(
+    return await collectResult(
       {
         status,
         finalResponse,
@@ -3977,13 +4273,6 @@ export async function runScanEvents(
       options.pythonPath,
       options.protectedRoot,
     );
-    if (options.signal.aborted) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
-      );
-    }
-    return result;
   } catch (error) {
     if (options.signal.reason instanceof ScanCostLimitExceededError) {
       throw options.signal.reason;
@@ -4011,14 +4300,9 @@ async function readCodexTurn(options: {
   usage: unknown;
   lastStreamError: string | null;
 }> {
-  const { readCodexSessionTurn } = await import(
-    pathToFileURL(
-      join(await bundledPluginRoot(), "scripts", "codex_session.mjs"),
-    ).href
-  );
   return readCodexSessionTurn({
     ...options,
-    onEvent: async (event: ScanEvent) => {
+    onEvent: async (event) => {
       await options.onEvent?.(event);
       if (event.type === "turn.failed") {
         throw new CodexSecurityError(turnFailureMessage(event["error"]));
@@ -4333,6 +4617,19 @@ function addScanCosts(
       previous.cacheWriteInputTokens + current.cacheWriteInputTokens,
     outputTokens: previous.outputTokens + current.outputTokens,
     estimatedUsd: previous.estimatedUsd + current.estimatedUsd,
+    ...(previous.coverage === "partial" || current.coverage === "partial"
+      ? { coverage: "partial" as const }
+      : {}),
+    ...(previous.modelCosts ||
+    current.modelCosts ||
+    previous.model !== current.model
+      ? {
+          modelCosts: [
+            ...(previous.modelCosts ?? [previous]),
+            ...(current.modelCosts ?? [current]),
+          ],
+        }
+      : {}),
     ...(previous.cacheWriteInputTokensReported === false ||
     current.cacheWriteInputTokensReported === false
       ? { cacheWriteInputTokensReported: false }
@@ -4809,154 +5106,6 @@ function sharedCredentialCodexConfig(
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
   }
   return scanRuntimeCodexConfig(shared, credentialHome);
-}
-
-export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
-  const safeString = (value: unknown): value is string =>
-    typeof value === "string" &&
-    value.length > 0 &&
-    !/[\u0000-\u001f\u007f]/u.test(value);
-  const safeProfileName = (value: unknown): value is string =>
-    safeString(value) && /^[A-Za-z0-9_-]+$/u.test(value);
-  const capabilityFeatures = (value: unknown): JsonObject => {
-    if (!isRecord(value)) return {};
-    const result: JsonObject = {};
-    for (const key of [
-      "goals",
-      "multi_agent",
-      "enable_fanout",
-      "api_key_cyber_access_programs",
-      "api_key_model_discovery",
-    ]) {
-      if (typeof value[key] === "boolean") result[key] = value[key];
-    }
-    const multiAgent = value["multi_agent_v2"];
-    if (typeof multiAgent === "boolean") {
-      result["multi_agent_v2"] = multiAgent;
-    } else if (isRecord(multiAgent)) {
-      const sanitized: JsonObject = {};
-      if (typeof multiAgent["enabled"] === "boolean") {
-        sanitized["enabled"] = multiAgent["enabled"];
-      }
-      const capacity = multiAgent["max_concurrent_threads_per_session"];
-      if (safeInteger(capacity)) {
-        sanitized["max_concurrent_threads_per_session"] = capacity;
-      }
-      if (Object.keys(sanitized).length > 0) {
-        result["multi_agent_v2"] = sanitized;
-      }
-    }
-    return result;
-  };
-  const executionConfig = (source: JsonObject): JsonObject => {
-    const result: JsonObject = {};
-    for (const key of [
-      "model",
-      "model_reasoning_effort",
-      "model_reasoning_summary",
-      "model_provider",
-      "service_tier",
-    ]) {
-      const value = source[key];
-      if (safeString(value)) result[key] = value;
-    }
-    const features = capabilityFeatures(source["features"]);
-    if (Object.keys(features).length > 0) result["features"] = features;
-    const agents = source["agents"];
-    if (isRecord(agents)) {
-      const sanitized: JsonObject = {};
-      for (const key of ["max_threads", "max_depth"]) {
-        const value = agents[key];
-        if (safeInteger(value)) sanitized[key] = value;
-      }
-      if (Object.keys(sanitized).length > 0) result["agents"] = sanitized;
-    }
-    const multiagent = source["multiagent_config"];
-    if (isRecord(multiagent) && safeInteger(multiagent["max_concurrency"])) {
-      result["multiagent_config"] = {
-        max_concurrency: multiagent["max_concurrency"],
-      };
-    }
-    return result;
-  };
-  const resolved = resolveCodexProfile(config);
-  const result = executionConfig(
-    safeProfileName(config["profile"]) ? config : resolved,
-  );
-  // Keep effective execution settings even when preflight filters the profile name.
-  for (const key of ["model_reasoning_summary", "service_tier"]) {
-    const value = resolved[key];
-    if (safeString(value)) result[key] = value;
-  }
-  const resolvedFeatures = capabilityFeatures(resolved["features"]);
-  for (const key of [
-    "api_key_cyber_access_programs",
-    "api_key_model_discovery",
-  ]) {
-    if (resolvedFeatures[key] !== undefined) {
-      result["features"] = {
-        ...(isRecord(result["features"]) ? result["features"] : {}),
-        [key]: resolvedFeatures[key],
-      };
-    }
-  }
-  const selectedProfile = safeProfileName(config["profile"])
-    ? config["profile"]
-    : undefined;
-  if (selectedProfile !== undefined) {
-    result["profile"] = selectedProfile;
-  }
-  const profiles = config["profiles"];
-  if (isRecord(profiles)) {
-    const sanitized: JsonObject = {};
-    for (const [name, profile] of Object.entries(profiles)) {
-      if (!safeProfileName(name) || !isRecord(profile)) continue;
-      const projected = executionConfig(profile as JsonObject);
-      if (Object.keys(projected).length === 0) continue;
-      sanitized[name] = projected;
-    }
-    if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
-  }
-  const modelProvider = scanModelProvider(result);
-  if (isExternalModelProvider(modelProvider)) {
-    result["model_providers"] = {
-      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
-    };
-  } else if (modelProvider === "amazon-bedrock") {
-    const providers = config["model_providers"];
-    const provider = isRecord(providers) ? providers[modelProvider] : undefined;
-    const aws = isRecord(provider) ? provider["aws"] : undefined;
-    if (isRecord(aws)) {
-      const sanitized: JsonObject = {};
-      for (const key of ["region", "profile"]) {
-        const value = aws[key];
-        if (safeString(value)) sanitized[key] = value;
-      }
-      if (Object.keys(sanitized).length > 0) {
-        result["model_providers"] = {
-          [modelProvider]: { aws: sanitized },
-        };
-      }
-    }
-  }
-  const rootMarkers = config["project_root_markers"];
-  if (Array.isArray(rootMarkers)) {
-    result["project_root_markers"] = rootMarkers.filter(safeString);
-  }
-  const projects = config["projects"];
-  if (isRecord(projects)) {
-    const sanitized: JsonObject = {};
-    for (const [path, project] of Object.entries(projects)) {
-      if (!safeString(path) || !isAbsolute(path) || !isRecord(project)) {
-        continue;
-      }
-      const trust = project["trust_level"];
-      if (trust !== "trusted" && trust !== "untrusted") continue;
-      sanitized[path] = { trust_level: trust };
-    }
-    if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
-  }
-  return result;
 }
 
 async function pluginSupportsWorkerProviderSnapshot(

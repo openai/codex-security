@@ -1,5 +1,15 @@
 [
   [
+    "-- Relocate known Deep Scan preview histories before applying main migrations.",
+    "WITH input AS (SELECT :history AS history),",
+    "moves(version, destination, name) AS (VALUES (51, 52, 'bind original deep scan execution settings'), (50, 51, 'bind original deep scan parent usage turn'), (48, 51, 'bind original deep scan parent usage turn'), (49, 50, 'freeze stopped scan checkpoint selections'), (47, 50, 'freeze stopped scan checkpoint selections'), (48, 49, 'persist selected deep scan finalization input'), (46, 49, 'persist selected deep scan finalization input'), (47, 48, 'retain deep scan attempts and exact merge inputs'), (45, 48, 'retain deep scan attempts and exact merge inputs'))",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination ||",
+    "    ' WHERE version = ' || version || ' AND name = ' || quote(name) AS value",
+    "FROM moves JOIN schema_migrations USING (version, name)",
+    "ORDER BY destination DESC;"
+  ],
+  [
     "-- mirror and early-moves: relocate numbers before checking profiles.",
     "WITH",
     "-- Keep the common :history binding even though these moves do not inspect it.",

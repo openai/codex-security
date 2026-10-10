@@ -11,10 +11,15 @@ const { validateDiscoveryArtifacts, validateReducerArtifacts } =
     path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
   );
 
+const { saveScanDraftCheckpoint } = await importSource(
+  new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
+);
+
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
 try {
   await testDiscoveryValidation(root);
+  await testDiscoveryRequiresCurrentCheckpoint(root);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
 } finally {
@@ -22,6 +27,48 @@ try {
 }
 
 console.log("deep scan artifact validation tests passed");
+
+async function testDiscoveryRequiresCurrentCheckpoint(root: string) {
+  const first = draft([finding("first", "src/a.js")]);
+  const current = draft([finding("current", "src/b.js")]);
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "checkpoint-publication"),
+    "worker-001",
+    first,
+  );
+  const context = {
+    root: path.dirname(worker.resultPath),
+    repoRoot: root,
+    layout: "worker" as const,
+    scanId,
+  };
+  await saveScanDraftCheckpoint(context, first);
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    first,
+  );
+  // The writer commits its immutable head before replacing the previous result.
+  await saveScanDraftCheckpoint(context, current);
+  await assert.rejects(
+    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    /does not match its current checkpoint head/,
+  );
+  await writeResult(worker.resultPath, {
+    ...current,
+    handoffClaimToken: otherScanId,
+  });
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    { ...current, handoffClaimToken: otherScanId },
+  );
+  await rm(path.join(context.root, "checkpoint-head.json"));
+  await writeResult(worker.resultPath, first);
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    first,
+    "older workers without checkpoint heads retain their accepted result contract",
+  );
+}
 
 async function testDiscoveryValidation(root: string) {
   const result = draft([finding("shared", "src/a.js")], {
@@ -212,9 +259,20 @@ async function testReducerValidation(root: string) {
       ],
       previous: null,
     };
-  const validateSnapshot = (reducerId = "dedup-0001", snapshot = sources) =>
+  const validateSnapshot = (
+    reducerId = "dedup-0001",
+    snapshot = sources,
+    persistSourceCoverage = false,
+  ) =>
     validateReducerArtifacts(
-      { artifacts, artifactDir, resultPath, reducerId, sources: snapshot },
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId,
+        sources: snapshot,
+        persistSourceCoverage,
+      },
       scanId,
     );
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
@@ -223,10 +281,18 @@ async function testReducerValidation(root: string) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = await readJson(resultPath);
+  const { sourceCoverage, ...legacySnapshot } = validatedSnapshot.result;
+  assert.equal(sourceCoverage.completeness, "unknown");
   assert.deepEqual(
-    validatedSnapshot.result,
+    legacySnapshot,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "v1 preserves host coverage in memory while retaining the legacy persisted shape",
+  );
+  const versionedSnapshot = await validateSnapshot("dedup-0001", sources, true);
+  assert.deepEqual(
+    versionedSnapshot.result,
+    JSON.parse(await readFile(resultPath, "utf8")),
+    "v2 persists the full host projection",
   );
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [

@@ -1175,6 +1175,7 @@ interface CliDependencies {
     input?: string,
     signal?: AbortSignal,
     pythonPath?: string,
+    withExecutionSettings?: boolean,
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1259,7 +1260,13 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return options?.trim === false ? stdout : stdout.trim();
   },
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath) => {
+  runWorkbench: async (
+    args,
+    input,
+    signal,
+    pythonPath,
+    withExecutionSettings,
+  ) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -1274,6 +1281,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         pluginRoot: await bundledPluginRoot(),
         environment,
         signal,
+        withExecutionSettings,
         failureMessage: "Could not read Codex Security scan history",
       },
       args,
@@ -1804,10 +1812,17 @@ export async function main(
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
+    withExecutionSettings?: boolean,
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(args, undefined, undefined, pythonPath),
+        await dependencies.runWorkbench(
+          args,
+          undefined,
+          undefined,
+          pythonPath,
+          withExecutionSettings,
+        ),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -2228,6 +2243,9 @@ export async function main(
               [
                 codexSecurityCredentialHome(dependencies.environment),
                 configuredCodexHome(dependencies.environment),
+                ...(scan.executionAttribution?.codexHome
+                  ? [scan.executionAttribution.codexHome]
+                  : []),
               ],
               {
                 allowMissingRoot: Boolean(
@@ -2253,6 +2271,8 @@ export async function main(
             }
             return logs as unknown as JsonObject;
           },
+          undefined,
+          true,
         );
         return streamedLogs === undefined ? result : undefined;
       },
@@ -5710,9 +5730,14 @@ export async function main(
         const scan =
           scanId === undefined
             ? undefined
-            : ((await history(["get-scan", "--scan-id", scanId]))[
-                "scan"
-              ] as ScanLogSource);
+            : ((
+                await history(
+                  ["get-scan", "--scan-id", scanId],
+                  undefined,
+                  undefined,
+                  options.includeLogs,
+                )
+              )["scan"] as ScanLogSource);
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {

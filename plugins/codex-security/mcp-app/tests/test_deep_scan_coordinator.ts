@@ -9,6 +9,7 @@ import type {
   DeepScanLogEvent,
 } from "../src/deep-scan/types.js";
 import { mock } from "node:test";
+import { importSource } from "./import-module.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
@@ -48,6 +49,51 @@ import {
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
+
+async function testStaleDiscoveryCheckpointRetriesBeforeAcceptance() {
+  const { saveScanDraftCheckpoint } = await importSource(
+    new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
+  );
+  const { fixture, store } = await coordinatorFixture({
+    workers: 2,
+    maxDiscoveryRuns: 2,
+    stopAfterNoNew: 2,
+  });
+  const executor = new FakeExecutor();
+  const runWorker = executor.run.bind(executor);
+  let stalePublished = false;
+  executor.run = async (request) => {
+    const result = await runWorker(request);
+    if (request.kind === "discovery") {
+      const draft = await readJson(request.workingDirectory, "result.json");
+      const stale = !stalePublished;
+      stalePublished = true;
+      await saveScanDraftCheckpoint(
+        { ...request.artifactContext!, repoRoot: fixture.run.targetPath },
+        stale
+          ? { ...draft, threatModel: { summary: "New worker checkpoint." } }
+          : draft,
+      );
+    }
+    return result;
+  };
+  const terminal = await runCoordinator(fixture, store, executor, {
+    random: () => 0,
+    retryDelaysMs: [1],
+  });
+  assert.equal(terminal?.status, "succeeded");
+  assert.deepEqual(
+    [...executor.discoveryAttempts.values()].sort(),
+    [1, 2],
+    "a stale result must be retried before acceptance without aborting another worker",
+  );
+  assert.equal(store.workers.size > 2, true);
+  assert.equal(store.failureMessages.length, 0);
+  const accepted = store.workerUpdates.filter(
+    (worker) => worker.kind === "discovery" && worker.status === "succeeded",
+  );
+  assert.equal(accepted.length, 2);
+}
 
 function twoRunConfig(config: Partial<DeepScanConfig> = {}) {
   return { ...config, stopAfterNoNew: 2, maxDiscoveryRuns: 2 };
@@ -3671,7 +3717,7 @@ async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
   );
 }
 
-async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
+async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
   const { fixture, store } = await coordinatorFixture(
     twoRunConfig({ workers: 2 }),
   );
@@ -3689,7 +3735,7 @@ async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
   executor.run = async (request) => {
     const outcome = await run(request);
     const resultPath = path.join(request.artifactContext!.root, "result.json");
-    const draft = await readJson(resultPath);
+    const draft = JSON.parse(await readFile(resultPath, "utf8"));
     draft.coverage = {
       completeness:
         request.kind === "discovery" &&
@@ -3702,7 +3748,7 @@ async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
         { reason: "An independent review left this question unresolved." },
       ],
     };
-    await writeJson(resultPath, draft);
+    await writeFile(resultPath, JSON.stringify(draft));
     return outcome;
   };
   const completed: ScanDraftInput[] = [];
@@ -3711,15 +3757,33 @@ async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
   });
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(completed.length, 1);
-  assert.deepEqual(completed[0].coverage, {
-    completeness: "complete",
-    surfaces: [],
-    explicitExclusions: [],
-    deferred: [],
-  });
+  const projection = completed[0].coverage as {
+    completeness: string;
+    deferred: { provenance: { attempt: number; workerId: string } }[];
+    surfaces: unknown[];
+    reviews: { completeness: string }[];
+  };
+  assert.equal(projection.completeness, "partial");
+  assert.equal(projection.deferred.length, 2);
+  assert.equal(projection.surfaces.length, 4);
+  assert.equal(projection.reviews.length, 2);
+  assert.deepEqual(
+    new Set(
+      projection.reviews.map(
+        (review: { completeness: string }) => review.completeness,
+      ),
+    ),
+    new Set(["partial", "unknown"]),
+  );
+  for (const item of projection.deferred) {
+    assert.equal(item.provenance.attempt, 1);
+    assert.ok(store.workers.has(item.provenance.workerId));
+  }
   for (const worker of store.workers.values()) {
     if (worker.kind !== "discovery") continue;
-    const draft = await readJson(worker.resultManifestPath!);
+    const draft = JSON.parse(
+      await readFile(worker.resultManifestPath!, "utf8"),
+    );
     assert.notEqual(draft.coverage.completeness, "complete");
     assert.deepEqual(draft.coverage.surfaces, [workerReviewed, followUp]);
     assert.equal(draft.coverage.deferred.length, 1);
@@ -4117,6 +4181,7 @@ async function testNonRetryableReducerAbortsScanWithoutRetry(
 }
 
 try {
+  await testStaleDiscoveryCheckpointRetriesBeforeAcceptance();
   await testDeepScanLifecycle({
     fixtureRun,
     FakeStore,
@@ -4138,7 +4203,7 @@ try {
   await testCompletionOrdering();
   await testSaturationPreservesFindingAlreadyBuffered();
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
-  await testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus();
+  await testSuccessfulDeepCoveragePreservesWorkerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure(true);
   await testPublicationUsesAcceptedReducerSnapshot();

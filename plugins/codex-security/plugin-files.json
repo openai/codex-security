@@ -27,6 +27,7 @@
     "mcp/native/win32-x64/windows.node",
     "mcp/helpers.mjs",
     "mcp/helpers.mjs.br.part-000",
+    "mcp/helpers.mjs.br.part-001",
     "mcp/permission-profile-preflight.mjs",
     "mcp/server.mjs",
     "mcp/server.mjs.br.part-000",

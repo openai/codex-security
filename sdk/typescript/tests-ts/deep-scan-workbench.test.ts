@@ -23,12 +23,13 @@ const deepScanOwnershipProbe = [
   "connection.executescript('''",
   "CREATE TABLE workspaces (id TEXT PRIMARY KEY, thread_id TEXT, updated_at TEXT);",
   "CREATE TABLE scans (id TEXT PRIMARY KEY, workspace_id TEXT, mode TEXT, status TEXT, recipe_json TEXT, handoff_status TEXT, handoff_claim_token TEXT, deep_scan_owner_thread_id TEXT, updated_at TEXT);",
-  "CREATE TABLE deep_scan_runs (scan_id TEXT PRIMARY KEY);",
+  "CREATE TABLE deep_scan_runs (scan_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL DEFAULT 1, workflow_version TEXT NOT NULL DEFAULT 'deep-scan-mcp/v1');",
+  "CREATE TABLE deep_scan_attempts (scan_id TEXT NOT NULL);",
   "''')",
   "scan_id = '11111111-1111-4111-8111-111111111111'",
   "connection.execute(\"INSERT INTO workspaces VALUES ('workspace', NULL, 'before')\")",
   "connection.execute(\"INSERT INTO scans VALUES (?, 'workspace', 'deep', 'running', '{}', 'delivered', ?, NULL, 'before')\", (scan_id, case['storedToken']))",
-  "connection.execute('INSERT INTO deep_scan_runs VALUES (?)', (scan_id,))",
+  "connection.execute('INSERT INTO deep_scan_runs (scan_id) VALUES (?)', (scan_id,))",
   "connection.commit()",
   "if case.get('mutation') == 'rotate':",
   "    connection.executescript(\"CREATE TRIGGER rotate_claim BEFORE UPDATE OF thread_id ON workspaces BEGIN UPDATE scans SET handoff_claim_token = '33333333-3333-4333-8333-333333333333' WHERE workspace_id = NEW.id; END\")",
@@ -504,6 +505,14 @@ describe("deep scan workbench ownership", () => {
       ]);
       const scanId = registration["scanId"] as string;
       const targetId = registration["targetId"] as string;
+      const snapshotDigest = (
+        registration["contract"] as {
+          target: { requiredSnapshotDigest: string };
+        }
+      ).target.requiredSnapshotDigest;
+      expect(snapshotDigest).toMatch(
+        /^codex-security-snapshot\/v1:sha256:[0-9a-f]{64}$/,
+      );
       command([
         "begin-deep-scan",
         "--scan-id",
@@ -600,20 +609,27 @@ describe("deep scan workbench ownership", () => {
         0,
       );
       if (existingDeferred) {
-        await writePartialScanArtifacts(scanDir, targetId, inventoryStrategy, [
-          {
-            id: "candidate-001",
-            candidateId: "candidate-001",
-            reason: "Existing candidate validation dependency was unavailable.",
-            paths: ["src/source.py"],
-          },
-          {
-            id: "candidate-deferred",
-            candidateId: "candidate-deferred",
-            reason: "Existing runtime policy could not be inspected.",
-            paths: ["src/source.py"],
-          },
-        ]);
+        await writePartialScanArtifacts(
+          scanDir,
+          targetId,
+          inventoryStrategy,
+          [
+            {
+              id: "candidate-001",
+              candidateId: "candidate-001",
+              reason:
+                "Existing candidate validation dependency was unavailable.",
+              paths: ["src/source.py"],
+            },
+            {
+              id: "candidate-deferred",
+              candidateId: "candidate-deferred",
+              reason: "Existing runtime policy could not be inspected.",
+              paths: ["src/source.py"],
+            },
+          ],
+          snapshotDigest,
+        );
       }
       const warning =
         "Scan stopped: estimated cost $10.08 exceeded the $10.00 limit.";
@@ -639,6 +655,10 @@ describe("deep scan workbench ownership", () => {
       };
       expect(scan.progress.status).toBe("complete");
       expect(scan.warnings).toContain(warning);
+      const manifest = JSON.parse(
+        await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+      ) as { scan: { target: { snapshotDigest: string } } };
+      expect(manifest.scan.target.snapshotDigest).toBe(snapshotDigest);
       const findings = JSON.parse(
         await readFile(join(scanDir, "findings.json"), "utf8"),
       ) as { findings: unknown[] };
@@ -1499,6 +1519,7 @@ function writePartialScanArtifacts(
   targetId: string,
   inventoryStrategy: CoverageDocument["inventoryStrategy"],
   deferred: CoverageDocument["deferred"],
+  snapshotDigest?: string,
 ) {
   return Promise.all([
     writeFile(
@@ -1509,6 +1530,7 @@ function writePartialScanArtifacts(
             kind: "directory_snapshot",
             targetId,
             displayName: "repository",
+            ...(snapshotDigest === undefined ? {} : { snapshotDigest }),
           },
           scope: { limitations: [], validationMode: "incomplete" },
         },

@@ -1,3 +1,10 @@
+import {
+  captureDeepScanExecutionSettings,
+  retainDeepScanExecutionSettings,
+  loadDeepScanExecutionSettings,
+  restoredDeepScanWorkerSettings,
+  type DeepScanLegacySettingsContext,
+} from "./recovery-settings.js";
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
@@ -26,17 +33,66 @@ export function startDeepScanEngine(options: {
 }) {
   const { run, runWorkbench, pluginRoot, threadId, handoffClaimToken } =
     options;
+  const executionSettings = retainDeepScanExecutionSettings(async (active) =>
+    run.startDisposition === "created"
+      ? await captureDeepScanExecutionSettings(
+          active,
+          options.parentSandbox,
+          process.env,
+          {
+            threadId,
+            startedAt: active.createdAt,
+            created: true,
+          },
+        )
+      : await loadDeepScanExecutionSettings(
+          active.scanDir,
+          active,
+          async () => {
+            const context = await runWorkbench([
+              "get-scan",
+              "--scan-id",
+              active.scanId,
+            ]);
+            const recipe = context.recipe as
+              Pick<DeepScanLegacySettingsContext, "config"> | undefined;
+            const scan = context.scan as {
+              executionAttribution?: { owner: DeepScanRunState["usageOwner"] };
+            };
+            return {
+              config: recipe?.config,
+              usageOwner: scan.executionAttribution?.owner,
+            };
+          },
+        ),
+  );
   return startOrJoinDeepScanCoordinator({
     run,
     registry: options.registry,
     options: {
       store: options.store,
+      prepareExecutor: async (active) =>
+        new CodexSdkWorkerExecutor({
+          ...restoredDeepScanWorkerSettings(
+            await executionSettings(active),
+            options.parentSandbox,
+          ),
+          artifactContext: {
+            pluginRoot,
+            scanRoot: active.scanDir,
+            repoRoot: active.targetPath,
+            scanId: active.scanId,
+            scope: active.scope,
+            pythonCommand: options.pythonCommand,
+          },
+        }),
       executor: new CodexSdkWorkerExecutor({
         model: options.model,
         reasoningEffort: options.reasoningEffort,
         parentSandbox: options.parentSandbox,
         artifactContext: {
           pluginRoot,
+          scanRoot: run.scanDir,
           repoRoot: run.targetPath,
           scanId: run.scanId,
           scope: run.scope,
@@ -47,7 +103,7 @@ export function startDeepScanEngine(options: {
       log: options.log,
       handoffClaimToken,
       threadId,
-      onComplete: async (draft, signal) => {
+      onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
           run.scanId,
           runWorkbench,
@@ -66,6 +122,7 @@ export function startDeepScanEngine(options: {
           },
           runWorkbench,
           signal,
+          publication,
         );
       },
       onStopped: async (stopped) => {

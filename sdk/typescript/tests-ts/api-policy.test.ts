@@ -1529,6 +1529,93 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test.each(["architecture", "threat_model"] as const)(
+    "enforces priced policy usage despite an unpriced remainder in %s",
+    async (crossingStage) => {
+      const costs: number[] = [];
+      const f = await setup({
+        config: { codexOverrides: { model: "gpt-5.6-sol" } },
+        stream: async function* (stage, signal) {
+          if (stage !== crossingStage) {
+            yield* events(stage);
+            return;
+          }
+          const directory = join(f.root, "codex-home", "sessions");
+          await mkdir(directory, { recursive: true });
+          const thread = `policy-${stage}`;
+          const input = stage === "architecture" ? 1_200 : 1_000;
+          for (const [id, model, parent, inputTokens] of [
+            [thread, "gpt-5.6-sol", undefined, input],
+            ["unpriced-policy-worker", "synthetic-unpriced-model", thread, 100],
+          ] as const) {
+            await writeFile(
+              join(directory, `${id}.jsonl`),
+              [
+                JSON.stringify({
+                  type: "session_meta",
+                  payload: {
+                    id,
+                    ...(parent === undefined
+                      ? {}
+                      : { parent_thread_id: parent }),
+                  },
+                }),
+                JSON.stringify({ type: "turn_context", payload: { model } }),
+                JSON.stringify({
+                  type: "event_msg",
+                  payload: {
+                    type: "token_count",
+                    info: {
+                      total_token_usage: {
+                        input_tokens: inputTokens,
+                        output_tokens: 0,
+                      },
+                    },
+                  },
+                }),
+                "",
+              ].join("\n"),
+            );
+          }
+          yield { type: "thread.started", thread_id: thread };
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else
+              signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw signal.reason;
+        },
+      });
+      const keepAlive = setTimeout(() => {}, 10_000);
+      try {
+        await expect(
+          f.security.generatePolicy(f.repository, {
+            outputDir: f.outputDir,
+            maxCostUsd: 0.0045,
+            signal: AbortSignal.timeout(5_000),
+            onCost: (cost) => costs.push(cost.estimatedUsd),
+          }),
+        ).rejects.toThrow("exceeded its $0.0045 cost limit");
+        expect(f.threads).toHaveLength(
+          crossingStage === "architecture" ? 1 : 2,
+        );
+        if (crossingStage === "architecture") expect(costs).toEqual([]);
+        else {
+          expect(costs.length).toBeGreaterThan(0);
+          for (const cost of costs) expect(cost).toBeCloseTo(0.0006, 12);
+        }
+        if (crossingStage === "threat_model") {
+          expect(
+            await readFile(join(f.outputDir, "project-spec.md"), "utf8"),
+          ).toContain("src/service.ts:1");
+        }
+      } finally {
+        clearTimeout(keepAlive);
+        await f.security.close();
+      }
+    },
+  );
+
   test("enforces one cost budget across stages and preserves completed evidence", async () => {
     const f = await setup();
     await expect(
@@ -1576,6 +1663,70 @@ describe("CodexSecurity policy API", () => {
     expect(warnings.some((warning) => warning.includes("track"))).toBe(true);
     await f.security.close();
   });
+
+  test.each([false, true])(
+    "requires complete policy receipt coverage for an explicit budget (gap: %p)",
+    async (gap) => {
+      for (const limited of [false, true]) {
+        const f = await setup({
+          config: { codexOverrides: { model: "gpt-5.6-sol" } },
+          stream: async function* (stage) {
+            const thread = `policy-${stage}`;
+            const directory = join(f.root, "codex-home", "sessions");
+            await mkdir(directory, { recursive: true });
+            await writeFile(
+              join(directory, `${thread}.jsonl`),
+              [
+                { type: "session_meta", payload: { id: thread } },
+                ...[
+                  ["first", 100, 100],
+                  ["third", 50, gap ? 180 : 150],
+                ].map(([id, input, cumulative]) => ({
+                  type: "token_usage_record",
+                  payload: {
+                    thread_id: thread,
+                    response_id: id,
+                    model: "gpt-5.6-sol",
+                    usage: { input_tokens: input, output_tokens: 0 },
+                    thread_token_usage: {
+                      input_tokens: cumulative,
+                      output_tokens: 0,
+                    },
+                  },
+                })),
+              ]
+                .map((event) => JSON.stringify(event))
+                .join("\n") + "\n",
+            );
+            for await (const event of events(stage)) {
+              yield event.type === "turn.completed"
+                ? ({ ...event, usage: null } as unknown as ThreadEvent)
+                : event;
+            }
+          },
+        });
+        try {
+          const result = f.security.generatePolicy(f.repository, {
+            outputDir: f.outputDir,
+            ...(limited ? { maxCostUsd: 1 } : {}),
+          });
+          if (limited && gap) {
+            await expect(result).rejects.toThrow(
+              "Could not verify the requested policy-generation cost limit",
+            );
+            expect(f.threads).toHaveLength(1);
+          } else {
+            const completed = await result;
+            expect(completed.content).toBe(POLICY);
+            expect(completed.cost?.inputTokens).toBe(450);
+            expect(completed.cost?.coverage).toBe(gap ? "partial" : undefined);
+          }
+        } finally {
+          await f.security.close();
+        }
+      }
+    },
+  );
 
   test("allows unavailable usage unless an explicit cost limit needs verification", async () => {
     for (const limited of [false, true]) {

@@ -59,7 +59,13 @@ export async function sendFeedback(
       try {
         const logs = await readSavedScanLogs(
           scan,
-          [codexHome, configuredCodexHome(environment)],
+          [
+            codexHome,
+            configuredCodexHome(environment),
+            ...(scan.executionAttribution?.codexHome
+              ? [scan.executionAttribution.codexHome]
+              : []),
+          ],
           { allowMissingRoot: true },
         );
         if (logs.sessions.length > 0) {

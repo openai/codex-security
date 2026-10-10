@@ -27,7 +27,10 @@ import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
 
-const pluginRoot = path.resolve(mcpAppRoot, "..");
+const selectedPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT;
+const pluginRoot = selectedPluginRoot
+  ? path.resolve(selectedPluginRoot)
+  : path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
 
@@ -68,11 +71,13 @@ async function testDeepScanStdioLifecycle() {
     fixtureRoot,
     "workbench-launches.jsonl",
   );
-  const serverBundlePath = path.join(
-    installedPluginRoot,
-    "mcp",
-    `.deep-scan-stdio-test-${randomUUID()}.cjs`,
-  );
+  const serverBundlePath = selectedPluginRoot
+    ? path.join(pluginRoot, "mcp", "server.mjs")
+    : path.join(
+        installedPluginRoot,
+        "mcp",
+        `.deep-scan-stdio-test-${randomUUID()}.cjs`,
+      );
   const threadId = "deep-scan-stdio-lifecycle-thread";
 
   await mkdir(targetPath, { recursive: true });
@@ -129,7 +134,8 @@ model_reasoning_summary = "none"
   );
   await writePythonWrapper(`${pythonWrapperPath}.mjs`);
   await symlink(`${pythonWrapperPath}.mjs`, pythonWrapperPath);
-  await buildServer(serverBundlePath, { target: "node20" });
+  if (!selectedPluginRoot)
+    await buildServer(serverBundlePath, { target: "node20" });
 
   const environment = {
     ...process.env,
@@ -661,7 +667,37 @@ model_reasoning_summary = "none"
       "the MCP server must remain responsive after canceling one scan",
     );
 
-    const resumedThreadId = "deep-scan-stdio-resumed-thread";
+    const originalThreadId = "deep-scan-stdio-resumed-thread";
+    await mkdir(path.join(codexHome, "sessions"), { recursive: true });
+    await writeFile(
+      path.join(codexHome, "sessions", "original-owner.jsonl"),
+      [
+        {
+          type: "session_meta",
+          timestamp: "2026-01-01T00:00:00Z",
+          payload: {
+            id: originalThreadId,
+            cli_version: "0.154.0",
+            model_provider: "openai",
+          },
+        },
+        {
+          type: "event_msg",
+          timestamp: "2026-01-01T00:00:01Z",
+          payload: {
+            type: "thread_settings_applied",
+            thread_id: originalThreadId,
+            thread_settings: {
+              reasoning_summary: "none",
+              model_provider_id: "openai",
+            },
+          },
+        },
+      ]
+        .map((record) => JSON.stringify(record))
+        .join("\n") + "\n",
+    );
+    let resumedThreadId = originalThreadId;
     const opened = await server.request(
       24,
       "tools/call",
@@ -679,7 +715,13 @@ model_reasoning_summary = "none"
         "tools/call",
         toolCall(
           "submit_codex_security_setup",
-          { sessionId, targetPath, scope: ".", mode: "deep" },
+          {
+            sessionId,
+            targetPath,
+            scope: ".",
+            mode: "deep",
+            userContext: "Original discovery focus",
+          },
           resumedThreadId,
         ),
       ),
@@ -692,7 +734,7 @@ model_reasoning_summary = "none"
     assertNoError(started);
     const resumedScan = started.result.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
-    const handoffClaimToken = randomUUID();
+    let handoffClaimToken = randomUUID();
     for (const [id, name, arguments_] of [
       [
         27,
@@ -765,6 +807,15 @@ model_reasoning_summary = "none"
     const completedDraft = await readJson(completedWorker.resultManifestPath);
     assert.equal(completedDraft.scanId, resumedScanId);
     assert.deepEqual(completedDraft.findings, []);
+    assert.equal(partial!.workflowVersion, "deep-security-scan/v1");
+    assert.equal(partial!.userContext, "Original discovery focus");
+    const settingsPath = path.join(
+      resumedScan.scanDir,
+      "artifacts",
+      "deep_discovery",
+      "execution-settings.json",
+    );
+    await assert.rejects(readFile(settingsPath), { code: "ENOENT" });
     await server.stop();
     assert.throws(
       () => process.kill(server.pid!, 0),
@@ -810,9 +861,33 @@ model_reasoning_summary = "none"
       path.join(stateDir, "workbench.sqlite3"),
       resumedScanId,
     ]);
+    await runWorkbench(environment, [
+      "release-handoff-delivery",
+      "--scan-id",
+      resumedScanId,
+      "--claim-token",
+      handoffClaimToken,
+    ]);
+    handoffClaimToken = randomUUID();
+    resumedThreadId = "deep-scan-stdio-replacement-thread";
+    await runWorkbench(environment, [
+      "claim-handoff-delivery",
+      "--scan-id",
+      resumedScanId,
+      "--claim-token",
+      handoffClaimToken,
+    ]);
+    await runWorkbench(environment, [
+      "attach-scan-continuation-thread",
+      "--scan-id",
+      resumedScanId,
+      "--claim-token",
+      handoffClaimToken,
+      "--thread-id",
+      resumedThreadId,
+    ]);
     await writeFile(restartControlPath, "after-restart");
 
-    const resumedStartIndex = (await readJsonLines(startLogPath)).length;
     const restartedServer = startServer(serverBundlePath, environment);
     try {
       assertNoError(
@@ -845,7 +920,11 @@ model_reasoning_summary = "none"
           resumedScanId,
         ],
       );
-      assert.deepEqual(JSON.parse(modelRows.stdout), ["gpt-6.1-sol", "max"]);
+      assert.deepEqual(
+        JSON.parse(modelRows.stdout),
+        ["gpt-5.6-sol", "high"],
+        "resuming under another continuation retains the original scan selections",
+      );
       const instructions = resumed.result.structuredContent.instructions;
       assert.match(
         instructions,
@@ -886,6 +965,11 @@ model_reasoning_summary = "none"
         partial!.coordinatorGeneration + 1,
       );
       assert.equal(finished.dispatchedCount, 2);
+      assert.equal(finished.workflowVersion, partial!.workflowVersion);
+      assert.equal(finished.userContext, partial!.userContext);
+      assert.equal(finished.createdAt, partial!.createdAt);
+      assert.equal(finished.config.maxTimeHours, partial!.config.maxTimeHours);
+      await assert.rejects(readFile(settingsPath), { code: "ENOENT" });
       const successfulDiscoveries = finished.workers.filter(
         (worker: PersistedDeepScanWorker) =>
           worker.kind === "discovery" && worker.status === "succeeded",
@@ -952,8 +1036,7 @@ model_reasoning_summary = "none"
       const executions = (await readLogLines(startLogPath)).slice(
         restartStartIndex,
       );
-      for (const [index, execution] of executions.entries()) {
-        const afterRestart = index + restartStartIndex >= resumedStartIndex;
+      for (const execution of executions) {
         assertReadOnlyWorkerInvocation(execution.argv, codexHome);
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
@@ -963,21 +1046,15 @@ model_reasoning_summary = "none"
           pluginRoot,
           pythonWrapperPath,
         );
-        assertFlagPair(
-          execution.argv,
-          "--model",
-          afterRestart ? "gpt-6.1-sol" : "gpt-5.6-sol",
-        );
-        assert.ok(
-          execution.argv.includes(
-            `model_reasoning_effort=${JSON.stringify(afterRestart ? "max" : "high")}`,
-          ),
-        );
+        assertFlagPair(execution.argv, "--model", "gpt-5.6-sol");
+        assert.ok(execution.argv.includes('model_reasoning_effort="high"'));
 
-        assert.equal(
-          execution.argv.includes('model_reasoning_summary="none"'),
-          true,
+        const summary = execution.argv.find((argument: string) =>
+          argument.startsWith("model_reasoning_summary="),
         );
+        assert.equal(summary, 'model_reasoning_summary="none"');
+        if (context.workerLabel)
+          assert.equal(context.userContext, "Original discovery focus");
       }
       assert.equal(
         executions.filter(
@@ -1002,7 +1079,7 @@ model_reasoning_summary = "none"
     throw error;
   } finally {
     await server.stop();
-    await rm(serverBundlePath, { force: true });
+    if (!selectedPluginRoot) await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
     parentSandboxState = readOnlyParentSandboxState(pluginRoot);
   }
@@ -1382,7 +1459,9 @@ async function writeFakeCodex(executablePath: string) {
     `#!/usr/bin/env node
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { parse as parseToml } from ${JSON.stringify(import.meta.resolve("smol-toml"))};
 if (process.argv.includes('app-server')) {
+  const suppliedProfile = process.argv.flatMap((argument, index) => argument === "--config" || argument === "-c" ? [process.argv[index + 1]] : []).map(parseToml).map(config => config.permissions?.codex_security_deep_scan_worker).findLast(profile => profile !== undefined);
   let buffer = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => {
@@ -1399,7 +1478,7 @@ if (process.argv.includes('app-server')) {
       if (message.method === 'initialize') {
         result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: suppliedProfile ?? { extends: ':read-only' } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
       } else if (message.method === 'account/read') {

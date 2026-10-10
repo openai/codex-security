@@ -1,5 +1,5 @@
 import type { DeepReducerContext } from "../artifact-io.js";
-import type { WorkbenchDeepScanStore } from "./store.js";
+import type { DeepScanExecutionSettingsSnapshot } from "./recovery-settings.js";
 
 export type DeepScanTerminalReason = "saturated" | "capped";
 
@@ -23,8 +23,27 @@ export interface DeepScanConfig {
   maxTimeHours?: number;
 }
 
+export interface DeepScanFinalizationInput {
+  version: number;
+  resultPath: string | null;
+  resultSha256: string | null;
+  terminalReason: DeepScanTerminalReason;
+  omittedWorkerIds: string[];
+  selectedAt: string;
+}
+
 export interface DeepScanRunState {
   scanId: string;
+  startDisposition?: "created" | "joined";
+  schemaVersion?: number;
+  workflowVersion?: string;
+  finalizationInput?: DeepScanFinalizationInput;
+  usageOwner?: {
+    threadId: string | null;
+    turnId: string | null;
+    startedAt: string;
+  } | null;
+  executionSettings?: DeepScanExecutionSettingsSnapshot | null;
   status: DeepScanRunStatus;
   coordinatorGeneration?: number;
   createdAt?: string;
@@ -32,6 +51,8 @@ export interface DeepScanRunState {
   targetPath: string;
   scope: string;
   userContext?: string;
+  model?: string;
+  reasoningEffort?: string;
   scanDir: string;
   config: DeepScanConfig;
   dispatchedCount: number;
@@ -42,12 +63,29 @@ export interface DeepScanRunState {
   error?: string;
   persistedWorkers?: PersistedDeepScanWorker[];
   persistedDedupInputs?: PersistedDeepScanDedupInput[];
+  persistedMergeClaims?: PersistedDeepScanMergeClaim[];
+  committedMerge?: {
+    workerId: string;
+    resultManifestPath: string;
+    resultManifestSha256: string;
+    newFindings: number;
+  };
+}
+
+export interface PersistedDeepScanMergeClaim {
+  workerId: string;
+  previousWorkerId?: string;
+  previousResultPath?: string;
+  previousResultSha256?: string;
 }
 
 export interface PersistedDeepScanDedupInput {
   dedupWorkerId: string;
   discoveryWorkerId: string;
   inputOrder: number;
+  resultManifestPath?: string;
+  resultManifestSha256?: string;
+  attempt?: number;
 }
 
 export interface DeepScanCoordinatorClaim {
@@ -84,6 +122,7 @@ export interface PersistedDeepScanWorker extends Omit<
   DeepScanWorkerMutation,
   "scanId" | "replaceableFailureKind"
 > {
+  acceptedResultPath?: string;
   completionSequence?: number;
   consecutiveErrors?: number;
   mergeState: DeepScanMergeState;
@@ -99,10 +138,74 @@ export interface DedupCommit {
 }
 
 /** Durable operations implemented by the Python workbench. */
-export type DeepScanStore = Omit<
-  WorkbenchDeepScanStore,
-  "begin" | "coordinatorLeaseArgs"
->;
+export interface DeepScanStore {
+  begin(input: {
+    scanId?: string;
+    targetPath?: string;
+    scope?: string;
+    userContext?: string;
+    handoffClaimToken?: string;
+    model?: string;
+    reasoningEffort?: string;
+    threadId: string;
+    scanRoot: string;
+  }): Promise<DeepScanRunState>;
+  get(scanId: string, threadId: string): Promise<DeepScanRunState>;
+  claimCoordinator(
+    input: DeepScanCoordinatorLeaseInput,
+  ): Promise<DeepScanCoordinatorClaim>;
+  heartbeatCoordinator(
+    input: DeepScanCoordinatorLeaseInput,
+  ): Promise<DeepScanRunState>;
+  cancel(scanId: string, threadId: string): Promise<Record<string, unknown>>;
+  updateWorker(
+    update: DeepScanWorkerMutation,
+  ): Promise<PersistedDeepScanWorker>;
+  claimDedup(input: {
+    id: string;
+    scanId: string;
+    workerIds: string[];
+    promptPath: string;
+    artifactDir: string;
+  }): Promise<DeepScanRunState | void>;
+  commitDedup(commit: DedupCommit): Promise<DeepScanRunState>;
+  selectFinalization?(input: {
+    scanId: string;
+    coordinatorGeneration?: number;
+    reason: DeepScanTerminalReason;
+    manifestPath: string;
+    resultPath?: string;
+    omittedWorkerIds: string[];
+  }): Promise<DeepScanRunState>;
+  finish(input: {
+    scanId: string;
+    coordinatorGeneration?: number;
+    reason: DeepScanTerminalReason;
+    manifestPath: string;
+    stagedManifestPath?: string;
+    omittedWorkerIds: string[];
+  }): Promise<DeepScanRunState>;
+  fail(
+    scanId: string,
+    message: string,
+    status?: "failed" | "interrupted",
+    manifestPath?: string,
+    stagedManifestPath?: string,
+  ): Promise<DeepScanRunState>;
+  recordStoppedPublicationFailure(
+    scanId: string,
+    message: string,
+    coordinatorGeneration?: number,
+  ): Promise<DeepScanRunState>;
+  updateProgress(input: {
+    scanId: string;
+    handoffClaimToken?: string;
+    phase?: "preflight" | "discovery";
+    deepReviewPass?: number;
+    reviewItemsTotal?: number;
+    reviewItemsCompleted?: number;
+  }): Promise<void>;
+}
 
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {

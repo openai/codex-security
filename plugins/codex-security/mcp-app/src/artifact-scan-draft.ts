@@ -7,6 +7,8 @@ import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
+import scanManifestDocument from "../../schemas/scan-manifest.schema.json";
+import coverageDocument from "../../schemas/coverage.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
@@ -20,17 +22,9 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
+import type { ScanDraftInput } from "./accepted-audit.js";
+export type { ScanDraftInput } from "./accepted-audit.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
-
-export interface ScanDraftInput {
-  scanId: string;
-  complete?: boolean;
-  handoffClaimToken?: string;
-  scope?: JsonObject;
-  threatModel?: JsonObject;
-  findings: JsonObject[];
-  coverage: JsonObject;
-}
 
 export interface CompletedScanInput {
   scanId: string;
@@ -57,6 +51,11 @@ interface PreparedScanDraft {
   coverage: JsonObject;
 }
 
+/** Host-selected Deep aggregate, separate from model-authored draft fields. */
+export interface DeepScanPublication {
+  coordinatorGeneration?: number;
+  resultPath: string | null;
+}
 interface SavedScanDraft {
   input: ScanDraftInput;
   modifiedMs: number;
@@ -68,6 +67,29 @@ const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
 
 export const scanDraftInputSchema = loadArtifactZodSchema(
   schemaDocuments,
+  scanDraftDocument.$id,
+  "scanDraftInput",
+) as z.ZodType<ScanDraftInput>;
+
+// Sealed documents retain the existing public ID contract; live drafts require UUIDs.
+const canonicalScanDraftInputSchema = loadArtifactZodSchema(
+  [
+    commonSchema,
+    {
+      ...scanDraftDocument,
+      $defs: {
+        ...scanDraftDocument.$defs,
+        scanId: scanManifestDocument.properties.scan.properties.id,
+        surface: {
+          ...scanDraftDocument.$defs.surface,
+          properties: {
+            ...scanDraftDocument.$defs.surface.properties,
+            id: coverageDocument.properties.surfaces.items.properties.id,
+          },
+        },
+      },
+    },
+  ] as SchemaDocument[],
   scanDraftDocument.$id,
   "scanDraftInput",
 ) as z.ZodType<ScanDraftInput>;
@@ -84,6 +106,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   input: ScanDraftInput,
   runWorkbench: RunArtifactWorkbench,
   signal?: AbortSignal,
+  publication?: DeepScanPublication,
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
@@ -157,7 +180,12 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
       await Promise.all([
         replaceArtifactJson(checkpointPath, snapshot),
-        replaceArtifactJson(draftPath, draft),
+        replaceArtifactJson(draftPath, {
+          ...draft,
+          ...(publication === undefined
+            ? {}
+            : { deepScanPublication: publication }),
+        }),
       ]);
       const arguments_ = [
         "write-scan-draft",
@@ -1021,6 +1049,22 @@ function reconcileDeferredSurfaces(
   return resolved;
 }
 
+/** Read the immutable checkpoint selected by the current worker writer. */
+export async function readCurrentScanDraftCheckpoint(
+  context: ArtifactContext,
+): Promise<JsonObject | undefined> {
+  const head = await readCheckpointHead(context, "current");
+  if (!head) return;
+  return parseJsonObject(
+    await readArtifactText(
+      context,
+      ["checkpoints", head.checkpoint],
+      "current scan checkpoint",
+    ),
+    "current scan checkpoint",
+  );
+}
+
 async function readCheckpointHead(
   context: ArtifactContext,
   kind: "current" | "archived",
@@ -1186,7 +1230,6 @@ async function readPreviousScanDraft(
     contents[2]!,
     "previous scan draft coverage",
   );
-  const scan = requireObject(manifest.scan, "previous scan draft.scan");
   return {
     digest,
     // File-authored coverage may leave its manifest unchanged; tool writes have a head.
@@ -1194,12 +1237,10 @@ async function readPreviousScanDraft(
       (await readCheckpointHead(context, "current")) === undefined
         ? saved[2]!.modifiedMs
         : Math.min(...saved.map((record) => record!.modifiedMs)),
-    input: parsePersistedCheckpoint({
+    input: parseCanonicalScanDraft({
       scanId: context.scanId,
-      ...(scan.complete === false ? { complete: false } : {}),
-      ...(isObject(scan.scope) ? { scope: scan.scope } : {}),
-      ...(isObject(scan.threatModel) ? { threatModel: scan.threatModel } : {}),
-      findings: findings.findings,
+      manifest,
+      findings,
       coverage,
     }),
   };
@@ -1725,8 +1766,83 @@ export async function getCodexSecurityCompletedScan(
   return { scanId: parsed.scanId, manifest, findings, coverage };
 }
 
+/** Project canonical documents through the same semantic parser as worker drafts. */
+export async function readScanAuditDraft(input: {
+  root: string;
+  scanId?: string;
+  manifest: JsonObject;
+  findings: JsonObject;
+  coverage: JsonObject;
+}): Promise<ScanDraftInput> {
+  const context: ArtifactContext = {
+    root: input.root,
+    repoRoot: input.root,
+    layout: "scan",
+    scanId: input.scanId,
+  };
+  const head = await readCheckpointHead(context, "current");
+  if (head !== undefined) {
+    const { saved } = await readPreviousScanDocuments(context);
+    // The writer commits its head before replacing the canonical documents.
+    if (
+      head.modifiedMs >=
+      Math.min(...saved.map((record) => record?.modifiedMs ?? 0))
+    ) {
+      const draft = parsePersistedCheckpoint(
+        parseJsonObject(
+          await readArtifactText(
+            context,
+            ["checkpoints", head.checkpoint],
+            "current scan checkpoint",
+          ),
+          "current scan checkpoint",
+        ),
+      );
+      if (draft.scanId !== input.scanId)
+        throw new Error(
+          "scan checkpoint: current checkpoint belongs to a different scan.",
+        );
+      return draft;
+    }
+  }
+  return parseCanonicalScanDraft(input);
+}
+
+export function parseCanonicalScanDraft(input: {
+  scanId?: string;
+  manifest: JsonObject;
+  findings: JsonObject;
+  coverage: JsonObject;
+}): ScanDraftInput {
+  const scan = requireObject(input.manifest.scan, "scan draft manifest.scan");
+  for (const scanId of [
+    scan.id,
+    input.findings.scanId,
+    input.coverage.scanId,
+  ]) {
+    if (scanId !== undefined && scanId !== input.scanId) {
+      throw new Error(
+        "scan draft: canonical documents belong to a different scan.",
+      );
+    }
+  }
+  return parsePersistedCheckpoint(
+    {
+      scanId: input.scanId,
+      ...(scan.complete === undefined ? {} : { complete: scan.complete }),
+      ...(scan.scope === undefined ? {} : { scope: scan.scope }),
+      ...(scan.threatModel === undefined
+        ? {}
+        : { threatModel: scan.threatModel }),
+      findings: input.findings.findings,
+      coverage: input.coverage,
+    },
+    canonicalScanDraftInputSchema,
+  );
+}
+
 export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
-  const parsed = parseScanDraftDocument(input);
+  const parsed = parseSemanticScanDraft(input, scanDraftInputSchema);
   const deferredIds = new Set<string>();
   const ambiguousIds = ambiguousGenericDeferredIds([parsed]);
   for (const row of parsed.coverage.deferred as JsonObject[]) {
@@ -1748,8 +1864,11 @@ export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
   return parsed;
 }
 
-function parseScanDraftDocument(input: unknown): ScanDraftInput {
-  const parsed = scanDraftInputSchema.parse(input);
+function parseSemanticScanDraft(
+  input: unknown,
+  schema: z.ZodType<ScanDraftInput>,
+): ScanDraftInput {
+  const parsed = schema.parse(input);
   validateFindingSemantics(parsed.findings);
   validateCoverageSemantics(parsed.coverage);
   return parsed;
@@ -1759,19 +1878,25 @@ function parseScanDraftDocument(input: unknown): ScanDraftInput {
 export function parsePersistedScanDraft(
   input: Record<string, unknown>,
 ): ScanDraftInput {
+  return parsePersistedDraft(input, scanDraftInputSchema);
+}
+
+function parsePersistedDraft(
+  input: Record<string, unknown>,
+  schema: z.ZodType<ScanDraftInput>,
+): ScanDraftInput {
   const compatible = structuredClone(input);
-  if (!Array.isArray(compatible.findings)) {
-    return parseScanDraftDocument(compatible);
+  if (Array.isArray(compatible.findings)) {
+    for (const finding of compatible.findings) {
+      if (isObject(finding)) normalizePersistedFindingDetails(finding);
+    }
   }
-  for (const finding of compatible.findings) {
-    if (!isObject(finding)) continue;
-    normalizePersistedFindingDetails(finding);
-  }
-  return parseScanDraftDocument(compatible);
+  return parseSemanticScanDraft(compatible, schema);
 }
 
 function parsePersistedCheckpoint(
   input: Record<string, unknown>,
+  schema = scanDraftInputSchema,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   if (isObject(compatible.scope)) {
@@ -1800,7 +1925,7 @@ function parsePersistedCheckpoint(
       delete finding.fingerprints;
     }
   }
-  return parsePersistedScanDraft(compatible);
+  return parsePersistedDraft(compatible, schema);
 }
 
 function normalizePersistedFindingDetails(finding: JsonObject): void {

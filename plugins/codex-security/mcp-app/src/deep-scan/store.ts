@@ -28,9 +28,11 @@ type JsonObject = Record<string, unknown>;
 export type WorkbenchRunner = (
   args: string[],
   input?: string,
+  selectFinalization?: boolean,
+  withExecutionSettings?: boolean,
 ) => Promise<JsonObject>;
 
-const WORKFLOW_VERSION = "deep-scan-mcp/v1";
+const WORKFLOW_VERSION = "deep-security-scan/v1";
 const MAX_IDEMPOTENT_PERSISTENCE_ATTEMPTS = 3;
 const PERSISTENCE_RETRY_BASE_DELAY_MS = 100;
 
@@ -167,7 +169,7 @@ export class WorkbenchDeepScanStore {
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
     }
-    return run;
+    return { ...run, startDisposition };
   }
 
   async get(scanId: string, threadId: string): Promise<DeepScanRunState> {
@@ -196,17 +198,23 @@ export class WorkbenchDeepScanStore {
   async claimCoordinator(
     input: DeepScanCoordinatorLeaseInput,
   ): Promise<DeepScanCoordinatorClaim> {
-    const result = await this.enqueueWrite([
-      "claim-deep-scan-coordinator",
-      "--scan-id",
-      input.scanId,
-      "--thread-id",
-      input.threadId,
-      ...this.coordinatorLeaseArgs(input.scanId),
-      ...(input.handoffClaimToken
-        ? ["--claim-token", input.handoffClaimToken]
-        : []),
-    ]);
+    const result = await this.enqueueWrite(
+      [
+        "claim-deep-scan-coordinator",
+        "--scan-id",
+        input.scanId,
+        "--thread-id",
+        input.threadId,
+        ...this.coordinatorLeaseArgs(input.scanId),
+        ...(input.handoffClaimToken
+          ? ["--claim-token", input.handoffClaimToken]
+          : []),
+      ],
+      false,
+      undefined,
+      false,
+      true,
+    );
     const run = parseDeepScan(result);
     const disposition = result.coordinatorDisposition;
     if (
@@ -260,6 +268,16 @@ export class WorkbenchDeepScanStore {
     return { ...lease.run, updatedAt };
   }
 
+  async cancel(scanId: string, threadId: string): Promise<JsonObject> {
+    return this.enqueueWrite([
+      "cancel-scan",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      threadId,
+    ]);
+  }
+
   async updateWorker(
     update: DeepScanWorkerMutation,
   ): Promise<PersistedDeepScanWorker> {
@@ -292,8 +310,13 @@ export class WorkbenchDeepScanStore {
       ],
       true,
     );
-    const worker = parseWorker(result, update.id);
     const state = objectValue(result.deepScan, "deepScan");
+    const worker = parseWorker(
+      state.workerReceipt
+        ? { deepScan: { ...state, workers: [state.workerReceipt] } }
+        : result,
+      update.id,
+    );
     return state.consecutiveErrors === undefined
       ? worker
       : {
@@ -311,25 +334,27 @@ export class WorkbenchDeepScanStore {
     workerIds: string[];
     promptPath: string;
     artifactDir: string;
-  }): Promise<void> {
-    await this.enqueueWrite(
-      [
-        "claim-deep-scan-dedup",
-        "--scan-id",
-        input.scanId,
-        "--worker-id",
-        input.id,
-        "--prompt-path",
-        input.promptPath,
-        "--artifact-dir",
-        input.artifactDir,
-        ...this.coordinatorLeaseArgs(input.scanId),
-        ...input.workerIds.flatMap((workerId) => [
-          "--input-worker-id",
-          workerId,
-        ]),
-      ],
-      true,
+  }): Promise<DeepScanRunState> {
+    return parseDeepScan(
+      await this.enqueueWrite(
+        [
+          "claim-deep-scan-dedup",
+          "--scan-id",
+          input.scanId,
+          "--worker-id",
+          input.id,
+          "--prompt-path",
+          input.promptPath,
+          "--artifact-dir",
+          input.artifactDir,
+          ...this.coordinatorLeaseArgs(input.scanId),
+          ...input.workerIds.flatMap((workerId) => [
+            "--input-worker-id",
+            workerId,
+          ]),
+        ],
+        true,
+      ),
     );
   }
 
@@ -356,8 +381,45 @@ export class WorkbenchDeepScanStore {
     );
   }
 
+  async selectFinalization(input: {
+    scanId: string;
+    coordinatorGeneration?: number;
+    reason: DeepScanTerminalReason;
+    manifestPath: string;
+    resultPath?: string;
+    omittedWorkerIds: string[];
+  }): Promise<DeepScanRunState> {
+    return parseDeepScan(
+      await this.enqueueWrite(
+        [
+          "finish-deep-scan",
+          "--scan-id",
+          input.scanId,
+          ...(input.coordinatorGeneration === undefined
+            ? this.coordinatorLeaseArgs(input.scanId)
+            : [
+                "--coordinator-generation",
+                String(input.coordinatorGeneration),
+              ]),
+          "--terminal-reason",
+          input.reason,
+          "--manifest-path",
+          input.manifestPath,
+          ...input.omittedWorkerIds.flatMap((workerId) => [
+            "--omitted-worker-id",
+            workerId,
+          ]),
+        ],
+        true,
+        JSON.stringify({ resultPath: input.resultPath ?? null }),
+        true,
+      ),
+    );
+  }
+
   async finish(input: {
     scanId: string;
+    coordinatorGeneration?: number;
     reason: DeepScanTerminalReason;
     manifestPath: string;
     stagedManifestPath?: string;
@@ -369,7 +431,12 @@ export class WorkbenchDeepScanStore {
           "finish-deep-scan",
           "--scan-id",
           input.scanId,
-          ...this.coordinatorLeaseArgs(input.scanId),
+          ...(input.coordinatorGeneration === undefined
+            ? this.coordinatorLeaseArgs(input.scanId)
+            : [
+                "--coordinator-generation",
+                String(input.coordinatorGeneration),
+              ]),
           "--terminal-reason",
           input.reason,
           "--manifest-path",
@@ -481,12 +548,19 @@ export class WorkbenchDeepScanStore {
     args: string[],
     retryTransientFailure = false,
     input?: string,
+    selectFinalization = false,
+    withExecutionSettings = false,
   ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
         return retryTransientFailure
-          ? await this.runIdempotentPersistence(args)
-          : await this.runWorkbench(args, input);
+          ? await this.runIdempotentPersistence(args, input, selectFinalization)
+          : await this.runWorkbench(
+              args,
+              input,
+              selectFinalization,
+              withExecutionSettings,
+            );
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
         const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;
@@ -518,11 +592,15 @@ export class WorkbenchDeepScanStore {
   }
 
   /** Replay only existing, same-identity workbench mutations after transient failures. */
-  private async runIdempotentPersistence(args: string[]): Promise<JsonObject> {
+  private async runIdempotentPersistence(
+    args: string[],
+    input?: string,
+    selectFinalization = false,
+  ): Promise<JsonObject> {
     const startedAt = Date.now();
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.runWorkbench(args);
+        return await this.runWorkbench(args, input, selectFinalization);
       } catch (error) {
         if (!isTransientPersistenceError(error)) {
           throw error;
@@ -697,6 +775,17 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
   };
   return {
     scanId: requiredString(value.scanId, "deepScan.scanId"),
+    schemaVersion: optionalPositiveInteger(value.schemaVersion),
+    workflowVersion: optionalString(value.workflowVersion),
+    finalizationInput: parseFinalizationInput(value.finalizationInput),
+    usageOwner: parseUsageOwner(value.usageOwner),
+    executionSettings:
+      value.executionSettings == null
+        ? undefined
+        : (objectValue(
+            value.executionSettings,
+            "deepScan.executionSettings",
+          ) as unknown as DeepScanRunState["executionSettings"]),
     status,
     coordinatorGeneration: optionalPositiveInteger(value.coordinatorGeneration),
     createdAt: optionalString(value.createdAt),
@@ -704,6 +793,8 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     targetPath: requiredString(value.targetPath, "deepScan.targetPath"),
     scope: requiredString(value.scope, "deepScan.scope"),
     userContext: optionalString(value.userContext),
+    model: optionalString(value.model),
+    reasoningEffort: optionalString(value.reasoningEffort),
     scanDir: requiredString(value.scanDir, "deepScan.scanDir"),
     config,
     dispatchedCount: nonNegativeInteger(
@@ -723,6 +814,81 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     error: optionalString(value.error),
     persistedWorkers: parsePersistedWorkers(value.workers),
     persistedDedupInputs: parsePersistedDedupInputs(value.dedupInputs),
+    persistedMergeClaims: Array.isArray(value.mergeClaims)
+      ? value.mergeClaims.map((candidate) => {
+          const claim = objectValue(candidate, "deepScan.mergeClaim");
+          return {
+            workerId: requiredString(
+              claim.workerId,
+              "deepScan.mergeClaim.workerId",
+            ),
+            previousWorkerId: optionalString(claim.previousWorkerId),
+            previousResultPath: optionalString(claim.previousResultPath),
+            previousResultSha256: optionalString(claim.previousResultSha256),
+          };
+        })
+      : [],
+    ...(value.committedMerge
+      ? { committedMerge: parseCommittedMerge(value.committedMerge) }
+      : {}),
+  };
+}
+
+function parseUsageOwner(value: unknown): DeepScanRunState["usageOwner"] {
+  if (value === undefined || value === null) return null;
+  const owner = objectValue(value, "deepScan.usageOwner");
+  return {
+    threadId: optionalString(owner.threadId) ?? null,
+    turnId: optionalString(owner.turnId) ?? null,
+    startedAt: requiredString(owner.startedAt, "deepScan.usageOwner.startedAt"),
+  };
+}
+
+function parseFinalizationInput(
+  value: unknown,
+): DeepScanRunState["finalizationInput"] {
+  if (value === undefined || value === null) return undefined;
+  const input = objectValue(value, "deepScan.finalizationInput");
+  if (
+    input.terminalReason !== "saturated" &&
+    input.terminalReason !== "capped"
+  ) {
+    throw new Error(
+      "Codex Security workbench returned invalid finalization terminal reason.",
+    );
+  }
+  if (!Array.isArray(input.omittedWorkerIds)) {
+    throw new Error(
+      "Codex Security workbench returned invalid finalization omissions.",
+    );
+  }
+  return {
+    version: positiveInteger(
+      input.version,
+      "deepScan.finalizationInput.version",
+    ),
+    resultPath:
+      input.resultPath === null
+        ? null
+        : requiredString(
+            input.resultPath,
+            "deepScan.finalizationInput.resultPath",
+          ),
+    resultSha256:
+      input.resultSha256 === null
+        ? null
+        : requiredString(
+            input.resultSha256,
+            "deepScan.finalizationInput.resultSha256",
+          ),
+    terminalReason: input.terminalReason,
+    omittedWorkerIds: input.omittedWorkerIds.map((id) =>
+      requiredString(id, "omittedWorkerId"),
+    ),
+    selectedAt: requiredString(
+      input.selectedAt,
+      "deepScan.finalizationInput.selectedAt",
+    ),
   };
 }
 
@@ -750,8 +916,35 @@ function parsePersistedDedupInputs(
         input.inputOrder,
         "deepScan.dedupInput.inputOrder",
       ),
+      resultManifestPath: optionalString(input.resultManifestPath),
+      resultManifestSha256: optionalString(input.resultManifestSha256),
+      attempt: optionalPositiveInteger(input.attempt),
     };
   });
+}
+
+function parseCommittedMerge(
+  value: unknown,
+): NonNullable<DeepScanRunState["committedMerge"]> {
+  const commit = objectValue(value, "deepScan.committedMerge");
+  return {
+    workerId: requiredString(
+      commit.workerId,
+      "deepScan.committedMerge.workerId",
+    ),
+    resultManifestPath: requiredString(
+      commit.resultManifestPath,
+      "deepScan.committedMerge.resultManifestPath",
+    ),
+    resultManifestSha256: requiredString(
+      commit.resultManifestSha256,
+      "deepScan.committedMerge.resultManifestSha256",
+    ),
+    newFindings: nonNegativeInteger(
+      commit.newFindings,
+      "deepScan.committedMerge.newFindings",
+    ),
+  };
 }
 
 function parsePersistedWorkers(value: unknown): PersistedDeepScanWorker[] {
@@ -805,6 +998,7 @@ function parsePersistedWorker(value: JsonObject): PersistedDeepScanWorker {
     attempt: nonNegativeInteger(value.attempt, "deepScan.worker.attempt"),
     threadId: optionalString(value.sdkThreadId),
     resultManifestPath: optionalString(value.resultManifestPath),
+    acceptedResultPath: optionalString(value.acceptedResultPath),
     completionSequence: optionalPositiveInteger(value.completionSequence),
     error: optionalString(value.error),
   };
