@@ -234,7 +234,8 @@
                 },
                 "path": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:)(?!\\.$)(?!.*\\x00).+$"
                 },
                 "startLine": {
                   "type": "integer",
