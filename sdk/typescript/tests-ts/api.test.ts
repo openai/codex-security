@@ -947,12 +947,15 @@ describe("CodexSecurity orchestration", () => {
       pythonPath: "/definitely/missing/python",
     });
     const onScanStarted = mock();
+    const onScanRegistered = mock();
     await expect(
       client.run("/definitely/missing/repository", {
         onScanStarted,
+        onScanRegistered,
       }),
     ).rejects.toBeInstanceOf(InvalidTargetError);
     expect(onScanStarted).not.toHaveBeenCalled();
+    expect(onScanRegistered).not.toHaveBeenCalled();
     await client.close();
   });
 
@@ -1876,6 +1879,14 @@ describe("CodexSecurity orchestration", () => {
         if (typeof instructionsFile === "string") {
           await writeFile(join(scanDir, instructionsFile), instructions);
         }
+        const authentication: Record<string, string> =
+          index === 0
+            ? {}
+            : {
+                cli_auth_credentials_store: index % 2 ? "file" : "ephemeral",
+                forced_login_method: index % 2 ? "api" : "chatgpt",
+                forced_chatgpt_workspace_id: `synthetic-workspace-${index}`,
+              };
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -1883,6 +1894,7 @@ describe("CodexSecurity orchestration", () => {
               model: "openai.gpt-5.6-luna",
               model_provider: "amazon-bedrock",
               ...overrides,
+              ...authentication,
             },
           },
           {
@@ -1945,6 +1957,16 @@ describe("CodexSecurity orchestration", () => {
                     windows,
                   );
                   expect(options.config?.["windows"]).toEqual(windows);
+                  for (const key of [
+                    "cli_auth_credentials_store",
+                    "forced_login_method",
+                    "forced_chatgpt_workspace_id",
+                  ] as const) {
+                    const expected = (authentication[key] ??
+                      DEFAULT_CODEX_CONFIG[key]) as string | undefined;
+                    expect(workerConfig[key]).toEqual(expected);
+                    expect(options.config?.[key]).toEqual(expected);
+                  }
                   for (const key of [
                     "model_context_window",
                     "model_auto_compact_token_limit",
@@ -2046,26 +2068,52 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("isolates authentication observer failures from scan startup", async () => {
+  test.each(["onAuthentication", "onScanRegistered"] as const)(
+    "isolates %s observer failures from scan startup",
+    async (observer) => {
+      const { root, repository, codexHome } = await runtimeDirectories();
+      const observerErrors: Array<[ScanObserverName, string]> = [];
+      const client = TestClient.withDependencies({
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: codexFactory(scanDidNotStart),
+      });
+
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "scan"),
+          [observer]: () => fail("observer exploded"),
+          onObserverError: collectObserverErrors(observerErrors),
+        }),
+      ).rejects.toThrow("scan did not start");
+      expect(observerErrors).toEqual([[observer, "observer exploded"]]);
+      await client.close();
+    },
+  );
+
+  test("does not announce a scan when its output directory registration fails", async () => {
     const { root, repository, codexHome } = await runtimeDirectories();
-    const observerErrors: Array<[ScanObserverName, string]> = [];
+    const onOutputDirReady = mock();
+    const onScanRegistered = mock();
     const client = TestClient.withDependencies({
       prepareRuntime: async () => preparedRuntime(codexHome),
       resolvePluginPython: async () => "/managed/python",
       repositoryRevision: async () => null,
+      runWorkbench: async () => {
+        throw new Error("Output directory already registered");
+      },
       createCodex: codexFactory(scanDidNotStart),
     });
-
     await expect(
       client.run(repository, {
         outputDir: join(root, "scan"),
-        onAuthentication: () => fail("authentication observer exploded"),
-        onObserverError: collectObserverErrors(observerErrors),
+        onOutputDirReady,
+        onScanRegistered,
       }),
-    ).rejects.toThrow("scan did not start");
-    expect(observerErrors).toEqual([
-      ["onAuthentication", "authentication observer exploded"],
-    ]);
+    ).rejects.toThrow("Output directory already registered");
+    expect(onOutputDirReady).toHaveBeenCalled();
+    expect(onScanRegistered).not.toHaveBeenCalled();
     await client.close();
   });
 
@@ -2317,7 +2365,7 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each(
-    (["preparation", "empty", "legacy", "commit", "rollback"] as const).flatMap(
+    (["preparation", "empty", "commit", "rollback"] as const).flatMap(
       (boundary) =>
         (["real", "mock", "import"] as const).flatMap((mode) =>
           (mode === "import"
@@ -2404,13 +2452,6 @@ describe("CodexSecurity orchestration", () => {
           "            connection.recv(1)",
           "def main(**kwargs):",
           "    sys.stdout.reconfigure(newline='\\r\\n')",
-          ...(boundary === "legacy"
-            ? [
-                "    if sys.argv[1:3] == ['register-cli-scan', '--help']:",
-                "        print('--archive-existing --archived-scan-dir')",
-                "        return",
-              ]
-            : []),
           "    if sys.argv[1:2] == ['register-cli-scan'] and '--help' not in sys.argv:",
           ...(mode === "real"
             ? [
@@ -7600,6 +7641,171 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await client.close();
     expect(scanSignal?.aborted).toBe(false);
   });
+
+  test.each(["standard", "deep"] as const)(
+    "isolates concurrent managed %s sessions at the Codex child boundary",
+    async (mode) => {
+      const clients: TestClient[] = [];
+      try {
+        const outcomes = await Promise.allSettled(
+          ["first", "second"].map(async (name) => {
+            const root = await temporaryDirectory();
+            const repository = join(root, "repository");
+            const codexHome = join(root, "codex-home");
+            const scanDir = join(root, "scan");
+            const preload = join(root, "fake-codex.mjs");
+            const marker = join(root, "invocation.jsonl");
+            await Promise.all([
+              mkdir(repository),
+              mkdir(codexHome),
+              mkdir(scanDir, { mode: 0o700 }),
+            ]);
+            await writeFile(
+              preload,
+              [
+                'import { appendFileSync } from "node:fs";',
+                'let prompt = ""; for await (const chunk of process.stdin) prompt += chunk;',
+                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `console.log(JSON.stringify({type:"thread.started",thread_id:${JSON.stringify(`fixture-${name}-thread`)}}));`,
+                'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"scan complete"}}));',
+                'console.log(JSON.stringify({type:"turn.completed",usage:null}));',
+                "process.exit(0);",
+              ].join("\n"),
+            );
+            const fake = nodeCodex(preload);
+            const model = `fixture-${name}-model`;
+            const provider = `fixture-${name}-provider`;
+            const client = new TestClient(
+              {
+                codexOverrides: {
+                  model,
+                  model_provider: provider,
+                  model_reasoning_effort: "ultra",
+                  model_reasoning_summary:
+                    name === "first" ? "none" : "concise",
+                  features: {
+                    multi_agent_v2: { max_concurrent_threads_per_session: 4 },
+                  },
+                },
+              },
+              {
+                environment: {
+                  OPENAI_API_KEY: `synthetic-${name}-key`,
+                  CODEX_CLI_PATH: fake.command.command,
+                },
+                prepareRuntime: async () => ({
+                  ...preparedRuntime(codexHome),
+                  configPath: join(codexHome, "preflight.toml"),
+                  deepScanConfigPath: join(codexHome, "deep.toml"),
+                  environment: {
+                    ...fake.environment,
+                    FIXTURE_SCAN_VALUE: name,
+                  },
+                }),
+                resolvePluginPython: async () => "/managed/python",
+                prepareOutputDir: async () => scanDir,
+                repositoryRevision: async () => "deadbeef",
+                createCodex: (options: CodexOptions) => {
+                  const codex = new Codex(options);
+                  return {
+                    startThread: (threadOptions: ThreadOptions) => {
+                      const thread = codex.startThread(threadOptions);
+                      return {
+                        get id() {
+                          return thread.id;
+                        },
+                        runStreamed: async (
+                          ...args: Parameters<typeof thread.runStreamed>
+                        ) => {
+                          if (thread.id === null) {
+                            await copyCompletedScan(root);
+                            if (mode === "deep") {
+                              const coveragePath = join(
+                                scanDir,
+                                "coverage.json",
+                              );
+                              const coverage = JSON.parse(
+                                await readFile(coveragePath, "utf8"),
+                              );
+                              coverage.mode = "deep_repository";
+                              const coverageBytes = JSON.stringify(coverage);
+                              await writeFile(coveragePath, coverageBytes);
+                              const manifestPath = join(
+                                scanDir,
+                                "scan-manifest.json",
+                              );
+                              const manifest = JSON.parse(
+                                await readFile(manifestPath, "utf8"),
+                              );
+                              manifest.scan.artifacts.find(
+                                (artifact: { path: string }) =>
+                                  artifact.path === "coverage.json",
+                              ).sha256 = hash("sha256", coverageBytes);
+                              await writeFile(
+                                manifestPath,
+                                JSON.stringify(manifest),
+                              );
+                            }
+                          }
+                          return thread.runStreamed(...args);
+                        },
+                      };
+                    },
+                  };
+                },
+              },
+            );
+            clients.push(client);
+            const postScanPrompt = "Summarize the completed synthetic scan.";
+            const result = await client.run(repository, {
+              mode,
+              postScanPrompt,
+            });
+            expect(result.threadId).toBe(`fixture-${name}-thread`);
+            expect(result.turnResult.usage).toBeNull();
+            const children = (await readFile(marker, "utf8"))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            expect(children).toHaveLength(2);
+            expect(children[1].prompt).toBe(postScanPrompt);
+            expect(children[1].args).toContain("resume");
+            expect(children[1].args).toContain(`fixture-${name}-thread`);
+            for (const child of children) {
+              expect(child.executable).toBe(
+                process.platform === "win32"
+                  ? win32.toNamespacedPath(fake.command.command)
+                  : fake.command.command,
+              );
+              expect(child.home).toBe(codexHome);
+              expect(child.key).toBe(`synthetic-${name}-key`);
+              expect(child.value).toBe(name);
+              expect(child.args).toContain(`model=${JSON.stringify(model)}`);
+              expect(child.args).toContain(
+                `model_provider=${JSON.stringify(provider)}`,
+              );
+              expect(child.args).toContain('model_reasoning_effort="ultra"');
+              expect(child.args).toContain(
+                `model_reasoning_summary=${JSON.stringify(name === "first" ? "none" : "concise")}`,
+              );
+              expect(child.args).toContain(
+                "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+              );
+              expect(child.args).toContain(
+                'default_permissions="codex_security_scan"',
+              );
+              expect(child.args).toContain('approval_policy="on-request"');
+            }
+          }),
+        );
+        for (const outcome of outcomes) {
+          if (outcome.status === "rejected") throw outcome.reason;
+        }
+      } finally {
+        await Promise.all(clients.map((client) => client.close()));
+      }
+    },
+  );
 
   test("closes a real Codex subprocess cleanly after a streamed terminal failure", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();

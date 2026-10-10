@@ -318,6 +318,154 @@ for (const mode of ["revisions", "local-patch"]) {
   });
 }
 
+for (const [mode, undoStagedChange] of [
+  ["revisions", false],
+  ["local-patch", false],
+  ["local-patch", true],
+] as const) {
+  test(`${mode} inventories type changes with staged change undone ${undoStagedChange}`, () => {
+    const f = fixture();
+    f.write("routes.py");
+    const changed = join(f.repo, "changed.py");
+    symlinkSync("routes.py", changed, "file");
+    const base = f.commit();
+    rmSync(changed);
+    f.write("changed.py", "changed = True\n");
+    if (undoStagedChange) {
+      git(f.repo, "add", ".");
+      rmSync(changed);
+      symlinkSync("routes.py", changed, "file");
+    } else if (mode === "revisions") f.commit();
+    const inventory = f
+      .success("generate-in-scope-files", [
+        "--scope",
+        ".",
+        "--diff-base",
+        base,
+        "--diff-mode",
+        mode,
+      ])
+      .split("\n");
+    const ranked = f.rows("make-diff-rank-input", [
+      "--base",
+      base,
+      "--mode",
+      mode,
+    ]);
+    expect(inventory.includes("changed.py")).toBe(!undoStagedChange);
+    expect(ranked.some(({ path }) => path === "changed.py")).toBe(
+      !undoStagedChange,
+    );
+  });
+}
+
+for (const mode of ["revisions", "local-patch"] as const) {
+  for (const replacement of ["symlink", "gitlink"] as const) {
+    test(`${mode} inventories exclude files replaced by ${replacement}`, () => {
+      const f = fixture();
+      f.write("README.md", "fixture\n");
+      const source = f.write("replaced.py", "old source\n");
+      const base = f.commit();
+      if (replacement === "symlink") {
+        rmSync(source);
+        symlinkSync("README.md", source, "file");
+      } else {
+        const origin = join(f.root, "origin");
+        mkdirSync(origin);
+        git(origin, "init", "-q");
+        writeFileSync(join(origin, "README.md"), "fixture\n");
+        git(origin, "add", ".");
+        git(origin, "commit", "-qm", "Source fixture");
+        git(f.repo, "rm", "-f", "replaced.py");
+        git(
+          f.repo,
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          origin,
+          "replaced.py",
+        );
+      }
+      f.write("visible.py");
+      git(f.repo, "add", ".");
+      if (mode === "revisions") f.commit();
+      const expected =
+        replacement === "gitlink"
+          ? [".gitmodules", "visible.py"]
+          : ["visible.py"];
+      expect(
+        f
+          .success("generate-in-scope-files", [
+            "--scope",
+            ".",
+            "--diff-base",
+            base,
+            "--diff-mode",
+            mode,
+          ])
+          .trim()
+          .split("\n"),
+      ).toEqual(expected);
+      expect(
+        f
+          .rows("make-diff-rank-input", ["--base", base, "--mode", mode])
+          .map(({ path }) => path),
+      ).toEqual(expected);
+    });
+  }
+}
+
+test("local diff inventory skips unreadable files", () => {
+  const f = fixture();
+  f.write("tracked.py");
+  const base = f.commit();
+  f.write("unreadable.py");
+  f.write("readable.py");
+  const preload = join(f.root, "read-error.cjs");
+  writeFileSync(
+    preload,
+    `
+const failure = () => { throw Object.assign(new Error("Synthetic unreadable file"), { code: "EACCES" }); };
+const fs = require("node:fs");
+const open = fs.openSync;
+fs.openSync = (path, ...args) => String(path).endsWith("unreadable.py") ? failure() : open(path, ...args);
+require("node:module").syncBuiltinESMExports();
+const Module = require("node:module");
+const native = Module._extensions[".node"];
+Module._extensions[".node"] = (loaded, path) => {
+  native(loaded, path);
+  if (!path.endsWith("windows.node")) return;
+  loaded.exports = new Proxy(loaded.exports, { get(exports, key) {
+    const value = Reflect.get(exports, key);
+    if (key !== "openWindowsFile") return value;
+    return (path, ...args) => {
+      const result = value(path, ...args);
+      if (path.toString("utf16le").endsWith("unreadable.py") && result.handle) {
+        return { ...result, handle: new Proxy(result.handle, { get(handle, key) {
+          if (key === "read") return failure;
+          const member = Reflect.get(handle, key);
+          return typeof member === "function" ? member.bind(handle) : member;
+        }}) };
+      }
+      return result;
+    };
+  }});
+};
+`,
+  );
+  const result = f.run(
+    "generate-in-scope-files",
+    ["--scope", ".", "--diff-base", base, "--diff-mode", "local-patch"],
+    {
+      ...f.toolEnvironment,
+      NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
+    },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(readFileSync(f.out, "utf8")).toBe("readable.py\n");
+});
+
 test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   "ignored tracked access errors preserve the existing inventory",
   () => {

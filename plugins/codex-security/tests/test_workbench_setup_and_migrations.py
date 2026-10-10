@@ -92,8 +92,12 @@ EXPECTED_MIGRATIONS = [
 ]
 
 
-@pytest.mark.parametrize("code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC])
-def test_state_directory_failure_preserves_original_exception(workbench_api, tmp_path, code):
+@pytest.mark.parametrize(
+    "code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST]
+)
+def test_state_directory_failure_preserves_original_exception(
+    workbench_api, tmp_path, code, capsys
+):
     error = OSError(code, os.strerror(code), str(tmp_path / "state"))
     connect = workbench_api["connect"]
     with (
@@ -109,11 +113,14 @@ def test_state_directory_failure_preserves_original_exception(workbench_api, tmp
         connect()
     assert str(failure.value) == str(error)
     assert failure.value is error
-    assert getattr(error, "_codex_security_state_unavailable", False) == (code != errno.ENOSPC)
+    detail = capsys.readouterr().err
+    assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+    assert "SQLite journal files" in detail
+    assert "CODEX_SECURITY_STATE_DIR" in detail
 
 
 @pytest.mark.parametrize("during_open", [True, False])
-def test_state_open_failure_metadata_is_limited_to_sqlite_connect(
+def test_state_open_or_migration_failure_preserves_original_exception(
     workbench_api, tmp_path, during_open, capsys
 ):
     error = sqlite3.OperationalError("unable to open database file")
@@ -139,7 +146,6 @@ def test_state_open_failure_metadata_is_limited_to_sqlite_connect(
             connect()
         assert failure.value is error
         assert str(error) == "unable to open database file"
-        assert getattr(error, "_codex_security_state_unavailable", False) is during_open
         detail = capsys.readouterr().err
         assert str(tmp_path / "state" / "workbench.sqlite3") in detail
         assert "SQLite journal files" in detail
