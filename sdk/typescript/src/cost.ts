@@ -1,5 +1,7 @@
 import { createHash, type Hash } from "node:crypto";
-import { open, readdir, realpath } from "node:fs/promises";
+import { open, readdir, realpath, type FileHandle } from "node:fs/promises";
+import { pipeline } from "node:stream";
+import zlib from "node:zlib";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
 import {
@@ -894,6 +896,18 @@ async function sessionPrefixMatches(
   try {
     const complete = await open(completePath, "r");
     try {
+      if (path.endsWith(".zst") || completePath.endsWith(".zst")) {
+        const left =
+          partial === null
+            ? session.contentHash!.copy().digest()
+            : await sessionPrefixDigest(partial, path, session.offset);
+        const right = await sessionPrefixDigest(
+          complete,
+          completePath,
+          session.offset,
+        );
+        return left !== null && right !== null && left.equals(right);
+      }
       const left = Buffer.alloc(SESSION_READ_SIZE);
       const right = Buffer.alloc(SESSION_READ_SIZE);
       const hash = partial === null ? createHash("sha256") : null;
@@ -925,6 +939,51 @@ async function sessionPrefixMatches(
   }
 }
 
+async function* compressedSessionChunks(
+  file: FileHandle,
+): AsyncGenerator<Buffer> {
+  const decoder = zlib.createZstdDecompress();
+  const source = file.createReadStream({ start: 0, autoClose: false });
+  const stream = pipeline(source, decoder, () => {});
+  try {
+    for await (const chunk of stream) yield chunk as Buffer;
+  } finally {
+    source.destroy();
+    stream.destroy();
+  }
+}
+
+async function sessionPrefixDigest(
+  file: FileHandle,
+  path: string,
+  length: number,
+): Promise<Buffer | null> {
+  const hash = createHash("sha256");
+  let offset = 0;
+  if (path.endsWith(".zst")) {
+    for await (const chunk of compressedSessionChunks(file)) {
+      const size = Math.min(chunk.length, length - offset);
+      hash.update(chunk.subarray(0, size));
+      offset += size;
+      if (offset === length) return hash.digest();
+    }
+  } else {
+    const buffer = Buffer.alloc(SESSION_READ_SIZE);
+    while (offset < length) {
+      const { bytesRead } = await file.read(
+        buffer,
+        0,
+        Math.min(buffer.length, length - offset),
+        offset,
+      );
+      if (bytesRead === 0) return null;
+      hash.update(buffer.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+  }
+  return offset === length ? hash.digest() : null;
+}
+
 async function readSessionUsage(
   path: string,
   session: SessionUsage,
@@ -954,6 +1013,34 @@ async function readSessionUsage(
     throw error;
   }
   try {
+    if (path.endsWith(".zst")) {
+      if (endOffset !== undefined && session.offset >= endOffset) return true;
+      let decodedOffset = 0;
+      for await (const chunk of compressedSessionChunks(file)) {
+        const start = Math.max(0, session.offset - decodedOffset);
+        const end =
+          endOffset === undefined
+            ? chunk.length
+            : Math.min(chunk.length, endOffset - decodedOffset);
+        decodedOffset += chunk.length;
+        if (start >= end) continue;
+        const contents = chunk.subarray(start, end);
+        // Archived and live copies share offsets and hashes of their JSONL bytes.
+        if (requireReadableSessions) {
+          session.contentHash ??= createHash("sha256");
+          session.contentHash.update(contents);
+        }
+        session.offset += contents.length;
+        try {
+          readSessionChunk(contents, session, model, repository);
+        } catch (error) {
+          quarantineSession(session, error);
+          throw error;
+        }
+        if (endOffset !== undefined && session.offset >= endOffset) return true;
+      }
+      return true;
+    }
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (true) {
       const length =

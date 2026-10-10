@@ -1,4 +1,5 @@
 import { jsonLines } from "./support/json.js";
+import { zstdCompressSync } from "node:zlib";
 import { Codex } from "@openai/codex-sdk";
 import { runNodePython } from "./support/python-probe.js";
 import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
@@ -5695,11 +5696,13 @@ describe("live scan cost tracking", () => {
 
   test.each(
     ["root", "worker", "resumed worker"].flatMap((archived) =>
-      [false, true].map((polled) => ({ archived, polled })),
+      [false, true].flatMap((polled) =>
+        [false, true].map((compressed) => ({ archived, polled, compressed })),
+      ),
     ),
   )(
-    "accounts for an authoritative archived $archived rollout after polling=$polled",
-    async ({ archived, polled }) => {
+    "accounts for an authoritative archived $archived rollout after polling=$polled compressed=$compressed",
+    async ({ archived, polled, compressed }) => {
       const home = await codexHome();
       const rootUsage = { input_tokens: 100, output_tokens: 10 };
       let root = await writeSession(
@@ -5760,11 +5763,21 @@ describe("live scan cost tracking", () => {
       }
       const archive = join(home, "archived_sessions");
       await mkdir(archive);
-      const moved = join(archive, "owned.jsonl");
-      await fsPromises.rename(archived === "root" ? root : worker, moved);
+      const moved = join(archive, `owned.jsonl${compressed ? ".zst" : ""}`);
+      const previous = archived === "root" ? root : worker;
+      if (compressed) {
+        const contents = Buffer.concat([
+          await fsPromises.readFile(previous),
+          Buffer.from(jsonLines([after]) + "\n"),
+        ]);
+        await writeFile(moved, zstdCompressSync(contents));
+        await rm(previous);
+      } else {
+        await fsPromises.rename(previous, moved);
+        await appendFile(moved, jsonLines([after]) + "\n");
+      }
       if (archived === "root") root = moved;
       else worker = moved;
-      await appendFile(moved, jsonLines([after]) + "\n");
       if (!polled) tracker.start("scan-thread");
       const snapshot = await tracker.stop(rootUsage);
       expect(snapshot.cost).toMatchObject({
@@ -5773,6 +5786,46 @@ describe("live scan cost tracking", () => {
         estimatedUsd: 0.0009,
       });
       expect(events).toEqual([before, after]);
+    },
+  );
+
+  test.each(["corrupt", "incomplete"])(
+    "rejects %s owned compressed worker usage",
+    async (kind) => {
+      const home = await codexHome();
+      const rootUsage = { input_tokens: 100, output_tokens: 10 };
+      const root = await writeSession(home, "scan-thread", rootUsage);
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 50, output_tokens: 5 },
+        "scan-thread",
+      );
+      const contents = await fsPromises.readFile(worker);
+      const compressed = `${worker}.zst`;
+      await writeFile(
+        compressed,
+        kind === "corrupt"
+          ? zstdCompressSync(contents).subarray(0, -3)
+          : zstdCompressSync(contents.subarray(0, -8)),
+      );
+      await rm(worker);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        resolveOwnedSessionPaths: async () =>
+          new Map([
+            [root, "scan-thread"],
+            [compressed, "worker-thread"],
+          ]),
+      });
+      tracker.start("scan-thread");
+      try {
+        await expect(tracker.stop(rootUsage)).rejects.toThrow();
+      } finally {
+        await tracker.stop().catch(() => {});
+      }
     },
   );
 
@@ -5949,9 +6002,13 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test.each(["divergent", "longer"])(
-    "rejects a %s incomplete copy despite a complete owned same-thread rollout",
-    async (kind) => {
+  test.each(
+    ["divergent", "longer"].flatMap((kind) =>
+      [false, true].map((compressed) => ({ kind, compressed })),
+    ),
+  )(
+    "rejects a $kind incomplete copy despite a complete owned same-thread rollout compressed=$compressed",
+    async ({ kind, compressed }) => {
       const home = await codexHome();
       const rootUsage = { input_tokens: 100, output_tokens: 10 };
       const root = await writeSession(
@@ -5973,6 +6030,11 @@ describe("live scan cost tracking", () => {
         true,
       );
       const contents = await fsPromises.readFile(worker, "utf8");
+      const ownedWorker = compressed ? `${worker}.zst` : worker;
+      if (compressed) {
+        await writeFile(ownedWorker, zstdCompressSync(Buffer.from(contents)));
+        await rm(worker);
+      }
       const copy =
         kind === "longer"
           ? contents + '{"type":"event_msg"'
@@ -5987,7 +6049,7 @@ describe("live scan cost tracking", () => {
         resolveOwnedSessionPaths: async () =>
           new Map([
             [root, "scan-thread"],
-            [worker, "worker-thread"],
+            [ownedWorker, "worker-thread"],
           ]),
       });
       tracker.start("scan-thread");
