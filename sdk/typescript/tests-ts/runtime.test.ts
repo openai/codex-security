@@ -78,6 +78,7 @@ import {
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
+  pluginHelperEnvironment,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
@@ -92,11 +93,13 @@ import {
   requireSecureCredentialHome,
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
+  resolvePluginPythonCommand,
   runWorkbench,
   workbenchEnvironment,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
+import * as trustedExecutables from "../src/trusted-executable.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -6275,6 +6278,86 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  test("carries the accepted Python environment through every protected root", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "carries the accepted Python environment through every protected root",
+      )
+    ) {
+      return;
+    }
+    const available = Bun.which("python3") ?? Bun.which("python");
+    expect(available).not.toBeNull();
+    const interpreter = await realpath(available!);
+    const roots = ["invoking", "campaign", "source"].map((name) =>
+      join(tmpdir(), `codex-security-${name}`),
+    );
+    const environment = pluginHelperEnvironment({
+      PATH: "initial-lookup",
+      KEEP: "preserved",
+      OPENAI_API_KEY: "synthetic-openai",
+      CODEX_API_KEY: "synthetic-codex",
+      OPENROUTER_API_KEY: "synthetic-openrouter",
+      FIREWORKS_API_KEY: "synthetic-fireworks",
+      ...(process.env["SystemRoot"] === undefined
+        ? {}
+        : { SystemRoot: process.env["SystemRoot"] }),
+    });
+    const filtered = { ...environment, PATH: dirname(interpreter) };
+    const calls: Array<{
+      candidate: string;
+      environment: Readonly<Record<string, string | undefined>>;
+      root: string | readonly string[];
+    }> = [];
+    const resolveCommand = spyOn(
+      trustedExecutables,
+      "resolveTrustedExecutable",
+    ).mockImplementation(async (candidate, currentEnvironment, root) => {
+      calls.push({ candidate, environment: currentEnvironment, root });
+      return {
+        executable: interpreter,
+        environment: filtered,
+      };
+    });
+    const selection = {
+      configuredPath: "python3",
+      environment,
+      protectedRoot: roots[0]!,
+      additionalProtectedRoots: roots.slice(1),
+    };
+    try {
+      expect(await resolvePluginPythonCommand(selection)).toEqual({
+        executable: interpreter,
+        environment: filtered,
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ candidate: "python3", environment });
+      expect(calls[0]!.root).toEqual(expect.arrayContaining(roots));
+      expect(calls[0]!.root).toContain(process.cwd());
+      expect(environment).not.toHaveProperty("OPENAI_API_KEY");
+      expect(environment).not.toHaveProperty("CODEX_API_KEY");
+      expect(environment).not.toHaveProperty("OPENROUTER_API_KEY");
+      expect(environment).not.toHaveProperty("FIREWORKS_API_KEY");
+
+      calls.length = 0;
+      resolveCommand.mockImplementation(
+        async (candidate, currentEnvironment, root) => {
+          calls.push({ candidate, environment: currentEnvironment, root });
+          return null;
+        },
+      );
+      await expect(resolvePluginPythonCommand(selection)).rejects.toThrow(
+        PluginPythonUnavailableError,
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ candidate: "python3", environment });
+      expect(calls[0]!.root).toEqual(expect.arrayContaining(roots));
+    } finally {
+      resolveCommand.mockRestore();
+    }
+  });
+
   test("resolves inherited Python names case-insensitively", async () => {
     const discovered =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -6810,3 +6893,34 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(false);
   });
 });
+
+testPosix(
+  "qualified campaign keeps canonical Python across protected roots",
+  async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const additional = join(root, "campaign");
+    const systemBin = join(root, "system", "bin");
+    const virtualenvBin = join(repository, "venv", "bin");
+    const interpreter = join(systemBin, "python3");
+    await Promise.all([
+      mkdir(additional),
+      mkdir(systemBin, { recursive: true }),
+      mkdir(virtualenvBin, { recursive: true }),
+    ]);
+    await writeFile(
+      interpreter,
+      '#!/bin/sh\ncase "$0" in */system/bin/python3) ;; *) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(interpreter, 0o700);
+    const alias = join(virtualenvBin, "python");
+    await symlink(interpreter, alias);
+    const command = await resolvePluginPythonCommand({
+      configuredPath: alias,
+      environment: { PATH: "" },
+      protectedRoot: repository,
+      additionalProtectedRoots: [additional],
+    });
+    expect(command.executable).toBe(interpreter);
+  },
+);

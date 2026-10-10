@@ -68,6 +68,7 @@ import {
   isWithin,
   resolveTrustedExecutable,
   type InspectedExecutable,
+  type TrustedExecutable,
 } from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
@@ -177,6 +178,7 @@ export interface PluginPythonOptions {
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
   protectedRoot?: string | readonly string[];
+  additionalProtectedRoots?: readonly string[];
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -196,7 +198,7 @@ export interface ScanArtifactRestorer {
   restore(relativePath: string, contents: Uint8Array): Promise<void>;
 }
 
-function environmentValue(
+export function environmentValue(
   environment: ProcessEnvironment,
   requested: string,
   preserveWhitespace = false,
@@ -3022,10 +3024,18 @@ export async function pluginMetadata(
 export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
+  return (await resolvePluginPythonCommand(options)).executable;
+}
+
+export async function resolvePluginPythonCommand(
+  options: PluginPythonOptions = {},
+): Promise<TrustedExecutable> {
   const environment = options.environment ?? process.env;
   const requestedRoots = options.protectedRoot ?? process.cwd();
-  const protectedRoot =
-    typeof requestedRoots === "string" ? [requestedRoots] : [...requestedRoots];
+  const protectedRoot = [
+    ...(typeof requestedRoots === "string" ? [requestedRoots] : requestedRoots),
+    ...(options.additionalProtectedRoots ?? []),
+  ];
   const callerDirectories = [
     process.cwd(),
     options.currentDirectory ?? process.cwd(),
@@ -3148,7 +3158,7 @@ export function pythonUtf8Environment(
   return normalized;
 }
 
-function pluginHelperEnvironment(
+export function pluginHelperEnvironment(
   environment: ProcessEnvironment,
 ): ProcessEnvironment {
   return pythonUtf8Environment(
@@ -3404,7 +3414,7 @@ async function requirePython(
   environment: ProcessEnvironment,
   protectedRoot: string | readonly string[],
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<TrustedExecutable> {
   const resolved = await usablePython(
     candidate,
     environment,
@@ -3423,11 +3433,13 @@ async function usablePython(
   environment: ProcessEnvironment = process.env,
   protectedRoot: string | readonly string[] = process.cwd(),
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<TrustedExecutable | null> {
+  const original = isPythonPathCandidate(candidate)
+    ? expandExecutableHome(candidate, environment)
+    : candidate;
+  throwIfSignalAborted(signal);
   const command = await resolveTrustedExecutable(
-    isPythonPathCandidate(candidate)
-      ? expandExecutableHome(candidate, environment)
-      : candidate,
+    original,
     environment,
     protectedRoot,
   );
@@ -3448,9 +3460,7 @@ async function usablePython(
         signal,
       },
     );
-    return stdout.trim() === "codex-security-python-ok"
-      ? command.executable
-      : null;
+    return stdout.trim() === "codex-security-python-ok" ? command : null;
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;

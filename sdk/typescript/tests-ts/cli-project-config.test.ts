@@ -1,6 +1,18 @@
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { createHash } from "node:crypto";
+import { normalizeTarget } from "../src/targets.js";
+import { loadContract } from "../src/contract.js";
+import { ScanResult } from "../src/result.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { afterEach, expect, test, mock } from "bun:test";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
@@ -381,21 +393,80 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
   const deps = dependencies({ currentDirectory: input.root });
   deps.createSecurity = (native) => {
     expect(native.codexOverrides?.["model"]).toBe("gpt-5.6-terra");
-    return fakeSecurity(async (_repository, options = {}) => {
+    return fakeSecurity(async (repository, options = {}) => {
       selected.push(options);
-      const result = fakeResult(["high"]);
-      await mkdir(options.outputDir!, { recursive: true });
-      for (const [name, content] of Object.entries({
-        "scan-manifest.json": result.manifest,
-        "findings.json": result.findings,
-        "coverage.json": result.coverage,
-        "report.md": "Synthetic report.",
-      }))
-        await writeFile(
-          join(options.outputDir!, name),
-          typeof content === "string" ? content : JSON.stringify(content),
-        );
-      return result;
+      const scanDir = options.outputDir!;
+      await mkdir(scanDir, { recursive: true, mode: 0o700 });
+      await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+        recursive: true,
+      });
+      const template = fakeResult(["high"]);
+      const manifest = JSON.parse(
+        await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+      ) as typeof template.manifest;
+      const findings = JSON.parse(
+        await readFile(join(scanDir, "findings.json"), "utf8"),
+      ) as typeof template.findings;
+      const coverage = JSON.parse(
+        await readFile(join(scanDir, "coverage.json"), "utf8"),
+      ) as typeof template.coverage;
+      const root = await realpath(repository);
+      const target = await normalizeTarget(
+        root,
+        options.target ?? "repository",
+      );
+      const includePaths = target.kind === "paths" ? [...target.paths] : ["."];
+      manifest.scan.target = {
+        kind: "git_revision",
+        targetId: `target_sha256_${createHash("sha256").update(`local-workspace\0${root}`).digest("hex")}`,
+        displayName: basename(root),
+        revision: execFileSync("git", ["-C", root, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+        }).trim(),
+      };
+      manifest.scan.scope.includePaths = includePaths;
+      coverage.includePaths = includePaths;
+      coverage.mode =
+        target.kind === "paths"
+          ? "scoped_path"
+          : options.mode === "deep"
+            ? "deep_repository"
+            : "repository";
+      coverage.inventoryStrategy =
+        target.kind === "paths" ? "scoped_path" : "repository";
+      for (const finding of findings.findings) {
+        const fingerprint = `codex-security/v1:sha256:${createHash("sha256")
+          .update(
+            [
+              "codex-security/v1",
+              manifest.scan.target.targetId,
+              finding.ruleId,
+              finding.identity.anchor,
+              finding.identity.instance ?? "",
+            ].join("\0"),
+          )
+          .digest("hex")}`;
+        finding.fingerprints.primary = fingerprint;
+        finding.findingId = `csf_${createHash("sha256").update(fingerprint).digest("hex").slice(0, 24)}`;
+        finding.occurrenceId = `occ_${createHash("sha256").update([manifest.scan.id, fingerprint].join("\0")).digest("hex").slice(0, 24)}`;
+      }
+      await writeFile(join(scanDir, "findings.json"), JSON.stringify(findings));
+      await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
+      for (const artifact of manifest.scan.artifacts)
+        artifact.sha256 = createHash("sha256")
+          .update(await readFile(join(scanDir, artifact.path)))
+          .digest("hex");
+      await writeFile(
+        join(scanDir, "scan-manifest.json"),
+        JSON.stringify(manifest),
+      );
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      return new ScanResult({
+        ...contract,
+        scanDir,
+        threadId: "synthetic-thread",
+        turnResult: template.turnResult,
+      });
     });
   };
   const args = [
