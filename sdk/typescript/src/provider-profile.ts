@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse } from "smol-toml";
 import { CodexSecurityError } from "./errors.js";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { configuredCodexHome } from "./auth.js";
+import { environmentEntry, expandHomePath } from "./codex-home.js";
 import {
   resolveCodexProfile,
   modelProviderConfigOverride,
@@ -129,9 +130,14 @@ export async function restoreReplayProfile(
       "The saved scan contains an invalid replay profile.",
     );
   }
+  const requestedHome = environmentEntry(environment, "CODEX_HOME");
   const codexHome =
     profile["home"] === "ambient"
-      ? configuredCodexHome(environment)
+      ? await realpath(
+          requestedHome?.trim()
+            ? expandHomePath(requestedHome, environment)
+            : configuredCodexHome(environment),
+        )
       : codexSecurityCredentialHome(environment);
   // The managed home has stricter ownership rules. Native execution preserves
   // the invoking home's permissions and reads the same private profile files.

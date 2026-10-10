@@ -1,4 +1,4 @@
-import { expandHome, environmentValue } from "./codex-home.js";
+import { expandHome, expandHomePath, environmentValue } from "./codex-home.js";
 export { expandHome } from "./codex-home.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
@@ -2739,7 +2739,7 @@ export function resolveCodexCommand(
   const expanded =
     configured === undefined
       ? undefined
-      : expandExecutableHome(configured, environment);
+      : expandHomePath(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
@@ -3466,7 +3466,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandExecutableHome(candidate, environment)
+      ? expandHomePath(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3520,17 +3520,6 @@ export function sameFile(left: string, right: string): Promise<boolean> {
       leftMetadata.ino === rightMetadata.ino,
     () => false,
   );
-}
-
-function expandExecutableHome(
-  value: string,
-  environment: ProcessEnvironment,
-): string {
-  const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
-  // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
-  return path.startsWith("~/")
-    ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
-    : expandHome(path, environment);
 }
 
 function safePrefix(value: string): string {
