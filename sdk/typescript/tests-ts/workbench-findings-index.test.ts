@@ -115,7 +115,7 @@ const findingsIndexProbe = [
   "        connection.execute('INSERT INTO finding_decisions (occurrence_id, decision_sequence, scan_sequence) VALUES (?, (SELECT COALESCE(MAX(decision_sequence), 0) + 1 FROM finding_decisions), (SELECT scans.rowid FROM scans JOIN finding_occurrences ON finding_occurrences.scan_id = scans.id WHERE finding_occurrences.id = ?))', (linked_decision, linked_decision))",
   "    connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('current-new-occurrence', 'stale-old-occurrence')\")",
   "    indexes.scan_history.repository_scan_scope = lambda _connection, _repository: (['scans.target_id IN (?, ?)'], ['current-target', 'linked-target'], ['current-target', 'linked-target'], ['/current/repository', '/linked/repository'])",
-  "    indexes.scan_history._same_registered_repository = lambda _connection, _before, _after: not settings.get('incompatibleSibling', False) and {_before['target_id'], _after['target_id']} <= {'current-target', 'linked-target'}",
+  "    indexes.scan_history._same_registered_repository = lambda _connection, _before, _after, *, checkout_relationships=None: not settings.get('incompatibleSibling', False) and {_before['target_id'], _after['target_id']} <= {'current-target', 'linked-target'}",
   "coverage_reads = []",
   "def coverage(scan):",
   "    assert scan['seal_manifest_digest'] is not None, 'Unsealed scan coverage was read.'",

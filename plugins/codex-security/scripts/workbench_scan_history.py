@@ -282,6 +282,24 @@ def _requested_repository(
     ).fetchone()
     target_id = requested["target_id"]
     if not target_id:
+        # Exact saved paths take precedence. Case-preserving filesystems can
+        # resolve another spelling to this same directory without normalizing it.
+        try:
+            metadata = repository.stat()
+        except OSError:
+            return requested, None
+        for target in connection.execute("SELECT id, current_path FROM security_targets"):
+            current_path = Path(target["current_path"])
+            try:
+                same_directory = os.path.samestat(metadata, current_path.stat())
+            except OSError:
+                continue
+            if same_directory:
+                # This recursive lookup is exact and keeps the saved owner's
+                # device/inode validation before accepting its directory alias.
+                matched, replaced = _requested_repository(connection, current_path)
+                if replaced is None and matched["target_id"] == target["id"]:
+                    return matched, None
         return requested, None
     recorded = connection.execute(
         """
