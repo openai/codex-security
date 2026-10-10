@@ -2310,6 +2310,7 @@ export async function main(
             },
             dependencies.currentDirectory(),
             dependencies.environment,
+            { sealedProducerVersion: saved["sealedProducerVersion"] },
           );
           if (scanArguments.mode !== "deep")
             throw new CodexSecurityError(
@@ -4714,6 +4715,10 @@ export async function main(
                       },
                       currentDirectory,
                       dependencies.environment,
+                      {
+                        sealedProducerVersion: saved["sealedProducerVersion"],
+                        postScanPrompt: prompts.postScanPrompt,
+                      },
                     );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
@@ -6314,6 +6319,10 @@ async function prepareScanArgumentsFromRecipe(
   >,
   directory: string,
   environment: NodeJS.ProcessEnv,
+  continuation?: {
+    sealedProducerVersion?: unknown;
+    postScanPrompt?: string;
+  },
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -6489,8 +6498,12 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
-  const replayConfig =
-    recipe["preserveProviderEnvironment"] === true
+  const publicationOnly =
+    typeof continuation?.sealedProducerVersion === "string" &&
+    !(postScanPrompt ?? continuation.postScanPrompt)?.trim();
+  const replayConfig = publicationOnly
+    ? config
+    : recipe["preserveProviderEnvironment"] === true
       ? await nativeScanConfiguration(
           environment,
           { recipe: { config } },

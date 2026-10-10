@@ -2269,3 +2269,226 @@ test.each([
     );
   },
 );
+
+test.each([
+  { bulk: false, missingHome: true, publicationOnly: true },
+  { bulk: true, missingHome: false, publicationOnly: true },
+  {
+    bulk: true,
+    missingHome: true,
+    savedPrompt: "",
+    fallbackPrompt: "Synthetic bulk follow-up",
+    publicationOnly: true,
+  },
+  {
+    bulk: true,
+    missingHome: true,
+    savedPrompt: " \n",
+    fallbackPrompt: "Synthetic bulk follow-up",
+    publicationOnly: true,
+  },
+  {
+    bulk: false,
+    missingHome: true,
+    savedPrompt: "Synthetic saved follow-up",
+    publicationOnly: false,
+  },
+  {
+    bulk: true,
+    missingHome: true,
+    fallbackPrompt: "Synthetic bulk follow-up",
+    publicationOnly: false,
+  },
+  {
+    bulk: true,
+    missingHome: true,
+    savedPrompt: "Synthetic saved follow-up",
+    fallbackPrompt: "",
+    publicationOnly: false,
+  },
+  { bulk: false, missingHome: true, rerun: true, publicationOnly: false },
+  { bulk: false, missingHome: true, unsealed: true, publicationOnly: false },
+] as {
+  bulk: boolean;
+  missingHome: boolean;
+  savedPrompt?: string;
+  fallbackPrompt?: string;
+  rerun?: boolean;
+  unsealed?: boolean;
+  publicationOnly: boolean;
+}[])(
+  "sealed CLI recovery only requires private replay configuration for execution %j",
+  async ({
+    bulk,
+    missingHome,
+    savedPrompt,
+    fallbackPrompt,
+    rerun,
+    unsealed,
+    publicationOnly,
+  }) => {
+    const childCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 375,
+      output_tokens: 3,
+    })!;
+    const cost = {
+      ...estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1375,
+        output_tokens: 13,
+      })!,
+      estimatedUsd: 0.125,
+    };
+    const f = await interruptedScan("deep", bulk, {}, true, true, {
+      cost: childCost,
+    });
+    const home = join(f.root, "private-replay-home");
+    await mkdir(home, { mode: 0o700 });
+    const profile = await createProviderProfile(home, {
+      model_providers: {
+        synthetic: {
+          name: "Synthetic",
+          wire_api: "responses",
+          http_headers: { Authorization: "synthetic-private-replay-token" },
+        },
+      },
+    });
+    const recipe = {
+      ...f.recipe,
+      config: {
+        ...(f.recipe.config as JsonObject),
+        model_provider: "synthetic",
+      },
+      providerProfile: { name: profile.name, home: "ambient" },
+      ...(savedPrompt === undefined ? {} : { postScanPrompt: savedPrompt }),
+    };
+    execFileSync(f.python, [
+      "-c",
+      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE scans SET recipe_json=? WHERE id=?',(sys.argv[2],sys.argv[3])); c.commit()",
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      JSON.stringify(recipe),
+      f.scanId,
+    ]);
+    if (!unsealed) await sealSavedScan(f, cost);
+    const saved = await f.command([
+      "get-cli-scan-resume",
+      "--scan-id",
+      f.scanId,
+    ]);
+    expect(typeof saved["sealedProducerVersion"]).toBe(
+      unsealed ? "undefined" : "string",
+    );
+    const names = [
+      ...(unsealed
+        ? []
+        : [
+            "scan-manifest.json",
+            "findings.json",
+            "coverage.json",
+            "report.md",
+          ]),
+      DEEP_SCAN_CHECKPOINT,
+    ];
+    const before = await Promise.all(
+      names.map((name) => readFile(join(f.scanDir, name))),
+    );
+    f.environment.CODEX_HOME = home;
+    if (missingHome) await rm(home, { recursive: true });
+    else await rm(profile.path);
+    const promptFile = join(f.root, "post-scan.md");
+    if (fallbackPrompt !== undefined)
+      await writeFile(promptFile, fallbackPrompt);
+    if (bulk && fallbackPrompt?.trim()) {
+      const manifestPath = join(f.root, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.postScanPrompt = fallbackPrompt;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    }
+    const instructionFile = join(f.root, "original-instructions.md");
+    if (rerun)
+      await writeFile(instructionFile, "Keep the original scan instructions.");
+    const stdout = capture(),
+      stderr = capture();
+    const requests: (string | undefined)[] = [];
+    let runtimeStarts = 0;
+    const code = await main(
+      bulk
+        ? [
+            "bulk-scan",
+            f.input,
+            "--output-dir",
+            f.root,
+            "--recover",
+            "--json",
+            ...(fallbackPrompt === undefined
+              ? []
+              : ["--post-scan-prompt-file", promptFile]),
+          ]
+        : [
+            "scans",
+            rerun ? "rerun" : "resume",
+            f.scanId,
+            "--json",
+            ...(rerun ? ["--scan-prompt-file", instructionFile] : []),
+          ],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies({
+          environment: f.environment,
+          currentDirectory: f.root,
+        }),
+        runWorkbench: f.command,
+        createSecurity(config) {
+          const client = new TestClient(
+            { ...config, pluginPath: PLUGIN_ROOT, pythonPath: f.python },
+            {
+              environment: f.environment,
+              resolvePluginPython: async () => f.python,
+              prepareRuntime: async () => {
+                runtimeStarts++;
+                throw new Error("Publication must not prepare a model runtime");
+              },
+              createCodex: () => {
+                runtimeStarts++;
+                throw new Error("Publication must not create a model client");
+              },
+              runWorkbench,
+            },
+          );
+          return {
+            preflight: (...args: Parameters<TestClient["preflight"]>) =>
+              client.preflight(...args),
+            close: () => client.close(),
+            run: async (repository: string, options: ScanOptions = {}) => {
+              requests.push(options.resumeScanId);
+              return client.run(repository, options);
+            },
+          };
+        },
+      },
+    );
+    expect(code, stderr.text()).toBe(2);
+    expect(runtimeStarts).toBe(0);
+    expect(requests).toEqual(publicationOnly ? [f.scanId] : []);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({
+      progress: { status: publicationOnly ? "complete" : "running" },
+    });
+    if (!publicationOnly)
+      expect(stdout.text() + stderr.text()).toContain("ENOENT");
+    if (publicationOnly && bulk) {
+      const result = JSON.parse(stdout.text());
+      expect(result).toMatchObject({ incomplete: 1, failed: 0 });
+      const receipts = (await readFile(result.resultsPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(receipts).toHaveLength(2);
+      expect(receipts[1]).toMatchObject({ attempt: 1, outputDir: f.scanDir });
+    }
+    expect(
+      await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
+    ).toEqual(before);
+  },
+);
