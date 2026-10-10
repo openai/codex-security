@@ -6632,8 +6632,15 @@ describe("CodexSecurity orchestration", () => {
       expect(
         (codexOptions as CodexOptions | null)?.env?.["CODEX_CLI_PATH"],
       ).toBe(selectedExecutable);
-      expect((codexOptions as CodexOptions | null)?.env?.["PATH"]).toBe(
-        searchPath,
+      expect(
+        (codexOptions as CodexOptions | null)?.env?.["PATH"]?.split(delimiter),
+      ).toEqual(
+        process.platform === "win32" && kind === "shim"
+          ? [
+              join(dirname(dirname(selectedExecutable)), "codex-path"),
+              searchPath,
+            ]
+          : [searchPath],
       );
       await client.close();
     },
@@ -6895,7 +6902,7 @@ process.exit(2);
     expect((codexOptions as CodexOptions | null)?.apiKey).toBe("ambient-key");
     expect((codexOptions as CodexOptions | null)?.codexPathOverride).toBe(
       process.platform === "win32"
-        ? win32.toNamespacedPath(resolveCodexCommand({}).command)
+        ? win32.toNamespacedPath(fakeCommand.command.command)
         : undefined,
     );
     expect(
