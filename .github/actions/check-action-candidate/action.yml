@@ -1,0 +1,27 @@
+name: Check Action against release candidate
+description: Exercise the Action adapter against the packed CLI without model calls.
+runs:
+  using: composite
+  steps:
+    - name: Set up Action Node.js runtime
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: "24"
+        package-manager-cache: false
+    - name: Set up the Ubuntu sandbox
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes bubblewrap apparmor-profiles
+        sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+    - name: Test Action compatibility with the packed CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        npm --prefix github-action ci --ignore-scripts --no-audit --no-fund
+        consumer="$(mktemp -d)"
+        trap 'rm -rf "$consumer"' EXIT
+        printf '%s\n' '{"name":"action-candidate-check","private":true,"type":"module"}' > "$consumer/package.json"
+        npm install --prefix "$consumer" --ignore-scripts --include=optional --no-audit --no-fund ./dist/*.tgz
+        version="$(node -p 'require("./sdk/typescript/package.json").version')"
+        npm --prefix github-action run test:cli -- "$consumer/node_modules/@openai/codex-security" "$version"

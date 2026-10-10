@@ -347,36 +347,25 @@ export class FindingDeduplicator {
       return parents.has(id) ? root(id) : undefined;
     });
     membersByRoot.delete(undefined);
-    const components = [...membersByRoot.values()].map((members) => ({
-      members,
-      supported: [] as [string, string][],
-      rejected: [] as [string, string][],
-    }));
-    const componentByFinding = new Map(
-      components.flatMap((component) =>
-        component.members.map((id) => [id, component] as const),
-      ),
+    const supportedByRoot = Map.groupBy(supported, ([left]) => root(left));
+    const rejectedByRoot = Map.groupBy(
+      rejected.filter(([left, right]) => root(left) === root(right)),
+      ([left]) => root(left),
     );
-    for (const pair of supported)
-      componentByFinding.get(pair[0])!.supported.push(pair);
-    for (const pair of rejected) {
-      const component = componentByFinding.get(pair[0]);
-      if (component && component === componentByFinding.get(pair[1]))
-        component.rejected.push(pair);
-    }
 
     const selected = new Set(ids);
     const duplicateGroups: string[][] = [];
     const canonical = new Map<string, string>();
-    for (const component of components) {
+    for (const [componentRoot, members] of membersByRoot) {
       this.signal?.throwIfAborted();
+      const conflicts = rejectedByRoot.get(componentRoot!);
       const groups =
-        component.rejected.length === 0
-          ? [new Set(component.members)]
+        conflicts === undefined
+          ? [new Set(members)]
           : contradictionFreeSubgroups(
-              component.members,
-              component.supported,
-              component.rejected,
+              members,
+              supportedByRoot.get(componentRoot!)!,
+              conflicts,
               this.signal,
             );
       for (const group of groups) {

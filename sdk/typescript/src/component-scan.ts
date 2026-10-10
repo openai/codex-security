@@ -1,3 +1,4 @@
+import { notify } from "./value.js";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, relative, sep } from "node:path";
@@ -5,6 +6,7 @@ import {
   CodexSecurity,
   scanAuthentication,
   selectedScanEnvironment,
+  type CodexSecuritySurface,
   type ScanOptions,
 } from "./api.js";
 import {
@@ -28,13 +30,15 @@ import type { ScanActivity } from "./scan-activity.js";
 import type { ScanSettings } from "./scan-settings.js";
 import type { ScanProgress, ScanWorkerStatus } from "./worker-progress.js";
 import {
-  matchScanFindings,
+  matchScanFindingsInternal,
   type ScanComparisonResult,
 } from "./scan-comparison.js";
 import { prepareOutputDir, requireOutputOutsideRepository } from "./runtime.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
 
 export interface ComponentScanOptions {
+  /** @internal Calling surface, inherited by planning, scans, and matching. */
+  surface?: CodexSecuritySurface;
   repository: string;
   outputDir: string;
   components?: ComponentPlan["components"];
@@ -53,7 +57,7 @@ export interface ComponentScanOptions {
   ) => Promise<ComponentPlan>;
   environment?: NodeJS.ProcessEnv;
   /** @internal */
-  matchFindings?: typeof matchScanFindings;
+  matchFindings?: typeof matchScanFindingsInternal;
   onPlan?: (components: ComponentReceipt[]) => void;
   onScanEvent?: (event: ComponentScanEvent) => void;
   onComplete?: (result: ComponentScanResult) => void;
@@ -154,6 +158,7 @@ export async function runComponentScans(
     options.auto
       ? await (options.planComponents ?? planComponents)(repository, {
           auth,
+          surface: options.surface ?? "sdk",
           cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config,
           environment,
@@ -187,7 +192,11 @@ export async function runComponentScans(
   const settled = await Promise.allSettled(
     Array.from({ length: Math.min(workers, receipts.length) }, async () => {
       const security = (
-        options.createSecurity ?? ((config) => new CodexSecurity(config))
+        options.createSecurity ??
+        ((config) =>
+          new CodexSecurity(config, undefined, {
+            surface: options.surface ?? "sdk",
+          }))
       )(options.config ?? {});
       try {
         while (!options.signal?.aborted) {
@@ -367,7 +376,9 @@ async function deduplicateFindings(
     if (remaining.length) notify(() => options.onDeduplicationStarted?.());
     for (const component of remaining) {
       const current = componentFindings(component);
-      const comparison = await (options.matchFindings ?? matchScanFindings)(
+      const comparison = await (
+        options.matchFindings ?? matchScanFindingsInternal
+      )(
         { before: [...previous], after: current },
         {
           allowHistoricalUncertainty: true,
@@ -378,6 +389,7 @@ async function deduplicateFindings(
           signal: options.signal,
           workingDirectory: tmpdir(),
         },
+        { surface: options.surface ?? "sdk" },
       );
       matching.matches.push(...comparison.matches);
       matching.uncertain.push(...comparison.uncertain);
@@ -414,12 +426,6 @@ async function deduplicateFindings(
     matching.related = matching.related.filter(remainSeparate);
   }
   return { findings, ...matching, ...(error === undefined ? {} : { error }) };
-}
-
-function notify(callback: () => unknown): void {
-  try {
-    void Promise.resolve(callback()).catch(() => {});
-  } catch {}
 }
 
 function mergeFindingGroups(

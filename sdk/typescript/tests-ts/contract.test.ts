@@ -782,9 +782,9 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
-  test("does not expose attacker-controlled keys in validation errors", async () => {
+  test("identifies unusual property names unambiguously in validation errors", async () => {
     const scanDir = await copyExample();
-    const marker = "PRIVATE_JSON_KEY";
+    const marker = 'synthetic/"~\nkey';
     await writeFile(
       join(scanDir, "findings.json"),
       JSON.stringify({ [marker]: 9007199254740992 }),
@@ -799,7 +799,7 @@ describe("canonical scan contract", () => {
 
     expect(thrown).toBeInstanceOf(ContractValidationError);
     expect((thrown as Error).message).toContain("unsafe integer-valued");
-    expect((thrown as Error).message).not.toContain(marker);
+    expect((thrown as Error).message).toContain(`[${JSON.stringify(marker)}]`);
   });
 
   test("accepts valid schemas beyond the previous complexity limit", async () => {
@@ -1208,7 +1208,7 @@ describe("canonical scan contract", () => {
           manifest["scan"]["target"]["remote"] =
             "https://example.com\\@evil.test/repo";
         },
-        "scan.target.remote",
+        "/scan/target/remote",
       ],
     ];
 
@@ -1256,6 +1256,24 @@ describe("canonical scan contract", () => {
     );
   });
 
+  test("identifies the failing schema field and required member", async () => {
+    for (const field of ["severity", "confidence"]) {
+      const scanDir = await copyExample();
+      const path = join(scanDir, "findings.json");
+      const document = await readJson(path);
+      document["findings"][0][field].level = null;
+      await writeJson(path, document);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(`/findings/0/${field}/level`);
+      delete document["findings"][0][field].level;
+      await writeJson(path, document);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow("required property 'level'");
+    }
+  });
+
   test("rejects unsafe and non-finite JSON numbers before contract typing", async () => {
     for (const [field, expected] of [
       ["startLine", "unsafe integer-valued JSON numbers"],
@@ -1282,7 +1300,7 @@ describe("canonical scan contract", () => {
         ];
       }
       if (field === "overflow") {
-        finding["extensions"] = { overflow: 0 };
+        finding["extensions"] = { 'evidence/"~\n': { overflow: 0 } };
       }
       await writeJson(findingsPath, findings);
       let text = await readFile(findingsPath, "utf8");
@@ -1311,6 +1329,10 @@ describe("canonical scan contract", () => {
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
       ).rejects.toThrow(expected);
+      if (field === "overflow")
+        await expect(
+          loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+        ).rejects.toThrow('["extensions"]["evidence/\\"~\\n"]["overflow"]');
     }
   });
 

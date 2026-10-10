@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import directory_content_digest, git_output, git_revision
+from workbench_target import directory_content_digest, git_bytes, git_revision
 
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
@@ -124,14 +124,28 @@ def finding_workflow(
         return {"workflow": read_workflow(connection, workflow_id)}
     if payload["action"] == "source":
         target = Path(payload["repository"]).resolve(strict=True)
+        private_paths = payload.get("privateStatePaths", [])
+        if not isinstance(private_paths, list) or any(
+            not isinstance(path, str) or not Path(path).is_absolute() for path in private_paths
+        ):
+            raise SystemExit("Private runtime paths must be absolute paths.")
+        excluded = tuple(sorted({Path(path).resolve() for path in private_paths}))
+        excluded = tuple(path for path in excluded if path.is_relative_to(target))
+        if target in excluded:
+            raise SystemExit("Private runtime storage must not exclude the repository root.")
         return {
             "source": {
                 "repository": str(target),
-                "revision": git_revision(target),
+                "revision": "unversioned" if payload.get("gitDisabled") else git_revision(target),
                 "refsDigest": hashlib.sha256(
-                    (git_output(target, "show-ref") or "").encode()
+                    b""
+                    if payload.get("gitDisabled")
+                    else (git_bytes(target, "show-ref") or b"").strip()
                 ).hexdigest(),
-                "content": directory_content_digest(target, include_ignored=True),
+                "content": directory_content_digest(
+                    target, excluded=excluded, include_ignored=True
+                ),
+                **({"privateStatePaths": [str(path) for path in excluded]} if excluded else {}),
             }
         }
     if payload["action"] == "get-review":

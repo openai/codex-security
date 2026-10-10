@@ -144,6 +144,10 @@ export function windowsFileSystem(native: WindowsBinding) {
     check(native.createWindowsDirectories(operationPath(path)), path);
   }
 
+  function mkdirPrivate(path: Buffer): void {
+    check(native.createPrivateWindowsDirectory(operationPath(path)), path);
+  }
+
   function readInto(path: Buffer, buffer: Buffer): number {
     return withFile(path, flags.GENERIC_READ, (handle) => {
       let length = 0;
@@ -235,6 +239,7 @@ export function windowsFileSystem(native: WindowsBinding) {
     identity,
     entriesWithTypes,
     mkdir,
+    mkdirPrivate,
     readInto,
     readFile,
     writeFile,

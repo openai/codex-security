@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { runWorkbench } from "../src/runtime.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import { runNodePython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -93,18 +93,7 @@ async function workbench(
   args: readonly string[],
   input?: string,
 ) {
-  return runWorkbench(
-    {
-      python: fixture.python,
-      pluginRoot: PLUGIN_ROOT,
-      environment: {
-        PATH: process.env["PATH"],
-        CODEX_SECURITY_STATE_DIR: fixture.stateDir,
-      },
-    },
-    args,
-    input,
-  );
+  return workbenchCommand(fixture.python, fixture.stateDir)(args, input);
 }
 
 async function startDraftScan(
@@ -431,7 +420,7 @@ describe("malformed scan artifact recovery", () => {
             "sys.path.insert(0, sys.argv[1])",
             "import workbench_target as target",
             "source = Path(sys.argv[2])",
-            "checkout = target.copy_git_worktree_files(source, Path(sys.argv[3]), ())",
+            "checkout, _ = target.copy_git_worktree_files(source, Path(sys.argv[3]), ())",
             "git_dir = Path(target.git_output(source, 'rev-parse', '--absolute-git-dir'))",
             "assert target.worktree_content_digest_for_context(checkout, '.', git_dir=git_dir, work_tree=checkout) == target.worktree_content_digest(source)",
           ].join("\n"),

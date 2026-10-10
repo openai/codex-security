@@ -28,7 +28,7 @@ RUN pnpm run types \
 FROM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS scanner
 
 LABEL org.opencontainers.image.title="Codex Security" \
-      org.opencontainers.image.description="Codex Security scanner and findings API" \
+      org.opencontainers.image.description="Codex Security scanner" \
       org.opencontainers.image.source="https://github.com/openai/codex-security"
 
 RUN apt-get update \
