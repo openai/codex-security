@@ -101,6 +101,9 @@ export function startDeepScanEngine(options: {
           {
             requireRunning: true,
             requireClaim: true,
+            // V2 coordinators validate their durable selection before publishing.
+            requireCurrentTarget:
+              run.workflowVersion !== "deep-security-scan/v2",
             handoffClaimToken,
             pluginRoot,
           },

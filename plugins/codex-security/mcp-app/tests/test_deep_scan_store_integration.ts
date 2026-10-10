@@ -5,7 +5,7 @@ import { mock } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
@@ -15,6 +15,7 @@ import type {
 } from "../src/artifact-scan-draft.js";
 import {
   DeepScanCoordinator,
+  DeepScanCoordinatorRegistry,
   FakeExecutor,
 } from "./deep_scan_coordinator_fixture.ts";
 
@@ -27,16 +28,29 @@ const {
   createScanArtifactContext,
   captureDeepScanExecutionSettings,
   recordCodexSecurityScanDraftViaWorkbench,
+  startDeepScanEngine,
 } = await importModule({
   stdin: {
     contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
 export { createScanArtifactContext } from "./src/artifact-context.ts";
 export { captureDeepScanExecutionSettings } from "./src/deep-scan/recovery-settings.ts";
-export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";`,
+export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";
+export { startDeepScanEngine } from "./src/deep-scan/engine.ts";`,
     resolveDir: mcpAppRoot,
+  },
+  loader: { ".md": "text" },
+  define: {
+    "import.meta.url": JSON.stringify(
+      new URL("../src/deep-scan/engine.ts", import.meta.url).href,
+    ),
+  },
+  banner: {
+    js: `import { createRequire as fixtureRequire } from "node:module"; const require = fixtureRequire(${JSON.stringify(import.meta.url)});`,
   },
 });
 
+await testNativeSelectedFinalizationWithoutCheckout("deleted");
+await testNativeSelectedFinalizationWithoutCheckout("moved");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench(true);
@@ -48,6 +62,107 @@ await testConcurrentParentDraftsPreserveBothCheckpoints();
 await testCoordinatorCommitResponseRecovery();
 await testCoordinatorCommitResponseRecovery("commit-deep-scan-dedup");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
+
+async function testNativeSelectedFinalizationWithoutCheckout(
+  targetChange: "deleted" | "moved",
+) {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-native-selected-recovery-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  const store = new WorkbenchDeepScanStore(runWorkbench);
+  const threadId = "selected-recovery-owner";
+  try {
+    await mkdir(path.join(environment.CODEX_HOME, "codex-security"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(environment.CODEX_HOME, "codex-security", "config.toml"),
+      "[deep_scan]\nworkers = 1\nstop_after_no_new = 1\nmax_discovery_runs = 1\n",
+    );
+    const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
+      targetPath,
+      threadId,
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    const executor = new FakeExecutor();
+    const coordinator = new DeepScanCoordinator({
+      run: claim.run,
+      store,
+      pluginRoot,
+      threadId,
+      executor,
+      onComplete: async () => {
+        throw new Error("Synthetic interruption before selected publication");
+      },
+    });
+    coordinator.start();
+    await assert.rejects(
+      coordinator.wait(undefined, 30_000),
+      /Synthetic interruption before selected publication/,
+    );
+    const selected = await store.get(run.scanId, threadId);
+    assert.equal(selected.status, "running");
+    assert.ok(selected.finalizationInput);
+    const savedTarget = (
+      await runWorkbench(["get-scan", "--scan-id", run.scanId])
+    ).scan.contract;
+    const workerIds = selected.persistedWorkers.map(
+      (worker: { id: string }) => worker.id,
+    );
+    await store.releaseCoordinator(run.scanId);
+    if (targetChange === "moved")
+      await rename(targetPath, `${targetPath}-moved`);
+    else await rm(targetPath, { recursive: true });
+
+    let finalized = 0;
+    const resumed = await startDeepScanEngine({
+      run: selected,
+      store,
+      registry: new DeepScanCoordinatorRegistry(),
+      runWorkbench,
+      pluginRoot,
+      pythonCommand: process.env.PYTHON || "python3",
+      parentSandbox: { filesystemDenies: [] },
+      threadId,
+      onFinalized: async () => {
+        finalized += 1;
+      },
+    });
+    const terminal = await resumed.coordinator.wait(undefined, 30_000);
+    assert.equal(terminal?.status, "succeeded");
+    assert.equal(finalized, 1);
+    const persisted = await store.get(run.scanId, threadId);
+    assert.deepEqual(persisted.finalizationInput, selected.finalizationInput);
+    assert.deepEqual(
+      persisted.persistedWorkers.map((worker: { id: string }) => worker.id),
+      workerIds,
+    );
+    assert.equal(executor.discoveryCalls, 1);
+    assert.equal(executor.dedupCalls, 1);
+    const findings = await readJson(run.scanDir, "findings.json");
+    assert.ok(Array.isArray(findings.findings));
+    const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(persisted.targetPath, targetPath);
+    assert.deepEqual(manifest.scan.target, {
+      kind: "directory_snapshot",
+      targetId: savedTarget.target.targetId,
+      displayName: savedTarget.target.displayName,
+      snapshotDigest: savedTarget.target.requiredSnapshotDigest,
+    });
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
 
 async function testCoordinatorCommitResponseRecovery(
   exhaustOperation?: "commit-deep-scan-dedup" | "finish-deep-scan",
