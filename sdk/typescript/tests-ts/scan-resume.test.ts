@@ -4,6 +4,8 @@ import { publishDraft } from "./support/scan-publication.js";
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 
 import { randomUUID } from "node:crypto";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
+import { workflowDigest } from "../src/finding-workflow.js";
 
 import { execFileSync } from "node:child_process";
 
@@ -145,7 +147,27 @@ async function interruptedScan(
     );
     await writeFile(
       join(root, "manifest.json"),
-      JSON.stringify({ version: 2, tasks: [task] }, null, 2) + "\n",
+      JSON.stringify(
+        {
+          version: 2,
+          tasks: [task],
+          ...(settings.knowledgeBasePaths?.length
+            ? {
+                knowledgeBaseDigests: {
+                  [mode]: workflowDigest(
+                    (
+                      await readKnowledgeBaseSnapshot(
+                        settings.knowledgeBasePaths,
+                      )
+                    ).documents,
+                  ),
+                },
+              }
+            : {}),
+        },
+        null,
+        2,
+      ) + "\n",
     );
     await writeFile(
       join(root, "results.jsonl"),
@@ -2878,6 +2900,7 @@ function resumeDependencies(
           return runtime;
         },
         resolvePluginPython: async () => f.python,
+        prepareScanArtifactRestorer,
         runWorkbench,
         createCodex,
       }),
@@ -2908,32 +2931,30 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
     stdout.stream,
     stderr.stream,
     {
-      ...resumeDependencies(f, (codex) => ({
-        startThread() {
-          throw new Error("Expected original session");
-        },
-        resumeThread(threadId) {
-          expect(threadId).toBe(f.threadId);
-          return {
-            id: threadId,
-            async runStreamed() {
-              const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
-              expect(await readdir(directory)).toEqual([
-                "0-architecture.md.txt",
-              ]);
-              expect(
-                await readFile(
-                  join(directory, "0-architecture.md.txt"),
-                  "utf8",
-                ),
-              ).toBe("Original architecture.");
-              resumed = true;
-              await finishDiscovery(f);
-              return { events: completedEvents(threadId) };
-            },
-          };
-        },
-      })),
+      ...resumeDependencies(f, async (codex) => {
+        const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+        expect(await readdir(directory)).toEqual(["0-architecture.md.txt"]);
+        expect(
+          await readFile(join(directory, "0-architecture.md.txt"), "utf8"),
+        ).toBe("Original architecture.");
+        resumed = true;
+        return {
+          startThread() {
+            throw new Error("Expected original session");
+          },
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            return {
+              id: threadId,
+              async runStreamed() {
+                throw new Error(
+                  "Accepted capped aggregate needs no additional model turn",
+                );
+              },
+            };
+          },
+        };
+      }),
       runWorkbench: async (args, input) => {
         if (args[0] === "get-cli-scan-resume") await rm(document);
         return f.command(args, input);

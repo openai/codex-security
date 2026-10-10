@@ -446,6 +446,42 @@ describe("ordinary scan composition", () => {
     },
   );
 
+  test.each(["Original discovery assumptions.", undefined])(
+    "freezes discovery context across interrupted and new passes: %p",
+    async (scanPrompt) => {
+      const h = await harness({ maxDiscoveryRuns: 2, stopAfterNoNew: 3 });
+      h.input.scanOptions.scanPrompt = scanPrompt;
+      const interruption = new ScanTransportClosedError("Synthetic restart.");
+      h.setRun(async () => {
+        h.controller.abort(interruption);
+        throw interruption;
+      });
+      await expect(runDeepScans(h.input)).rejects.toThrow(interruption.message);
+      expect((await h.checkpoint()).discoveryUserContext).toBe(
+        scanPrompt ?? null,
+      );
+      const originalPass = h.calls[0]!;
+      h.input.scanOptions.scanPrompt = "Changed parent context after restart.";
+      h.input.signal = new AbortController().signal;
+      h.setRun(async (options) =>
+        result(options.resumeScanId!, options.outputDir!),
+      );
+      await runDeepScans(h.input);
+      expect(h.calls).toHaveLength(3);
+      expect(h.calls[1]!.outputDir).toBe(originalPass.outputDir);
+      expect(h.calls[1]!.resumeScanId).toBeDefined();
+      expect(h.calls[2]!.outputDir).not.toBe(originalPass.outputDir);
+      expect(h.calls.map((call) => call.scanPrompt)).toEqual([
+        scanPrompt,
+        scanPrompt,
+        scanPrompt,
+      ]);
+      expect((await h.checkpoint()).discoveryUserContext).toBe(
+        scanPrompt ?? null,
+      );
+    },
+  );
+
   test("preserves a checkpoint write failure and still saves terminal state", async () => {
     const h = await harness({ stopAfterNoNew: 1 });
     const workbench = h.input.workbench;
@@ -2248,6 +2284,7 @@ describe("ordinary scan composition", () => {
       const checkpoint: DeepScanCheckpoint = {
         version: 2,
         startedAt,
+        discoveryUserContext: null,
         passes: [{ directory, scanId }],
         mergedScanIds: [],
         aggregate: { scanId: h.input.scanId, findings: [], coverage },

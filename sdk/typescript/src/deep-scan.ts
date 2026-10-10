@@ -147,6 +147,8 @@ export async function runDeepScans(
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
   validatePassDirectories(state);
+  if (state.discoveryUserContext === undefined)
+    state.discoveryUserContext = input.scanOptions.scanPrompt ?? null;
   let saveTail = Promise.resolve();
   let savedSnapshot: string | undefined;
   let queuedSave: { snapshot: string; pending: Promise<void> } | undefined;
@@ -431,6 +433,7 @@ export async function runDeepScans(
           const resuming = pass.scanId !== undefined;
           const result = await client.run(input.repository, {
             ...input.scanOptions,
+            scanPrompt: state.discoveryUserContext ?? undefined,
             mode: "standard",
             outputDir: join(scanDir, pass.directory),
             ...(resuming

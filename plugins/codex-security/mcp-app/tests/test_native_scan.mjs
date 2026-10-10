@@ -16,20 +16,20 @@ import { delimiter, dirname, join, sep } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
 const bundle = await build({
   bundle: true,
   stdin: {
     contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
-      export { prepareAmbientRuntime } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
+      export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
     resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
   },
   define: {
     "import.meta.url": JSON.stringify(
-      new URL("../src/native-scan.ts", import.meta.url).href,
+      new URL("../../mcp/server.mjs", import.meta.url).href,
     ),
   },
   format: "cjs",
@@ -65,6 +65,10 @@ const {
   scanRuntimeCodexConfig,
   createPermissionCheckedCodex,
   prepareAmbientRuntime,
+  prepareExecutionSource,
+  createExecutionCodex,
+  prepareDiscoveryExecution,
+  prepareMergeExecution,
 } = module.exports;
 
 const fixtureRepository = await realpath(
@@ -1452,7 +1456,11 @@ test("native saved scans retain settings, auth environment, permissions and iden
       request.stateDirectory,
     );
     assert.deepEqual(client.dependencies.inheritedPermissions, {
-      filesystem: { "/fixture/.env": "deny", glob_scan_max_depth: 3 },
+      filesystem: {
+        ":workspace_roots": "write",
+        "/fixture/.env": "deny",
+        glob_scan_max_depth: 3,
+      },
       network: { enabled: false },
     });
     assert.equal(options.workers, 4);
@@ -1465,10 +1473,10 @@ test("native saved scans retain settings, auth environment, permissions and iden
       scan: { ...request.scan, userContext: null },
     });
     assert.equal(withoutContext.options.scanPrompt, undefined);
-    for (const [savedDepth, currentDepth] of [
-      [3, 10],
-      [10, 3],
-      [3, undefined],
+    for (const [savedDepth, currentDepth, expectedDepth] of [
+      [3, 10, 10],
+      [10, 3, 10],
+      [3, undefined, 3],
     ]) {
       const savedPermissions = await prepareNativeScan({
         ...request,
@@ -1480,6 +1488,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
           ...request.recipe,
           inheritedPermissions: {
             filesystem: {
+              ":workspace_roots": "read",
               "/saved/.env": "deny",
               glob_scan_max_depth: savedDepth,
             },
@@ -1489,9 +1498,10 @@ test("native saved scans retain settings, auth environment, permissions and iden
       });
       assert.deepEqual(savedPermissions.options.inheritedPermissions, {
         filesystem: {
+          ":workspace_roots": "read",
           "/saved/.env": "deny",
           "/fixture/.env": "deny",
-          glob_scan_max_depth: 3,
+          glob_scan_max_depth: expectedDepth,
         },
         network: { enabled: false },
       });
@@ -1556,3 +1566,252 @@ test("native saved scans retain settings, auth environment, permissions and iden
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const scenario of [
+  "saved-uncapped",
+  "current-uncapped",
+  "both-finite",
+  "saved-literal",
+  "current-literal",
+  "saved-glob-current-literal",
+  "saved-literal-current-glob",
+  "repeated-literal",
+]) {
+  test(
+    `native merged settings reach every worker: ${scenario}`,
+    {
+      skip:
+        process.platform === "win32"
+          ? "Synthetic executable uses a POSIX shebang."
+          : false,
+    },
+    async () => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "native-merged-worker-")),
+      );
+      const home = join(root, "home");
+      const repository = join(root, "repository");
+      const pluginRoot = join(root, "plugin");
+      const executable = join(root, "codex");
+      const capture = join(root, "worker.json");
+      const restore = captureEnvironment([
+        "CODEX_HOME",
+        "CODEX_CLI_PATH",
+        "CODEX_API_KEY",
+        "OPENAI_API_KEY",
+        "CODEX_SECURITY_CONFIG_PATH",
+        "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      ]);
+      try {
+        await mkdir(home);
+        await mkdir(repository);
+        await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
+        await writeFile(
+          join(pluginRoot, ".codex-plugin/plugin.json"),
+          JSON.stringify({ name: "codex-security", version: "0.0.0" }),
+        );
+        await writeFile(
+          executable,
+          `#!${process.execPath}
+const fs = require("node:fs");
+${syntheticPermissionAppServer()}
+if (process.argv.includes("app-server")) servePermissionProfiles();
+else {
+  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY }));
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-merged-worker" }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
+}
+`,
+          { mode: 0o700 },
+        );
+        Object.assign(process.env, {
+          CODEX_HOME: home,
+          CODEX_CLI_PATH: executable,
+          OPENAI_API_KEY: "synthetic-selected-key",
+        });
+        delete process.env.CODEX_API_KEY;
+        delete process.env.CODEX_SECURITY_CONFIG_PATH;
+        delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+        const configuration = {
+          model: "ambient-model",
+          model_provider: "openai",
+          model_providers: {
+            openai: { env_key: "OPENAI_API_KEY", requires_openai_auth: true },
+          },
+        };
+        const configText = stringifyToml(configuration);
+        await writeFile(join(home, "config.toml"), configText);
+        const samePath = [
+          "saved-glob-current-literal",
+          "saved-literal-current-glob",
+          "repeated-literal",
+        ].includes(scenario);
+        const savedLiteral = [
+          "saved-literal-current-glob",
+          "repeated-literal",
+        ].includes(scenario);
+        const currentLiteral = [
+          "saved-glob-current-literal",
+          "repeated-literal",
+        ].includes(scenario);
+        const savedPath = samePath
+          ? join(repository, "private[0]")
+          : scenario === "saved-literal"
+            ? join(repository, "saved.env")
+            : join(repository, "**", "saved.env");
+        const currentPath = samePath
+          ? savedPath
+          : scenario === "current-literal"
+            ? join(repository, "current.env")
+            : join(repository, "**", "current.env");
+        const savedDepth = ["saved-uncapped", "saved-literal"].includes(
+          scenario,
+        )
+          ? undefined
+          : 3;
+        const currentDepth = ["current-uncapped", "current-literal"].includes(
+          scenario,
+        )
+          ? undefined
+          : 7;
+        const expectedDepth = ["saved-uncapped", "current-uncapped"].includes(
+          scenario,
+        )
+          ? undefined
+          : scenario === "current-literal"
+            ? 3
+            : 7;
+        for (const resumed of [false, true]) {
+          const request = {
+            ...input(),
+            pluginRoot,
+            scan: {
+              ...input().scan,
+              targetPath: repository,
+              scanDir: join(root, "scan"),
+            },
+            model: "explicit-current-model",
+            reasoningEffort: "ultra",
+            parentSandbox: {
+              filesystemDenies: currentLiteral ? [] : [currentPath],
+              ...(currentLiteral
+                ? { literalFilesystemDenies: [currentPath] }
+                : {}),
+              ...(currentDepth === undefined
+                ? {}
+                : { globScanMaxDepth: currentDepth }),
+            },
+            recipe: {
+              auth: "api-key",
+              inheritedPermissions: {
+                filesystem: {
+                  [savedPath]: savedLiteral ? { ".": "deny" } : "deny",
+                  ...(savedDepth === undefined
+                    ? {}
+                    : { glob_scan_max_depth: savedDepth }),
+                },
+                network: { enabled: false },
+              },
+            },
+          };
+          if (samePath && savedLiteral !== currentLiteral) {
+            await assert.rejects(
+              prepareNativeScan(request),
+              /literal.*glob|glob.*literal/u,
+            );
+            await assert.rejects(readFile(capture), { code: "ENOENT" });
+            continue;
+          }
+          const prepared = await prepareNativeScan(request);
+          const ambient = prepared.client.dependencies.ambientExecution;
+          const runtime = await prepareAmbientRuntime(ambient);
+          try {
+            const source = prepareExecutionSource(ambient);
+            const sessionConfig = scanRuntimeCodexConfig(
+              prepared.client.config.codexOverrides,
+              repository,
+              prepared.options.inheritedPermissions,
+            );
+            const session = {
+              policy: "ordinary",
+              source,
+              runtime,
+              runtimeHome: runtime.codexHome,
+              effectiveConfig: ambient.configuration,
+              preflightConfig: {},
+              sessionConfig,
+              inheritedPermissions: prepared.options.inheritedPermissions,
+              authentication: source.authentication,
+              approvalPolicy: "never",
+              python: process.execPath,
+              releaseCredentialHome: null,
+            };
+            for (const role of ["discovery", "merge"]) {
+              const worker =
+                role === "discovery"
+                  ? prepareDiscoveryExecution(session)
+                  : prepareMergeExecution(session, 2);
+              const { codex } = await createExecutionCodex(
+                { surface: "sdk", command: "scan" },
+                worker,
+                {},
+              );
+              const options = {
+                workingDirectory: repository,
+                skipGitRepoCheck: true,
+                approvalPolicy: "never",
+              };
+              const thread = resumed
+                ? codex.resumeThread("synthetic-merged-worker", options)
+                : codex.startThread(options);
+              const events = await collectNativeEvents(
+                thread,
+                "Synthetic worker settings only.",
+                {},
+              );
+              assert.equal(events.at(-1).type, "turn.completed");
+              const observed = JSON.parse(await readFile(capture, "utf8"));
+              const fragments = [];
+              for (let i = 0; i < observed.argv.length; i++)
+                if (["-c", "--config"].includes(observed.argv[i]))
+                  fragments.push(parseToml(observed.argv[++i]));
+              const config = Object.assign({}, ...fragments);
+              assert.equal(observed.argv.includes("resume"), resumed);
+              const filesystem =
+                config.permissions[config.default_permissions].filesystem;
+              assert.equal(
+                savedLiteral
+                  ? filesystem[savedPath]["."]
+                  : filesystem[savedPath],
+                "deny",
+              );
+              assert.equal(
+                currentLiteral
+                  ? filesystem[currentPath]["."]
+                  : filesystem[currentPath],
+                "deny",
+              );
+              assert.equal(filesystem.glob_scan_max_depth, expectedDepth);
+              assert.equal(
+                await readFile(join(home, "config.toml"), "utf8"),
+                configText,
+              );
+              assert.equal(
+                process.env.OPENAI_API_KEY,
+                "synthetic-selected-key",
+              );
+            }
+          } finally {
+            await rm(runtime.bootstrapWorkspace, {
+              recursive: true,
+              force: true,
+            });
+          }
+        }
+      } finally {
+        restore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+}

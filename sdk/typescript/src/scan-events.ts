@@ -134,7 +134,11 @@ export async function runScanTurn(
       thread: options.thread,
       events: options.events,
       onEvent: async (event) => {
-        if (!tacStatusReported) {
+        if (
+          !tacStatusReported &&
+          options.modelProvider !== "amazon-bedrock" &&
+          options.authentication?.method !== "aws_credentials"
+        ) {
           const tacStatus = trustedAccessStatusFromEvent(event);
           if (tacStatus !== null) {
             tacStatusReported = true;

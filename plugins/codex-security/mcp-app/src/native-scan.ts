@@ -26,6 +26,7 @@ import {
 } from "../../../../sdk/typescript/src/execution-preparation.js";
 export { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
 import type { ScanResults } from "./types.js";
+import { isRecord } from "./record.js";
 
 export interface NativeScanInput {
   scan: ScanResults;
@@ -136,23 +137,58 @@ export async function prepareNativeScan(
   const savedPermissions =
     recipe.inheritedPermissions as ScanOptions["inheritedPermissions"];
   const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
+  for (const path of input.parentSandbox.literalFilesystemDenies ?? []) {
+    const saved = savedPermissions?.filesystem[path];
+    if (/[?*\[]/u.test(path) && (saved === "deny" || saved === "none"))
+      throw new CodexSecurityError(
+        "Saved glob and current literal filesystem denials with the same key cannot be preserved.",
+      );
+  }
+  for (const path of input.parentSandbox.filesystemDenies) {
+    const saved = savedPermissions?.filesystem[path];
+    if (
+      /[?*\[]/u.test(path) &&
+      isRecord(saved) &&
+      (saved["."] === "deny" || saved["."] === "none")
+    )
+      throw new CodexSecurityError(
+        "Saved literal and current glob filesystem denials with the same key cannot be preserved.",
+      );
+  }
   const inheritedPermissions = {
     filesystem: Object.fromEntries([
+      [":workspace_roots", "write"],
       ...Object.entries(savedPermissions?.filesystem ?? {}),
       ...input.parentSandbox.filesystemDenies.map((path) => [path, "deny"]),
+      ...(input.parentSandbox.literalFilesystemDenies ?? []).map((path) => [
+        path,
+        { ".": "deny" },
+      ]),
       ...(input.parentSandbox.globScanMaxDepth === undefined
         ? []
         : [
             [
               "glob_scan_max_depth",
               typeof savedGlobDepth === "number"
-                ? Math.min(savedGlobDepth, input.parentSandbox.globScanMaxDepth)
+                ? Math.max(savedGlobDepth, input.parentSandbox.globScanMaxDepth)
                 : input.parentSandbox.globScanMaxDepth,
             ],
           ]),
     ]) as JsonObject,
     network: { enabled: false },
   };
+  const hasUncappedDenials =
+    (savedGlobDepth === undefined &&
+      Object.entries(savedPermissions?.filesystem ?? {}).some(
+        ([path, access]) =>
+          (access === "deny" || access === "none") && /[*?\[\]]/.test(path),
+      )) ||
+    (input.parentSandbox.globScanMaxDepth === undefined &&
+      input.parentSandbox.filesystemDenies.some((path) =>
+        /[*?\[\]]/.test(path),
+      ));
+  if (hasUncappedDenials)
+    delete inheritedPermissions.filesystem["glob_scan_max_depth"];
   const options = ScanSettingsSchema.parse({
     ...input.savedDeepScanSettings,
     ...(recipe.deepScan as JsonObject | undefined),

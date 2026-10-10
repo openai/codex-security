@@ -2421,6 +2421,7 @@ export class CodexSecurity {
               pluginRoot: runtime.plugin.installedRoot,
               expectation,
               authentication,
+              modelProvider: session.source.modelProvider,
               workbenchValidated: true,
               model,
               onThreadStarted: async (threadId) => {
