@@ -1642,11 +1642,11 @@ def register_cli_scan(
                 registration.get("claimToken"),
                 sealed_producer_version=lambda _: sealed_version,
             )
-    recipe = parse_scan_recipe(recipe_json, repository)
     if (not args.archive_existing or args.archived_scan_dir is not None) and next(
         scan_dir.iterdir(), None
     ) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+    recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
     scope = paths[0] if len(paths) == 1 else "."

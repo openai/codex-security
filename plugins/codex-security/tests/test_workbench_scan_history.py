@@ -341,7 +341,7 @@ def test_finding_history_work_does_not_grow_with_unrelated_scans(workbench_db, w
         "VALUES ('shared', 'shared', 'synthetic', 'fixture', '0', '0')"
     )
     for index, scan_id in enumerate(("before", "selected", "after", "hidden")):
-        add_scan(scan_id, str(index))
+        add_scan(scan_id, f"2026-01-01T00:00:0{index}Z")
         connection.execute(
             "INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity, "
             "confidence, remediation, created_at) "
@@ -378,7 +378,7 @@ def test_finding_history_work_does_not_grow_with_unrelated_scans(workbench_db, w
         connection.set_progress_handler(step, 1)
         try:
             result = workbench_api["scan_history"].finding_matches(
-                connection, "selected", "selected", "1"
+                connection, "selected", "selected", "2026-01-01T00:00:01Z"
             )
         finally:
             connection.set_progress_handler(None, 0)
@@ -388,10 +388,10 @@ def test_finding_history_work_does_not_grow_with_unrelated_scans(workbench_db, w
     expected, original_work = measure()
     matches, first, bounds = expected
     assert [match["scanId"] for match in matches] == ["after", "before"]
-    assert first == "0"
+    assert first == "2026-01-01T00:00:00Z"
     assert bounds == ["before", "after"]
     for index in range(1024):
-        add_scan(f"unrelated-{index}", "4")
+        add_scan(f"unrelated-{index}", "2026-01-01T00:00:04Z")
     observed, expanded_work = measure()
     assert observed == expected
     assert expanded_work <= original_work
@@ -1606,7 +1606,11 @@ def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_
         )
         connection.executemany(
             "INSERT INTO scans VALUES (?, ?, ?)",
-            [("parent", "1", None), ("child", "2", "deep_pass"), ("rerun", "3", None)],
+            [
+                ("parent", "2026-01-01T00:00:01Z", None),
+                ("child", "2026-01-01T00:00:02Z", "deep_pass"),
+                ("rerun", "2026-01-01T00:00:03Z", None),
+            ],
         )
         connection.executemany(
             "INSERT INTO finding_occurrences VALUES (?, ?, 'stable', 'Synthetic finding')",
@@ -1617,10 +1621,13 @@ def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_
             [("parent", "child", "p", "c"), ("child", "rerun", "c", "r")],
         )
         matches = workbench_api["scan_history"].finding_matches
-        for occurrence, scan_id, started in (("p", "parent", "1"), ("r", "rerun", "3")):
+        for occurrence, scan_id, started in (
+            ("p", "parent", "2026-01-01T00:00:01Z"),
+            ("r", "rerun", "2026-01-01T00:00:03Z"),
+        ):
             rows, known_since, known_scans = matches(connection, occurrence, scan_id, started)
             assert {row["scanId"] for row in rows} == ({"parent", "rerun"} - {scan_id})
-            assert known_since == "1"
+            assert known_since == "2026-01-01T00:00:01Z"
             assert known_scans == ["parent", "rerun"]
-        rows, _, _ = matches(connection, "c", "child", "2")
+        rows, _, _ = matches(connection, "c", "child", "2026-01-01T00:00:02Z")
         assert {row["occurrenceId"] for row in rows} == {"p", "c2", "r"}

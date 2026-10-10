@@ -81,6 +81,18 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
     ).rejects.toThrow("already running");
     const releaseOther = await acquireScanExecution(state, other, PLUGIN_ROOT);
     releaseOther();
+    const controller = new AbortController();
+    const canceled = acquireScanExecution(
+      state,
+      first,
+      PLUGIN_ROOT,
+      true,
+      controller.signal,
+    );
+    const stopped = new Error("Synthetic native transport closed.");
+    await Bun.sleep(100);
+    controller.abort(stopped);
+    await expect(canceled).rejects.toBe(stopped);
     const waiting = acquireScanExecution(state, first, PLUGIN_ROOT, true);
     void waiting.catch(() => undefined);
     await expect(
@@ -100,9 +112,10 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
     }
     child.stdin!.write("acquire\n");
     expect((await output.next()).value).toBe("owned");
+    const recovered = acquireScanExecution(state, first, PLUGIN_ROOT, true);
     child.kill();
     await exited;
-    (await acquireScanExecution(state, first, PLUGIN_ROOT))();
+    (await recovered)();
   } finally {
     lines.close();
     if (child.exitCode === null && child.signalCode === null) {
@@ -128,4 +141,7 @@ test("rejects a lock path replaced by a directory", async () => {
   await expect(acquireScanExecution(state, scan, PLUGIN_ROOT)).rejects.toThrow(
     "ordinary file",
   );
+  await expect(
+    acquireScanExecution(state, scan, PLUGIN_ROOT, true),
+  ).rejects.toThrow("ordinary file");
 });

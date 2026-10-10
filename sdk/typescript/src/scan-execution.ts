@@ -43,7 +43,9 @@ export async function acquireScanExecution(
   scanDirectory: string,
   pluginRoot: string,
   wait = false,
+  signal?: AbortSignal,
 ): Promise<() => void> {
+  signal?.throwIfAborted();
   const directory = join(stateDirectory, "scan-execution");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   if (!(await lstat(directory)).isDirectory())
@@ -105,7 +107,7 @@ export async function acquireScanExecution(
         throw new Error("Scan execution lock must be an ordinary file.");
       let error = handle.lock(true);
       while (wait && error === 33) {
-        await delay(50);
+        await delay(50, undefined, { signal });
         error = handle.lock(true);
       }
       if (error !== 0)
@@ -114,8 +116,10 @@ export async function acquireScanExecution(
             ? alreadyRunning
             : `Cannot lock saved scan (Windows error ${error}).`,
         );
+      signal?.throwIfAborted();
     } catch (error) {
       handle.close();
+      signal?.throwIfAborted();
       throw error;
     }
     return () => {
@@ -143,7 +147,7 @@ export async function acquireScanExecution(
       (errno === osConstants.errno.EAGAIN ||
         errno === osConstants.errno.EWOULDBLOCK)
     ) {
-      await delay(50);
+      await delay(50, undefined, { signal });
       ({ errno } = native.fileLock(fd, false, true));
     }
     if (errno !== 0)
@@ -153,8 +157,10 @@ export async function acquireScanExecution(
           ? alreadyRunning
           : `Cannot lock saved scan (errno ${errno}).`,
       );
+    signal?.throwIfAborted();
   } catch (error) {
     closeSync(fd);
+    signal?.throwIfAborted();
     throw error;
   }
   return () => closeSync(fd);

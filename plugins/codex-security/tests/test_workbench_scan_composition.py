@@ -2853,7 +2853,8 @@ def test_membership_migration_rebuilds_public_finding_projections(
         for entry in entries:
             upsert_finding(connection, entry["finding"], timestamp, repository_id)
             connection.execute(
-                "INSERT OR REPLACE INTO finding_embeddings VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO finding_embeddings (finding_id, model, vector_json) "
+                "VALUES (?, ?, ?)",
                 (
                     entry["finding"]["findingId"],
                     entry["embedding"]["model"],

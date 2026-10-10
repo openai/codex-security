@@ -15,7 +15,10 @@ import { expandHome } from "../../../../sdk/typescript/src/codex-home.js";
 import { gitMarkerRoot } from "../../../../sdk/typescript/src/targets.js";
 import { CodexSecurityError } from "../../../../sdk/typescript/src/errors.js";
 import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-config.js";
-import { ScanTransportClosedError } from "../../../../sdk/typescript/src/scan-execution.js";
+import {
+  acquireScanExecution,
+  ScanTransportClosedError,
+} from "../../../../sdk/typescript/src/scan-execution.js";
 import type { ScanResult } from "../../../../sdk/typescript/src/result.js";
 import {
   resolveCodexPath,
@@ -261,6 +264,8 @@ export async function prepareNativeScan(
       environment,
       inheritedPermissions,
       ambientExecution,
+      acquireScanExecution: (state, directory, plugin) =>
+        acquireScanExecution(state, directory, plugin, true, signal),
     },
     { surface: "sdk" },
   );
