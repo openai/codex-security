@@ -3936,9 +3936,9 @@ export async function runScanEvents(
       ["scan-manifest.json", "findings.json", "coverage.json"].map(
         async (name) =>
           JSON.parse(
-            (
-              await readScanFile(options.scanDir, name, name, options.signal)
-            ).toString("utf8"),
+            new TextDecoder("utf-8", { fatal: true }).decode(
+              await readScanFile(options.scanDir, name, name, options.signal),
+            ),
           ),
       ),
     );

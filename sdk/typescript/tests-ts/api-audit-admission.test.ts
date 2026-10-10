@@ -334,6 +334,26 @@ test("Standard admission preserves existing canonical scan IDs", async () => {
   expect(standard.finalizations).toBe(1);
 });
 
+test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
+  "Standard admission preserves BOM-prefixed %s bytes",
+  async (name) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const scanDir = await copyCompletedScan(root);
+    const file = join(scanDir, name);
+    const bytes = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      await readFile(file),
+    ]);
+    await writeFile(file, bytes);
+    const standard = await observeStandardAdmission(repository, scanDir);
+    expect(standard.error).toBe(standard.finalization);
+    expect(standard.finalizations).toBe(1);
+    expect(await readFile(file)).toEqual(bytes);
+  },
+);
+
 test.each(["HTTP API", "ArchiveSurface", "", 17])(
   "canonical coverage ID %j follows the canonical contract",
   async (id) => {
