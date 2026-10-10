@@ -32,7 +32,7 @@ const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
 await writeFile(bundlePath, bundle.outputFiles[0]!.contents);
 const {
   createDeepScanArtifacts,
-  recordCodexSecurityScanDraft,
+  recordCodexSecurityScanDraftViaWorkbench,
   parseCanonicalScanDraft,
   parseScanDraft,
   readDiscoveryAuditDraft,
@@ -160,7 +160,7 @@ for (const scenario of cases) {
               ],
       },
     };
-    await recordCodexSecurityScanDraft(
+    await recordCodexSecurityScanDraftViaWorkbench(
       {
         root: standardRoot,
         repoRoot: repository,
@@ -181,6 +181,20 @@ for (const scenario of cases) {
         },
       },
       semantic,
+      async (args: string[]) => {
+        const draft = JSON.parse(
+          await readFile(args[args.indexOf("--draft-path") + 1]!, "utf8"),
+        );
+        await Promise.all(
+          [
+            ["manifest", "scan-manifest.json"],
+            ["findings", "findings.json"],
+            ["coverage", "coverage.json"],
+          ].map(([key, name]) =>
+            writeFile(join(standardRoot, name!), JSON.stringify(draft[key!])),
+          ),
+        );
+      },
     );
     const submitted = mutateDraft(semantic, scenario.mutation);
     const findings = {

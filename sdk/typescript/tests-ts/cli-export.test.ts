@@ -1,3 +1,4 @@
+import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { resolving } from "./support/promises.js";
 import { createHash } from "node:crypto";
 import {
@@ -53,6 +54,10 @@ describe("CLI", () => {
       exportEnvironment({
         Path: "C:\\Python;C:\\Windows\\System32",
         PYTHON: "/managed/python",
+        XDG_CACHE_HOME: "/managed/cache",
+        LD_LIBRARY_PATH: "/managed/libraries",
+        DYLD_LIBRARY_PATH: "/managed/dylibs",
+        DYLD_FALLBACK_LIBRARY_PATH: "/managed/fallback-libraries",
         TMPDIR: "/tmp",
         OPENAI_API_KEY: "openai-secret",
         CODEX_API_KEY: "codex-secret",
@@ -62,6 +67,7 @@ describe("CLI", () => {
     ).toEqual({
       Path: "C:\\Python;C:\\Windows\\System32",
       PYTHON: "/managed/python",
+      XDG_CACHE_HOME: "/managed/cache",
       PYTHONUTF8: "1",
       TMPDIR: "/tmp",
     });
@@ -152,20 +158,9 @@ describe("CLI", () => {
       };
       const workbench = (args: readonly string[]) =>
         runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args);
-      const registered = await workbench([
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify({
-          config: {},
-          mode: "standard",
-          repository,
-          target: { kind: "repository", paths: [] },
-        }),
-      ]);
+      const registered = await workbench(
+        scanRegistrationArguments(repository, scanDir),
+      );
       const scanId = registered["scanId"] as string;
       await copyCompletedScan(root);
       const content = "# Saved model\n\nSynthetic component boundaries.\n";

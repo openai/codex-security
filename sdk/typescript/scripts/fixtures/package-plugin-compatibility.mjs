@@ -40,12 +40,13 @@ const environment = {
 const postScanPrompt = "Summarize the completed synthetic scan.";
 const turns = [];
 let scanEnvironment;
-// Only model execution is replaced. Plugin selection, bootstrap, admission,
+// Model execution and its sandbox probe are synthetic. Plugin selection, bootstrap, admission,
 // finalization, report generation and workbench completion use the installed SDK.
 const client = new CodexSecurity(
   { pythonPath: process.env.PYTHON, pluginPath: selectedPlugin },
   {
     environment,
+    probeCodexSandbox: async () => {},
     createCodex({ env }) {
       scanEnvironment = env;
       return {

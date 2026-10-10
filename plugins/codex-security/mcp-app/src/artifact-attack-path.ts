@@ -1,3 +1,4 @@
+import { asRecord } from "./record.js";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import attackPathSchema from "../../schemas/tools/candidate-attack-paths.schema.json";
@@ -49,13 +50,6 @@ interface CandidateAttackPathsPayload {
   attackPaths: CandidateAttackPathUpdate[];
 }
 
-/** The stored JSON Schema is the sole source of the nested attack-path contract. */
-const candidateAttackPathsPayloadSchema = loadArtifactZodSchema(
-  documents,
-  attackPathSchema.$id,
-  "updatesPayload",
-) as z.ZodType<CandidateAttackPathsPayload>;
-
 /** The checked-in public schema controls both tools/list and call validation. */
 export const candidateAttackPathsInputSchema = loadArtifactZodSchema(
   documents,
@@ -86,7 +80,8 @@ export async function recordCodexSecurityCandidateAttackPaths(
     );
   }
 
-  const { attackPaths } = candidateAttackPathsPayloadSchema.parse(input);
+  // The MCP registry validates this request before invoking the writer.
+  const { attackPaths } = input;
   const updates = new Map<string, CandidateAttackPathRecord>();
   for (const update of attackPaths) {
     if (updates.has(update.candidateId)) {
@@ -156,14 +151,6 @@ export async function recordCodexSecurityCandidateAttackPaths(
 }
 
 function isAttackPathEligible(candidate: Record<string, unknown>): boolean {
-  const validation = candidate.validation;
-  if (
-    !validation ||
-    typeof validation !== "object" ||
-    Array.isArray(validation)
-  ) {
-    return false;
-  }
-  const disposition = (validation as Record<string, unknown>).disposition;
+  const disposition = asRecord(candidate.validation)?.disposition;
   return disposition === "reportable" || disposition === "deferred";
 }

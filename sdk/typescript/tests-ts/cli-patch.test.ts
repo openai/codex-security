@@ -1361,11 +1361,22 @@ describe("scan and patch workflow", () => {
             ) {
               expect(output.command).toBe("patch");
               expect(output.appServer?.sandbox).toBe("read-only");
+              expect(args).toContain(
+                'responses_api_metadata.codex_security_command="assess-patch-risk"',
+              );
               expect(output.appServer?.prompt).toContain(
                 "<!-- codex-security:patch-risk-summary:start -->",
               );
               expect(output.appServer?.prompt).toContain(
                 "<!-- codex-security:patch-risk-summary:end -->",
+              );
+              expect(output.appServer?.prompt).toContain(
+                "--helper validate-patch-risk-assessment <assessment.json>",
+              );
+              expect(output.appServer?.prompt).toContain(
+                process.platform === "win32"
+                  ? "launch_codex_security_mcp.cmd"
+                  : "launch_codex_security_mcp",
               );
               const artifact = JSON.parse(
                 output

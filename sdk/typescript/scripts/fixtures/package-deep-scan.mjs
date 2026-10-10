@@ -14,6 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -47,6 +48,11 @@ try {
   ]) {
     await copyFile(new URL(name, import.meta.url), join(root, name));
   }
+  const installedRequire = createRequire(join(installedRoot, "package.json"));
+  await copyFile(
+    installedRequire.resolve("smol-toml"),
+    join(root, "package-toml.cjs"),
+  );
   const executable = join(
     root,
     process.platform === "win32"

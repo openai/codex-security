@@ -1,6 +1,6 @@
 import { readJson, readJsonLines } from "./support/json.ts";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -65,5 +65,55 @@ test("a reducer recovers from the real IPC frame limit and records all sources",
   await assert.rejects(
     gradeReducerPagingResult(fixture),
     /distinct|independent/,
+  );
+});
+
+for (const failure of ["synthetic model failure", "empty trace"]) {
+  test(`retains a diagnostic report for ${failure}`, async (t) => {
+    const { Codex } = await import("@openai/codex-sdk");
+    const root = await mkdtemp(
+      path.join(tmpdir(), "deep-reducer-failed-eval-"),
+    );
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const thread = {
+      run: async () => {
+        if (failure !== "empty trace") throw new Error(failure);
+        return { finalResponse: "No tools called." };
+      },
+    } as unknown as ReturnType<typeof Codex.prototype.startThread>;
+    t.mock.method(Codex.prototype, "startThread", () => thread);
+    const expected =
+      failure === "empty trace"
+        ? /produced no tool trace/
+        : /synthetic model failure/;
+    await assert.rejects(
+      runReducerPagingEval({ root, mode: "model" }),
+      expected,
+    );
+    const report = JSON.parse(
+      await readFile(path.join(root, "report.json"), "utf8"),
+    );
+    assert.equal(report.mode, "model");
+    assert.match(report.error, expected);
+    assert.equal(report.accountedSourceCount, undefined);
+  });
+}
+
+test("preserves the reducer error when writing its report also fails", async (t) => {
+  const root = await mkdtemp(
+    path.join(tmpdir(), "deep-reducer-report-failure-"),
+  );
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { Codex } = await import("@openai/codex-sdk");
+  const failure = new Error("Synthetic reducer failure");
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    run: async () => {
+      await rm(root, { recursive: true, force: true });
+      throw failure;
+    },
+  }));
+  await assert.rejects(
+    runReducerPagingEval({ root, mode: "model" }),
+    (error) => error === failure,
   );
 });

@@ -62,7 +62,7 @@ function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function stableJson(value: unknown): string {
+export function stableJson(value: unknown): string {
   return JSON.stringify(value, jsonFields);
 }
 
@@ -73,7 +73,8 @@ const readFile = (path: string) =>
   windows ? windowsFiles().readFile(fsPath(path)) : readFileSync(fsPath(path));
 const stat = (path: string) =>
   windows ? windowsFiles().stat(fsPath(path)) : statSync(fsPath(path));
-const pathKey = (value: string) => (windows ? value.toLowerCase() : value);
+export const pathKey = (value: string) =>
+  windows ? value.toLowerCase() : value;
 
 function resolvedPath(value: string, strict = true): string {
   const path = resolveFilePath(fsPath(value), strict);
@@ -98,7 +99,10 @@ function inside(path: string, root: string, allowMissing = false): string {
   return result.split(sep).join("/");
 }
 
-function relativeFile(value: unknown, root: string): [string, string] {
+export type CandidateSource =
+  { path: string; lineCount?: number } | { error: "missing" | "not_file" };
+
+export function candidateRelativePath(value: unknown): string {
   if (typeof value !== "string" || value === "" || value.includes("\0"))
     throw new Error("path: expected a non-empty repository-relative path");
   const raw = windows ? value.replaceAll("\\", "/") : value;
@@ -110,6 +114,28 @@ function relativeFile(value: unknown, root: string): [string, string] {
     throw new Error(
       "path: expected a repository-relative path without traversal",
     );
+  return raw;
+}
+
+export function relativeFile(
+  value: unknown,
+  root: string,
+  sources?: ReadonlyMap<string, CandidateSource>,
+): [string, string, number?] {
+  const raw = candidateRelativePath(value);
+  const source = sources?.get(raw);
+  if (source) {
+    if ("error" in source)
+      throw Object.assign(
+        new Error(
+          source.error === "missing"
+            ? `path: no selected source for ${raw}`
+            : "path: expected a regular file",
+        ),
+        source.error === "missing" ? { code: "ENOENT" } : {},
+      );
+    return [source.path, source.path, source.lineCount];
+  }
   const path = resolvedPath(join(root, raw));
   const name = inside(path, root);
   if (!stat(path).isFile()) throw new Error("path: expected a regular file");
@@ -120,13 +146,71 @@ function readScope(
   path: string,
   root: string,
   allowMissing: boolean,
+  sources?: ReadonlyMap<string, CandidateSource>,
 ): Set<string> {
-  const lines = decodeUtf8(readFile(path)).split(/\r?\n/u);
+  const contents = decodeUtf8(readFile(path));
+  const lines = contents.split("\n");
+  const listedRows = new Set(lines);
+  const isScopeFile = (value: string): boolean => {
+    try {
+      relativeFile(value, root, sources);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const carriageRows = new Map<string, [boolean, boolean]>();
+  if (!windows) {
+    for (const line of lines) {
+      if (line.endsWith("\r") && line !== "\r") {
+        carriageRows.set(line, [
+          isScopeFile(line),
+          isScopeFile(line.slice(0, -1)),
+        ]);
+      }
+    }
+  }
+  const crlfEvidence = lines.slice(0, -1).some((line) => {
+    if (line === "\r") return true;
+    const paths = carriageRows.get(line);
+    return paths !== undefined && paths[1] && !paths[0];
+  });
+  const literalEvidence = [...carriageRows.values()].some(
+    ([literal, stripped]) => literal && !stripped,
+  );
   const scope = new Set<string>();
-  for (const [index, line] of lines.entries()) {
+  for (const [index, row] of lines.entries()) {
+    let line = row;
+    const finalLiteral = index === lines.length - 1;
+    if (!finalLiteral && (windows || line === "\r")) {
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+    } else if (!finalLiteral && line.endsWith("\r")) {
+      const [literal, stripped] = carriageRows.get(line)!;
+      const trimmed = line.slice(0, -1);
+      if (allowMissing && literal && !stripped && !listedRows.has(trimmed)) {
+        throw new Error(
+          `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
+        );
+      }
+      if (stripped && !literal) {
+        line = trimmed;
+      } else if (stripped && literal) {
+        if (!listedRows.has(trimmed)) {
+          if (crlfEvidence && !literalEvidence) {
+            line = trimmed;
+          } else if (!literalEvidence || crlfEvidence) {
+            throw new Error(
+              `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
+            );
+          }
+        }
+      } else if (!literal && crlfEvidence) {
+        line = trimmed;
+      }
+    }
     if (line === "") continue;
     try {
-      scope.add(relativeFile(line, root)[0]);
+      scope.add(relativeFile(line, root, sources)[0]);
     } catch (error) {
       if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") {
         try {
@@ -188,6 +272,7 @@ function normalizeLocations(
   row: Row,
   root: string,
   lineCounts: Map<string, number>,
+  sources?: ReadonlyMap<string, CandidateSource>,
 ): Location[] {
   if (!Array.isArray(row.locations) || row.locations.length === 0)
     throw new Error("locations: expected a non-empty array");
@@ -199,7 +284,11 @@ function normalizeLocations(
       .sort();
     if (unknown.length)
       throw new Error(`locations: unsupported fields ${unknown.join(", ")}`);
-    const [name, source] = relativeFile(item.path, root);
+    const [name, source, selectedLineCount] = relativeFile(
+      item.path,
+      root,
+      sources,
+    );
     if (name.trim() === "" || name.includes("\\") || name.includes(":"))
       throw new Error("path: expected a safe repository-relative POSIX path");
     const start = positiveLine(item.start_line, "start_line");
@@ -210,7 +299,7 @@ function normalizeLocations(
     if (end < start)
       throw new Error("end_line: must be greater than or equal to start_line");
     const key = pathKey(source);
-    if (!lineCounts.has(key)) {
+    if (selectedLineCount === undefined && !lineCounts.has(key)) {
       const bytes = readFile(source);
       const contents = bytes.toString("latin1");
       const lines =
@@ -218,7 +307,7 @@ function normalizeLocations(
         (contents === "" || /[\r\n]$/u.test(contents) ? 1 : 0);
       lineCounts.set(key, lines);
     }
-    const count = lineCounts.get(key)!;
+    const count = selectedLineCount ?? lineCounts.get(key)!;
     if (end > count)
       throw new Error(`line range ${start}-${end} exceeds ${name}:${count}`);
     if (typeof item.role !== "string" || !roles.includes(item.role))
@@ -245,6 +334,7 @@ function normalizeCandidate(
   root: string,
   scope: Set<string>,
   lineCounts: Map<string, number>,
+  sources?: ReadonlyMap<string, CandidateSource>,
 ): Candidate {
   const unknown = Object.keys(row)
     .filter((key) => !fields.has(key))
@@ -252,7 +342,7 @@ function normalizeCandidate(
   if (unknown.length)
     throw new Error(`unsupported fields ${unknown.join(", ")}`);
   if ("candidate_id" in row) textField(row, "candidate_id");
-  const locations = normalizeLocations(row, root, lineCounts);
+  const locations = normalizeLocations(row, root, lineCounts, sources);
   if (!locations.some((item) => scope.has(item.path)))
     throw new Error("locations: expected at least one in-scope file");
   const result: Candidate = {
@@ -292,6 +382,69 @@ function combine(groups: Map<string, Candidate[]>) {
       if (context !== "") result.context = context;
       return result;
     });
+}
+
+export function createCandidateNormalizer(
+  repoRoot: string,
+  scopePath: string,
+  allowMissing = false,
+  sources?: ReadonlyMap<string, CandidateSource>,
+) {
+  const root = resolvedPath(repoRoot);
+  if (!stat(root).isDirectory())
+    throw new Error("--repo-root: expected a directory");
+  const scope = readScope(scopePath, root, allowMissing, sources);
+  const lineCounts = new Map<string, number>();
+  const groups = new Map<string, Candidate[]>();
+  return {
+    add(row: unknown) {
+      if (!object(row)) throw new Error("expected a JSON object");
+      const candidate = normalizeCandidate(
+        row,
+        root,
+        scope,
+        lineCounts,
+        sources,
+      );
+      const key = stableJson({
+        cwe_ids: candidate.cwe_ids,
+        locations: candidate.locations,
+        instance: candidate.instance ?? null,
+      });
+      const group = groups.get(key) ?? [];
+      group.push(candidate);
+      groups.set(key, group);
+    },
+    finish: () => combine(groups),
+  };
+}
+
+export interface CandidateNormalizationInput {
+  repoRoot: string;
+  scopePath: string;
+  allowMissing: boolean;
+  sources?: ReadonlyMap<string, CandidateSource>;
+  candidates: unknown[];
+}
+
+export function normalizeCandidateBatch(input: CandidateNormalizationInput) {
+  const normalizer = createCandidateNormalizer(
+    input.repoRoot,
+    input.scopePath,
+    input.allowMissing,
+    input.sources,
+  );
+  for (const [index, candidate] of input.candidates.entries()) {
+    try {
+      normalizer.add(candidate);
+    } catch (error) {
+      throw new Error(
+        `discovery candidates: candidate input row ${index + 1}: ${(error as Error).message}`,
+        { cause: error },
+      );
+    }
+  }
+  return normalizer.finish();
 }
 
 function argumentsFor(args: string[]) {
@@ -358,40 +511,27 @@ export function normalizeCandidatesCommand(
       throw new Error("--out: must not also be an input");
     if (pathKey(output) === pathKey(scopePath))
       throw new Error("--out: must not replace --in-scope-files");
-    const scope = readScope(
-      scopePath,
+    const normalizer = createCandidateNormalizer(
       root,
+      scopePath,
       values["allow-missing-in-scope"] ?? false,
     );
-    const lineCounts = new Map<string, number>();
-    const groups = new Map<string, Candidate[]>();
     let rowCount = 0;
     for (const source of inputs) {
       const lines = decodeUtf8(readFile(source)).split(/\r?\n/u);
       for (const [index, line] of lines.entries()) {
         if (line.trim() === "") continue;
-        let candidate: Candidate;
         try {
-          const row: unknown = JSON.parse(line);
-          if (!object(row)) throw new Error("expected a JSON object");
-          candidate = normalizeCandidate(row, root, scope, lineCounts);
+          normalizer.add(JSON.parse(line));
         } catch (error) {
           throw new Error(
             `${source} row ${index + 1}: ${(error as Error).message}`,
           );
         }
-        const key = stableJson({
-          cwe_ids: candidate.cwe_ids,
-          locations: candidate.locations,
-          instance: candidate.instance ?? null,
-        });
-        const group = groups.get(key) ?? [];
-        group.push(candidate);
-        groups.set(key, group);
         rowCount++;
       }
     }
-    const combined = combine(groups);
+    const combined = normalizer.finish();
     if (windows) windowsFiles().mkdir(fsPath(dirname(output)));
     else mkdirSync(fsPath(dirname(output)), { recursive: true });
     const temporary = fsPath(

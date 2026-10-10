@@ -1,6 +1,7 @@
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
+import { mock } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -26,6 +27,7 @@ export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-dr
   },
 });
 
+await testFreeformFailureMessagesAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench(true);
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
@@ -62,6 +64,39 @@ function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
     });
     return JSON.parse(stdout);
   };
+}
+
+async function testFreeformFailureMessagesAgainstRealWorkbench() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-error-transport-",
+  );
+  const store = new WorkbenchDeepScanStore(createWorkbenchRunner(environment));
+  try {
+    const run = await store.begin({
+      targetPath,
+      threadId: "error-owner",
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId: "error-owner",
+    });
+    const worker = await createWorkerFixture(run, "discovery", "discovery");
+    await store.updateWorker({ ...worker, status: "running" });
+    const message = "--provider-error=café\nretry the request";
+    const failed = await store.updateWorker({
+      ...worker,
+      status: "failed",
+      error: message,
+    });
+    assert.equal(failed.error, message);
+    assert.equal((await store.fail(run.scanId, message)).error, message);
+    const reloaded = await store.get(run.scanId, "error-owner");
+    assert.equal(reloaded.error, message);
+    assert.equal(reloaded.persistedWorkers[0].error, message);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 async function testRecoveredPublicationRejectsLateFailure() {
@@ -153,7 +188,7 @@ async function testNoopStoppedRefreshRetainsPublicationFailure() {
       "noop-publication-owner",
     ]);
     const message =
-      "Saved result publication failed: fixture no-op publication failure";
+      "--publication-error=café\nSaved result publication failed.";
     await store.recordStoppedPublicationFailure(
       run.scanId,
       message,
@@ -333,7 +368,7 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-integration-thread";
   const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = createWorkbenchRunner(environment);
+  const runWorkbench = mock.fn(createWorkbenchRunner(environment));
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
   try {
@@ -510,7 +545,11 @@ connection.rollback()`,
     assert.equal(afterCommit.terminalReason, undefined);
     assert.equal(afterCommit.manifestPath, undefined);
     assert.equal(afterCommit.noNewStreak, 2);
-    assert.equal(afterCommit.canonicalArtifacts, undefined);
+    assert.equal(
+      (await runWorkbench.mock.calls.at(-1)!.result).deepScan
+        .canonicalArtifacts,
+      null,
+    );
     assert.equal(
       await readFile(canonical.candidateLedgerPath, "utf8"),
       '{"candidate_id":"replacement"}\n',
@@ -603,7 +642,7 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
   );
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-zero-discovery-thread";
-  const runWorkbench = createWorkbenchRunner(environment, false);
+  const runWorkbench = mock.fn(createWorkbenchRunner(environment, false));
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
   try {
@@ -625,7 +664,11 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
       threadId,
     });
     assert.equal(owned.acquired, true);
-    assert.equal(owned.run.canonicalArtifacts, undefined);
+    assert.equal(
+      (await runWorkbench.mock.calls.at(-1)!.result).deepScan
+        .canonicalArtifacts,
+      null,
+    );
     const canonical = await createCanonicalFixture(run.scanDir);
     const manifestPath = path.join(
       run.scanDir,
@@ -647,7 +690,11 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
     assert.equal(finished.status, "succeeded");
     assert.equal(finished.terminalReason, "capped");
     assert.equal(finished.dispatchedCount, 0);
-    assert.deepEqual(finished.canonicalArtifacts, canonical);
+    assert.deepEqual(
+      (await runWorkbench.mock.calls.at(-1)!.result).deepScan
+        .canonicalArtifacts,
+      canonical,
+    );
     assert.equal(await readFile(canonical.candidateLedgerPath, "utf8"), "");
     assert.equal(
       await readFile(canonical.inScopeFilesPath, "utf8"),
@@ -660,7 +707,11 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
     );
     assert.equal(observed.status, "succeeded");
     assert.equal(observed.terminalReason, "capped");
-    assert.deepEqual(observed.canonicalArtifacts, canonical);
+    assert.deepEqual(
+      (await runWorkbench.mock.calls.at(-1)!.result).deepScan
+        .canonicalArtifacts,
+      canonical,
+    );
     assert.deepEqual(observed.persistedWorkers, []);
   } finally {
     await rm(fixtureRoot, { force: true, recursive: true });

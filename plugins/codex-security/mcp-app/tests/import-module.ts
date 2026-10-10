@@ -1,10 +1,8 @@
 import { build, type BuildOptions } from "esbuild";
-import { fileURLToPath } from "node:url";
 
 export async function importModule(options: BuildOptions) {
   const result = await build({
     bundle: true,
-    nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
     format: "esm",
     platform: "node",
     write: false,

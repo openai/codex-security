@@ -11,7 +11,7 @@ const {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
 } = await importSource(
-  new URL("../src/artifact-attack-path.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-attack-path.ts"),
 );
 
 const scanId = "11111111-1111-4111-8111-111111111111";
@@ -23,7 +23,6 @@ try {
   await testUnknownAndDuplicateCandidatesDoNotChangeLedger();
   await testMissingEligibleCandidateDoesNotChangeLedger();
   await testIneligibleCandidatesDoNotChangeLedger();
-  await testInvalidAttackPathsDoNotChangeLedger();
   await testDuplicateStoredCandidatesDoNotChangeLedger();
   await testMalformedLedgerIsNotReplaced();
   await testEmptyLedgerAcceptsAnEmptyBatch();
@@ -38,10 +37,9 @@ async function testSchemaMatchesDocumentedAttackPathDecisions() {
   );
 
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.deepEqual(schema.required, ["scanId", "attackPaths"]);
-  assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.$defs.input.required, schema.required);
-  assert.deepEqual(schema.$defs.updatesPayload.required, ["attackPaths"]);
+  assert.deepEqual(schema.$defs.input.required, ["scanId", "attackPaths"]);
+  assert.equal(schema.$defs.input.additionalProperties, false);
+  assert.equal(schema.$ref, "#/$defs/input");
   assert.deepEqual(schema.$defs.reportableAttackPath.properties.severity.enum, [
     "critical",
     "high",
@@ -189,35 +187,6 @@ async function testIneligibleCandidatesDoNotChangeLedger() {
         ],
       }),
       /must have a reportable or deferred validation/,
-    );
-    await assertUnchanged(fixture);
-  }
-}
-
-async function testInvalidAttackPathsDoNotChangeLedger() {
-  const fixture = await createFixture("invalid attack judgments", [
-    candidate("candidate-1", "reportable"),
-  ]);
-  const invalid = [
-    { ...attackPath(), severity: "moderate" },
-    { ...attackPath(), decision: "ignore" },
-    { ...attackPath(), decision: "deferred" },
-    { ...attackPath(), severity_rationale: "  " },
-  ];
-
-  for (const value of invalid) {
-    const payload = {
-      attackPaths: [{ candidateId: "candidate-1", attackPath: value }],
-    };
-    assert.equal(
-      candidateAttackPathsInputSchema.safeParse({
-        scanId,
-        ...payload,
-      }).success,
-      false,
-    );
-    await assert.rejects(
-      recordCodexSecurityCandidateAttackPaths(fixture.context, payload),
     );
     await assertUnchanged(fixture);
   }

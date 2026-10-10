@@ -1,7 +1,7 @@
 import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { runAcceptedAudit } from "../../../../../sdk/typescript/src/accepted-audit.js";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
 import {
   readDiscoveryAuditDraft,
@@ -19,6 +19,7 @@ import {
   boundedDeepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
+  confirmedOwnershipChange,
   isCodexCybersecurityPolicyRefusal,
 } from "./errors.js";
 import { renderDedupPrompt, renderDiscoveryPrompt } from "./templates.js";
@@ -165,16 +166,6 @@ export class DeepScanWorkerRunner {
         discoveryValidated = draft.complete !== false;
         return draft;
       },
-      beforeRetry: async (attempt) => {
-        await archiveDirectory(
-          artifactDir,
-          join(
-            workerRoot,
-            "attempts",
-            `attempt-${String(attempt).padStart(2, "0")}`,
-          ),
-        );
-      },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
       await this.persistWorkerCancellation(
@@ -229,6 +220,7 @@ export class DeepScanWorkerRunner {
         async () => await this.options.store.updateWorker(acceptance),
       );
     } catch (error) {
+      if (confirmedOwnershipChange(error, run.scanId)) throw error;
       if (!this.options.signal.aborted) throw error;
       return { type: "discovery", status: "canceled", workerId };
     }
@@ -326,14 +318,6 @@ export class DeepScanWorkerRunner {
           run.scanId,
         );
       },
-      beforeRetry: async (attempt) => {
-        const attemptRoot = join(
-          reducerRoot,
-          "attempts",
-          `attempt-${String(attempt).padStart(2, "0")}`,
-        );
-        await archiveDirectory(artifactDir, attemptRoot);
-      },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
       await this.persistWorkerCancellation(
@@ -396,7 +380,6 @@ export class DeepScanWorkerRunner {
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
     validate: () => Promise<ScanDraftInput | void>;
-    beforeRetry: (attempt: number) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -513,6 +496,7 @@ export class DeepScanWorkerRunner {
           threadId: result.threadId ?? activeThreadId,
         };
       } catch (error) {
+        if (confirmedOwnershipChange(error, run.scanId)) throw error;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
@@ -576,7 +560,7 @@ export class DeepScanWorkerRunner {
         } else {
           resumableThreadId = undefined;
           continuationPrompt = undefined;
-          await input.beforeRetry(attempt);
+          await this.archiveWorkerAttempt(input.artifactDir, attempt);
           if (validationStarted && !validationCompleted) {
             executionPromptPath = await writeValidationRetryPrompt({
               kind: input.kind,
@@ -612,6 +596,17 @@ export class DeepScanWorkerRunner {
         }
       }
     }
+  }
+
+  private async archiveWorkerAttempt(artifactDir: string, attempt: number) {
+    await archiveDirectory(
+      artifactDir,
+      join(
+        dirname(artifactDir),
+        "attempts",
+        `attempt-${String(attempt).padStart(2, "0")}`,
+      ),
+    );
   }
 
   private async persistWorkerCancellation(
@@ -650,6 +645,8 @@ export class DeepScanWorkerRunner {
     try {
       return await operation();
     } catch (firstError) {
+      if (confirmedOwnershipChange(firstError, this.options.run.scanId))
+        throw firstError;
       this.options.log({
         event,
         scanId: this.options.run.scanId,
@@ -659,6 +656,8 @@ export class DeepScanWorkerRunner {
       try {
         return await operation();
       } catch (replayError) {
+        if (confirmedOwnershipChange(replayError, this.options.run.scanId))
+          throw replayError;
         throw new Error(
           `Deep Scan persistence replay failed: ${asError(replayError).message}`,
           { cause: firstError },
@@ -698,7 +697,10 @@ function withWorkerDiagnostics(
   const namespaceFailure = diagnostics.find(
     (diagnostic) => diagnostic.code === "sandbox_namespace_exhausted",
   );
-  const diagnostic = namespaceFailure ?? diagnostics[0];
+  const diagnostic =
+    namespaceFailure ??
+    diagnostics.find((item) => item.code !== "worker_error") ??
+    diagnostics[0];
   const combined = new Error(
     `${diagnostics.map((item) => item.message).join(" ")} Deterministic artifact validation also reported: ${normalized.message}`,
     { cause: normalized },
@@ -715,7 +717,9 @@ function withWorkerDiagnostics(
 function isMissingWorkerResult(error: Error, artifactDir: string): boolean {
   const diagnosed = error as NodeJS.ErrnoException;
   const original =
-    diagnosed.code === "artifact_tool_failed" && error.cause instanceof Error
+    (diagnosed.code === "artifact_tool_failed" ||
+      diagnosed.code === "worker_error") &&
+    error.cause instanceof Error
       ? (error.cause as NodeJS.ErrnoException)
       : diagnosed;
   return (

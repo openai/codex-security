@@ -25,6 +25,7 @@ import { importModule } from "./import-module.ts";
 export const {
   DeepScanCoordinator,
   DeepScanCoordinatorRegistry,
+  WorkbenchDeepScanStore,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,
   AsyncLock,
@@ -34,9 +35,10 @@ export const {
   stdin: {
     contents: `
       export * from "./registry.ts";
+      export { WorkbenchDeepScanStore } from "./store.ts";
       export { classifyCodexWorkerError } from "./errors.ts";
     `,
-    resolveDir: new URL("../src/deep-scan/", import.meta.url).pathname,
+    resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
   },
   loader: { ".md": "text" },
 });
@@ -214,7 +216,6 @@ export class FakeStore {
           this.workers.set(workerId, { ...discovery, mergeState: "buffered" });
         }
       }
-      this.run.phase = "discovery";
     }
     persisted.consecutiveErrors = this.run.consecutiveErrors;
     this.workers.set(update.id, persisted);
@@ -386,7 +387,6 @@ export class FakeStore {
       throw new Error("fixture progress persistence failure");
     }
     this.progress.push(structuredClone(input));
-    if (input.phase) this.run.phase = input.phase as DeepScanRunState["phase"];
   }
 }
 

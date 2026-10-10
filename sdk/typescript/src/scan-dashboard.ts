@@ -265,7 +265,7 @@ export class ScanDashboard {
         input.on("data", this.#onInput);
         this.#stream.write(ENABLE_ALTERNATE_SCROLL);
       }
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch (error) {
       try {
         this.stop();
@@ -537,12 +537,8 @@ export class ScanDashboard {
   #refresh(): void {
     if (this.#timer === null) return;
     try {
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch {}
-  }
-
-  #render(): void {
-    this.#stream.write(this.#frame());
   }
 
   #frame(): string {
@@ -568,7 +564,9 @@ export class ScanDashboard {
     const files =
       this.#files === null
         ? "waiting for inventory"
-        : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
+        : this.#files.filesCompleted > 0
+          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
+          : `${formatCount(this.#files.filesTotal)} in scope`;
     const history = this.#activityLines(width);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
@@ -839,15 +837,20 @@ export class ScanDashboard {
 
   #costLines(): string[] {
     if (!this.#showCost) return [];
+    if (
+      this.#cost === null &&
+      this.#options.maxCostUsd === undefined &&
+      estimateScanCost(this.#options.model?.model, {
+        input_tokens: 0,
+        output_tokens: 0,
+      }) === null
+    ) {
+      return [];
+    }
     const cost =
       this.#cost === null
         ? this.#options.maxCostUsd === undefined
-          ? estimateScanCost(this.#options.model?.model, {
-              input_tokens: 0,
-              output_tokens: 0,
-            }) === null
-            ? "unavailable (model pricing missing)"
-            : "waiting for usage"
+          ? "waiting for usage"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
     return wrapActivity("  COST     ", cost, this.#width());
