@@ -8,6 +8,7 @@ import {
   readFile,
   realpath,
   rename,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -900,7 +901,7 @@ for (const selector of ["latest", "workflow"] as const) {
         "2026-01-01T00:00:00Z",
       );
       db.query(
-        "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
+        "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL WHERE id = ?",
       ).run(dirname(f.python), "unrelated-target", f.second.scanId);
     } finally {
       db.close();
@@ -1217,7 +1218,7 @@ for (const kind of ["non-Git", "symlinked"] as const) {
           "2026-01-01T00:00:00Z",
         );
         db.query(
-          "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
+          "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL WHERE id = ?",
         ).run(target, "non-git-target", f.second.scanId);
       } finally {
         db.close();
@@ -1415,7 +1416,7 @@ test.skipIf(process.platform === "win32")(
         "2026-01-01T00:00:00Z",
       );
       db.query(
-        "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
+        "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL WHERE id = ?",
       ).run(target, "inaccessible-target", f.second.scanId);
     } finally {
       db.close();
@@ -1630,6 +1631,9 @@ test.each(["removed", "recreated directory", "replacement Git checkout"])(
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
     try {
+      db.query(
+        "UPDATE security_targets SET repository_identity = NULL WHERE id = (SELECT target_id FROM scans WHERE id = ?)",
+      ).run(newest.scanId);
       db.query("UPDATE scans SET status = 'failed' WHERE id IN (?, ?)").run(
         f.first.scanId,
         f.second.scanId,
@@ -1683,31 +1687,116 @@ test("latest preserves submillisecond update ordering ahead of scan-ID ties", as
   expect((await latestFor(f, f.repository)).scanId).toBe(newer!.scanId);
 });
 
+for (const removedComponent of [false, true]) {
+  test.skipIf(process.platform === "win32")(
+    `latest ignores an unrelated registered Git target around configured Python (removed component: ${removedComponent})`,
+    async () => {
+      const f = await fixture(true);
+      const unrelated = join(f.root, "unrelated");
+      execFileSync("git", ["clone", "--quiet", f.repository, unrelated]);
+      const target = removedComponent
+        ? join(unrelated, "component")
+        : unrelated;
+      if (removedComponent) {
+        await mkdir(join(target, "src"), { recursive: true });
+        await writeFile(
+          join(target, "src", "extract.py"),
+          "# Synthetic component\n",
+        );
+      }
+      if (removedComponent) {
+        execFileSync("git", ["-C", unrelated, "add", "."]);
+        execFileSync("git", [
+          "-C",
+          unrelated,
+          "-c",
+          "user.name=Synthetic Fixture",
+          "-c",
+          "user.email=fixture@example.test",
+          "commit",
+          "-qm",
+          "Synthetic component",
+        ]);
+      }
+      await f.scan("unrelated-scan", target);
+      if (removedComponent) await rm(target, { recursive: true });
+      const interpreter = join(unrelated, "python");
+      await writeFile(
+        interpreter,
+        `#!/bin/sh\nexec ${JSON.stringify(f.python)} "$@"\n`,
+        { mode: 0o700 },
+      );
+      const workbench = await savedScanWorkbench("latest", {
+        environment: { ...f.environment, PYTHON: interpreter },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.repository,
+      });
+      expect(
+        (
+          await resolveCompletedScan("latest", {
+            currentDirectory: () => f.repository,
+            runWorkbench: workbench,
+          })
+        ).scanId,
+      ).toBe(f.second.scanId);
+    },
+  );
+}
+
 test.skipIf(process.platform === "win32")(
-  "latest ignores an unrelated registered Git target around configured Python",
+  "latest protects the surviving checkout around a removed related component",
   async () => {
     const f = await fixture(true);
-    const unrelated = join(f.root, "unrelated");
-    execFileSync("git", ["clone", "--quiet", f.repository, unrelated]);
-    await f.scan("unrelated-scan", unrelated);
-    const interpreter = join(unrelated, "python");
+    const component = join(f.repository, "component");
+    await mkdir(join(component, "src"), { recursive: true });
+    await writeFile(
+      join(component, "src", "extract.py"),
+      "# Synthetic component\n",
+    );
+    execFileSync("git", ["-C", f.repository, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      f.repository,
+      "-c",
+      "user.name=Synthetic Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Synthetic component",
+    ]);
+    const linked = join(f.root, "linked");
+    execFileSync("git", [
+      "-C",
+      f.repository,
+      "worktree",
+      "add",
+      "--quiet",
+      "--detach",
+      linked,
+      "HEAD",
+    ]);
+    await f.scan("removed-component", component);
+    await rm(component, { recursive: true });
+    const interpreter = join(f.repository, "python");
+    const marker = join(f.root, "python-probed");
     await writeFile(
       interpreter,
-      `#!/bin/sh\nexec ${JSON.stringify(f.python)} "$@"\n`,
+      `#!/bin/sh\nprintf probed > ${JSON.stringify(marker)}\nexec ${JSON.stringify(f.python)} "$@"\n`,
       { mode: 0o700 },
     );
+    const currentDirectory = join(linked, "component");
     const workbench = await savedScanWorkbench("latest", {
       environment: { ...f.environment, PYTHON: interpreter },
       pluginRoot: PLUGIN_ROOT,
-      currentDirectory: f.repository,
+      currentDirectory,
     });
-    expect(
-      (
-        await resolveCompletedScan("latest", {
-          currentDirectory: () => f.repository,
-          runWorkbench: workbench,
-        })
-      ).scanId,
-    ).toBe(f.second.scanId);
+    await expect(
+      resolveCompletedScan("latest", {
+        currentDirectory: () => currentDirectory,
+        runWorkbench: workbench,
+      }),
+    ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
+    expect(existsSync(marker)).toBe(false);
   },
 );
