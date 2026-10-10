@@ -701,6 +701,8 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         "current-mismatched",
         "external-sqlite",
         "external-archived",
+        "external-home-alias",
+        "external-archived-home-alias",
         "external-shared-home",
         "external-missing-copy",
         "external-missing-child",
@@ -743,6 +745,10 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
         selected_home = current_home if worker_home == "current" else root / "original-home"
         if worker_home == "external-shared-home":
             selected_home = tmp_path / "shared-original-home"
+        if worker_home in {"external-home-alias", "external-archived-home-alias"}:
+            actual_home = root / "actual-home"
+            actual_home.mkdir()
+            selected_home.symlink_to(actual_home, target_is_directory=True)
         process = subprocess.run(
             [
                 sys.executable,
@@ -904,6 +910,8 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
         elif worker_home in {
             "external-sqlite",
             "external-archived",
+            "external-home-alias",
+            "external-archived-home-alias",
             "external-shared-home",
             "external-missing-copy",
             "external-missing-child",
@@ -922,7 +930,7 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             # index lives elsewhere and recovery chooses a different index.
             sessions = (
                 selected_home
-                / ("archived_sessions" if worker_home == "external-archived" else "sessions")
+                / ("archived_sessions" if "archived" in worker_home else "sessions")
                 / "2026"
                 / "01"
                 / "01"
@@ -1033,6 +1041,27 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                     ]
                 ),
             }
+
+
+def test_recorded_home_alias_keeps_individual_rollout_links_excluded(
+    tmp_path: Path, workbench_api
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    home = tmp_path / "home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(home, target_is_directory=True)
+    canonical = _rollout(tmp_path, "worker", [])
+    path = sessions / "worker.jsonl"
+    canonical.rename(path)
+    linked = _rollout(tmp_path, "linked-worker", [])
+    (sessions / "linked-worker.jsonl").symlink_to(linked)
+    (sessions / "linked-directory").symlink_to(linked.parent, target_is_directory=True)
+
+    discovered = reader._discover_recorded_worker_sessions(alias, {"worker", "linked-worker"})
+    assert [(session.thread_id, session.path) for session in discovered] == [("worker", path)]
+    assert reader._discover_recorded_worker_sessions(tmp_path / "missing-home", {"worker"}) == []
 
 
 def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:

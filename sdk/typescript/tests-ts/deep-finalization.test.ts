@@ -141,10 +141,14 @@ const cases: {
   initialResumeUsage?: boolean;
   unpricedUsage?: boolean;
   statusReadFault?: boolean;
+  resumeStatusFault?: "transport" | "missing-selection" | "stopped";
   cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
   { outcome: "restart", statusReadFault: true },
+  { outcome: "restart", resumeStatusFault: "transport" },
+  { outcome: "restart", resumeStatusFault: "missing-selection" },
+  { outcome: "restart", resumeStatusFault: "stopped" },
   { outcome: "restart-unavailable-runtime", initialResumeUsage: true },
   {
     outcome: "restart-unavailable-runtime",
@@ -213,6 +217,7 @@ for (const {
   initialResumeUsage,
   unpricedUsage,
   statusReadFault,
+  resumeStatusFault,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome.startsWith("restart") || resumedStop;
@@ -227,7 +232,7 @@ for (const {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${resumeStatusFault ? ` (resume status ${resumeStatusFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -255,6 +260,10 @@ for (const {
     let workbenchOptions: Parameters<typeof runWorkbench>[0];
     let publicationFails = restart && !statusReadFault;
     let selectionReadLost = false;
+    let resumeStatusInjected = false;
+    const resumeStatusError = new Error(
+      "Synthetic selected resume status unavailable",
+    );
     let completionReceiptLost = loseCompletionResponse;
     let budgetReceiptLost =
       budgetCompletionFault === "lost" ||
@@ -375,6 +384,29 @@ for (const {
             if (args[0] === "get-cli-scan-resume")
               originalResumeSignal = options.signal;
             commands.push(args[0]!);
+            if (
+              args[0] === "get-deep-scan" &&
+              resumedStartup &&
+              resumeStatusFault &&
+              !resumeStatusInjected
+            ) {
+              resumeStatusInjected = true;
+              if (resumeStatusFault === "transport") throw resumeStatusError;
+              if (resumeStatusFault === "missing-selection") {
+                const result = await runWorkbench(options, args, input);
+                delete (result["deepScan"] as Record<string, unknown>)[
+                  "finalizationInput"
+                ];
+                return result;
+              }
+              await runWorkbench(options, [
+                "cancel-scan",
+                "--scan-id",
+                scanId,
+                "--thread-id",
+                threadId,
+              ]);
+            }
             if (
               args[0] === "get-deep-scan" &&
               statusReadFault &&
@@ -776,6 +808,49 @@ for (const {
         client = makeClient();
         if (initialResumeUsage) await recordBudgetUsage();
       }
+      if (resumeStatusFault) {
+        const previousModelCalls = modelInputs.length;
+        const failure = await client
+          .run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+            postScanPrompt: followUp,
+          })
+          .catch((error: unknown) => error);
+        expect(resumeStatusInjected).toBe(true);
+        // Failure keeps the explicitly requested follow-up, but cannot restart scanning.
+        expect(modelInputs.slice(previousModelCalls)).toEqual([followUp]);
+        expect(modelInputs.filter((input) => input !== followUp)).toHaveLength(
+          1,
+        );
+        if (resumeStatusFault === "transport")
+          expect(failure).toBe(resumeStatusError);
+        else expect(failure).toBeInstanceOf(Error);
+        expect(commands).not.toContain("fail-scan");
+        const persisted = await runWorkbench(workbenchOptions!, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(persisted["scan"]).toMatchObject({
+          progress: {
+            status: resumeStatusFault === "stopped" ? "canceled" : "running",
+          },
+        });
+        const deep = await runWorkbench(workbenchOptions!, [
+          "get-deep-scan",
+          "--scan-id",
+          scanId,
+          "--thread-id",
+          threadId,
+        ]);
+        expect(
+          (deep["deepScan"] as Record<string, unknown>)["finalizationInput"],
+        ).toEqual(originalFinalizationInput);
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        if (resumeStatusFault === "stopped") return;
+      }
       if (budgeted || closed) {
         const running = client.run(repository, {
           mode: "deep",
@@ -1144,7 +1219,9 @@ for (const {
           : unavailableStartup
             ? 1
             : restart
-              ? 2
+              ? resumeStatusFault
+                ? 3
+                : 2
               : 1,
       );
       if (unavailableStartup) {

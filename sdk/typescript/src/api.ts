@@ -2234,7 +2234,7 @@ export class CodexSecurity {
       if (postScanPrompt?.trim()) {
         runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
       }
-      const recoverSelectedCompletion = async () => {
+      const recoverSelectedCompletion = async (required = false) => {
         const threadId = observedScanThreadId ?? thread.id;
         if (mode !== "deep" || !threadId || signal.aborted) return null;
         const saved = await workbench(workbenchOptions, [
@@ -2243,8 +2243,9 @@ export class CodexSecurity {
           scanId,
           "--thread-id",
           threadId,
-        ]).catch(() => {
+        ]).catch((error: unknown) => {
           deepFinalizationStatusUnavailable = true;
+          if (required) throw error;
           return null;
         });
         if (saved !== null) deepFinalizationStatusUnavailable = false;
@@ -2253,8 +2254,13 @@ export class CodexSecurity {
           !isRecord(deep) ||
           !isRecord(deep["finalizationInput"]) ||
           (deep["status"] !== "running" && deep["status"] !== "succeeded")
-        )
+        ) {
+          if (required)
+            throw new CodexSecurityError(
+              "The saved Deep Scan selection is unavailable for finalization.",
+            );
           return null;
+        }
         selectedDeepFinalization = true;
         await resumeSelectedDeepScan({
           scanId,
@@ -2272,7 +2278,9 @@ export class CodexSecurity {
         };
       };
       const savedCompletion = resumeThreadId
-        ? await recoverSelectedCompletion()
+        ? await recoverSelectedCompletion(
+            registration["selectedFinalization"] === true,
+          )
         : null;
       const directRunner = this.#dependencies.runDeepScan ?? runDeepScan;
       const directPreflightCommand = directDeepScan

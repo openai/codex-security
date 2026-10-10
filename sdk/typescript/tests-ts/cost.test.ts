@@ -3259,6 +3259,106 @@ describe("recorded Deep worker homes", () => {
   );
 });
 
+test.each(
+  [false, true].flatMap((fullInArchive) =>
+    [false, true].flatMap((receipt) =>
+      [false, true].map((attributed) => ({
+        fullInArchive,
+        receipt,
+        attributed,
+      })),
+    ),
+  ),
+)(
+  "keeps corrected usage from the complete rollout copy: %j",
+  async ({ fullInArchive, receipt, attributed }) => {
+    const home = await codexHome();
+    const at = "2026-09-01T00:00:02Z";
+    const usage = (cached: number) => ({
+      input_tokens: 1_000_000,
+      cached_input_tokens: cached,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+    });
+    const counter = (cached: number) => ({
+      type: "event_msg",
+      timestamp: at,
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: usage(cached) },
+      },
+    });
+    const prefix =
+      jsonLines([
+        { type: "session_meta", payload: { id: "worker" } },
+        {
+          type: "turn_context",
+          timestamp: at,
+          payload: { model: "gpt-5.6-sol", turn_id: "turn" },
+        },
+        counter(0),
+      ]) + "\n";
+    const correction = receipt
+      ? {
+          type: "token_usage_record",
+          timestamp: at,
+          payload: {
+            thread_id: "worker",
+            turn_id: "turn",
+            response_id: "corrected-receipt",
+            model: "gpt-5.6-sol",
+            usage: usage(900_000),
+            thread_token_usage: usage(900_000),
+          },
+        }
+      : counter(900_000);
+    const active = join(home, "sessions");
+    const archive = join(home, "archived_sessions");
+    await mkdir(active);
+    await mkdir(archive);
+    const fullPath = join(fullInArchive ? archive : active, "full.jsonl");
+    const prefixPath = join(fullInArchive ? active : archive, "prefix.jsonl");
+    await writeFile(fullPath, prefix + JSON.stringify(correction) + "\n");
+    const observed: number[] = [];
+    const createTracker = () => {
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 2,
+        onCost: (cost) => observed.push(cost.estimatedUsd),
+        onCostLowerBound: (cost) => observed.push(cost.estimatedUsd),
+      });
+      if (attributed)
+        tracker.setAttributionReader(async () => ({
+          formatVersion: 1,
+          executionThreadIds: [],
+          owner: { threadId: "worker", turnId: "turn", startedAt: at },
+          startedAt: at,
+          completedAt: null,
+        }));
+      tracker.start("worker");
+      return tracker;
+    };
+    const tracker = createTracker();
+    let reloaded: ScanCostTracker | undefined;
+    try {
+      const baseline = await tracker.refresh();
+      expect(baseline.cost?.estimatedUsd).toBeCloseTo(0.76, 10);
+      await writeFile(prefixPath, prefix);
+      expect((await tracker.refresh()).cost).toEqual(baseline.cost);
+      reloaded = createTracker();
+      const cold = await reloaded.stop(usage(0));
+      expect(cold.cost).toEqual(baseline.cost);
+      expect(cold.usage).toMatchObject(usage(900_000));
+      expect(observed.length).toBeGreaterThan(0);
+      expect(observed.every((cost) => cost < 2)).toBe(true);
+    } finally {
+      await tracker.stop();
+      await reloaded?.stop();
+    }
+  },
+);
+
 test.each([
   ["150000/15000 vs 100000/200000", 150_000, 15_000, 100_000, 200_000],
   ["150000/15000 vs 100000/20000", 150_000, 15_000, 100_000, 20_000],

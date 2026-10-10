@@ -633,6 +633,7 @@ def _discover_rollout_sessions(
 
 
 def _discover_recorded_worker_sessions(codex_home: Path, roots: set[str]) -> list[RolloutSession]:
+    codex_home = codex_home.resolve()
     recorded: dict[str, list[RolloutSession]] = {}
     children: dict[str, set[str]] = {}
     for candidate in sorted(

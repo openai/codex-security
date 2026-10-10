@@ -406,7 +406,6 @@ export class ScanCostTracker {
       }
     }
     const usageSessions = new Map<string, SessionUsage>();
-    const counterSessions = new Map<string, SessionUsage>();
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -472,18 +471,23 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
-      // A copied prefix must not supply model usage for a more complete log.
+      // Choose one copy for both usage and model pricing. Equal token totals
+      // can still precede later cache-category corrections in the full log.
       const previous = usageSessions.get(threadId);
       if (
         previous === undefined ||
         (session.usage?.total_tokens ?? -1) >
           (previous.usage?.total_tokens ?? -1) ||
         (session.usage?.total_tokens === previous.usage?.total_tokens &&
-          session.pendingLine.length === 0 &&
-          previous.pendingLine.length > 0)
+          (session.eventIndex > previous.eventIndex ||
+            (session.eventIndex === previous.eventIndex &&
+              session.pendingLine.length === 0 &&
+              previous.pendingLine.length > 0)))
       ) {
         usageSessions.set(threadId, session);
       }
+    }
+    for (const [threadId, session] of usageSessions) {
       if (
         session.counterUsage &&
         session.counterUsage.total_tokens >
@@ -491,12 +495,6 @@ export class ScanCostTracker {
       ) {
         usages.set(threadId, session.counterUsage);
       }
-      if (
-        session.counterUsage &&
-        session.counterUsage.total_tokens >
-          (counterSessions.get(threadId)?.counterUsage?.total_tokens ?? -1)
-      )
-        counterSessions.set(threadId, session);
       const receipt = usages.get(threadId);
       if (
         session.usage !== null &&
@@ -508,10 +506,8 @@ export class ScanCostTracker {
         usages.set(threadId, session.usage);
       }
       if (!usages.has(threadId)) usages.set(threadId, null);
-    }
-    for (const [threadId, session] of usageSessions) {
       let selected = usages.get(threadId);
-      const counter = counterSessions.get(threadId)?.counterUsage;
+      const counter = session.counterUsage;
       if (selected && counter)
         selected = addTokenUsage(
           selected,
@@ -579,14 +575,13 @@ export class ScanCostTracker {
           addTokenUsage(modelUsage.get(model) ?? null, remainder),
         );
       }
-      const counter = counterSessions.get(threadId);
       const live =
-        (counter?.counterUsage?.total_tokens ?? -1) >
+        (session?.counterUsage?.total_tokens ?? -1) >
         (session?.usage?.total_tokens ?? -1);
-      const liveTokens = live ? counter?.counterUsage : session?.usage;
+      const liveTokens = live ? session?.counterUsage : session?.usage;
       const liveModels = reconcileModelUsage(
         value,
-        live ? counter?.counterModelUsage : session?.modelUsage,
+        live ? session?.counterModelUsage : session?.modelUsage,
       );
       for (const [model, tokens] of liveModels ?? [])
         liveModelUsage.set(
