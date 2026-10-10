@@ -59,8 +59,10 @@ try {
       ? "package-codex.exe"
       : "package-deep-codex.mjs",
   );
-  if (process.platform === "win32")
+  if (process.platform === "win32") {
     await copyFile(process.execPath, executable);
+    await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
+  }
   await chmod(executable, 0o700);
 
   await runInstalledSdk(installedPlugin, executable);

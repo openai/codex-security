@@ -63,20 +63,20 @@ async function fixture(git = false) {
   };
   const python = await resolvePluginPython({ environment });
   const options = { environment, python, pluginRoot: PLUGIN_ROOT };
-  async function scan(name: string) {
+  async function scan(name: string, target = repository) {
     const scanDir = join(root, name);
     await mkdir(scanDir, { mode: 0o700 });
     const registered = await runWorkbench(options, [
       "register-cli-scan",
       "--repository",
-      repository,
+      target,
       "--scan-dir",
       scanDir,
       "--recipe-json",
       JSON.stringify({
         config: {},
         mode: "standard",
-        repository,
+        repository: target,
         target: { kind: "repository", paths: [] },
       }),
     ]);
@@ -90,7 +90,7 @@ async function fixture(git = false) {
     if (git)
       manifest.scan.target.revision = execFileSync(
         "git",
-        ["-C", repository, "rev-parse", "HEAD"],
+        ["-C", target, "rev-parse", "HEAD"],
         { encoding: "utf8" },
       ).trim();
     delete manifest.scan.sealedAt;
@@ -168,6 +168,7 @@ async function fixture(git = false) {
     python,
     first,
     second,
+    scan,
     embedding,
     embed,
     reviewer,
@@ -1483,3 +1484,184 @@ test.each(["checkout", "git metadata"])(
     ).rejects.toThrow("No completed saved scan was found for this repository.");
   },
 );
+
+async function latestFor(
+  f: Awaited<ReturnType<typeof fixture>>,
+  directory: string,
+) {
+  const workbench = await savedScanWorkbench("latest", {
+    environment: { ...f.environment, PYTHON: f.python },
+    pluginRoot: PLUGIN_ROOT,
+    currentDirectory: directory,
+  });
+  return resolveCompletedScan("latest", {
+    currentDirectory: () => directory,
+    runWorkbench: workbench,
+  });
+}
+
+test.each(["checkout", "linked worktree", "same-origin clone"])(
+  "latest keeps component scope when a sibling in a %s has newer history",
+  async (kind) => {
+    const f = await fixture(true);
+    for (const component of ["a", "b"]) {
+      await mkdir(join(f.repository, component, "src"), { recursive: true });
+      await writeFile(
+        join(f.repository, component, "src", "extract.py"),
+        "# Synthetic component\n",
+      );
+    }
+    execFileSync("git", ["-C", f.repository, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      f.repository,
+      "-c",
+      "user.name=Synthetic Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Synthetic components",
+    ]);
+    let other = f.repository;
+    if (kind === "linked worktree") {
+      other = join(f.root, "linked");
+      execFileSync("git", [
+        "-C",
+        f.repository,
+        "worktree",
+        "add",
+        "--quiet",
+        "--detach",
+        other,
+        "HEAD",
+      ]);
+    } else if (kind === "same-origin clone") {
+      other = join(f.root, "clone");
+      execFileSync("git", ["clone", "--quiet", f.repository, other]);
+      execFileSync("git", [
+        "-C",
+        f.repository,
+        "remote",
+        "add",
+        "origin",
+        "https://example.test/team/components.git",
+      ]);
+      execFileSync("git", [
+        "-C",
+        other,
+        "remote",
+        "set-url",
+        "origin",
+        "https://example.test/team/components.git",
+      ]);
+    }
+    const own = await f.scan("component-a", join(f.repository, "a"));
+    await f.scan("component-b", join(other, "b"));
+    expect((await latestFor(f, join(f.repository, "a"))).scanId).toBe(
+      own.scanId,
+    );
+  },
+);
+
+test("latest continues to an older valid scan after rejecting a replaced same-origin clone", async () => {
+  const f = await fixture(true);
+  const clone = join(f.root, "clone");
+  execFileSync("git", ["clone", "--quiet", f.repository, clone]);
+  execFileSync("git", [
+    "-C",
+    f.repository,
+    "remote",
+    "add",
+    "origin",
+    "https://example.test/team/replacement.git",
+  ]);
+  execFileSync("git", [
+    "-C",
+    clone,
+    "remote",
+    "set-url",
+    "origin",
+    "https://example.test/team/replacement.git",
+  ]);
+  const newest = await f.scan("clone-scan", clone);
+  expect((await latestFor(f, f.repository)).scanId).toBe(newest.scanId);
+  await rename(join(clone, ".git"), join(f.root, "previous-clone-metadata"));
+  execFileSync("git", ["init", "--quiet", clone]);
+  execFileSync("git", [
+    "-C",
+    clone,
+    "remote",
+    "add",
+    "origin",
+    "https://example.test/team/replacement.git",
+  ]);
+  expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+});
+
+test("latest retains generation-bound history after its linked worktree is removed", async () => {
+  const f = await fixture(true);
+  const linked = join(f.root, "linked");
+  execFileSync("git", [
+    "-C",
+    f.repository,
+    "worktree",
+    "add",
+    "--quiet",
+    "--detach",
+    linked,
+    "HEAD",
+  ]);
+  const newest = await f.scan("removed-worktree-scan", linked);
+  execFileSync("git", [
+    "-C",
+    f.repository,
+    "worktree",
+    "remove",
+    "--force",
+    linked,
+  ]);
+  const canonical = await resolveCompletedScan("latest", {
+    currentDirectory: () => f.repository,
+    runWorkbench: (args, input, signal) =>
+      runWorkbench(
+        {
+          environment: f.environment,
+          pluginRoot: PLUGIN_ROOT,
+          python: f.python,
+          signal,
+        },
+        args,
+        input,
+      ),
+  });
+  expect(canonical.scanId).toBe(newest.scanId);
+  expect((await latestFor(f, f.repository)).scanId).toBe(newest.scanId);
+});
+
+test("latest preserves submillisecond update ordering ahead of scan-ID ties", async () => {
+  const f = await fixture();
+  const [older, newer] = [f.first, f.second].sort((left, right) =>
+    left.scanId.localeCompare(right.scanId),
+  );
+  const db = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    for (const [scan, timestamp] of [
+      [older!, "2099-01-01T00:00:00.000100Z"],
+      [newer!, "2099-01-01T00:00:00.000200Z"],
+    ] as const) {
+      db.query(
+        "UPDATE scans SET started_at = '2099-01-01T00:00:00Z', updated_at = ? WHERE id = ?",
+      ).run(timestamp, scan.scanId);
+      db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
+        timestamp,
+        scan.scanId,
+      );
+    }
+  } finally {
+    db.close();
+  }
+  expect((await latestFor(f, f.repository)).scanId).toBe(newer!.scanId);
+});
