@@ -141,6 +141,10 @@ import {
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
 import {
+  formatCoverageScope,
+  formatScopePath,
+} from "./coverage-presentation.js";
+import {
   formatScanCost,
   formatScanCostTokens,
   formatTokenUsage,
@@ -8928,7 +8932,7 @@ async function executeScan(
       reason: "Stop reason unavailable. See the report for details.",
     };
   }
-  progress?.stage(`Scan complete · ${result.manifest.scan.id.slice(0, 8)}`);
+  progress?.stage(`Scan finished · ${result.manifest.scan.id.slice(0, 8)}`);
   printScanSummary(
     result,
     progress,
@@ -8941,8 +8945,8 @@ async function executeScan(
   );
   const coverageError = incomplete
     ? threshold === undefined
-      ? `Scan coverage is ${result.coverage.completeness}; results may be incomplete.`
-      : `Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.`
+      ? `Scan coverage is ${result.coverage.completeness} for the requested scope; see the report for unfinished work.`
+      : `Cannot evaluate the failure policy: coverage is ${result.coverage.completeness} for the requested scope.`
     : undefined;
   const completedScan = (
     exitCode: number,
@@ -9273,7 +9277,7 @@ function scanScope(arguments_: ScanArguments): string | null {
         portable.startsWith("//")
           ? basename(portable) || portable
           : portable;
-      return errorMessage(scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "));
+      return errorMessage(formatScopePath(scoped));
     });
     return `${displayed.join(", ")}${paths.length > displayed.length ? `, +${paths.length - displayed.length} more` : ""}`;
   }
@@ -9474,7 +9478,8 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
+      `  ${paint("SCOPE", 1)}     ${formatCoverageScope(result.coverage)}\n` +
+      `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness} for requested scope\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

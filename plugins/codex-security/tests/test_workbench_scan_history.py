@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -274,6 +275,94 @@ def create_cli_scan(
         completion.extend(("--cost-json", json.dumps(cost)))
     run_workbench(state_dir, *completion)
     return launched
+
+
+@pytest.mark.parametrize("finding", [False, True])
+@pytest.mark.parametrize("completeness", ["complete", "partial"])
+def test_get_scan_reads_legacy_sealed_history_coverage_without_writes(
+    tmp_path: Path, finding: bool, completeness: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(
+        state_dir, tmp_path / "results", repository, finding=finding, completeness=completeness
+    )
+    scan_dir = Path(scan["scanDir"])
+    artifacts = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ? AND details_json = '{}'",
+            (scan["scanId"],),
+        ).fetchone() == (0,)
+        connection.execute(
+            "UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan["scanId"],)
+        )
+
+    assert get_scan(state_dir, scan["scanId"])["scan"]["coverage"] == {
+        "mode": "repository",
+        "completeness": completeness,
+        "includePaths": ["."],
+        "excludePaths": [],
+        "explicitExclusions": [],
+    }
+    assert {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()} == artifacts
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT seal_manifest_digest FROM scans WHERE id = ?", (scan["scanId"],)
+        ).fetchone() == (None,)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["coverage", "findings", "missing-coverage", "missing-manifest", "unsealed", "owner", "mode"],
+)
+def test_get_scan_rejects_unverifiable_legacy_sealed_history_coverage(
+    tmp_path: Path, corruption: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state_dir, tmp_path / "results", repository, finding=False)
+    scan_dir = Path(scan["scanDir"])
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan["scanId"],)
+        )
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if corruption in {"coverage", "findings"}:
+        path = scan_dir / f"{corruption}.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+    elif corruption.startswith("missing-"):
+        (
+            scan_dir
+            / ("coverage.json" if corruption == "missing-coverage" else "scan-manifest.json")
+        ).unlink()
+    elif corruption == "unsealed":
+        del manifest["scan"]["sealedAt"]
+        del manifest["scan"]["artifacts"]
+        manifest_path.write_text(json.dumps(manifest))
+    elif corruption == "owner":
+        manifest["scan"]["target"]["targetId"] = "unrelated-target"
+        manifest_path.write_text(json.dumps(manifest))
+    else:
+        coverage_path = scan_dir / "coverage.json"
+        coverage = json.loads(coverage_path.read_text())
+        coverage["mode"] = "deep_repository"
+        coverage_path.write_text(json.dumps(coverage))
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == "coverage.json":
+                artifact["sha256"] = hashlib.sha256(coverage_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+    artifacts = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
+
+    assert "coverage" not in get_scan(state_dir, scan["scanId"])["scan"]
+    assert {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()} == artifacts
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT seal_manifest_digest FROM scans WHERE id = ?", (scan["scanId"],)
+        ).fetchone() == (None,)
 
 
 def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_path: Path) -> None:

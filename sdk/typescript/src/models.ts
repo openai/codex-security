@@ -300,6 +300,9 @@ export interface CoverageDocument {
     | "branch_diff"
     | "working_tree"
     | "deep_repository";
+  /**
+   * Completion of the requested review within the authorized scope, not whole-repository coverage or proof that no vulnerabilities exist. Use partial when requested work or an essential in-scope proof gap remains; use unknown when completion cannot be established.
+   */
   completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
     "repository" | "scoped_path" | "diff" | "directory" | "custom";
@@ -308,6 +311,9 @@ export interface CoverageDocument {
   surfaces: {
     id: string;
     label: string;
+    /**
+     * The evidence-supported result for this in-scope surface. Use needs_follow_up only when an essential part of its requested review remains unresolved.
+     */
     disposition:
       | "reported"
       | "no_issue_found"
@@ -319,11 +325,17 @@ export interface CoverageDocument {
     notes?: string;
     [k: string]: unknown;
   }[];
+  /**
+   * Source excluded by the requested scope or applicable authorization and policy. Do not invent exclusions to hide unfinished requested work.
+   */
   explicitExclusions: {
     pattern: string;
     reason: string;
     [k: string]: unknown;
   }[];
+  /**
+   * Unfinished requested work or an essential unresolved in-scope proof gap. Every item blocks complete coverage. Put optional additional assurance in openQuestions instead; never move a real blocker there to claim completion.
+   */
   deferred: {
     id: string;
     reason: string;
@@ -338,6 +350,9 @@ export interface CoverageDocument {
     id: string;
     reason: string;
   }[];
+  /**
+   * Optional additional assurance or later investigations that do not block completion of the requested review. Preserve essential unresolved in-scope proof gaps in deferred instead.
+   */
   openQuestions?: {
     question: string;
     followUpPrompt?: string;

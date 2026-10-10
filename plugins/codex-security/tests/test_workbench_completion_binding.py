@@ -1255,18 +1255,20 @@ def test_completion_succeeds_when_all_findings_are_malformed(tmp_path: Path) -> 
         }
     ]
     report = (scan_dir / "report.md").read_text()
-    assert "| Coverage | partial |" in report
+    assert "| Coverage | partial for requested scope |" in report
     assert "Skipped malformed finding 1" in report
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
     run = sarif["runs"][0]
     assert run["properties"]["codexSecurityCoverageCompleteness"] == "partial"
-    assert run["invocations"][0]["executionSuccessful"] is True
-    assert run["invocations"][0]["toolExecutionNotifications"] == [
-        {
-            "level": "warning",
-            "message": {"text": completed["scan"]["warnings"][0]},
-        }
-    ]
+    assert run["invocations"][0]["executionSuccessful"] is False
+    notifications = run["invocations"][0]["toolExecutionNotifications"]
+    assert {
+        "level": "warning",
+        "message": {"text": completed["scan"]["warnings"][0]},
+    } in notifications
+    assert any(
+        coverage["surfaces"][0]["label"] in item["message"]["text"] for item in notifications
+    )
 
 
 def test_completion_recovers_lone_surrogate_in_malformed_finding(tmp_path: Path) -> None:

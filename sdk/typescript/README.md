@@ -158,6 +158,11 @@ directory must be private to you (`chmod 700`).
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |
 | `cost`                            | Estimated model usage cost, or `null` when unavailable.          |
 
+Completion covers the requested paths. Unselected source does not make a finished
+scoped review partial; unfinished requested work and essential in-scope proof gaps do.
+`coverage.deferred` records unfinished work, while `coverage.openQuestions` records
+optional follow-up.
+
 Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.

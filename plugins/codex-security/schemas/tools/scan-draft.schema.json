@@ -699,7 +699,7 @@
           "description": "The meaningful name of the reviewed security surface."
         },
         "disposition": {
-          "description": "The evidence-supported review result for this surface.",
+          "description": "The evidence-supported result for this in-scope surface. Use needs_follow_up only when an essential part of its requested review remains unresolved.",
           "enum": [
             "reported",
             "no_issue_found",
@@ -737,7 +737,7 @@
         "excludePaths": false,
         "receiptRefs": false,
         "completeness": {
-          "description": "Use partial if any work is deferred or any surface needs follow-up; use complete only when no such work remains.",
+          "description": "Completion of the requested review within the authorized scope, not whole-repository coverage or proof that no vulnerabilities exist. Use partial when requested work or an essential in-scope proof gap remains, including any deferred item or surface needing follow-up; use unknown when completion cannot be established.",
           "enum": ["complete", "partial", "unknown"]
         },
         "inventoryStrategy": false,
@@ -761,10 +761,11 @@
             },
             "required": ["pattern", "reason"],
             "additionalProperties": true
-          }
+          },
+          "description": "Source excluded by the requested scope or applicable authorization and policy. Do not invent exclusions to hide unfinished requested work."
         },
         "deferred": {
-          "description": "Each supplied id identifies one task and must be unique within this draft. Reuse saved IDs in later updates.",
+          "description": "Unfinished requested work or an essential unresolved in-scope proof gap. Every item blocks complete coverage. Put optional additional assurance in openQuestions instead; never move a real blocker there to claim completion. Each supplied id identifies one task and must be unique within this draft. Reuse saved IDs in later updates.",
           "type": "array",
           "items": {
             "type": "object",
@@ -802,10 +803,7 @@
                 "$ref": "#/$defs/text"
               }
             },
-            "required": [
-              "id",
-              "reason"
-            ],
+            "required": ["id", "reason"],
             "additionalProperties": false
           }
         },
@@ -830,7 +828,8 @@
                 "additionalProperties": true
               }
             ]
-          }
+          },
+          "description": "Optional additional assurance or later investigations that do not block completion of the requested review. Preserve essential unresolved in-scope proof gaps in deferred instead."
         }
       },
       "required": [

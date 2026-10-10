@@ -2,6 +2,7 @@
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import sqlite3
@@ -14,7 +15,12 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from finalize_scan_contract import ContractError, _prepare_scan_finalization
+from finalize_scan_contract import (
+    ContractError,
+    _prepare_scan_finalization,
+    _read_scan_local_json_bytes,
+    _read_sealed_scan,
+)
 from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
@@ -136,6 +142,66 @@ def cli_scan_resume(
                 except ContractError as exc:
                     raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
     return result
+
+
+def coverage_summary_for_history(
+    wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
+) -> dict[str, Any]:
+    scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
+    coverage_ref = ARTIFACTS["coverage"]
+    try:
+        if scan["seal_manifest_digest"] is None:
+            # Older workbench rows can have valid seals without a pinned digest.
+            manifest, _, coverage, _ = _read_sealed_scan(scan_dir, None, "history coverage")
+            wb.verify_manifest_binding(scan, manifest)
+            if coverage["mode"] != wb.expected_coverage_mode(scan):
+                raise ContractError("coverage.mode: must match the workbench scan")
+        else:
+            # Completion already validated the full scan. History only needs the
+            # pinned manifest and its coverage artifact, not findings or receipts.
+            manifest, manifest_bytes = _read_scan_local_json_bytes(
+                scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
+            )
+            if (
+                f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+                != scan["seal_manifest_digest"]
+            ):
+                raise ContractError("The sealed scan manifest changed after completion.")
+            sealed_scan = manifest["scan"]
+            if (
+                sealed_scan["id"] != scan["id"]
+                or not sealed_scan.get("sealedAt")
+                or sealed_scan["coverageRef"] != coverage_ref
+            ):
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            coverage, coverage_bytes = _read_scan_local_json_bytes(
+                scan_dir, coverage_ref, coverage_ref
+            )
+            expected = next(
+                (
+                    artifact["sha256"]
+                    for artifact in sealed_scan["artifacts"]
+                    if artifact["path"] == coverage_ref
+                ),
+                None,
+            )
+            if (
+                hashlib.sha256(coverage_bytes).hexdigest() != expected
+                or coverage.get("scanId") != scan["id"]
+            ):
+                raise ContractError("The sealed coverage changed after completion.")
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    return {
+        key: coverage[key]
+        for key in (
+            "mode",
+            "completeness",
+            "includePaths",
+            "excludePaths",
+            "explicitExclusions",
+        )
+    }
 
 
 def _windows_path_key(value: str) -> str:

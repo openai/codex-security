@@ -1,3 +1,5 @@
+import { runPython } from "./support/python-probe.js";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import Ajv, { type ValidateFunction } from "ajv";
@@ -92,7 +94,33 @@ const stringAssessmentInput = {
   ],
 };
 
+function projectFindingDetails(details: JsonObject): string {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const script = [
+    "import json, pathlib, runpy, sys",
+    "plugin = pathlib.Path(sys.argv[1])",
+    "examples = plugin / 'examples' / 'completed-scan'",
+    "manifest, findings, coverage = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
+    "findings['findings'][0].update(json.loads(sys.argv[2]))",
+    "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
+    "sys.stdout.buffer.write(projection['generate_report_markdown'](manifest, findings, coverage))",
+  ].join("\n");
+  const result = runPython(python!, [
+    "-c",
+    script,
+    PLUGIN_ROOT,
+    JSON.stringify(details),
+  ]);
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  return new TextDecoder().decode(result.stdout);
+}
+
 const readJson = readJsonFile<JsonObject>;
+
+function schemaProperties(schema: JsonObject): Record<string, JsonObject> {
+  return schema["properties"] as Record<string, JsonObject>;
+}
 
 async function startMcp() {
   return startMcpClient(
@@ -129,6 +157,36 @@ function expectScanDraftDetails(validate: ValidateFunction) {
 }
 
 describe("bundled plugin finding detail contracts", () => {
+  test("keeps the shipped example report aligned with canonical scan facts", async () => {
+    const exampleRoot = join(PLUGIN_ROOT, "examples", "completed-scan");
+    const [manifest, findings, coverage, example] = await Promise.all([
+      readJson(join(exampleRoot, "scan-manifest.json")),
+      readJson(join(exampleRoot, "findings.json")),
+      readJson(join(exampleRoot, "coverage.json")),
+      readFile(join(exampleRoot, "report.md"), "utf8"),
+    ]);
+    const target = (manifest["scan"] as JsonObject)["target"] as JsonObject;
+    const finding = (findings["findings"] as JsonObject[])[0]!;
+    const location = (finding["locations"] as JsonObject[])[0]!;
+    const canonicalFacts = [
+      target["displayName"],
+      target["revision"],
+      finding["title"],
+      finding["summary"],
+      (finding["severity"] as JsonObject)["level"],
+      (finding["confidence"] as JsonObject)["level"],
+      location["path"],
+      `${coverage["completeness"]} for requested scope`,
+    ] as string[];
+
+    for (const report of [projectFindingDetails({}), example]) {
+      for (const fact of canonicalFacts) expect(report).toContain(fact);
+      for (const path of coverage["includePaths"] as string[]) {
+        expect(report).toContain(`\`${path}\``);
+      }
+    }
+  });
+
   test("rejects malformed known fields in scan drafts", async () => {
     const schemaRoot = join(PLUGIN_ROOT, "schemas");
     const [commonSchema, scanDraftSchema] = await Promise.all([
@@ -156,6 +214,34 @@ describe("bundled plugin finding detail contracts", () => {
         (candidate) => candidate["name"] === "record_codex_security_scan_draft",
       );
       expect(tool).toBeDefined();
+
+      const sourceSchema = await readJson(
+        join(PLUGIN_ROOT, "schemas", "tools", "scan-draft.schema.json"),
+      );
+      const definitions = sourceSchema["$defs"] as Record<string, JsonObject>;
+      const declaredCoverage = schemaProperties(definitions["coverage"]!);
+      const advertisedCoverage = schemaProperties(
+        schemaProperties(tool!["inputSchema"] as JsonObject)["coverage"]!,
+      );
+      for (const name of [
+        "completeness",
+        "explicitExclusions",
+        "deferred",
+        "openQuestions",
+      ]) {
+        const description = declaredCoverage[name]!["description"];
+        expect(typeof description).toBe("string");
+        expect(advertisedCoverage[name]!["description"]).toBe(description);
+      }
+      expect(
+        schemaProperties(
+          advertisedCoverage["surfaces"]!["items"] as JsonObject,
+        )["disposition"]!["description"],
+      ).toBe(
+        schemaProperties(definitions["surface"]!)["disposition"]![
+          "description"
+        ],
+      );
 
       const validator = new Ajv({ strict: false });
       validator.addFormat("uuid", /^[0-9a-f-]{36}$/iu);
