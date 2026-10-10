@@ -118,6 +118,39 @@ Bedrock scans use AWS credentials and model access. They do not require
 [Bedrock guide](https://github.com/openai/codex-security/blob/main/docs/bedrock.md)
 for setup, model selection, and verification.
 
+## Read existing Cloud findings
+
+The Security plugin includes `$cloud-findings` for accounts where Codex Security
+Cloud is available. Install the plugin through your configured Codex marketplace,
+sign in to Codex with ChatGPT, and complete the Cloud connection interactively in
+the intended account and workspace. Installation alone does not authenticate the
+connection. Local scans do not require Cloud, and an API key used for scanning
+does not replace the Cloud connection.
+
+In Codex desktop or the interactive Codex CLI, ask:
+
+> Use $cloud-findings to list findings for example/security-demo in my selected
+> workspace. Inspect the highest-severity finding and its report, and show its
+> recorded assignee, patch links, verification results, and latest scan status.
+> Do not change anything.
+
+After completing connection setup, the same host connection can be used by
+`codex exec`:
+
+```bash
+codex exec --ephemeral --json -s read-only 'Use $cloud-findings to read findings and the latest scan status for example/security-demo in my selected workspace. Inspect one finding and its report. If the workspace or repository is ambiguous, explain the required selection and stop. Do not change anything.'
+```
+
+Noninteractive execution needs an existing authenticated connection; it cannot
+complete first-time sign-in. If authentication expires, the app is unavailable,
+or workspace policy denies access, complete the reported setup action before
+retrying. Those failures do not mean the repository has no findings.
+
+Assignment, issue validation, patch checks, periodic fix checks, and finding
+lifecycle status are separate records. Some finding sources do not provide all
+of them. The read workflow reports missing data and incomplete evidence pages,
+and does not describe failed or unfinished scans as clean.
+
 ## Run a scan from TypeScript
 
 Scan a repository you own or have permission to assess:

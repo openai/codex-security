@@ -114,6 +114,18 @@ def test_daybreak_access_uses_plugin_mcp() -> None:
     assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in mcp_servers
 
 
+def test_cloud_connection_is_optional_and_skill_is_shipped() -> None:
+    apps = read_json(PLUGIN_ROOT / ".app.json")["apps"]
+    cloud = apps["codex-security-cloud"]
+    assert cloud["id"] == "connector_openai_defense_factory"
+    assert cloud["category"] == "Code Hosting & Security Findings"
+    assert cloud.get("required", False) is False
+
+    shipped = read_json(PLUGIN_ROOT / "plugin-files.json")["shippedExact"]
+    assert "skills/cloud-findings/SKILL.md" in shipped
+    assert "skills/cloud-findings/agents/openai.yaml" in shipped
+
+
 def test_deep_scan_config_override_is_forwarded_to_mcp_server() -> None:
     mcp_server = read_json(PLUGIN_ROOT / ".mcp.json")["mcpServers"]["codex-security"]
 

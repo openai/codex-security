@@ -63,6 +63,20 @@ async function snapshot(root: string) {
 afterEach(temporaryDirectories.cleanup);
 
 describe("bundled plugin build", () => {
+  test("ships the Cloud connection and skill unchanged", async () => {
+    for (const path of [
+      ".app.json",
+      "skills/cloud-findings/SKILL.md",
+      "skills/cloud-findings/agents/openai.yaml",
+    ]) {
+      const source = await readFile(
+        new URL(`../../../plugins/codex-security/${path}`, import.meta.url),
+        "utf8",
+      );
+      expect(await readFile(join(PLUGIN_ROOT, path), "utf8")).toBe(source);
+    }
+  });
+
   test("copies Python contracts and completed examples unchanged from source", async () => {
     const source = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
