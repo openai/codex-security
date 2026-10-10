@@ -3074,7 +3074,13 @@ describe("semantic scan comparison", () => {
           expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
             "synthetic-ambient-key",
           );
-          expect(captured?.configOverrides).toBeUndefined();
+          expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+            responses_api_metadata: {
+              codex_security_surface: "sdk",
+              codex_security_command: "compare",
+              codex_security_package_version: VERSION,
+            },
+          });
         }
         expect(threadOptions).toMatchObject({
           workingDirectory: home,
