@@ -250,6 +250,7 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -1949,6 +1950,24 @@ export async function main(
     });
     return result;
   };
+  const showHistoryNavigation = async (
+    scan: JsonObject,
+    format: string,
+    selection?: string,
+  ): Promise<void> => {
+    if (
+      format !== "toon" ||
+      argv.some((argument) => OUTPUT_OPTION.test(argument))
+    )
+      return;
+    await withTerminalErrorsHandled(errorOutput, async () => {
+      try {
+        printScanReference(scan, errorOutput, selection);
+      } catch {
+        // Optional navigation must not prevent reading saved results or logs.
+      }
+    });
+  };
   const findingFeedback = Cli.create("findings", {
     description: "Review saved findings (default: list).",
   }).command("false-positive", {
@@ -2099,6 +2118,7 @@ export async function main(
     })
     .command("show", {
       description: "Show the results and saved configuration for a scan.",
+      hint: "Without an ID, show selects the latest completed scan; logs selects the latest scan of any status. Pass the same ID to inspect one run.",
       mcp: false,
       args: z.object({
         scanId: z
@@ -2122,11 +2142,31 @@ export async function main(
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
-        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+        let scanId = args.scanId;
+        if (scanId === undefined) {
+          try {
+            scanId = (await latestScans())?.[0]?.scanId;
+          } catch (error) {
+            if (
+              format === "toon" &&
+              !argv.some((argument) => OUTPUT_OPTION.test(argument))
+            ) {
+              errorOutput.write(
+                "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
+              );
+            }
+            throw error;
+          }
+        }
         if (scanId === undefined) return;
         return presentHistory(
-          await history(["get-scan", "--scan-id", scanId], (value) => {
+          await history(["get-scan", "--scan-id", scanId], async (value) => {
             const { scan, recipe, parentScanId } = value;
+            await showHistoryNavigation(
+              scan as JsonObject,
+              format,
+              args.scanId === undefined ? "latest completed scan" : undefined,
+            );
             return {
               ...(scan as JsonObject),
               ...(recipe === undefined ? {} : { recipe }),
@@ -2141,13 +2181,16 @@ export async function main(
     })
     .command("logs", {
       description: "Show saved activity for a scan and its workers.",
+      hint: "Without an ID, logs selects the latest scan, including failed and active runs; show selects the latest completed scan. Pass the same ID to inspect one run.",
       mcp: false,
       args: z.object({
         scanId: z
           .string()
           .min(1)
           .optional()
-          .describe("Scan identifier or unique prefix (default: latest)."),
+          .describe(
+            "Scan identifier or unique prefix (default: latest, any status).",
+          ),
       }),
       examples: [
         { args: {}, description: "Show activity from the latest scan." },
@@ -2165,6 +2208,13 @@ export async function main(
           ["get-scan", "--scan-id", scanId],
           async (value) => {
             const scan = value["scan"] as ScanLogSource;
+            await showHistoryNavigation(
+              scan,
+              format,
+              args.scanId === undefined
+                ? "latest scan, including failed and active runs"
+                : undefined,
+            );
             const logs = await readSavedScanLogs(
               scan,
               [
@@ -3726,12 +3776,17 @@ export async function main(
           ]
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
-          const contents = `#!/bin/sh\nset -eu\nexec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const invocation = `exec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const contents = `#!/bin/sh\nset -eu\nunset ${[...UNSUPPORTED_GIT_ENVIRONMENT].join(" ")}\n${invocation}`;
+          const previousScopedContents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n${invocation}`;
+          const previousContents = `#!/bin/sh\nset -eu\n${invocation}`;
           const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
           const existing = await readFile(hook, "utf8").catch(() => null);
           if (
             existing !== null &&
             existing !== contents &&
+            existing !== previousScopedContents &&
+            existing !== previousContents &&
             existing !== legacyContents
           ) {
             throw new Error(`A pre-commit hook already exists at ${hook}.`);
@@ -3739,7 +3794,7 @@ export async function main(
           if (existing === null) {
             await mkdir(dirname(hook), { recursive: true });
             await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
-          } else if (existing === legacyContents) {
+          } else if (existing !== contents) {
             await writeFile(hook, contents, { flag: "w" });
           }
           return {
@@ -8112,6 +8167,7 @@ async function executeScan(
   dependencies: CliDependencies,
   interactive = true,
 ): Promise<ScanOutcome> {
+  let registeredScan: JsonObject | undefined;
   let scanDir: string | null = null;
   const scanInput = dependencies.scanInput ?? process.stdin;
   let requestedSignal: SignalName | null = null;
@@ -8442,6 +8498,10 @@ async function executeScan(
         );
       },
       signal: preparationAbortController.signal,
+      onScanRegistered: (scan) => {
+        registeredScan = scan;
+        scanDir = scan.scanDir;
+      },
       onOutputDirReady: (path) => {
         scanDir = path;
         diagnostic("scan.output_ready", { scan_dir: path });
@@ -8695,8 +8755,10 @@ async function executeScan(
       signal: requestedSignal,
       partial_output: scanDir !== null,
     });
+    const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
+    printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
-      exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
+      exitCode,
       error:
         requestedSignal === "SIGINT"
           ? "Scan canceled by Ctrl-C."
@@ -8731,6 +8793,7 @@ async function executeScan(
     });
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
+      printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
       return { exitCode: 2, error: message };
     }
     if (scanDir !== null) {
@@ -8738,6 +8801,7 @@ async function executeScan(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
     }
+    printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return { exitCode: 2, error: message };
   }
   if (preflight !== null) {
@@ -8786,6 +8850,7 @@ async function executeScan(
       message: "Scan completed without a result.",
     });
     errorOutput.write("scan completed without a result\n");
+    printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return { exitCode: 2, error: "Scan completed without a result." };
   }
   const threshold = arguments_.failureSeverity;
@@ -9231,6 +9296,72 @@ async function readDeepScanStop(
   };
 }
 
+function printScanReference(
+  scan: JsonObject,
+  output: Writable,
+  selection?: string,
+): void {
+  const scanId = scan["scanId"];
+  if (typeof scanId !== "string") return;
+  const progress = scan["progress"] as JsonObject | undefined;
+  const detail = [
+    `Scan ${diagnosticValue(scanId)}`,
+    ...(typeof progress?.["status"] === "string"
+      ? [diagnosticValue(progress["status"])]
+      : []),
+    ...(typeof progress?.["phase"] === "string"
+      ? [diagnosticValue(progress["phase"])]
+      : []),
+    ...(typeof scan["startedAt"] === "string"
+      ? [`started ${diagnosticValue(scan["startedAt"])}`]
+      : typeof scan["updatedAt"] === "string"
+        ? [`updated ${diagnosticValue(scan["updatedAt"])}`]
+        : []),
+  ];
+  const argument = quoteCliPath(diagnosticValue(scanId));
+  output.write(
+    `\n${detail.join(" · ")}\n` +
+      (selection === undefined ? "" : `Selected ${selection}.\n`) +
+      `Inspect: codex-security scans show ${argument}\n` +
+      `Logs:    codex-security scans logs ${argument}\n`,
+  );
+}
+
+function printFailedScanReference(
+  scan: JsonObject | undefined,
+  phase: string | null,
+  arguments_: ScanArguments,
+  output: Writable,
+): void {
+  if (scan === undefined) return;
+  try {
+    printScanReference(scan, output);
+    if (phase !== null)
+      output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
+    output.write(
+      `Retained results: ${diagnosticValue(scan["scanDir"])}\n` +
+        "Inspect the saved scan status before choosing resume or rerun.\n",
+    );
+    const prompts = [
+      ...(arguments_.scanPromptFile !== undefined ||
+      arguments_.scanPrompt !== undefined
+        ? ["--scan-prompt-file"]
+        : []),
+      ...(arguments_.validationPromptFile !== undefined ||
+      arguments_.validationPrompt !== undefined
+        ? ["--validation-prompt-file"]
+        : []),
+    ];
+    if (prompts.length > 0) {
+      output.write(
+        `A rerun requires the original instructions via ${prompts.join(" and ")}.\n`,
+      );
+    }
+  } catch {
+    // Optional navigation must not replace the scan's original failure.
+  }
+}
+
 function printScanSummary(
   result: ScanResult,
   progress: Progress | null,
@@ -9313,6 +9444,14 @@ function printScanSummary(
   }
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
+  );
+  printScanReference(
+    {
+      scanId: result.manifest.scan.id,
+      progress: { status: "complete" },
+      startedAt: result.manifest.scan.startedAt,
+    },
+    errorOutput,
   );
   if (deepScanStop?.nextStep !== undefined) {
     errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);
