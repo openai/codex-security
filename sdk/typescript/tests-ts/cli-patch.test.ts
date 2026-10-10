@@ -3546,61 +3546,105 @@ describe("patch change tracking", () => {
     expect(await readFile(join(directory, file), "utf8")).toBe("fixed\n");
   });
 
-  test("inferred rename sources do not select unrelated nested renames", async () => {
-    const { directory, git } = await publicationRepository();
-    await writeFile(join(directory, "z.ts"), "Verified rename source\n");
-    await writeFile(join(directory, "zz.ts"), "Unrelated rename source\n");
-    git("add", "z.ts", "zz.ts");
-    git("commit", "-m", "Synthetic rename sources");
-    const before = git("rev-parse", "HEAD");
-    const result = resultWithFindings(["high"]);
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onWorkbench: () => savedScan(result, "scan-1", directory),
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
-        onCodex: async (_args, output) => {
-          await rename(join(directory, "z.ts"), join(directory, "new.ts"));
-          await mkdir(join(directory, "z.ts"));
-          await rename(
-            join(directory, "zz.ts"),
-            join(directory, "z.ts/inside.ts"),
-          );
-          output?.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: ["new.ts"],
-                  verification: "Synthetic verification.",
-                },
-              ],
-            }),
-          );
-          return 0;
+  test.each([false, true])(
+    "risk assessment and publication agree when a rename source becomes a directory (selected: %p)",
+    async (selectDirectory) => {
+      const { directory, git } = await publicationRepository();
+      await writeFile(join(directory, "z.ts"), "Verified rename source\n");
+      await writeFile(join(directory, "zz.ts"), "Unrelated rename source\n");
+      git("add", "z.ts", "zz.ts");
+      git("commit", "-m", "Synthetic rename sources");
+      const before = git("rev-parse", "HEAD");
+      const result = resultWithFindings(["high"]);
+      let assessedFiles: string[] = [];
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--scan",
+          "scan-1",
+          "--assess-patch-risk",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { path: string; changedFiles: string[] };
+              assessedFiles = artifact.changedFiles;
+              const patch = await readFile(artifact.path, "utf8");
+              expect(patch).toContain("diff --git a/new.ts b/new.ts");
+              expect(patch).toContain("diff --git a/z.ts b/z.ts");
+              if (selectDirectory) {
+                expect(patch).toContain("z.ts/inside.ts");
+                expect(patch).toContain("diff --git a/zz.ts b/zz.ts");
+              } else {
+                expect(patch).not.toContain("z.ts/inside.ts");
+                expect(patch).not.toContain("zz.ts");
+              }
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            await rename(join(directory, "z.ts"), join(directory, "new.ts"));
+            await mkdir(join(directory, "z.ts"));
+            await rename(
+              join(directory, "zz.ts"),
+              join(directory, "z.ts/inside.ts"),
+            );
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: selectDirectory ? ["new.ts", "z.ts"] : ["new.ts"],
+                    verification: "Synthetic verification.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
         },
-      },
-    );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(git("diff", "--name-status", "--no-renames", before, "HEAD")).toBe(
-      "A\tnew.ts\nD\tz.ts",
-    );
-    expect(git("show", "HEAD:zz.ts")).toBe("Unrelated rename source");
-    expect(git("show", "HEAD:new.ts")).toBe("Verified rename source");
-    expect(await readFile(join(directory, "z.ts/inside.ts"), "utf8")).toBe(
-      "Unrelated rename source\n",
-    );
-    expect(git("diff", "--cached", "--name-only")).toBe("");
-    expect(git("diff", "--name-only")).toBe("zz.ts");
-    expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
-  });
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(assessedFiles.sort()).toEqual(
+        selectDirectory
+          ? ["new.ts", "z.ts", "z.ts/inside.ts", "zz.ts"]
+          : ["new.ts", "z.ts"],
+      );
+      expect(git("diff", "--name-status", "--no-renames", before, "HEAD")).toBe(
+        selectDirectory
+          ? "A\tnew.ts\nD\tz.ts\nA\tz.ts/inside.ts\nD\tzz.ts"
+          : "A\tnew.ts\nD\tz.ts",
+      );
+      expect(
+        git("show", selectDirectory ? "HEAD:z.ts/inside.ts" : "HEAD:zz.ts"),
+      ).toBe("Unrelated rename source");
+      expect(git("show", "HEAD:new.ts")).toBe("Verified rename source");
+      expect(await readFile(join(directory, "z.ts/inside.ts"), "utf8")).toBe(
+        "Unrelated rename source\n",
+      );
+      expect(git("diff", "--cached", "--name-only")).toBe("");
+      expect(git("diff", "--name-only")).toBe(selectDirectory ? "" : "zz.ts");
+      expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+    },
+  );
 
   test.each(
     ["staged", "unstaged", "assume-unchanged", "clean"].flatMap((state) =>

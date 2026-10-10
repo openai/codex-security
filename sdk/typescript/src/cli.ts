@@ -8423,7 +8423,7 @@ async function assessPatchRisk(
         "--literal-pathspecs",
         "diff",
       ];
-      const selected =
+      const sources =
         request.files === undefined
           ? undefined
           : patchChangeSources(
@@ -8443,7 +8443,8 @@ async function assessPatchRisk(
               checkout,
               request.repository,
               request.files,
-            ).files;
+            );
+      const selected = sources?.files;
       const files = selected?.some(
         (file) =>
           !isOutsidePath(relative(resolve(request.repository, file), checkout)),
@@ -8455,7 +8456,38 @@ async function assessPatchRisk(
             )
             .filter((file) => !isOutsidePath(file));
       if (files?.length === 0) continue;
-      const paths = files === undefined ? [] : ["--", ...files];
+      let paths = files === undefined ? [] : ["--", ...files];
+      let selectedHead = headTree;
+      if (sources?.deleted.size) {
+        const [before, after] = await Promise.all(
+          [baseTree, headTree].map((tree) =>
+            patchTreeEntries(
+              repositoryRoot,
+              repositoryRoot,
+              tree,
+              dependencies,
+            ),
+          ),
+        );
+        const entries = new Map(before!);
+        for (const path of new Set([...before!.keys(), ...after!.keys()])) {
+          const file = relative(request.repository, resolve(checkout, path));
+          if (
+            request.files!.some(
+              (selected) => !isOutsidePath(relative(selected, file)),
+            )
+          ) {
+            const entry = after!.get(path);
+            if (entry === undefined) entries.delete(path);
+            else entries.set(path, entry);
+          } else if (sources.deleted.has(file)) {
+            // An inferred rename source is an exact deletion, not a directory selection.
+            entries.delete(path);
+          }
+        }
+        selectedHead = await writeTree(entries);
+        paths = [];
+      }
       const [, names] = await Promise.all([
         run([
           ...args,
@@ -8467,7 +8499,7 @@ async function assessPatchRisk(
             : []),
           `--output=${fragment}`,
           baseTree,
-          headTree,
+          selectedHead,
           ...paths,
         ]),
         run(
@@ -8477,7 +8509,7 @@ async function assessPatchRisk(
             "--no-renames",
             "-z",
             baseTree,
-            headTree,
+            selectedHead,
             ...paths,
           ],
           { trim: false },
