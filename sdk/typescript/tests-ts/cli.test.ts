@@ -2055,9 +2055,9 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
-  test.each([false, true])(
-    "shows durable Deep progress without changing stdout or TUI layout (interactive=%s)",
-    async (interactive) => {
+  test.each([false, true].map((interactive) => ({ interactive })))(
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=$interactive)",
+    async ({ interactive }) => {
       const { stdout, stderr, runCli } = createCliTest(main, {
         stderr: interactive,
       });

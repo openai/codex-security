@@ -3351,7 +3351,19 @@ describe("CodexSecurity orchestration", () => {
         expect(
           await readFile(join(root, "registration-input.json"), "utf8"),
         ).toBe(submitted!);
-        const closed = once(socket, "close", { signal: deadline });
+        const closed = once(socket, "close", { signal: deadline }).catch(
+          (error: NodeJS.ErrnoException) => {
+            // Terminating the paused child resets its socket on Windows.
+            // Committed registrations must still finish the exchange below.
+            if (
+              error.code !== "ECONNRESET" ||
+              boundary === "commit" ||
+              boundary === "rollback"
+            )
+              throw error;
+            expect(socket?.destroyed).toBe(true);
+          },
+        );
         if (cancel === "close") closing = client.close();
         else controller.abort();
         if (boundary === "commit" || boundary === "rollback") {
