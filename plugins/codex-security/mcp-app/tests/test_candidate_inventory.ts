@@ -1,13 +1,27 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
+import type { ArtifactContext } from "../src/artifact-io.js";
 import { importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 const { normalizeCandidatesCommand } = await importSource(
   new URL("../src/helpers/normalize-candidates.ts", import.meta.url).pathname,
+);
+const { recordCodexSecurityDiscoveryCandidates } = await importSource(
+  path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
+  {
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
+          import.meta.url,
+        ).href,
+      ),
+    },
+  },
 );
 const inventoryScript = path.join(
   import.meta.dirname,
@@ -98,6 +112,52 @@ for (const deleted of [false, true]) {
         assert.equal(normalizeCandidatesCommand(args), 0);
         const retained = await readFile(output, "utf8");
         assert.equal(JSON.parse(retained).locations[0].path, candidatePath);
+
+        const scanRoot = path.join(root, "scan");
+        await mkdir(scanRoot, { mode: 0o700 });
+        const discovery = path.join(scanRoot, "artifacts", "02_discovery");
+        await mkdir(discovery, { recursive: true });
+        await copyFile(scope, path.join(discovery, "in_scope_files.txt"));
+        const context: ArtifactContext = {
+          root: scanRoot,
+          repoRoot: repo,
+          scanId: "11111111-1111-4111-8111-111111111111",
+          layout: "scan",
+          pluginRoot: path.resolve(import.meta.dirname, "../.."),
+          mode: "diff",
+          targetContract: {
+            diffTarget: {
+              kind: "range",
+              baseRevision: base,
+              headRevision: git("rev-parse", "HEAD"),
+            },
+          },
+        };
+        for (const sourcePath of new Set(["app.py", candidatePath])) {
+          assert.deepEqual(
+            await recordCodexSecurityDiscoveryCandidates(
+              {
+                candidates: [
+                  {
+                    cwe_ids: ["CWE-20"],
+                    locations: [
+                      { path: sourcePath, start_line: 1, role: "source" },
+                    ],
+                    summary: "Synthetic candidate",
+                    evidence: "Synthetic evidence",
+                  },
+                ],
+              },
+              context,
+            ),
+            { operation: "replace", candidatesRecorded: 1 },
+          );
+          const ledger = await readFile(
+            path.join(discovery, "candidate_ledger.jsonl"),
+            "utf8",
+          );
+          assert.equal(JSON.parse(ledger).locations[0].path, sourcePath);
+        }
 
         // Candidate JSON remains UTF-8 even when inventory paths contain raw bytes.
         await writeFile(input, Buffer.from([0xff]));

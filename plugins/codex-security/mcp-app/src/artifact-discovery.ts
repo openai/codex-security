@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { decodeUtf8 } from "./helpers/utf8.js";
+import { decodePosixBytes } from "./helpers/posix-path.js";
 import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
 import {
   stableJson,
@@ -161,7 +162,12 @@ async function diffCandidateSources(
   }
   const nativePath = (value: string) =>
     process.platform === "win32" ? value.replaceAll("\\", "/") : value;
-  const paths = decodeUtf8(await readFile(inventory))
+  const contents = await readFile(inventory);
+  const paths = (
+    process.platform === "win32"
+      ? decodeUtf8(contents)
+      : decodePosixBytes(contents)
+  )
     .split(/\r?\n/u)
     .filter(Boolean)
     .map(nativePath);
