@@ -406,6 +406,241 @@
       "title": "ImportedAssessment",
       "type": "object"
     },
+    "ImportedCodeContext": {
+      "additionalProperties": false,
+      "description": "Optional range and snippet for the evidence's first source location.",
+      "properties": {
+        "end_line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End Line"
+        },
+        "snippet": {
+          "anyOf": [
+            {
+              "maxLength": 65536,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Snippet"
+        }
+      },
+      "title": "ImportedCodeContext",
+      "type": "object"
+    },
+    "ImportedConfigurationDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "platform": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Platform"
+        },
+        "cloud_platform": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cloud Platform"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "maxLength": 65536,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected"
+        },
+        "actual": {
+          "anyOf": [
+            {
+              "maxLength": 65536,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actual"
+        }
+      },
+      "title": "ImportedConfigurationDetails",
+      "type": "object"
+    },
+    "ImportedFindingDetails": {
+      "additionalProperties": false,
+      "description": "Typed repository evidence; vendor state is not a Codex assessment.",
+      "properties": {
+        "kind": {
+          "enum": ["sast", "secret", "iac"],
+          "title": "Kind",
+          "type": "string"
+        },
+        "repository": {
+          "$ref": "#/$defs/ImportedRepositoryReference"
+        },
+        "source_status": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Status"
+        },
+        "scanner_origin": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scanner Origin"
+        },
+        "scanner_verdict": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scanner Verdict"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedFindingRule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "weakness_ids": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Weakness Ids",
+          "type": "array"
+        },
+        "remediation_instructions": {
+          "anyOf": [
+            {
+              "maxLength": 65536,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Remediation Instructions"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedCodeContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "secret": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedSecretDetails"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "configuration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedConfigurationDetails"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "file_url": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File Url"
+        }
+      },
+      "required": ["kind", "repository"],
+      "title": "ImportedFindingDetails",
+      "type": "object"
+    },
     "ImportedFindingEvidence": {
       "additionalProperties": false,
       "properties": {
@@ -546,10 +781,69 @@
           "default": {},
           "title": "Source Data",
           "type": "object"
+        },
+        "details": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedFindingDetails"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": ["title", "severity"],
       "title": "ImportedFindingEvidence",
+      "type": "object"
+    },
+    "ImportedFindingRule": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "short_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Short Id"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        }
+      },
+      "title": "ImportedFindingRule",
       "type": "object"
     },
     "ImportedLocation": {
@@ -643,6 +937,136 @@
       },
       "required": ["name"],
       "title": "ImportedPackage",
+      "type": "object"
+    },
+    "ImportedRepositoryReference": {
+      "additionalProperties": false,
+      "description": "Vendor repository identity, resolved to the full source-control URL.",
+      "properties": {
+        "url": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        }
+      },
+      "required": ["url"],
+      "title": "ImportedRepositoryReference",
+      "type": "object"
+    },
+    "ImportedSecretDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Type"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "validation_status": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Validation Status"
+        },
+        "is_encrypted": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Encrypted"
+        },
+        "is_managed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Managed"
+        },
+        "introduced_commit": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Introduced Commit"
+        }
+      },
+      "title": "ImportedSecretDetails",
       "type": "object"
     },
     "LastImport": {
