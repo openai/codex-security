@@ -1168,10 +1168,10 @@ async function readSavedCheckpoints(
       await readArtifactText(context, ["checkpoints", entry.name], label),
       label,
     );
-    const input =
-      kind === "current"
-        ? parsePersistedCheckpoint(draft)
-        : parsePersistedScanDraft(draft);
+    let input: ScanDraftInput;
+    if (kind === "archived") input = parsePersistedScanDraft(draft);
+    else if (context.layout === "scan") input = parseCanonicalCheckpoint(draft);
+    else input = parsePersistedCheckpoint(draft);
     if (kind === "archived") requireMatchingScan(context, input);
     else if (input.scanId !== context.scanId) {
       throw new Error(
@@ -1831,19 +1831,22 @@ export function parseCanonicalScanDraft(input: {
       );
     }
   }
-  const parsed = parsePersistedCheckpoint(
-    {
-      scanId: input.scanId,
-      ...(scan.complete === undefined ? {} : { complete: scan.complete }),
-      ...(scan.scope === undefined ? {} : { scope: scan.scope }),
-      ...(scan.threatModel === undefined
-        ? {}
-        : { threatModel: scan.threatModel }),
-      findings: input.findings.findings,
-      coverage: input.coverage,
-    },
-    canonicalScanDraftInputSchema,
-  );
+  return parseCanonicalCheckpoint({
+    scanId: input.scanId,
+    ...(scan.complete === undefined ? {} : { complete: scan.complete }),
+    ...(scan.scope === undefined ? {} : { scope: scan.scope }),
+    ...(scan.threatModel === undefined
+      ? {}
+      : { threatModel: scan.threatModel }),
+    findings: input.findings.findings,
+    coverage: input.coverage,
+  });
+}
+
+function parseCanonicalCheckpoint(
+  input: Record<string, unknown>,
+): ScanDraftInput {
+  const parsed = parsePersistedCheckpoint(input, canonicalScanDraftInputSchema);
   for (const [index, finding] of parsed.findings.entries()) {
     for (const field of ["locations", "codeEvidence"] as const) {
       for (const [locationIndex, location] of (
