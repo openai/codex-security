@@ -1,0 +1,4 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+$ref: ./promptfooconfig.calibration.yaml
+description: "Codex Security triage-finding OSS calibration smoke eval"
+tests: file://./artifacts/calibration-smoke.yaml

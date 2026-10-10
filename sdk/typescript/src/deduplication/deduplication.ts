@@ -1,10 +1,16 @@
+import { findingGroupRoots } from "../finding-catalogue.js";
 import type { Finding } from "../models.js";
 import type { FindingNeighborhood } from "../finding-retrieval.js";
-import { CodexSecurityError } from "../errors.js";
+import {
+  CodexSecurityError,
+  DeduplicationReviewError,
+  type DeduplicationReviewStage,
+} from "../errors.js";
 import {
   pairKey,
   screeningPairSlot,
   type DeduplicationReviewer,
+  type ScreeningResult,
 } from "./deduplication-reviewer.js";
 
 export const DEFAULT_DEDUPE_CONCURRENCY = 8;
@@ -61,10 +67,21 @@ async function runQueued(
   if (failure !== undefined) throw failure.error;
 }
 
+export interface DeduplicationRefusal {
+  decision: "NO_DECISION";
+  stage: DeduplicationReviewStage;
+  model: string;
+  /** For screening, the first finding is the anchor and the rest are its candidates. */
+  findingIds: string[];
+  reason: string;
+}
+
 export interface DeduplicationResult {
   uniqueFindingIds: string[];
   duplicateGroups: string[][];
-  deduplicationStatus: "completed";
+  deduplicationStatus: "completed" | "completed_with_refusals";
+  /** Refused reviews are kept separate without claiming a DISTINCT verdict. */
+  refusals?: DeduplicationRefusal[];
 }
 
 const severityOrder: Record<Finding["severity"]["level"], number> = {
@@ -75,46 +92,10 @@ const severityOrder: Record<Finding["severity"]["level"], number> = {
   informational: 4,
 };
 
-function scoreAfter(
-  left: readonly number[],
-  right: readonly number[],
-): boolean {
-  for (let index = 0; index < left.length; index++) {
-    if (left[index] !== right[index]) return left[index]! > right[index]!;
-  }
-  return false;
-}
-
 /** @internal */
 export interface ContradictionGroupingMetrics {
   candidateEvaluations: number;
   conflictNeighborChecks: number;
-}
-
-function addSupport(
-  support: Map<number, Map<number, number>>,
-  left: number,
-  right: number,
-): void {
-  const leftSupport = support.get(left) ?? new Map<number, number>();
-  const rightSupport = support.get(right) ?? new Map<number, number>();
-  leftSupport.set(right, (leftSupport.get(right) ?? 0) + 1);
-  rightSupport.set(left, (rightSupport.get(left) ?? 0) + 1);
-  support.set(left, leftSupport);
-  support.set(right, rightSupport);
-}
-
-function addConflict(
-  conflicts: Map<number, Set<number>>,
-  left: number,
-  right: number,
-): void {
-  const leftConflicts = conflicts.get(left) ?? new Set<number>();
-  const rightConflicts = conflicts.get(right) ?? new Set<number>();
-  leftConflicts.add(right);
-  rightConflicts.add(left);
-  conflicts.set(left, leftConflicts);
-  conflicts.set(right, rightConflicts);
 }
 
 /** Greedily retain the best-supported legal merges, using input order for ties. */
@@ -129,26 +110,40 @@ export function contradictionFreeSubgroups(
   const indexes = new Map(
     findingIds.map((findingId, index) => [findingId, index]),
   );
-  const active = new Set(findingIds.map((_findingId, index) => index));
   const clusters = new Map(
     findingIds.map((findingId, index) => [index, new Set([findingId])]),
   );
   const support = new Map<number, Map<number, number>>();
-  for (const [left, right] of samePairs)
-    addSupport(support, indexes.get(left)!, indexes.get(right)!);
+  for (const [left, right] of samePairs) {
+    const leftIndex = indexes.get(left)!;
+    const rightIndex = indexes.get(right)!;
+    const leftSupport = support.get(leftIndex) ?? new Map<number, number>();
+    const rightSupport = support.get(rightIndex) ?? new Map<number, number>();
+    leftSupport.set(rightIndex, (leftSupport.get(rightIndex) ?? 0) + 1);
+    rightSupport.set(leftIndex, (rightSupport.get(leftIndex) ?? 0) + 1);
+    support.set(leftIndex, leftSupport);
+    support.set(rightIndex, rightSupport);
+  }
   const conflicts = new Map<number, Set<number>>();
-  for (const [left, right] of distinctPairs)
-    addConflict(conflicts, indexes.get(left)!, indexes.get(right)!);
+  for (const [left, right] of distinctPairs) {
+    const leftIndex = indexes.get(left)!;
+    const rightIndex = indexes.get(right)!;
+    const leftConflicts = conflicts.get(leftIndex) ?? new Set<number>();
+    const rightConflicts = conflicts.get(rightIndex) ?? new Set<number>();
+    leftConflicts.add(rightIndex);
+    rightConflicts.add(leftIndex);
+    conflicts.set(leftIndex, leftConflicts);
+    conflicts.set(rightIndex, rightConflicts);
+  }
 
   while (true) {
     signal?.throwIfAborted();
     let selected: readonly [number, number] | undefined;
     let selectedScore: readonly number[] | undefined;
-    for (const leftCluster of active) {
+    for (const leftCluster of clusters.keys()) {
       for (const [rightCluster, gain] of support.get(leftCluster) ?? []) {
         if (
           leftCluster >= rightCluster ||
-          !active.has(rightCluster) ||
           conflicts.get(leftCluster)?.has(rightCluster)
         )
           continue;
@@ -173,55 +168,43 @@ export function contradictionFreeSubgroups(
           -leftCluster,
           -rightCluster,
         ];
-        if (selectedScore === undefined || scoreAfter(score, selectedScore)) {
-          selected = [leftCluster, rightCluster];
-          selectedScore = score;
+        if (selectedScore !== undefined) {
+          const index = score.findIndex(
+            (value, position) => value !== selectedScore![position],
+          );
+          if (index === -1 || !(score[index]! > selectedScore[index]!)) {
+            continue;
+          }
         }
+        selected = [leftCluster, rightCluster];
+        selectedScore = score;
       }
     }
     if (selected === undefined)
-      return [...active]
-        .map((cluster) => clusters.get(cluster)!)
-        .filter((members) => members.size > 1);
+      return [...clusters.values()].filter((members) => members.size > 1);
     const [leftCluster, rightCluster] = selected;
     for (const member of clusters.get(rightCluster)!)
       clusters.get(leftCluster)!.add(member);
     clusters.delete(rightCluster);
-    active.delete(rightCluster);
 
-    const leftSupport = support.get(leftCluster) ?? new Map<number, number>();
-    const rightSupport = support.get(rightCluster) ?? new Map<number, number>();
-    const supportNeighbors = new Set([
-      ...leftSupport.keys(),
-      ...rightSupport.keys(),
-    ]);
-    supportNeighbors.delete(leftCluster);
-    supportNeighbors.delete(rightCluster);
+    const leftSupport = support.get(leftCluster)!;
     leftSupport.delete(rightCluster);
-    for (const neighbor of supportNeighbors) {
-      const weight =
-        (leftSupport.get(neighbor) ?? 0) + (rightSupport.get(neighbor) ?? 0);
+    for (const [neighbor, rightWeight] of support.get(rightCluster)!) {
+      if (neighbor === leftCluster || neighbor === rightCluster) continue;
+      const weight = (leftSupport.get(neighbor) ?? 0) + rightWeight;
       leftSupport.set(neighbor, weight);
-      const neighborSupport = support.get(neighbor)!;
-      neighborSupport.delete(rightCluster);
-      neighborSupport.set(leftCluster, weight);
+      support.get(neighbor)!.set(leftCluster, weight).delete(rightCluster);
     }
-    support.set(leftCluster, leftSupport);
     support.delete(rightCluster);
 
-    const mergedConflicts = new Set([
-      ...(conflicts.get(leftCluster) ?? []),
-      ...(conflicts.get(rightCluster) ?? []),
-    ]);
+    const mergedConflicts = conflicts.get(leftCluster) ?? new Set<number>();
+    for (const id of conflicts.get(rightCluster) ?? []) mergedConflicts.add(id);
     mergedConflicts.delete(leftCluster);
     mergedConflicts.delete(rightCluster);
     for (const neighbor of mergedConflicts) {
-      const neighborConflicts = conflicts.get(neighbor)!;
-      neighborConflicts.delete(rightCluster);
-      neighborConflicts.add(leftCluster);
+      conflicts.get(neighbor)!.add(leftCluster).delete(rightCluster);
     }
-    if (mergedConflicts.size > 0) conflicts.set(leftCluster, mergedConflicts);
-    else conflicts.delete(leftCluster);
+    conflicts.set(leftCluster, mergedConflicts);
     conflicts.delete(rightCluster);
   }
 }
@@ -242,6 +225,23 @@ export class FindingDeduplicator {
     const concurrency = deduplicationConcurrency(this.concurrency);
     const ids = [...new Set(findingIds)];
     const findings = new Map<string, Finding>();
+    const refusals = new Map<string, DeduplicationRefusal>();
+    const recordRefusal = (error: unknown, ids: string[]): void => {
+      this.signal?.throwIfAborted();
+      if (
+        !(error instanceof DeduplicationReviewError) ||
+        error.metadata.category !== "refusal"
+      )
+        throw error;
+      const { stage, model, reason } = error.metadata;
+      refusals.set(JSON.stringify([stage, ...ids]), {
+        decision: "NO_DECISION",
+        stage,
+        model,
+        findingIds: ids,
+        reason,
+      });
+    };
     const neighborhoods = new Array<Finding[]>(ids.length);
     await runQueued(
       ids.map((id, index) => async () => {
@@ -288,7 +288,15 @@ export class FindingDeduplicator {
     const pending = neighborhoods
       .filter((neighborhood) => neighborhood.length > 1)
       .map((neighborhood) => async () => {
-        const screening = await this.reviewer.screen(neighborhood);
+        let screening: ScreeningResult | undefined;
+        try {
+          screening = await this.reviewer.screen(neighborhood);
+        } catch (error) {
+          recordRefusal(
+            error,
+            neighborhood.map((finding) => finding.findingId),
+          );
+        }
         this.signal?.throwIfAborted();
         for (let index = 0; index < neighborhood.length - 1; index++) {
           const key = pairKey([
@@ -297,20 +305,25 @@ export class FindingDeduplicator {
           ]);
           const state = pairs.get(key)!;
           if (
+            screening === undefined ||
             screening.decisions[screeningPairSlot(index)]!.decision ===
-            "DISTINCT"
+              "DISTINCT"
           )
             state.rejected = true;
           state.remaining--;
-          // Wait for every screening of this pair: a later DISTINCT veto must
+          // Wait for every screening: a later DISTINCT verdict or refusal must
           // prevent verification, including a verification that could fail.
           if (state.remaining === 0 && !state.rejected) {
             ready.push(async () => {
-              state.decision = (
-                await this.reviewer.reviewPair(
-                  state.ids.map((id) => findings.get(id)!),
-                )
-              ).decision;
+              try {
+                state.decision = (
+                  await this.reviewer.reviewPair(
+                    state.ids.map((id) => findings.get(id)!),
+                  )
+                ).decision;
+              } catch (error) {
+                recordRefusal(error, state.ids);
+              }
             });
           }
         }
@@ -326,61 +339,33 @@ export class FindingDeduplicator {
       else rejected.push(state.ids);
     }
 
-    const adjacent = new Map<string, Set<string>>();
-    for (const pair of supported) {
-      for (const [left, right] of [pair, [pair[1], pair[0]]] as const) {
-        const neighbors = adjacent.get(left) ?? new Set<string>();
-        neighbors.add(right);
-        adjacent.set(left, neighbors);
-      }
-    }
-
-    const components: {
-      members: string[];
-      supported: [string, string][];
-      rejected: [string, string][];
-    }[] = [];
-    const componentByFinding = new Map<string, (typeof components)[number]>();
-    for (const id of findings.keys()) {
-      this.signal?.throwIfAborted();
-      if (!adjacent.has(id) || componentByFinding.has(id)) continue;
-      const component: (typeof components)[number] = {
-        members: [],
-        supported: [],
-        rejected: [],
-      };
-      components.push(component);
-      const pending = [id];
-      while (pending.length > 0) {
-        const member = pending.pop()!;
-        if (componentByFinding.has(member)) continue;
-        componentByFinding.set(member, component);
-        pending.push(...adjacent.get(member)!);
-      }
-    }
+    const { parents, root } = findingGroupRoots();
+    for (const [left, right] of supported) parents.set(root(right), root(left));
     // Preserve finding insertion order for contradiction-grouping ties.
-    for (const id of findings.keys())
-      componentByFinding.get(id)?.members.push(id);
-    for (const pair of supported)
-      componentByFinding.get(pair[0])!.supported.push(pair);
-    for (const pair of rejected) {
-      const component = componentByFinding.get(pair[0]);
-      if (component && component === componentByFinding.get(pair[1]))
-        component.rejected.push(pair);
-    }
+    const membersByRoot = Map.groupBy(findings.keys(), (id) => {
+      this.signal?.throwIfAborted();
+      return parents.has(id) ? root(id) : undefined;
+    });
+    membersByRoot.delete(undefined);
+    const supportedByRoot = Map.groupBy(supported, ([left]) => root(left));
+    const rejectedByRoot = Map.groupBy(
+      rejected.filter(([left, right]) => root(left) === root(right)),
+      ([left]) => root(left),
+    );
 
     const selected = new Set(ids);
     const duplicateGroups: string[][] = [];
     const canonical = new Map<string, string>();
-    for (const component of components) {
+    for (const [componentRoot, members] of membersByRoot) {
       this.signal?.throwIfAborted();
+      const conflicts = rejectedByRoot.get(componentRoot!);
       const groups =
-        component.rejected.length === 0
-          ? [new Set(component.members)]
+        conflicts === undefined
+          ? [new Set(members)]
           : contradictionFreeSubgroups(
-              component.members,
-              component.supported,
-              component.rejected,
+              members,
+              supportedByRoot.get(componentRoot!)!,
+              conflicts,
               this.signal,
             );
       for (const group of groups) {
@@ -400,7 +385,17 @@ export class FindingDeduplicator {
     return {
       uniqueFindingIds: [...new Set(ids.map((id) => canonical.get(id) ?? id))],
       duplicateGroups,
-      deduplicationStatus: "completed",
+      deduplicationStatus:
+        refusals.size > 0 ? "completed_with_refusals" : "completed",
+      ...(refusals.size > 0
+        ? {
+            refusals: [...refusals.entries()]
+              .sort(([left], [right]) =>
+                left < right ? -1 : left > right ? 1 : 0,
+              )
+              .map(([, refusal]) => refusal),
+          }
+        : {}),
     };
   }
 }

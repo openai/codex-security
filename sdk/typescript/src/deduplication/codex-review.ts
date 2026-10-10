@@ -7,7 +7,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
 import { z } from "incur";
+import type { JsonObject } from "../config.js";
 import {
   comparisonEnvironment,
   disabledMcpServers,
@@ -22,17 +24,22 @@ import {
 } from "../runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
 import { VERSION } from "../version.js";
+import type { CodexSecuritySurface } from "../api.js";
+import { codexSecurityRequestMetadata } from "../request-metadata.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
-  type DeduplicationReviewStage,
-  safeErrorMessage,
+  errorMessage,
 } from "../errors.js";
 import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
 import {
+  DEFAULT_CODEX_CONFIG,
   hasCommandAuth,
+  inlineToml,
   modelProviderConfigOverride,
+  normalizeLegacyWindowsSandboxOverride,
   resolveCommandAuthConfig,
+  resolveCodexProfile,
 } from "../config.js";
 import {
   reviewErrorInstructions,
@@ -40,17 +47,21 @@ import {
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
 import { retryDelay, waitForRetry } from "./retry.js";
+import type { DeduplicationReviewRequest } from "./review.js";
+import { isReviewRefusal } from "./refusal.js";
+import {
+  emitDiagnostic,
+  type DeduplicationDiagnosticObserver,
+} from "./diagnostics.js";
 
-const reviewErrorSchema = z
-  .object({ reason: z.string().trim().min(1) })
-  .strict();
+const reviewErrorSchema = z.strictObject({ reason: z.string().trim().min(1) });
 
-export interface CodexReview<T> {
-  stage: DeduplicationReviewStage;
-  model: string;
-  effort: string;
-  prompt: string;
-  schema: unknown;
+export interface CodexReview<T> extends Pick<
+  DeduplicationReviewRequest,
+  "stage" | "model" | "effort" | "prompt" | "schema"
+> {
+  /** Exact comparison participants, supplied by the structured reviewer. */
+  findingIds?: readonly string[];
   validate(value: unknown): T;
 }
 
@@ -83,6 +94,7 @@ interface Message {
     turn?: { id: string };
   };
   params?: {
+    [key: string]: unknown;
     threadId: string;
     turnId?: string;
     turn?: {
@@ -93,6 +105,7 @@ interface Message {
     tool?: string;
     namespace?: string | null;
     arguments?: unknown;
+    item?: { type: string; text?: string; [key: string]: unknown };
   };
 }
 
@@ -122,6 +135,24 @@ function transientCodexError(info: unknown): boolean {
   return false;
 }
 
+export function reviewSqliteHome(
+  environment: NodeJS.ProcessEnv,
+  executionConfig: JsonObject,
+): string {
+  return typeof executionConfig["sqlite_home"] === "string"
+    ? resolve(
+        configuredCodexHome(environment),
+        expandHome(executionConfig["sqlite_home"], environment),
+      )
+    : resolve(
+        expandHome(
+          environmentEntry(environment, "CODEX_SQLITE_HOME")?.trim() ||
+            configuredCodexHome(environment),
+          environment,
+        ),
+      );
+}
+
 export class CodexReviewRunner {
   constructor(
     private readonly environment: NodeJS.ProcessEnv = process.env,
@@ -132,15 +163,30 @@ export class CodexReviewRunner {
       wait?: typeof waitForRetry;
       random?: () => number;
     } = {},
+    private readonly onDiagnostic?: DeduplicationDiagnosticObserver,
+    private readonly surface: CodexSecuritySurface = "sdk",
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
     const state = { attempts: 0 };
+    const reviewId = randomUUID();
+    const diagnostic: DeduplicationDiagnosticObserver = (event) =>
+      emitDiagnostic(this.onDiagnostic, {
+        reviewId,
+        stage: review.stage,
+        model: review.model,
+        effort: review.effort,
+        attempt: state.attempts,
+        ...event,
+      });
     try {
       for (let session = 1; ; session++) {
         state.attempts++;
+        emitDiagnostic(diagnostic, { event: "review.started" });
         try {
-          return await this.runSession(review, state);
+          const result = await this.runSession(review, state, diagnostic);
+          emitDiagnostic(diagnostic, { event: "review.completed" });
+          return result;
         } catch (error) {
           this.signal?.throwIfAborted();
           if (
@@ -149,6 +195,10 @@ export class CodexReviewRunner {
             !error.retryable
           )
             throw error;
+          emitDiagnostic(diagnostic, {
+            event: "review.retry",
+            message: errorMessage(error),
+          });
           await (this.retry.wait ?? waitForRetry)(
             retryDelay(session, this.retry.random),
             this.signal,
@@ -156,6 +206,10 @@ export class CodexReviewRunner {
         }
       }
     } catch (error) {
+      emitDiagnostic(diagnostic, {
+        event: "review.failed",
+        message: errorMessage(error),
+      });
       this.signal?.throwIfAborted();
       const category =
         error instanceof ReviewAttemptError ? error.category : "transport";
@@ -163,14 +217,14 @@ export class CodexReviewRunner {
         error instanceof ReviewAttemptError
           ? error.supportReason
           : "Codex review transport failed.";
-      const displayReason = safeErrorMessage(error);
+      const displayReason = errorMessage(error);
       throw new DeduplicationReviewError(
         {
           stage: review.stage,
           model: review.model,
           category,
           attempts: state.attempts,
-          reason: displayReason === "[redacted]" ? "[redacted]" : supportReason,
+          reason: supportReason,
         },
         displayReason,
       );
@@ -180,6 +234,7 @@ export class CodexReviewRunner {
   private async runSession<T>(
     review: CodexReview<T>,
     state: { attempts: number },
+    onDiagnostic: DeduplicationDiagnosticObserver,
   ): Promise<T> {
     this.signal?.throwIfAborted();
     const workingDirectory = resolve(this.workingDirectory);
@@ -203,6 +258,26 @@ export class CodexReviewRunner {
       ].find((value) => value?.trim());
       const args = ["app-server", "--stdio", "--disable", "plugins"];
       const config = await readCodexHomeConfig(environment, this.signal);
+      const executionConfig = resolveCodexProfile(config);
+      normalizeLegacyWindowsSandboxOverride(executionConfig);
+      // Reuse native state instead of importing the caller's history into a new
+      // database for every ephemeral review. Resolve an environment-relative
+      // location before moving the native process into its scratch directory.
+      const inheritedSqliteHome = environmentEntry(
+        environment,
+        "CODEX_SQLITE_HOME",
+      )?.trim();
+      if (inheritedSqliteHome) {
+        const key = Object.keys(environment).find((name) =>
+          process.platform === "win32"
+            ? name.toUpperCase() === "CODEX_SQLITE_HOME"
+            : name === "CODEX_SQLITE_HOME",
+        )!;
+        environment[key] = resolve(
+          expandHome(inheritedSqliteHome, environment),
+        );
+      }
+      const sqliteHome = reviewSqliteHome(environment, executionConfig);
       if (hasCommandAuth(config)) {
         args.push(
           ...modelProviderConfigOverride(
@@ -219,6 +294,7 @@ export class CodexReviewRunner {
           environmentEntry(environment, "CODEX_HOME") ||
             join(homedir(), ".codex"),
           codexSecurityCredentialHome(environment),
+          sqliteHome,
           join(homedir(), ".ssh"),
           environmentEntry(environment, "GH_CONFIG_DIR") ||
             join(homedir(), ".config", "gh"),
@@ -234,9 +310,7 @@ export class CodexReviewRunner {
         "--config",
         `permissions.codex_security_review={extends=":read-only",filesystem={${[...privatePaths].map((path) => `${JSON.stringify(path)}="deny"`).join(",")}}}`,
         "--config",
-        `sqlite_home=${JSON.stringify(directory)}`,
-        "--config",
-        'windows.sandbox="unelevated"',
+        `windows=${inlineToml(executionConfig["windows"] ?? DEFAULT_CODEX_CONFIG["windows"]!)}`,
       );
       if (apiKey)
         args.push("--config", 'cli_auth_credentials_store="ephemeral"');
@@ -247,7 +321,7 @@ export class CodexReviewRunner {
         {
           // Keep host-side auth helpers outside the source checkout.
           cwd: directory,
-          env: { ...environment, CODEX_SQLITE_HOME: directory },
+          env: environment,
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
           signal: this.signal,
@@ -270,7 +344,26 @@ export class CodexReviewRunner {
         inputError = error;
         lines.close();
       });
-      child.stderr.resume();
+      const releaseCanceledPipes = () => {
+        if (!this.signal?.aborted) return;
+        lines.close();
+        if (child.exitCode === null && child.signalCode === null) return;
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      };
+      this.signal?.addEventListener("abort", releaseCanceledPipes, {
+        once: true,
+      });
+      child.once("exit", releaseCanceledPipes);
+      let diagnostic = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+        diagnostic += chunk;
+        emitDiagnostic(onDiagnostic, {
+          event: "review.stderr",
+          message: chunk,
+        });
+      });
       const send = (message: object) =>
         child.stdin.write(`${JSON.stringify(message)}\n`);
       const startThread = () =>
@@ -282,7 +375,7 @@ export class CodexReviewRunner {
             cwd: workingDirectory,
             ephemeral: true,
             approvalPolicy:
-              review.model === "gpt-5.6-luna" ? "never" : "on-request",
+              review.stage === "screening" ? "never" : "on-request",
             approvalsReviewer: "auto_review",
             permissions: "codex_security_review",
             threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
@@ -304,7 +397,11 @@ export class CodexReviewRunner {
                 update_plan: { enabled: false },
                 experimental_request_user_input: { enabled: false },
               },
-              responses_api_metadata: { codex_security_surface: "sdk" },
+              responses_api_metadata: {
+                ...(executionConfig["responses_api_metadata"] as
+                  Record<string, string> | undefined),
+                ...codexSecurityRequestMetadata(this.surface, "dedupe"),
+              },
               features: {
                 code_mode: {
                   direct_only_tool_namespaces: ["review_validator"],
@@ -312,7 +409,7 @@ export class CodexReviewRunner {
                 apps: false,
                 memories: false,
                 shell_snapshot: false,
-                ...(review.model === "gpt-5.6-luna"
+                ...(review.stage === "screening"
                   ? { multi_agent: false, multi_agent_v2: false }
                   : {}),
               },
@@ -346,12 +443,14 @@ export class CodexReviewRunner {
       let turnId: string | undefined;
       let accepted: T | undefined;
       let validationFailure: string | undefined;
+      let finalResponse: string | undefined;
       let turns = 0;
       const startTurn = (prompt: string) => {
         this.signal?.throwIfAborted();
         turns++;
         turnId = undefined;
         validationFailure = undefined;
+        finalResponse = undefined;
         send({
           id: 3 + state.attempts,
           method: "turn/start",
@@ -383,6 +482,25 @@ export class CodexReviewRunner {
               "Codex review transport failed.",
               true,
             );
+          }
+          const notification = message.method;
+          if (notification === "warning" || notification === "configWarning") {
+            emitDiagnostic(onDiagnostic, {
+              event: "review.warning",
+              details: { method: notification, ...message.params },
+            });
+          } else if (
+            notification === "turn/started" ||
+            notification === "turn/completed" ||
+            notification === "thread/tokenUsage/updated" ||
+            ((notification === "item/started" ||
+              notification === "item/completed") &&
+              message.params?.item?.type === "commandExecution")
+          ) {
+            emitDiagnostic(onDiagnostic, {
+              event: "review.event",
+              details: { method: notification, ...message.params },
+            });
           }
           const params = message.params;
           if (message.id !== undefined && message.method !== undefined) {
@@ -431,11 +549,24 @@ export class CodexReviewRunner {
                   ],
                 },
               });
+              emitDiagnostic(onDiagnostic, {
+                event: "review.submission",
+                message: success ? reportedFailure : rejection,
+                details: {
+                  threadId: params.threadId,
+                  turnId: params.turnId,
+                  callId: message.id,
+                  tool: params.tool,
+                  accepted: success && reportedFailure === undefined,
+                },
+              });
               if (reportedFailure !== undefined)
                 throw new ReviewAttemptError(
-                  "model",
+                  isReviewRefusal(reportedFailure) ? "refusal" : "model",
                   `Required review check could not be completed: ${reportedFailure}`,
-                  "A required review check could not be completed.",
+                  isReviewRefusal(reportedFailure)
+                    ? "The model refused the deduplication review."
+                    : "A required review check could not be completed.",
                 );
             } else {
               send({
@@ -444,11 +575,18 @@ export class CodexReviewRunner {
               });
             }
           } else if (message.error !== undefined) {
+            const refused = isReviewRefusal(
+              message.error.message,
+              message.error.data?.codexErrorInfo,
+            );
             throw new ReviewAttemptError(
-              "transport",
+              refused ? "refusal" : "transport",
               message.error?.message ?? "Codex rejected the review request",
-              "Codex rejected the review request.",
-              transientCodexError(message.error.data?.codexErrorInfo),
+              refused
+                ? "The model refused the deduplication review."
+                : "Codex rejected the review request.",
+              !refused &&
+                transientCodexError(message.error.data?.codexErrorInfo),
             );
           } else if (message.id === 1) {
             send({ method: "initialized" });
@@ -469,6 +607,10 @@ export class CodexReviewRunner {
               );
             }
             threadId = thread.id;
+            emitDiagnostic(onDiagnostic, {
+              event: "review.event",
+              details: { method: "thread/started", threadId },
+            });
             startTurn(review.prompt);
           } else if (message.id === 3 + state.attempts) {
             turnId = message.result?.turn?.id ?? turnId;
@@ -479,6 +621,13 @@ export class CodexReviewRunner {
           ) {
             turnId = params?.turn?.id;
           } else if (
+            message.method === "item/completed" &&
+            params?.threadId === threadId &&
+            params?.turnId === turnId &&
+            params?.item?.type === "agentMessage"
+          ) {
+            finalResponse = params.item.text;
+          } else if (
             message.method === "turn/completed" &&
             params !== undefined &&
             threadId !== undefined &&
@@ -487,15 +636,30 @@ export class CodexReviewRunner {
             params.turn?.id === turnId
           ) {
             if (params.turn.status !== "completed") {
-              throw new ReviewAttemptError(
-                "model",
+              const reason =
                 params.turn.error?.message ??
-                  `Codex review turn ${params.turn.status}`,
-                "Codex review turn failed.",
-                transientCodexError(params.turn.error?.codexErrorInfo),
+                `Codex review turn ${params.turn.status}`;
+              const refused = isReviewRefusal(
+                reason,
+                params.turn.error?.codexErrorInfo,
+              );
+              throw new ReviewAttemptError(
+                refused ? "refusal" : "model",
+                reason,
+                refused
+                  ? "The model refused the deduplication review."
+                  : "Codex review turn failed.",
+                !refused &&
+                  transientCodexError(params.turn.error?.codexErrorInfo),
               );
             }
             if (accepted === undefined) {
+              if (finalResponse && isReviewRefusal(finalResponse))
+                throw new ReviewAttemptError(
+                  "refusal",
+                  finalResponse,
+                  "The model refused the deduplication review.",
+                );
               if (turns === 1) {
                 state.attempts++;
                 startTurn(
@@ -521,19 +685,25 @@ export class CodexReviewRunner {
             return accepted;
           }
         }
-        if (processError) throw processError;
-        throw new ReviewAttemptError(
-          "transport",
-          inputError?.message ?? "Codex exited before completing the review",
-          "Codex review transport failed.",
-          true,
-        );
       } finally {
         lines.close();
         child.stdin.end();
         if (child.exitCode === null) child.kill();
-        await closed;
+        try {
+          await closed;
+        } finally {
+          this.signal?.removeEventListener("abort", releaseCanceledPipes);
+          child.removeListener("exit", releaseCanceledPipes);
+        }
       }
+      if (processError) throw processError;
+      throw new ReviewAttemptError(
+        "transport",
+        [inputError?.message, diagnostic].filter(Boolean).join("\n") ||
+          "Codex exited before completing the review",
+        "Codex review transport failed.",
+        true,
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

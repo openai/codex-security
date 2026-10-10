@@ -7,49 +7,32 @@ import csv
 import io
 import os
 import sqlite3
-from collections.abc import Callable
+import sys
 from contextlib import closing
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    SealedArtifactError,
+    build_threat_model_export,
     csv_cell,
     finalize_scan,
     finding_candidate_id,
+    finding_csv_columns,
+    write_export_output,
     write_sarif_projection,
-    write_scan_local_bytes,
 )
 
 
-@dataclass(frozen=True)
-class WorkbenchPublicationContext:
-    ARTIFACTS: dict[str, str]
-    artifact_path: Callable[..., Path | None]
-    available_artifact_path: Callable[[Path, Path], Path | None]
-    database_path: Callable[[], Path]
-    expected_coverage_mode: Callable[[sqlite3.Row], str]
-    now: Callable[[], str]
-    pin_legacy_manifest_digest: Callable[[sqlite3.Connection, str, str], None]
-    published_manifest_digest: Callable[[Path, dict[str, Any]], str]
-    read_json_object: Callable[[Path], dict[str, Any]]
-    require_canonical_scan_directory: Callable[[Path], Path]
-    require_recorded_manifest_digest: Callable[[sqlite3.Row, Path], str]
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row]
-    scan_result: Callable[[sqlite3.Connection, sqlite3.Row], dict[str, Any]]
-    verify_manifest_binding: Callable[[sqlite3.Row, dict[str, Any]], None]
-    workspace_state: Callable[[sqlite3.Connection, str], dict[str, Any]]
-
-
 def linear_publication_input(
-    db: WorkbenchPublicationContext,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
     *,
     recording: bool,
 ) -> tuple[dict[str, Any], dict[str, str], list[dict[str, str]]]:
-    payload = db.read_json_object(Path(args.input_file))
     required = {"scanId", "scanDirectory", "destination", "findings"}
     if recording:
         required.add("publications")
@@ -107,7 +90,7 @@ def linear_publication_input(
 
 
 def verify_linear_publication_scan(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
     payload: dict[str, Any],
     findings: list[dict[str, str]],
@@ -154,10 +137,10 @@ def verify_linear_publication_scan(
 
 
 def inspect_linear_publication(
-    db: WorkbenchPublicationContext,
-    args: argparse.Namespace,
+    db: Any,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=False)
+    payload, destination, findings = linear_publication_input(payload, recording=False)
     database_uri = f"file:{quote(str(db.database_path()), safe='')}?mode=ro"
     with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
         connection.row_factory = sqlite3.Row
@@ -203,32 +186,28 @@ def inspect_linear_publication(
 
 
 def prepare_linear_publication(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=False)
+    payload, destination, findings = linear_publication_input(payload, recording=False)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
         result = {
             "scanId": scan["id"],
             "destination": destination,
             "findingCount": len(findings),
         }
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return result
 
 
 def record_linear_publications(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=True)
+    payload, destination, findings = linear_publication_input(payload, recording=True)
     publications = payload["publications"]
     if not isinstance(publications, list):
         raise SystemExit("Linear publication results must be an array.")
@@ -264,7 +243,7 @@ def record_linear_publications(
         external_ids.add(issue_identifier)
 
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
         timestamp = db.now()
         for publication in publications:
@@ -349,28 +328,48 @@ def record_linear_publications(
                 }
             )
         result = {"scanId": scan["id"], "destination": destination, "created": created}
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return result
 
 
 def export_findings(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     scan = db.require_scan(connection, args.scan_id)
-    if scan["status"] != "complete" and not (
-        scan["status"] == "failed" and scan["seal_manifest_digest"]
-    ):
-        raise SystemExit(
-            "Findings can be exported after the scan completes or preserves stopped results."
-        )
+    artifact = getattr(args, "artifact", "findings")
+    args.format = args.format or ("md" if artifact == "threat-model" else "csv")
+    if artifact == "threat-model":
+        if args.format != "md":
+            raise SystemExit("Threat models can only be exported as Markdown (md).")
+    else:
+        if args.format == "md":
+            raise SystemExit("Markdown export requires --artifact threat-model.")
+        if scan["status"] != "complete" and not (
+            scan["status"] == "failed" and scan["seal_manifest_digest"]
+        ):
+            raise SystemExit(
+                "Findings can be exported after the scan completes or preserves stopped results."
+            )
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
-    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    manifest_path = scan_dir / db.ARTIFACTS["manifest"]
+    db.verify_manifest_binding(scan, db.read_json_object(manifest_path))
+    if getattr(args, "validate_only", False):
+        # SDK/CLI exports use their requested destination without modifying saved artifacts.
+        return {"scan": {"scanId": scan["id"], "scanDir": str(scan_dir)}}
+    if artifact == "threat-model":
+        path = scan_dir / "exports" / "threatmodel.md"
+        try:
+            contents = build_threat_model_export(scan_dir)
+            write_export_output(scan_dir, path, "md", contents)
+        except ContractError as exc:
+            raise SystemExit(str(exc)) from exc
+        return {
+            "export": {"artifact": artifact, "format": "md", "path": str(path)},
+            "scan": db.scan_result(connection, scan),
+            "workspace": db.workspace_state(connection, scan["workspace_id"]),
+        }
     try:
         manifest, _, _ = finalize_scan(
             scan_dir,
@@ -401,7 +400,7 @@ def export_findings(
 
 
 def write_csv_export(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
 ) -> Path:
@@ -422,57 +421,27 @@ def write_csv_export(
             candidate_id = finding_candidate_id(finding)
             if isinstance(occurrence_id, str) and isinstance(candidate_id, str):
                 candidate_ids_by_occurrence[occurrence_id] = candidate_id
-    columns = (
-        "occurrence_id",
-        "finding_id",
-        *(("candidate_id",) if deep_scan else ()),
-        "title",
-        "summary",
-        "severity",
-        "confidence",
-        "status",
-        "close_reason",
-        "note",
-        "remediation",
-        "path",
-        "start_line",
-        "end_line",
-    )
+    columns = finding_csv_columns(deep_scan)
     writer.writerow(columns)
     for row in finding_export_rows(connection, scan["id"]):
-        writer.writerow(
-            (
-                csv_cell(row["occurrence_id"]),
-                csv_cell(row["finding_id"]),
-                *(
-                    (csv_cell(candidate_ids_by_occurrence.get(row["occurrence_id"])),)
-                    if deep_scan
-                    else ()
-                ),
-                csv_cell(row["title"]),
-                csv_cell(row["summary"]),
-                csv_cell(row["severity"]),
-                csv_cell(row["confidence"]),
-                csv_cell(row["status"]),
-                csv_cell(row["close_reason"]),
-                csv_cell(row["note"]),
-                csv_cell(row["remediation"]),
-                csv_cell(row["relative_path"]),
-                row["start_line"],
-                row["end_line"],
-            )
-        )
+        values = dict(row)
+        values["path"] = row["relative_path"]
+        values["candidate_id"] = candidate_ids_by_occurrence.get(row["occurrence_id"])
+        writer.writerow(csv_cell(values[column]) for column in columns)
+    destination = scan_dir / "exports" / "findings.csv"
     try:
-        write_scan_local_bytes(
+        write_export_output(
             scan_dir,
-            "exports/findings.csv",
+            destination,
+            "csv",
             output.getvalue().encode("utf-8"),
         )
+    except SealedArtifactError as exc:
+        raise SystemExit(str(exc)) from exc
     except ContractError as exc:
         raise SystemExit(
             "exports: expected a regular directory inside the scan directory."
         ) from exc
-    destination = scan_dir / "exports" / "findings.csv"
     path = db.available_artifact_path(scan_dir, destination)
     if path is None:
         raise SystemExit("findings.csv: expected a regular file inside the scan directory.")

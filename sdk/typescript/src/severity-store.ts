@@ -7,20 +7,21 @@ import {
   type SeverityClassificationCheckpoint,
 } from "./classify-severity.js";
 import type { JsonObject } from "./config.js";
+import { gitProtectionRoots } from "./targets.js";
 import { CodexSecurityError } from "./errors.js";
 import {
-  bundledPluginRoot,
   canonicalizeModelSafePath,
+  bundledPluginRoot,
   codexSecurityStateDirectory,
+  workbenchEnvironment,
   requireOutputOutsideRepository,
-  resolvePluginPython,
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "./runtime.js";
 
 /** @internal */
 export class SeverityStore {
-  private options?: Promise<WorkbenchCommandOptions>;
+  private options?: Promise<Omit<WorkbenchCommandOptions, "python">>;
 
   constructor(
     private readonly environment: NodeJS.ProcessEnv,
@@ -35,7 +36,7 @@ export class SeverityStore {
   ): SeverityClassificationCheckpoint {
     return {
       load: async (result) => {
-        const response = await this.run(["severity-classification"], {
+        const response = await this.run("severity-classification", {
           action: "begin",
           scanId,
           findingIds,
@@ -51,8 +52,9 @@ export class SeverityStore {
             );
       },
       save: async (finding, assessment, result) => {
-        await this.run(["severity-classification"], {
+        await this.run("severity-classification", {
           action: "save",
+          scanId,
           finding,
           assessment: {
             ...assessment,
@@ -76,11 +78,7 @@ export class SeverityStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
-    const saved = await this.run([
-      "read-severity-classification",
-      "--scan-id",
-      scanId,
-    ]);
+    const saved = await this.run("read-severity-classification", { scanId });
     if (saved["scanId"] === undefined) return undefined;
     const result: SeverityClassification = {
       schemaVersion: 1,
@@ -102,37 +100,31 @@ export class SeverityStore {
     return result;
   }
 
-  private async run(args: string[], input?: object) {
-    const options = await (this.options ??= this.resolveOptions());
+  private async run(command: string, input: object) {
     return runWorkbench(
-      options,
-      args,
-      input === undefined ? undefined : JSON.stringify(input),
+      await (this.options ??= this.resolveOptions()),
+      [command],
+      JSON.stringify(input),
     );
   }
 
-  private async resolveOptions(): Promise<WorkbenchCommandOptions> {
-    const environment = {
-      ...this.environment,
-      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(this.environment),
-    };
+  private async resolveOptions(): Promise<
+    Omit<WorkbenchCommandOptions, "python">
+  > {
+    const environment = workbenchEnvironment(this.environment);
     requireOutputOutsideRepository(
       this.scanDirectory,
       await canonicalizeModelSafePath(environment.CODEX_SECURITY_STATE_DIR),
       "runtime",
     );
-    const [python, pluginRoot] = await Promise.all([
-      resolvePluginPython({
-        environment,
-        protectedRoot: this.scanDirectory,
-        signal: this.signal,
-      }),
-      bundledPluginRoot(),
-    ]);
     return {
-      python,
-      pluginRoot,
+      pluginRoot: await bundledPluginRoot(),
       environment,
+      protectedRoot: [
+        this.scanDirectory,
+        ...(await gitProtectionRoots(process.cwd(), this.signal)),
+        ...(await gitProtectionRoots(this.scanDirectory, this.signal)),
+      ],
       signal: this.signal,
       failureMessage: "Could not access severity assessments",
     };

@@ -5,6 +5,11 @@ import {
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   deduplicateScan,
+  deduplicateRecords,
+  type DeduplicateRecordsInput,
+  type DeduplicateRecordsResult,
+  type DeduplicationReviewRequest,
+  type DeduplicationReviewRunner,
   estimateScanCost,
   loadProjectConfig,
   matchScanFindings,
@@ -26,6 +31,7 @@ import {
   type ScanComparisonResult,
   type ScanOptions,
   type ScanProgress,
+  type ScanWorkerEvent,
   type ScanResult,
   type ScanSettings,
   type ValidationOptions,
@@ -34,7 +40,6 @@ import {
 import {
   OpenAiFindingEmbedder,
   SqliteFindingsStore,
-  startFindingsServer,
 } from "@openai/codex-security/server";
 
 export async function classify(
@@ -69,17 +74,15 @@ export async function classify(
   return classification;
 }
 
-export async function findingsServer(getApiKey: () => Promise<string>) {
-  return await startFindingsServer({
+export function findingsStorage(getApiKey: () => Promise<string>) {
+  return {
     store: new SqliteFindingsStore(),
     embeddings: new OpenAiFindingEmbedder(
       getApiKey,
       fetch,
       process.env["CODEX_SECURITY_EMBEDDINGS_URL"] || undefined,
     ),
-    host: "127.0.0.1",
-    port: 0,
-  });
+  };
 }
 
 export async function publishCustom(
@@ -110,6 +113,10 @@ const options: ScanOptions = {
   target: DiffTarget.refs({ base: "HEAD~1" }),
   onProgress(progress: ScanProgress) {
     progress.filesCompleted satisfies number;
+  },
+  onWorkerEvent(event: ScanWorkerEvent) {
+    event.kind satisfies "observed";
+    event.worker satisfies number;
   },
 };
 
@@ -218,3 +225,19 @@ export async function scanComponents(repository: string, outputDir: string) {
 
 // @ts-expect-error The model client is an internal test dependency.
 planComponents("synthetic-repository", { codex: {} });
+
+export async function dedupeRecords(
+  input: DeduplicateRecordsInput,
+  execute: (
+    request: DeduplicationReviewRequest,
+    signal?: AbortSignal,
+  ) => Promise<unknown>,
+  signal: AbortSignal,
+): Promise<DeduplicateRecordsResult> {
+  const reviewRunner: DeduplicationReviewRunner = {
+    run(request, options) {
+      return execute(request, options?.signal);
+    },
+  };
+  return await deduplicateRecords(input, { reviewRunner, signal });
+}

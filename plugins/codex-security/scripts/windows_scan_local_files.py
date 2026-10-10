@@ -4,12 +4,15 @@ Windows does not implement Python's descriptor-relative ``dir_fd`` APIs or
 ``O_NOFOLLOW``.  This module provides the three operations needed by the scan
 finalizer without falling back to check-then-use path validation.
 
-The implementation opens every directory with ``FILE_FLAG_OPEN_REPARSE_POINT``
-and rejects all reparse points, including junctions.  Directory handles remain
-open without ``FILE_SHARE_DELETE`` for the full operation, which prevents an
+Scan-local reads, writes, and deletes open every directory with
+``FILE_FLAG_OPEN_REPARSE_POINT`` and reject all reparse points, including junctions.
+Directory handles remain open without ``FILE_SHARE_DELETE`` for the full
+operation, which prevents an
 already-validated ancestor from being renamed or replaced during a read,
 write, or delete.  Writes rename the exact temporary-file handle into place so
 an attacker cannot substitute another file at the temporary name.
+
+The snapshot helper copies junction metadata without opening the link target.
 
 Importing this module and comparing streams work on every platform. Filesystem
 operations raise ``WindowsScanLocalFileError`` outside Windows.
@@ -202,6 +205,19 @@ if os.name == "nt":
     ]
     _WriteFile.restype = wintypes.BOOL
 
+    _DeviceIoControl = _kernel32.DeviceIoControl
+    _DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    _DeviceIoControl.restype = wintypes.BOOL
+
     _FlushFileBuffers = _kernel32.FlushFileBuffers
     _FlushFileBuffers.argtypes = [wintypes.HANDLE]
     _FlushFileBuffers.restype = wintypes.BOOL
@@ -307,6 +323,34 @@ def _create_file(
             return None
         _raise_last_error("CreateFileW", path)
     return _OwnedHandle(int(handle))
+
+
+def copy_directory_junction(source: Path, destination: Path) -> None:
+    """Copy raw junction data to an empty directory without opening the link target."""
+    # MAXIMUM_REPARSE_DATA_BUFFER_SIZE, including the reparse data header.
+    data = ctypes.create_string_buffer(16 * 1024)
+    size = wintypes.DWORD()
+    for path, write in ((source, False), (destination, True)):
+        handle = _create_file(
+            path,
+            access=_GENERIC_WRITE if write else _FILE_READ_ATTRIBUTES,
+            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            disposition=_OPEN_EXISTING,
+            flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+        assert handle is not None
+        with handle:
+            if not _DeviceIoControl(
+                handle.value,
+                0x000900A4 if write else 0x000900A8,  # FSCTL_SET/GET_REPARSE_POINT.
+                data if write else None,
+                size.value if write else 0,
+                None if write else data,
+                0 if write else len(data),
+                ctypes.byref(size),
+                None,
+            ):
+                _raise_last_error("Copy directory junction", path)
 
 
 def _attributes(handle: int) -> _FileAttributeTagInfo:
@@ -453,6 +497,12 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
     """Open a verified regular file and return an owned binary read descriptor."""
 
+    return open_read_fd_with_path(scan_dir, relative_path, context)[0]
+
+
+def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> tuple[int, str]:
+    """Return the descriptor and its filename while the verified parents are held."""
+
     try:
         with _locked_parent(scan_dir, relative_path, create=False) as (parent_path, leaf_name):
             path = parent_path / leaf_name
@@ -467,10 +517,13 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
             assert handle is not None and handle.value is not None
             with handle:
                 _verify_regular_file(handle.value, path)
+                filename = Path(_final_path(handle.value)).name
+                resolved_path = PurePosixPath(relative_path).with_name(filename).as_posix()
                 raw_handle = handle.detach()
                 try:
                     assert _msvcrt is not None
-                    return _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
+                    descriptor = _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
+                    return descriptor, resolved_path
                 except BaseException:
                     _close_handle(raw_handle)
                     raise
@@ -654,6 +707,7 @@ def atomic_write(
                 try:
                     _mark_handle_for_deletion(temp_handle.value)
                 except OSError:
+                    # Cleanup must not replace the original write or rename failure.
                     pass
                 raise
 
@@ -686,9 +740,5 @@ def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
             _mark_handle_for_deletion(handle.value)
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

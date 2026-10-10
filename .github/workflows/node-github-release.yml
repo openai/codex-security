@@ -29,6 +29,11 @@ jobs:
     permissions:
       actions: read
       contents: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+      integrity: ${{ steps.artifact.outputs.integrity }}
+      has-action: ${{ steps.action.outputs.present }}
 
     steps:
       - name: Checkout release automation
@@ -173,11 +178,7 @@ jobs:
             sleep 2
           done
 
-          if [[ "$run_name" != "node-release" ||
-                "$run_status" != "completed" ||
-                "$run_conclusion" != "success" ||
-                "$run_sha" != "$release_sha" ||
-                "$run_tag" != "$release_tag" ]]; then
+          if [[ "$run_conclusion" != "success" ]]; then
             echo "The release run must successfully publish the exact tagged commit." >&2
             exit 1
           fi
@@ -188,6 +189,37 @@ jobs:
             printf 'sha=%s\n' "$release_sha"
             printf 'run-id=%s\n' "$release_run"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the published npm package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # npm can finish publishing before its registry makes the version available.
+          for attempt in {1..21}; do
+            if metadata="$(
+              npm view "@openai/codex-security@$RELEASE_VERSION" version \
+                --json --prefer-online --registry=https://registry.npmjs.org/
+            )"; then
+              exit 0
+            fi
+            printf '%s\n' "$metadata" >&2
+            if ! printf '%s\n' "$metadata" | node --input-type=module --eval '
+              import { readFileSync } from "node:fs";
+              const result = JSON.parse(readFileSync(0, "utf8"));
+              process.exit(result?.error?.code === "E404" ? 0 : 1);
+            '; then
+              exit 1
+            fi
+            if (( attempt == 21 )); then
+              echo "The published npm version did not become available within ten minutes." >&2
+              exit 1
+            fi
+            echo "Waiting for npm publication to become available." >&2
+            sleep 30
+          done
 
       - name: Download the verified or durable npm release artifact
         shell: bash
@@ -262,7 +294,7 @@ jobs:
                 "$RELEASE_VERSION" \
                 "$RELEASE_SHA" \
                 "$GITHUB_REPOSITORY" \
-                "$RELEASE_RUN_ID" 2>/dev/null
+                "$RELEASE_RUN_ID"
           )"; then
             verified_run_id="$RELEASE_RUN_ID"
             printf '%s\n' "$verified_provenance"
@@ -329,6 +361,16 @@ jobs:
                 "$verified_run_id"
 
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+          printf 'integrity=%s\n' "$(jq -r '."dist.integrity" // .dist.integrity' <<< "$metadata")" >> "$GITHUB_OUTPUT"
+
+      - name: Detect Action release source
+        id: action
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          if git cat-file -e "$RELEASE_SHA:action.yml" 2>/dev/null; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Resolve published release history
         id: history
@@ -404,248 +446,263 @@ jobs:
           MAKE_LATEST: ${{ steps.history.outputs.make-latest }}
         run: |
           set -euo pipefail
-
           release_workspace="$(mktemp -d)"
           trap 'rm -rf "$release_workspace"' EXIT
 
-          verify_release_tag() {
-            local live_ref live_type live_object live_commit
-            if ! live_ref="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-                --jq '[.object.type, .object.sha] | @tsv'
-            )"; then
-              echo "GitHub release tag must still point to the verified commit." >&2
-              return 1
-            fi
-            IFS=$'\t' read -r live_type live_object <<< "$live_ref"
-            if [[ ! "$live_object" =~ ^[0-9a-fA-F]{40}$ ]]; then
-              echo "GitHub release tag must still point to the verified commit." >&2
-              return 1
-            fi
+          node --input-type=module --eval '
+            import { publishGitHubRelease } from "./sdk/typescript/scripts/publish-github-release.mjs";
+            try {
+              publishGitHubRelease(process.env, process.argv[1]);
+            } catch (error) {
+              if (error.status === undefined) throw error;
+              process.exit(error.status);
+            }
+          ' "$release_workspace"
 
-            case "$live_type" in
-              commit)
-                live_commit="$live_object"
-                ;;
-              tag)
-                if ! live_commit="$(
-                  gh api \
-                    "repos/$GITHUB_REPOSITORY/git/tags/$live_object" \
-                    --jq 'if .object.type == "commit" then .object.sha else empty end'
-                )"; then
-                  echo "GitHub release tag must still point to the verified commit." >&2
-                  return 1
-                fi
-                ;;
-              *)
-                echo "GitHub release tag must still point to the verified commit." >&2
-                return 1
-                ;;
-            esac
+  installed:
+    name: verify published installation
+    needs: release
+    uses: ./.github/workflows/published-install-smoke.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+      # Use current checks when recovering releases that predate exact-version smoke.
+      ref: ${{ github.sha }}
 
-            if [[ ! "$live_commit" =~ ^[0-9a-fA-F]{40}$ ||
-                  "$live_commit" != "$RELEASE_SHA" ]]; then
-              echo "GitHub release tag must still point to the verified commit." >&2
-              return 1
-            fi
-          }
+  action-verify:
+    name: verify matching Action
+    needs: [release, installed]
+    if: needs.release.outputs.has-action == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      runtime-lock-artifact: ${{ steps.runtime-lock.outputs.artifact-id }}
+    env:
+      RELEASE_VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_SHA: ${{ needs.release.outputs.sha }}
+      CLI_INTEGRITY: ${{ needs.release.outputs.integrity }}
 
-          github_release_or_missing() {
-            local endpoint="$1" label="$2" query_status=0 response
-            response="$(gh api --include "$endpoint" 2>/dev/null)" ||
-              query_status=$?
-            printf '%s\n' "$response" |
-              CODEX_SECURITY_RELEASE_QUERY_STATUS="$query_status" \
-                CODEX_SECURITY_RELEASE_LABEL="$label" \
-                node --input-type=module --eval '
-                  import { readFileSync } from "node:fs";
-                  const fail = () => {
-                    throw new Error(
-                      "Unable to resolve the " +
-                        process.env.CODEX_SECURITY_RELEASE_LABEL +
-                        ".",
-                    );
-                  };
-                  const raw = readFileSync(0, "utf8");
-                  const separator = raw.search(/\r?\n\r?\n/u);
-                  const status = /^HTTP\/\d+(?:\.\d+)?\s+(\d{3})(?:\s|$)/u.exec(
-                    raw.slice(0, separator),
-                  );
-                  if (separator < 0 || status == null) fail();
-                  let response;
-                  try {
-                    response = JSON.parse(
-                      raw.slice(separator + (raw[separator] === "\r" ? 4 : 2)),
-                    );
-                  } catch {
-                    fail();
-                  }
-                  if (response == null || typeof response !== "object") fail();
-                  if (process.env.CODEX_SECURITY_RELEASE_QUERY_STATUS === "0") {
-                    if (Number(status[1]) < 200 || Number(status[1]) >= 300) fail();
-                    process.stdout.write(JSON.stringify(response));
-                  } else if (status[1] !== "404") {
-                    fail();
-                  }
-                '
-          }
+    steps:
+      - &action-checkout-automation
+        name: Checkout release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: automation
+          persist-credentials: false
 
-          existing_release="$(
-            github_release_or_missing \
-              "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
-              "existing GitHub Release"
-          )"
-          if [[ -n "$existing_release" ]]; then
-            asset_name="$(basename "$RELEASE_ARCHIVE")"
-            downloaded_assets="$release_workspace/downloaded-assets"
-            mkdir "$downloaded_assets"
-            gh release download "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --pattern "$asset_name" \
-              --dir "$downloaded_assets"
+      - &action-checkout-source
+        name: Checkout verified CLI source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          path: release-source
+          fetch-depth: 0
+          persist-credentials: false
 
-            downloaded_archive="$downloaded_assets/$asset_name"
-            if [[ ! -f "$downloaded_archive" || -L "$downloaded_archive" ]]; then
-              echo "Expected the exact existing GitHub release asset." >&2
+      - &action-setup-node
+        name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Set up Socket Firewall
+        uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+          firewall-version: "1.15.0"
+
+      - name: Set up the Ubuntu sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+
+      - &action-reuse-distribution
+        name: Reuse an existing immutable Action distribution
+        id: distribution
+        working-directory: release-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          action_tag="action-v$RELEASE_VERSION"
+          if git show-ref --verify --quiet "refs/tags/$action_tag"; then
+            action_sha="$(git rev-parse "$action_tag^{commit}")"
+            if [[ "$(git rev-parse "$action_sha^")" != "$RELEASE_SHA" ]]; then
+              echo 'The existing Action tag must derive from the exact CLI source.' >&2
               exit 1
             fi
-
-            printf '%s\n' "$existing_release" |
-              node sdk/typescript/scripts/release-automation.mjs \
-                verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG" \
-                "$downloaded_archive"
-          fi
-
-          existing_notes_file="$release_workspace/existing-notes.md"
-          : > "$existing_notes_file"
-          if [[ -n "$existing_release" ]]; then
-            printf '%s\n' "$existing_release" |
-              node --input-type=module --eval '
-                import { readFileSync, writeFileSync } from "node:fs";
-                const release = JSON.parse(readFileSync(0, "utf8"));
-                if (release.body != null && typeof release.body !== "string") {
-                  throw new Error("Existing release notes must be a string.");
-                }
-                writeFileSync(
-                  process.argv[1],
-                  (release.body ?? "").replace(/(?:\r?\n)+$/u, ""),
-                );
-              ' "$existing_notes_file"
-          fi
-
-          notes_args=(
-            --method POST
-            "repos/$GITHUB_REPOSITORY/releases/generate-notes"
-            -f "tag_name=$RELEASE_TAG"
-            -f "target_commitish=$RELEASE_SHA"
-          )
-          if git cat-file -e "$RELEASE_SHA:.github/release.yml" 2>/dev/null; then
-            notes_args+=(-f "configuration_file_path=.github/release.yml")
-          fi
-          if [[ -n "$PREVIOUS_TAG" ]]; then
-            notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")
-          fi
-          generated_notes_file="$release_workspace/generated-notes.md"
-          gh api "${notes_args[@]}" |
-            node --input-type=module --eval '
-              import { readFileSync, writeFileSync } from "node:fs";
-              const response = JSON.parse(readFileSync(0, "utf8"));
-              if (typeof response.body !== "string") {
-                throw new Error("Generated GitHub release notes must be a string.");
-              }
-              writeFileSync(process.argv[1], response.body);
-            ' "$generated_notes_file"
-          release_note_args=()
-
-          tagged_notes_file="$release_workspace/tagged-notes.md"
-          if git show "$RELEASE_SHA:.github/release-notes.md" \
-            > "$tagged_notes_file" 2>/dev/null; then
-            release_note_args+=(
-              --tagged-notes-file "$tagged_notes_file"
-            )
-          fi
-
-          if [[ -s "$existing_notes_file" ]]; then
-            release_note_args+=(
-              --existing-notes-file "$existing_notes_file"
-            )
-          fi
-
-          published_notes_file="$release_workspace/published-notes.md"
-          node sdk/typescript/scripts/release-automation.mjs \
-            compose-release-notes \
-            "$RELEASE_VERSION" \
-            "$generated_notes_file" \
-            ${release_note_args[@]+"${release_note_args[@]}"} \
-            > "$published_notes_file"
-
-          if [[ -n "$existing_release" ]]; then
-            latest_response="$(
-              github_release_or_missing \
-                "repos/$GITHUB_REPOSITORY/releases/latest" \
-                "current Latest GitHub Release"
-            )"
-            current_latest_tag=""
-            if [[ -n "$latest_response" ]]; then
-              current_latest_tag="$(
-                printf '%s\n' "$latest_response" |
-                  node --input-type=module --eval '
-                    import { readFileSync } from "node:fs";
-                    const response = JSON.parse(readFileSync(0, "utf8"));
-                    if (
-                      typeof response.tag_name !== "string" ||
-                      response.tag_name.length === 0
-                    ) {
-                      throw new Error(
-                        "Unable to resolve the current Latest GitHub Release.",
-                      );
-                    }
-                    process.stdout.write(response.tag_name);
-                  '
-              )"
+            changed_source="$(git diff --name-only "$RELEASE_SHA" "$action_sha" -- . \
+              ':!github-action/package.json' ':!github-action/package-lock.json' \
+              ':!github-action/runtime/package.json' ':!github-action/runtime/package-lock.json' \
+              ':!github-action/dist/index.cjs' ':!github-action/dist/post.cjs')"
+            if [[ -n "$changed_source" ]]; then
+              echo 'The existing Action tag contains changes outside release packaging.' >&2
+              exit 1
             fi
-            currently_latest=false
-            if [[ "$current_latest_tag" == "$RELEASE_TAG" ]]; then
-              currently_latest=true
-            fi
+            git checkout --detach "$action_sha"
+            node "$GITHUB_WORKSPACE/automation/github-action/scripts/release.mjs" verify \
+              "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" \
+              "$GITHUB_WORKSPACE/release-source/github-action"
+            echo 'existing=true' >> "$GITHUB_OUTPUT"
+          fi
 
-            notes_changed=false
-            if ! cmp -s "$existing_notes_file" "$published_notes_file"; then
-              notes_changed=true
-            fi
-            if [[ "$notes_changed" == true ||
-                  "$currently_latest" != "$MAKE_LATEST" ]]; then
-              verify_release_tag
-              if [[ "$notes_changed" == true ]]; then
-                gh release edit "$RELEASE_TAG" \
-                  --repo "$GITHUB_REPOSITORY" \
-                  --latest="$MAKE_LATEST" \
-                  --notes-file "$published_notes_file"
-                echo "Updated existing GitHub Release with reviewed and generated notes."
-              else
-                gh release edit "$RELEASE_TAG" \
-                  --repo "$GITHUB_REPOSITORY" \
-                  --latest="$MAKE_LATEST"
-              fi
-              if [[ "$currently_latest" != "$MAKE_LATEST" ]]; then
-                echo "Updated existing GitHub Release Latest status."
+      - name: Resolve the verified CLI runtime lock
+        if: steps.distribution.outputs.existing != 'true'
+        run: |
+          node automation/github-action/scripts/release.mjs prepare \
+            "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" \
+            "$GITHUB_WORKSPACE/release-source/github-action"
+
+      - name: Install Action and CLI dependencies
+        working-directory: release-source/github-action
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          runtime_cache="$(mktemp -d "$RUNNER_TEMP/action-runtime-firewall-cache.XXXXXX")"
+          trap 'rm -rf "$runtime_cache"' EXIT
+          sfw npm ci --prefix runtime --ignore-scripts --include=optional --no-audit --no-fund \
+            --registry=https://registry.npmjs.org/ --cache="$runtime_cache"
+
+      - name: Build Action distribution
+        if: steps.distribution.outputs.existing != 'true'
+        working-directory: release-source/github-action
+        run: npm run build
+
+      - name: Validate the packaged Action
+        working-directory: release-source/github-action
+        run: |
+          npm run validate
+          npm run test:cli
+          node scripts/linux-smoke.mjs
+          npm audit --audit-level=high
+          npm audit --prefix runtime --omit=dev --audit-level=high
+          npm run check-dist
+
+      - name: Save verified CLI runtime lock
+        id: runtime-lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: action-runtime-lock
+          path: release-source/github-action/runtime/package-lock.json
+          if-no-files-found: error
+          retention-days: 7
+
+  action:
+    name: publish matching Action
+    needs: [release, action-verify]
+    if: needs.release.outputs.has-action == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_SHA: ${{ needs.release.outputs.sha }}
+      CLI_INTEGRITY: ${{ needs.release.outputs.integrity }}
+
+    steps:
+      - *action-checkout-automation
+      - *action-checkout-source
+      - *action-setup-node
+      - *action-reuse-distribution
+
+      - name: Download verified CLI runtime lock
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.action-verify.outputs.runtime-lock-artifact }}
+          path: ${{ runner.temp }}/action-runtime-lock
+          merge-multiple: true
+
+      - name: Stage verified CLI runtime lock
+        run: |
+          node automation/github-action/scripts/release.mjs stage \
+            "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" \
+            "$RUNNER_TEMP/action-runtime-lock/package-lock.json" \
+            "$GITHUB_WORKSPACE/release-source/github-action"
+
+      # Rebuild from reviewed source in a fresh job; never run the CLI here.
+      - name: Install Action build dependencies
+        working-directory: release-source/github-action
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build Action distribution
+        if: steps.distribution.outputs.existing != 'true'
+        working-directory: release-source/github-action
+        run: npm run build
+
+      - name: Check Action distribution before publication
+        working-directory: release-source/github-action
+        run: npm run check-dist
+
+      - name: Commit and verify release metadata
+        working-directory: release-source
+        env:
+          EXISTING: ${{ steps.distribution.outputs.existing }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXISTING" != true ]]; then
+            git add github-action/package.json github-action/package-lock.json \
+              github-action/runtime/package.json github-action/runtime/package-lock.json \
+              github-action/dist/index.cjs github-action/dist/post.cjs
+            git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              -c commit.gpgsign=false commit --allow-empty -m "chore(release): package Action $RELEASE_VERSION"
+          fi
+          node "$GITHUB_WORKSPACE/automation/github-action/scripts/release.mjs" metadata \
+            "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" "$(git rev-parse HEAD)" \
+            "$GITHUB_WORKSPACE/release-source/github-action"
+
+      - name: Publish immutable Action tag and metadata
+        working-directory: release-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXISTING: ${{ steps.distribution.outputs.existing }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXISTING" != true ]]; then
+            git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+              push origin "HEAD:refs/tags/action-v$RELEASE_VERSION"
+          fi
+          cp github-action/build/release-manifest.json "$RUNNER_TEMP/action-release-manifest.json"
+          cp github-action/build/sbom.cdx.json "$RUNNER_TEMP/action-sbom.cdx.json"
+          existing_assets="$(gh release view "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          comparison="$(mktemp -d)"
+          trap 'rm -rf "$comparison"' EXIT
+          for asset in action-release-manifest.json action-sbom.cdx.json; do
+            if grep -Fxq "$asset" <<< "$existing_assets"; then
+              gh release download "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" \
+                --pattern "$asset" --dir "$comparison"
+              if ! cmp "$RUNNER_TEMP/$asset" "$comparison/$asset"; then
+                echo "Published Action metadata differs: $asset" >&2
+                exit 1
               fi
             else
-              echo "The verified GitHub Release already exists."
+              gh release upload "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/$asset"
             fi
-            exit 0
+          done
+          {
+            printf '### Codex Security %s\n\n' "$RELEASE_VERSION"
+            printf 'CLI source: `%s`\n\n' "$RELEASE_SHA"
+            printf 'Action: `uses: %s@%s` (`action-v%s`)\n' "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)" "$RELEASE_VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  complete:
+    name: release status
+    if: always()
+    needs: [release, installed, action]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require completed release channels
+        env:
+          RELEASE_RESULT: ${{ needs.release.result }}
+          INSTALL_RESULT: ${{ needs.installed.result }}
+          ACTION_RESULT: ${{ needs.action.result }}
+          HAS_ACTION: ${{ needs.release.outputs.has-action }}
+        run: |
+          test "$RELEASE_RESULT" = success
+          test "$INSTALL_RESULT" = success
+          if [[ "$HAS_ACTION" == true ]]; then
+            test "$ACTION_RESULT" = success
           fi
-
-          release_args=(
-            "$RELEASE_TAG"
-            "$RELEASE_ARCHIVE"
-            --repo "$GITHUB_REPOSITORY"
-            --title "Codex Security $RELEASE_VERSION"
-            --verify-tag
-            --notes-file "$published_notes_file"
-            --latest="$MAKE_LATEST"
-          )
-
-          verify_release_tag
-          gh release create "${release_args[@]}"

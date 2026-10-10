@@ -1,14 +1,18 @@
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
 import { parse as parseToml } from "smol-toml";
-import { loadContract } from "./contract.js";
-import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
+import { loadContract, sha256Text as sha256 } from "./contract.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  errorMessage,
+} from "./errors.js";
 import type { Finding, ScanManifest } from "./models.js";
 import {
   CSV_TARGET_ID,
+  bindImportedFindings,
   csvRowFinding,
   parseFindingsCsv,
 } from "./findings-import.js";
@@ -82,19 +86,32 @@ export async function publishFindingsCsvToCloud(
   dependencies.signal?.throwIfAborted();
   let source: string;
   try {
-    source = await readFile(csvPath, "utf8");
+    source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      await readFile(csvPath),
+    );
   } catch (error) {
-    throw new CodexSecurityError("Could not read findings CSV.", {
-      cause: error,
-    });
+    throw new CodexSecurityError(
+      `Could not read findings CSV. ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
   dependencies.signal?.throwIfAborted();
   const rows = parseFindingsCsv(source);
+  if (rows.length === 0) {
+    throw new CodexSecurityError(
+      "Findings CSV must contain at least one finding.",
+    );
+  }
   const digest = sha256(source);
   const scanId = `scan_csv_${sha256(
     ["codex-security-csv-import/v1", VERSION, source].join("\0"),
   ).slice(0, 24)}`;
-  const findings = rows.map((row) => csvRowFinding(row, scanId));
+  const findings = bindImportedFindings(
+    rows.map(csvRowFinding),
+    "csv",
+    scanId,
+    CSV_TARGET_ID,
+  );
   const timestamp = "1970-01-01T00:00:00.000Z";
   const findingsDocument = JSON.stringify({
     documentType: "codex-security.findings",
@@ -161,18 +178,11 @@ export async function publishFindingsCsvToCloud(
   return publishCloudPayload(scan, findings, dependencies);
 }
 
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
 async function publishCloudPayload(
   scan: ScanManifest["scan"],
   findings: Finding[],
   dependencies: CloudPublicationDependencies,
 ): Promise<CloudPublicationResult> {
-  if (findings.length === 0) {
-    throw new CodexSecurityError("There are no findings to publish.");
-  }
   dependencies.signal?.throwIfAborted();
   if (dependencies.dryRun) {
     return {
@@ -260,8 +270,9 @@ async function publishCloudPayload(
 }
 
 async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+  const configuredHome = environment["CODEX_HOME"];
   let home = expandHome(
-    environment["CODEX_HOME"]?.trim() || "~/.codex",
+    configuredHome?.trim() ? configuredHome : "~/.codex",
     environment,
   );
   let requireFileStorage = true;

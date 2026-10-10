@@ -1,11 +1,13 @@
 import { Tiktoken } from "js-tiktoken/lite";
 import cl100kBase from "js-tiktoken/ranks/cl100k_base";
+import { errorMessage } from "../errors.js";
 import type { Finding } from "../models.js";
 import { FindingsError } from "./errors.js";
 import type { FindingEmbedding } from "./storage.js";
 
 export const EMBEDDING_MODEL = "text-embedding-3-large";
 export const EMBEDDING_DIMENSIONS = 1536;
+export const EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
 const MAX_INPUT_TOKENS = 8192;
 const MAX_REQUEST_TOKENS = 300_000;
 const MAX_REQUEST_INPUTS = 2048;
@@ -29,7 +31,8 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       url: string,
       init: RequestInit,
     ) => Promise<Response> = fetch,
-    private readonly url: string = "https://api.openai.com/v1/embeddings",
+    private readonly url: string = EMBEDDINGS_URL,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async embed(findings: readonly Finding[]): Promise<FindingEmbedding[]> {
@@ -86,6 +89,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       if (!apiKey) throw new Error("Missing embedding credentials");
       response = await this.request(this.url, {
         method: "POST",
+        ...(this.signal === undefined ? {} : { signal: this.signal }),
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
@@ -97,13 +101,15 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
           input: chunks.map(({ tokens }) => tokens),
         }),
       });
-    } catch {
+    } catch (error) {
+      this.signal?.throwIfAborted();
       throw new FindingsError(
         "embedding_failed",
-        "Could not reach the embedding provider.",
+        `Could not request finding embeddings: ${errorMessage(error)}`,
       );
     }
     if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
       throw new FindingsError(
         "embedding_failed",
         `Embedding provider returned HTTP ${response.status}.`,
@@ -114,6 +120,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
     try {
       payload = (await response.json()) as typeof payload;
     } catch {
+      this.signal?.throwIfAborted();
       throw invalidEmbeddingResponse();
     }
     if (

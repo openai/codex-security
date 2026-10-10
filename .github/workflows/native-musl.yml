@@ -17,14 +17,14 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x64
-            rust-image: rust@sha256:83b16fd204613a557527e81ef4f87fd513229187c49635e3c7f96b08dfa43c33
-            node22-image: node@sha256:133cdce957f50f47236d6d926592fb1db7a120ac3c33191e611b60dfab63e324
-            node20-image: node@sha256:2ffec31a58e85fbcd575c544a3584f6f4d128779e6b856153a04366b8dd01bb0
+            rust-image: public.ecr.aws/docker/library/rust@sha256:83b16fd204613a557527e81ef4f87fd513229187c49635e3c7f96b08dfa43c33
+            node22-image: public.ecr.aws/docker/library/node@sha256:133cdce957f50f47236d6d926592fb1db7a120ac3c33191e611b60dfab63e324
+            node20-image: public.ecr.aws/docker/library/node@sha256:2ffec31a58e85fbcd575c544a3584f6f4d128779e6b856153a04366b8dd01bb0
           - runner: ubuntu-24.04-arm
             arch: arm64
-            rust-image: rust@sha256:ec97f172f73f5ec381a238dad6ddd99e0e9c14fd3709a05beb41ccdf50eb666a
-            node22-image: node@sha256:9090fa64b73b14ab658d907e7916afcb1633e4bdd5134f9b1be4a21a6c56f0b8
-            node20-image: node@sha256:9a3cb11e78b5082ce7d22bb5113ed5bb7ac4c20195c05f3981e765e21e31c29c
+            rust-image: public.ecr.aws/docker/library/rust@sha256:ec97f172f73f5ec381a238dad6ddd99e0e9c14fd3709a05beb41ccdf50eb666a
+            node22-image: public.ecr.aws/docker/library/node@sha256:9090fa64b73b14ab658d907e7916afcb1633e4bdd5134f9b1be4a21a6c56f0b8
+            node20-image: public.ecr.aws/docker/library/node@sha256:9a3cb11e78b5082ce7d22bb5113ed5bb7ac4c20195c05f3981e765e21e31c29c
     defaults:
       run:
         shell: bash
@@ -38,21 +38,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Set up TypeScript tools
+        uses: ./.github/actions/setup-tools
         with:
-          package_json_file: package.json
-          cache: true
-          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
-      - name: Set up Node.js for TypeScript tools
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22.13.0"
-      - name: Compile TypeScript tools
-        working-directory: .
-        run: |
-          pnpm --dir sdk/typescript install --frozen-lockfile
-          pnpm --dir sdk/typescript run build:ci
+          compile: true
       - name: Fetch locked Rust dependencies
         run: |
           rustup toolchain install 1.97.1 --profile minimal

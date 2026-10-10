@@ -1,0 +1,280 @@
+name: Invoice Desk OpenAI scan
+run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0} @ {1}', inputs.pr_number, inputs.source_sha) || (github.event_name == 'workflow_run' && 'PR fallback' || 'main baseline') }}"
+
+on:
+  workflow_run:
+    workflows: ["Invoice Desk sample"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number (leave both inputs empty for a main baseline)"
+        type: string
+        default: ""
+      source_sha:
+        description: "Exact PR head SHA, required with pr_number"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: invoice-desk-scan-${{ github.event_name == 'workflow_dispatch' && (inputs.pr_number && format('pr-{0}-{1}', inputs.pr_number, inputs.source_sha) || 'main') || format('fallback-{0}', github.run_id) }}
+  cancel-in-progress: true
+
+env:
+  CODEX_SECURITY_VERSION: "0.1.30"
+
+jobs:
+  target:
+    # Only a workflow on protected main can request the inference environment.
+    if: >-
+      github.ref == 'refs/heads/main' && github.ref_protected &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.event == 'pull_request')
+    runs-on: ubuntu-24.04
+    # This job reads only trusted helpers and event metadata before caching public packages.
+    cache-mode: write
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    outputs:
+      targets: ${{ steps.target.outputs.targets }}
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      - name: Check out trusted workflow helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - &set-up-node-js
+        name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Resolve the current pull request targeting main
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/invoice-desk-target.mjs
+
+      # Populate only public package downloads, before any PR source or inference.
+      - name: Restore CLI package download cache
+        if: steps.target.outputs.targets != '[]'
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/invoice-desk-npm-cache/_cacache
+          key: invoice-desk-npm-v1-${{ runner.os }}-${{ runner.arch }}-node24-cli${{ env.CODEX_SECURITY_VERSION }}
+      - name: Populate CLI package download cache
+        if: steps.target.outputs.targets != '[]' && steps.cache.outputs.cache-hit != 'true'
+        working-directory: ${{ runner.temp }}
+        run: |
+          npm install --prefix "$RUNNER_TEMP/codex-security-cli" \
+            --cache "$RUNNER_TEMP/invoice-desk-npm-cache" --prefer-offline \
+            --ignore-scripts --no-audit --no-fund \
+            --registry=https://registry.npmjs.org/ \
+            "@openai/codex-security@$CODEX_SECURITY_VERSION"
+      - name: Save CLI package download cache
+        if: steps.target.outputs.targets != '[]' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/invoice-desk-npm-cache/_cacache
+          key: invoice-desk-npm-v1-${{ runner.os }}-${{ runner.arch }}-node24-cli${{ env.CODEX_SECURITY_VERSION }}
+
+  scan:
+    name: "OpenAI source scan (${{ matrix.target.pr && format('PR #{0}', matrix.target.pr) || 'main' }})"
+    needs: target
+    if: needs.target.outputs.targets != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.target.outputs.targets) }}
+    environment: codex-security-smoke-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    cache-mode: read
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      SOURCE_SHA: ${{ matrix.target.sha }}
+      PR_NUMBER: ${{ matrix.target.pr }}
+
+    steps:
+      - name: Check out trusted workflow helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-workflow
+          persist-credentials: false
+      - *set-up-node-js
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Restore CLI package download cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/invoice-desk-npm-cache/_cacache
+          key: invoice-desk-npm-v1-${{ runner.os }}-${{ runner.arch }}-node24-cli${{ env.CODEX_SECURITY_VERSION }}
+      - name: Install Codex Security outside the checkout
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/codex-security-cli" \
+            --cache "$RUNNER_TEMP/invoice-desk-npm-cache" --prefer-offline \
+            --ignore-scripts --no-audit --no-fund \
+            --registry=https://registry.npmjs.org/ \
+            "@openai/codex-security@$CODEX_SECURITY_VERSION"
+      - name: Check out the exact source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.target.sha }}
+          path: source
+          persist-credentials: false
+      - name: Extract committed application files without running PR code
+        env:
+          SOURCE_REPOSITORY: ${{ github.workspace }}/source
+          SCAN_SOURCE: ${{ runner.temp }}/invoice-desk
+        run: node trusted-workflow/.github/scripts/invoice-desk-source.mjs
+
+      - name: Recheck PR eligibility after environment approval
+        id: recheck
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node trusted-workflow/.github/scripts/invoice-desk-target.mjs
+          # The scanner can read outside its target; remove the guide and answer key.
+          rm -rf -- "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/trusted-workflow"
+      - name: Scan with OpenAI inference
+        id: scan
+        if: steps.recheck.outputs.targets != '[]'
+        working-directory: ${{ runner.temp }}/invoice-desk
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
+        run: |
+          if [[ -z "$OPENAI_API_KEY" ]]; then
+            echo "::error::Configure OPENAI_API_KEY in the protected codex-security-smoke-test environment."
+            echo "exit-code=2" >> "$GITHUB_OUTPUT"
+            echo "elapsed-seconds=0" >> "$GITHUB_OUTPUT"
+            exit 2
+          fi
+          started_at=$SECONDS
+          scan_status=0
+          "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" scan . \
+            --provider openai --auth api-key \
+            --codex 'openai_base_url="https://us.api.openai.com/v1"' \
+            --model gpt-5.6-sol --effort high --mode standard \
+            --headless --format json \
+            --output-dir "$RUNNER_TEMP/invoice-desk-scan" \
+            > "$RUNNER_TEMP/invoice-desk-result.json" || scan_status=$?
+          echo "exit-code=$scan_status" >> "$GITHUB_OUTPUT"
+          echo "elapsed-seconds=$((SECONDS - started_at))" >> "$GITHUB_OUTPUT"
+          exit "$scan_status"
+
+      - name: Export completed findings as SARIF
+        if: ${{ !cancelled() && steps.scan.outputs.exit-code == '0' }}
+        shell: bash
+        env:
+          CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
+        run: |
+          "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" export "$RUNNER_TEMP/invoice-desk-scan" \
+            --export-format sarif \
+            --source-root "$RUNNER_TEMP/invoice-desk" \
+            --output "$RUNNER_TEMP/invoice-desk.sarif"
+
+      - name: Summarize and measure the scan
+        if: ${{ !cancelled() && steps.scan.outputs.exit-code != '' }}
+        shell: bash
+        env:
+          SCAN_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+          SCAN_ELAPSED_SECONDS: ${{ steps.scan.outputs.elapsed-seconds }}
+          PREVIOUS_CACHE_HIT: ${{ needs.target.outputs.cache-hit }}
+          SCAN_CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          python3 - <<'PYTHON'
+          from collections import Counter
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          completed = os.environ["SCAN_EXIT_CODE"] == "0"
+          counts, coverage, total, usage, cost_range = {}, None, None, None, None
+          result = {}
+          result_path = root / "invoice-desk-result.json"
+          if result_path.is_file() and result_path.stat().st_size:
+              try:
+                  result = json.loads(result_path.read_text())
+              except json.JSONDecodeError:
+                  if completed:
+                      raise
+          raw_usage = (result.get("turn") or {}).get("usage")
+          if raw_usage is not None:
+              usage = {key: raw_usage.get(key) for key in (
+                  "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+                  "cache_write_input_tokens_reported", "output_tokens"
+              )}
+          cost_range = (result.get("cost") or {}).get("estimatedUsdRange")
+          coverage = (result.get("coverage") or {}).get("completeness")
+          if completed:
+              findings = json.loads((root / "invoice-desk-scan/findings.json").read_text())["findings"]
+              coverage = json.loads((root / "invoice-desk-scan/coverage.json").read_text())["completeness"]
+              counts = Counter(finding["severity"]["level"] for finding in findings)
+              total = len(findings)
+          metrics = {
+              "schemaVersion": 1,
+              "sourceSha": os.environ["SOURCE_SHA"],
+              "workflowSha": os.environ["GITHUB_SHA"],
+              "pullRequest": int(os.environ["PR_NUMBER"]) or None,
+              "cliVersion": os.environ["CODEX_SECURITY_VERSION"],
+              "model": "gpt-5.6-sol", "mode": "standard", "effort": "high",
+              "exitCode": int(os.environ["SCAN_EXIT_CODE"]),
+              "completed": completed,
+              "elapsedSeconds": int(os.environ["SCAN_ELAPSED_SECONDS"]),
+              "packageCacheReusedFromPreviousRun": os.environ["PREVIOUS_CACHE_HIT"] == "true",
+              "packageCacheRestoredForScan": os.environ["SCAN_CACHE_HIT"] == "true",
+              "findings": total, "findingsBySeverity": dict(counts),
+              "coverage": coverage, "tokenUsage": usage, "estimatedUsdRange": cost_range,
+              "seedRecall": None,
+          }
+          (root / "invoice-desk-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+              summary.write("## Invoice Desk security scan\n\n")
+              summary.write("Source commit: `" + metrics["sourceSha"] + "`.\n\n")
+              if metrics["pullRequest"]:
+                  summary.write(f"Pull request: #{metrics['pullRequest']}.\n\n")
+              summary.write(f"Scan elapsed: **{metrics['elapsedSeconds']} seconds**. Package cache reused from an earlier run: **{metrics['packageCacheReusedFromPreviousRun']}**.\n\n")
+              if not completed:
+                  summary.write("The scan did not complete. Check the scan step and any saved reports; this is not a clean security result.\n")
+              else:
+                  summary.write(f"Reported findings: **{total}**. Coverage: **{coverage}**.\n\n")
+                  summary.write("| Severity | Count |\n| --- | --- |\n")
+                  for severity in ("critical", "high", "medium", "low", "informational"):
+                      summary.write(f"| {severity} | {counts[severity]} |\n")
+                  summary.write("\nDownload the report and metrics artifacts to compare distinct root causes with the ten seeded cases. Extra reports and duplicates need review; raw counts do not measure recall.\n")
+              summary.write("\nScanner: @openai/codex-security@" + metrics["cliVersion"] + "; OpenAI gpt-5.6-sol; standard mode; high effort.\n")
+          PYTHON
+
+      - name: Save reports and metrics
+        if: ${{ !cancelled() && steps.scan.outputs.exit-code != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: invoice-desk-scan-${{ matrix.target.pr || 'main' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/invoice-desk-result.json
+            ${{ runner.temp }}/invoice-desk-metrics.json
+            ${{ runner.temp }}/invoice-desk.sarif
+            ${{ runner.temp }}/invoice-desk-scan/report.md
+            ${{ runner.temp }}/invoice-desk-scan/scan-manifest.json
+            ${{ runner.temp }}/invoice-desk-scan/coverage.json
+            ${{ runner.temp }}/invoice-desk-scan/findings.json

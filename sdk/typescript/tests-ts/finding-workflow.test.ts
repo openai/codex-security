@@ -4,6 +4,7 @@ import { expect, test } from "bun:test";
 import {
   FindingWorkflow,
   workflowDestination,
+  workflowDigest,
 } from "../src/finding-workflow.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import {
@@ -16,11 +17,60 @@ import {
   scriptedWorkbench,
 } from "./support/workbench-fakes.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
+import { runCommand } from "./support/shell.js";
 
 const distinct: DuplicateDecision = {
   decision: "DISTINCT",
   rationale: "Independent corrections are required.",
 };
+
+test("resumed reviews invalidate pre-decision-contract checkpoints", async () => {
+  await using f = await workflowFixture();
+  const store = checkpointWorkbench("legacy-contract", {
+    repository: f.repository,
+  });
+  let legacy = true;
+  const workflow = new FindingWorkflow(
+    "legacy-contract",
+    f.environment,
+    async (options, args, input) => {
+      const payload = JSON.parse(input!);
+      if (legacy && payload.action === "save-review") {
+        payload.binding.version = 4;
+        payload.key = workflowDigest(payload.binding);
+        legacy = false;
+      }
+      return store.run(options, args, JSON.stringify(payload));
+    },
+  );
+  let reviews = 0;
+  const makeRunner = () =>
+    new CheckpointedReviewRunner(
+      workflow,
+      {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          reviews++;
+          return review.validate(distinct);
+        },
+      },
+      store.source,
+      { allRepositories: true },
+    );
+  const review: CodexReview<DuplicateDecision> = {
+    stage: "pair-review",
+    model: "synthetic-model",
+    effort: "medium",
+    prompt: "Synthetic comparison",
+    schema: {},
+    validate: () => distinct,
+  };
+  await makeRunner().run(review);
+  await makeRunner().run(review);
+  await makeRunner().run(review);
+  expect(reviews).toBe(2);
+  expect(store.saved[0]?.["binding"]).toMatchObject({ version: 4 });
+  expect(store.saved[1]?.["binding"]).not.toMatchObject({ version: 4 });
+});
 
 test.each([
   "finding",
@@ -202,9 +252,7 @@ test("preserves the operation error when recording a failed stage also fails", a
     workbench.run,
   );
   await expect(
-    workflow.run("publish", async () => {
-      throw failure;
-    }),
+    workflow.run("publish", (Promise.reject<never>).bind(Promise, failure)),
   ).rejects.toBe(failure);
   workbench.assertDone();
 });
@@ -246,4 +294,51 @@ test("normalizes a workflow destination without storing URL credentials", () => 
   expect(workflowDestination("http://synthetic:password@synthetic.test")).toBe(
     "http://synthetic.test/",
   );
+});
+
+test("blank home digests follow effective Codex configuration", async () => {
+  await using fixture = await workflowFixture();
+  const home = join(fixture.root, "home");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  const moduleUrl = new URL(
+    "../src/deduplication/checkpointed-review.ts",
+    import.meta.url,
+  ).href;
+  const result = await runCommand(
+    process.execPath,
+    [
+      "-e",
+      `
+    import {writeFile} from "node:fs/promises";
+    import {join} from "node:path";
+    const {reviewSettingsDigest} = await import(${JSON.stringify(moduleUrl)});
+    const env = {...process.env, CODEX_HOME: ""};
+    const effective = join(process.env.HOME, ".codex", "config.toml");
+    await writeFile(effective, 'model="first"\\n');
+    const initial = await reviewSettingsDigest(env);
+    await writeFile(effective, 'model="second"\\n');
+    const changed = await reviewSettingsDigest(env);
+    await writeFile("config.toml", 'model="irrelevant"\\n');
+    const unrelated = await reviewSettingsDigest(env);
+    console.log(JSON.stringify({changed: initial !== changed, unrelated: changed === unrelated,
+      whitespace: changed === await reviewSettingsDigest({...env, CODEX_HOME: "  "})}));
+  `,
+    ],
+    {
+      cwd: fixture.root,
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        CODEX_SECURITY_STATE_DIR: fixture.environment.CODEX_SECURITY_STATE_DIR,
+      },
+    },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    changed: true,
+    unrelated: true,
+    whitespace: true,
+  });
 });

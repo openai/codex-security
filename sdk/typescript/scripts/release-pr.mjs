@@ -1,13 +1,18 @@
+import { gitText } from "../../../plugins/codex-security/mcp-app/scripts/git.mjs";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
+import { isMain } from "./is-main.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
+export const actionPackagePath = "github-action/package.json";
+export const actionLockPath = "github-action/package-lock.json";
 export const notesPath = ".github/release-notes.md";
 export const statePath = ".github/release-pr-state.json";
+const packagePaths = [packagePath, actionPackagePath, actionLockPath];
 const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
 const sectionIds = ["highlights", "upgrades"];
 const releaseBranchPrefix = "release/next-";
@@ -88,13 +93,13 @@ export function generateNoteSections(changes) {
             "",
             ...breaking.map(changeLine),
           ].join("\n")
-        : "Review compatibility and document any required migration steps before releasing.",
+        : "No additional migration steps are documented for this release.",
     ].join("\n"),
   };
 }
 
 function sectionBlock(id, content) {
-  return `<!-- release-section: ${id}:start -->\n${content}\n<!-- release-section: ${id}:end -->`;
+  return `<!-- release-section: ${id}:start -->\n\n${content}\n\n<!-- release-section: ${id}:end -->`;
 }
 
 function findSection(notes, id) {
@@ -114,10 +119,6 @@ function findSection(notes, id) {
   return { start, end, text: notes.slice(start, end) };
 }
 
-function hash(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 export function updateReleaseNotes(
   version,
   generated,
@@ -126,29 +127,22 @@ export function updateReleaseNotes(
 ) {
   const header = `<!-- release-version: ${version} -->`;
   const sections = {};
-  if (previousSections === undefined) {
-    const blocks = sectionIds.map((id) => {
-      const block = sectionBlock(id, generated[id]);
-      sections[id] = { generatedHash: hash(block), humanOwned: false };
-      return block;
-    });
-    return { notes: `${header}\n\n${blocks.join("\n\n")}\n`, sections };
-  }
-
-  let notes = previousNotes;
+  const initial = previousSections === undefined;
+  let notes = initial ? null : previousNotes;
   if (notes !== null) {
     notes = /^<!-- release-version: [^\r\n]* -->/u.test(notes)
       ? notes.replace(/^<!-- release-version: [^\r\n]* -->/u, header)
       : `${header}\n\n${notes}`;
   }
   for (const id of sectionIds) {
-    const previous = previousSections[id];
-    const block = notes === null ? null : findSection(notes, id);
+    const previous = initial ? null : previousSections[id];
+    const block = initial || notes === null ? null : findSection(notes, id);
     const humanOwned =
+      !initial &&
       previous?.reset !== true &&
       (previous?.humanOwned !== false ||
         block === null ||
-        hash(block.text) !== previous.generatedHash);
+        hash("sha256", block.text) !== previous.generatedHash);
     if (humanOwned) {
       sections[id] = {
         generatedHash: previous?.generatedHash ?? null,
@@ -162,7 +156,7 @@ export function updateReleaseNotes(
     } else {
       notes = notes.slice(0, block.start) + next + notes.slice(block.end);
     }
-    sections[id] = { generatedHash: hash(next), humanOwned: false };
+    sections[id] = { generatedHash: hash("sha256", next), humanOwned: false };
   }
   return { notes, sections };
 }
@@ -182,6 +176,23 @@ function updatePackageVersion(packageText, version) {
     if (isDeepStrictEqual(JSON.parse(updated), expected)) return updated;
   }
   throw new Error("Unable to update only the top-level package version.");
+}
+
+function updateActionLockVersion(lockText, version) {
+  const lock = JSON.parse(lockText);
+  lock.version = version;
+  lock.packages[""].version = version;
+  return `${JSON.stringify(lock, null, 2)}\n`;
+}
+
+function packageWithoutVersion(text, path) {
+  if (text === null) return null;
+  const metadata = JSON.parse(text);
+  delete metadata.version;
+  if (path === actionLockPath && metadata.packages?.[""]) {
+    delete metadata.packages[""].version;
+  }
+  return metadata;
 }
 
 export function createReleasePlan(history, previous = null) {
@@ -204,6 +215,23 @@ export function createReleasePlan(history, previous = null) {
     previous?.state.sections,
   );
   const state = { baseVersion, baseCommit, sections };
+  const files = {
+    [packagePath]: updatePackageVersion(packageText, version),
+    [notesPath]: notes,
+    [statePath]: `${JSON.stringify(state, null, 2)}\n`,
+  };
+  if (history.actionPackageText != null) {
+    files[actionPackagePath] = updatePackageVersion(
+      history.actionPackageText,
+      version,
+    );
+  }
+  if (history.actionLockText != null) {
+    files[actionLockPath] = updateActionLockVersion(
+      history.actionLockText,
+      version,
+    );
+  }
   return {
     baseVersion,
     baseCommit,
@@ -214,21 +242,13 @@ export function createReleasePlan(history, previous = null) {
     changes,
     generated,
     humanOwned: sectionIds.filter((id) => sections[id].humanOwned),
-    files: {
-      [packagePath]: updatePackageVersion(packageText, version),
-      [notesPath]: notes,
-      [statePath]: `${JSON.stringify(state, null, 2)}\n`,
-    },
+    files,
   };
 }
 
 export function createGitRepository(directory) {
   const git = (...args) =>
-    execFileSync("git", args, {
-      cwd: directory,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    gitText(args, { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
   return {
     git,
     ensureCommit(sha) {
@@ -294,6 +314,8 @@ export async function readReleaseHistory(repo, mainSha, github) {
     baseCommit,
     mainSha,
     packageText,
+    actionPackageText: repo.readFile(mainSha, actionPackagePath),
+    actionLockText: repo.readFile(mainSha, actionLockPath),
     changes: [...changes.values()],
   };
 }
@@ -306,22 +328,30 @@ function readReleaseBranch(repo, mainSha, headSha) {
     .split("\0")
     .filter(Boolean);
   if (
-    paths.some((path) => ![packagePath, notesPath, statePath].includes(path))
+    paths.some(
+      (path) => ![...packagePaths, notesPath, statePath].includes(path),
+    )
   ) {
     return {
       holdReason:
         "The release branch has other file edits. Preserve or merge them before running the updater.",
     };
   }
-  const originalPackage = JSON.parse(repo.readFile(mergeBase, packagePath));
-  const branchPackage = JSON.parse(repo.readFile(headSha, packagePath));
-  delete originalPackage.version;
-  delete branchPackage.version;
-  if (!isDeepStrictEqual(originalPackage, branchPackage)) {
-    return {
-      holdReason:
-        "The release branch has package edits beyond its version. Preserve them before running the updater.",
-    };
+  for (const path of packagePaths) {
+    const originalPackage = packageWithoutVersion(
+      repo.readFile(mergeBase, path),
+      path,
+    );
+    const branchPackage = packageWithoutVersion(
+      repo.readFile(headSha, path),
+      path,
+    );
+    if (!isDeepStrictEqual(originalPackage, branchPackage)) {
+      return {
+        holdReason:
+          "The release branch has package edits beyond its version. Preserve them before running the updater.",
+      };
+    }
   }
   const state = JSON.parse(repo.readFile(headSha, statePath));
   if (!state?.sections) {
@@ -475,8 +505,8 @@ async function ensurePullRequest(
     };
   }
   const marker = `<!-- release-pr-head: ${headSha} -->`;
-  const proposalMarker = `<!-- release-pr-proposal: ${hash(JSON.stringify(plan.files))} -->`;
-  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash(JSON.stringify(plan.generated))} -->`;
+  const proposalMarker = `<!-- release-pr-proposal: ${hash("sha256", JSON.stringify(plan.files))} -->`;
+  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash("sha256", JSON.stringify(plan.generated))} -->`;
   const comments = await github.list(
     `issues/${current.number}/comments?per_page=100`,
   );
@@ -686,10 +716,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
   };
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
   const directory = fileURLToPath(new URL("../../..", import.meta.url));
   const repository = process.env.GITHUB_REPOSITORY ?? "openai/codex-security";
   const token =

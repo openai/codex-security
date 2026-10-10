@@ -1,5 +1,6 @@
+import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync, type Stats } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import {
@@ -12,15 +13,18 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import { InvalidTargetError } from "./errors.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { InvalidTargetError, abortReason, errorMessage } from "./errors.js";
+import {
+  resolveTrustedExecutable,
+  type TrustedExecutable,
+} from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
 import type { ScanMode } from "./scan-modes.js";
 export type { ScanMode } from "./scan-modes.js";
 
 const execFile = promisify(execFileCallback);
-const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
+export const UNSUPPORTED_GIT_ENVIRONMENT: ReadonlySet<string> = new Set([
   "GIT_DIR",
   "GIT_WORK_TREE",
   "GIT_INDEX_FILE",
@@ -65,13 +69,10 @@ export class DiffTarget {
         `Unsupported diff target kind: ${String(this.kind)}`,
       );
     }
-    if (typeof this.base !== "string" || this.base.length === 0) {
+    if (!isNonEmptyString(this.base)) {
       throw new InvalidTargetError("The diff base ref must be non-empty.");
     }
-    if (
-      this.kind === "refs" &&
-      (typeof this.head !== "string" || this.head.length === 0)
-    ) {
+    if (this.kind === "refs" && !isNonEmptyString(this.head)) {
       throw new InvalidTargetError(
         "Git diff refs must include a non-empty head ref.",
       );
@@ -189,7 +190,7 @@ export async function enclosingGitWorktreeRoot(
     if (strict && error instanceof InvalidTargetError) throw error;
     if (markerRoot !== null) {
       throw new InvalidTargetError(
-        "Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible.",
+        `Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible. ${errorMessage(error)}`,
         { cause: error },
       );
     }
@@ -235,10 +236,7 @@ export async function isGitMetadataDirectory(
 ): Promise<boolean> {
   const metadata = async (name: string, followLinks = false) =>
     await (followLinks ? stat : lstat)(join(repository, name)).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      },
+      nullIfMissingPath,
     );
   const head = await metadata("HEAD");
   if (head === null) {
@@ -263,24 +261,37 @@ export async function isGitMetadataDirectory(
           "core.repositoryformatversion",
         ],
         signal,
+        { LC_ALL: "C" },
       );
       return /^\d+$/u.test(version);
     } catch (error) {
       throwIfAborted(signal);
-      // git config uses status 1 when the requested key is absent.
-      if (error instanceof Error && "code" in error && error.code === 1)
+      // Application folders can share these filenames without using Git's
+      // config format. Missing or invalid declarations do not identify metadata.
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error.code === 1 ||
+          (error.code === 128 &&
+            "stderr" in error &&
+            typeof error.stderr === "string" &&
+            /fatal: bad (?:config line|numeric config value)/u.test(
+              error.stderr,
+            )))
+      )
         return false;
       throw error;
     }
   }
   if (!head.isFile() && !head.isSymbolicLink()) return false;
   try {
-    // This resolver validates Git directories without loading their configuration.
+    // Resolve from outside the candidate so Git does not load its configuration.
     const directory = await gitOutput(
       repository,
       ["rev-parse", "--resolve-git-dir", repository],
       signal,
       { LC_ALL: "C" },
+      dirname(repository),
     );
     return (
       relative(await realpath(directory), await realpath(repository)) === ""
@@ -303,6 +314,7 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
+  options: { includeLocalObjects?: boolean } = {},
 ): Promise<[string, string, ...string[]]> {
   const [directory, commonDirectory] = await Promise.all([
     gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
@@ -312,7 +324,7 @@ export async function gitMetadataDirectories(
     abortable(() => realpath(resolve(repository, directory)), signal),
     abortable(() => realpath(resolve(repository, commonDirectory)), signal),
   ]);
-  return [...roots, ...(await gitObjectDirectories(roots, signal))];
+  return [...roots, ...(await gitObjectDirectories(roots, signal, options))];
 }
 
 function gitAlternatePaths(contents: Buffer): string[] {
@@ -372,6 +384,7 @@ function gitAlternatePaths(contents: Buffer): string[] {
 export async function gitObjectDirectories(
   metadataDirectories: readonly string[],
   signal?: AbortSignal,
+  options: { includeLocalObjects?: boolean } = {},
 ): Promise<string[]> {
   const pending = metadataDirectories.map((path) => join(path, "objects"));
   const visited = new Set<string>();
@@ -396,20 +409,19 @@ export async function gitObjectDirectories(
     visited.add(directory);
     const contents = await readFile(join(directory, "info", "alternates"), {
       signal,
-    }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    }).catch(nullIfMissingPath);
     if (contents === null) continue;
     for (const path of gitAlternatePaths(contents)) {
       throwIfAborted(signal);
       pending.push(resolve(directory, path));
     }
   }
-  return [...visited].filter((path) =>
-    metadataDirectories.every((root) =>
-      relativePathIsOutside(relative(root, path)),
-    ),
+  return [...visited].filter(
+    (path) =>
+      options.includeLocalObjects ||
+      metadataDirectories.every((root) =>
+        relativePathIsOutside(relative(root, path)),
+      ),
   );
 }
 
@@ -526,29 +538,20 @@ export async function normalizeTarget(
     }
     await requireGitRepository(root, signal);
     const base = await resolveGitRef(root, target.base, signal);
-    if (target.kind === "refs") {
-      const head = target.head;
-      if (typeof head !== "string" || head.length === 0) {
-        throw new InvalidTargetError(
-          "Git diff refs must include a non-empty head ref.",
-        );
-      }
-      return {
-        kind: "refs",
-        paths: [],
-        base,
-        head: await resolveGitRef(root, head, signal),
-        baseRef: target.base,
-        headRef: head,
-      };
+    const kind = target.kind === "refs" ? "refs" : "working_tree";
+    const head = kind === "refs" ? target.head : "HEAD";
+    if (!isNonEmptyString(head)) {
+      throw new InvalidTargetError(
+        "Git diff refs must include a non-empty head ref.",
+      );
     }
     return {
-      kind: "working_tree",
+      kind,
       paths: [],
       base,
-      head: await resolveGitRef(root, "HEAD", signal),
+      head: await resolveGitRef(root, head, signal),
       baseRef: target.base,
-      headRef: "HEAD",
+      headRef: head,
     };
   }
 
@@ -579,17 +582,22 @@ export async function normalizeTarget(
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
-    if (!existsSync(candidate)) {
-      throw new InvalidTargetError(`Path target does not exist: ${value}`);
-    }
+    let metadata: Stats;
     let canonical: string;
     try {
+      metadata = await abortable(() => stat(candidate), signal);
       canonical = await abortable(() => realpath(candidate), signal);
     } catch (error) {
       throwIfAborted(signal);
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
         cause: error,
       });
+    }
+    // Match the bundled scan scope resolver's supported filesystem types.
+    if (!metadata.isFile() && !metadata.isDirectory()) {
+      throw new InvalidTargetError(
+        `Path target is not a regular file or directory: ${value}`,
+      );
     }
     const relativePath = relative(root, canonical);
     if (relativePathIsOutside(relativePath)) {
@@ -688,7 +696,7 @@ async function requireGitRepository(
   } catch (error) {
     throwIfAborted(signal);
     throw new InvalidTargetError(
-      `Diff targets require a Git repository: ${repository}`,
+      `Diff targets require a Git repository: ${repository}. ${errorMessage(error)}`,
       {
         cause: error,
       },
@@ -715,20 +723,76 @@ async function resolveGitRef(
     );
   } catch (error) {
     throwIfAborted(signal);
-    throw new InvalidTargetError(`unknown Git ref: ${ref}`, { cause: error });
+    throw new InvalidTargetError(
+      `unknown Git ref: ${ref}. ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
 }
 
-async function gitOutput(
+/** Read-only identity for matching saved history with an already selected host Git. */
+export async function gitHistoryIdentity(
+  repository: string,
+  git: TrustedExecutable,
+  signal?: AbortSignal,
+): Promise<{ commonDirectory: string | null; origin: string | null }> {
+  const read = async (args: readonly string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFile(
+        git.executable,
+        ["-c", "core.fsmonitor=false", "-C", repository, ...args],
+        {
+          encoding: "utf8",
+          signal,
+          env: isolatedGitEnvironment(true, git.environment),
+          maxBuffer: Infinity,
+        },
+      );
+      return (
+        stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "") ||
+        null
+      );
+    } catch {
+      throwIfAborted(signal);
+      return null;
+    }
+  };
+  const [commonDirectory, origin] = await Promise.all([
+    read(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    read(["remote", "get-url", "origin"]),
+  ]);
+  return { commonDirectory, origin };
+}
+
+export function gitOutput(
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+  environment?: NodeJS.ProcessEnv,
+  workingDirectory?: string,
+): Promise<string>;
+export function gitOutput(
+  repository: string,
+  args: readonly string[],
+  signal: AbortSignal | undefined,
+  environment: NodeJS.ProcessEnv | undefined,
+  workingDirectory: string | undefined,
+  encoding: "buffer",
+): Promise<Buffer>;
+export async function gitOutput(
   repository: string,
   args: readonly string[],
   signal?: AbortSignal,
   environment: NodeJS.ProcessEnv = {},
-): Promise<string> {
+  workingDirectory = repository,
+  encoding: "utf8" | "buffer" = "utf8",
+): Promise<string | Buffer> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
-    isolatedGitEnvironment(args[0] === "rev-parse" || args[0] === "config"),
+    isolatedGitEnvironment(
+      args[0] === "rev-parse" || args[0] === "config" || args[0] === "ls-files",
+    ),
     (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
   );
   if (command === null)
@@ -736,23 +800,67 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
+    ["-c", "core.fsmonitor=false", "-C", workingDirectory, ...args],
     {
-      encoding: "utf8",
+      encoding,
       signal,
       env: { ...command.environment, ...environment },
       maxBuffer: Infinity,
     },
   );
-  return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
+  return typeof stdout === "string"
+    ? stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "")
+    : stdout;
 }
 
-async function gitMarkerRoot(
+export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  let current = repository;
+  let candidate = resolve(repository);
+  let current: string;
+  while (true) {
+    try {
+      const canonical = await abortable(() => realpath(candidate), signal);
+      current = (await lstat(canonical)).isDirectory()
+        ? canonical
+        : dirname(canonical);
+      break;
+    } catch (error) {
+      // Stale or inaccessible descendants still belong to their accessible checkout ancestors.
+      throwIfAborted(signal);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        search !== "outermost" ||
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
+      )
+        throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) throw error;
+      candidate = parent;
+    }
+  }
+  return await walkGitMarkers(current, signal, search);
+}
+
+/** Protect both the stored path's checkout and its resolved destination. */
+export async function gitProtectionRoots(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots = await Promise.all([
+    gitMarkerRoot(repository, signal, "outermost"),
+    walkGitMarkers(resolve(repository), signal, "outermost"),
+  ]);
+  return [...new Set(roots.filter((root): root is string => root !== null))];
+}
+
+async function walkGitMarkers(
+  current: string,
+  signal: AbortSignal | undefined,
+  search: "nearest" | "outermost",
+): Promise<string | null> {
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);
@@ -761,7 +869,14 @@ async function gitMarkerRoot(
       if (search === "nearest") return current;
       root = current;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      throwIfAborted(signal);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        code !== "ENOENT" &&
+        code !== "ENOTDIR" &&
+        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
+      )
+        throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;
@@ -771,8 +886,9 @@ async function gitMarkerRoot(
 
 function isolatedGitEnvironment(
   preserveGitConfiguration: boolean,
+  source: Readonly<Record<string, string | undefined>> = process.env,
 ): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
+  const environment = { ...source };
   for (const name of Object.keys(environment)) {
     const normalized = name.toUpperCase();
     if (
@@ -796,30 +912,20 @@ export async function abortable<T>(
   return await new Promise<T>((resolvePromise, reject) => {
     const onAbort = (): void => reject(abortReason(signal));
     signal.addEventListener("abort", onAbort, { once: true });
+    const finish =
+      <U>(settle: (value: U) => void) =>
+      (value: U): void => {
+        signal.removeEventListener("abort", onAbort);
+        settle(value);
+      };
     void Promise.resolve()
       .then(operation)
-      .then(
-        (value) => {
-          signal.removeEventListener("abort", onAbort);
-          resolvePromise(value);
-        },
-        (error: unknown) => {
-          signal.removeEventListener("abort", onAbort);
-          reject(error);
-        },
-      );
+      .then(finish(resolvePromise), finish(reject));
   });
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw abortReason(signal);
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }
 
 function expandHome(value: string): string {
@@ -830,4 +936,16 @@ function expandHome(value: string): string {
     return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
   }
   return value;
+}
+
+/** @internal */
+export function nullIfMissingFile(error: NodeJS.ErrnoException): null {
+  if (error.code === "ENOENT") return null;
+  throw error;
+}
+
+/** @internal */
+export function nullIfMissingPath(error: NodeJS.ErrnoException): null {
+  if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+  throw error;
 }

@@ -166,22 +166,26 @@ test.each([
   },
 );
 
-test("does not retry Windows executable permission failures", async () => {
+test("keeps operating-system worker failures retryable", async () => {
   const runtime = await loadBundledRuntime();
   const source =
     /function classifyCodexWorkerError\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
       runtime,
     )?.[0];
   expect(source).toBeDefined();
-  class NonRetryableError extends Error {}
   const classify = new Function(
-    "DeepScanNonRetryableError",
     `${source}\nreturn classifyCodexWorkerError;`,
-  )(NonRetryableError) as (error: Error) => Error;
-  const original = Object.assign(new Error("spawn codex EPERM"), {
-    code: "EPERM",
-  });
-  const result = classify(original);
-  expect(result).toBeInstanceOf(NonRetryableError);
-  expect(result.cause).toBe(original);
+  )() as (error: Error) => Error;
+  for (const original of [
+    Object.assign(new Error("spawn codex EPERM"), { code: "EPERM" }),
+    ...[
+      "Error: No such file or directory (os error 2)",
+      "Error: The system cannot find the file specified. (os error 2)",
+    ].map(
+      (diagnostic) =>
+        new Error(`Codex Exec exited with code 1:\n${diagnostic}`),
+    ),
+  ]) {
+    expect(classify(original)).toBe(original);
+  }
 });

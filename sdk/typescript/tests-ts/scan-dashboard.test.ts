@@ -1,10 +1,13 @@
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock, jest } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
 import { capture, fakeResult } from "./cli-fixtures.js";
+
+afterEach(() => jest.useRealTimers());
 
 const STARTED_AT = new Date(2026, 6, 29, 9, 41, 0).getTime();
 
@@ -14,6 +17,17 @@ function fakeClock(now: () => number = () => STARTED_AT) {
     setInterval: () => ({}) as NodeJS.Timeout,
     clearInterval: () => {},
   };
+}
+
+function createDashboard(
+  stream: ConstructorParameters<typeof ScanDashboard>[0],
+  options: Partial<ConstructorParameters<typeof ScanDashboard>[1]> = {},
+) {
+  return new ScanDashboard(stream, {
+    repository: "/code/juice-shop",
+    clock: fakeClock(),
+    ...options,
+  });
 }
 
 function lastFrame(stderr: ReturnType<typeof capture>): string {
@@ -41,15 +55,28 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test.each([
+    ["unknown-model", false],
+    ["gpt-5.6-cyber", true],
+  ] as const)("shows a cost row only when %s has pricing", (model, priced) => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, {
+      model: { model, reasoningEffort: "xhigh" },
+      showCost: true,
+    });
+    dashboard.start();
+    const frame = lastFrame(stderr);
+    expect(/^\s*COST\b/m.test(frame)).toBe(priced);
+    if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
+    expect(frame).not.toContain("model pricing missing");
+    dashboard.stop();
+  });
+
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 60, rows: 24 },
-      {
-        repository: "/synthetic/repository",
-        showCost: true,
-        clock: fakeClock(),
-      },
+      { repository: "/synthetic/repository", showCost: true },
     );
     dashboard.start();
     dashboard.setCost({
@@ -76,10 +103,9 @@ describe("live scan dashboard", () => {
   test("edits a higher total budget while continuing to show live cost", async () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(stderr.stream, {
+    const dashboard = createDashboard(stderr.stream, {
       repository: "/synthetic/repository",
       maxCostUsd: 20,
-      clock: fakeClock(),
       input,
     });
     const controller = new AbortController();
@@ -96,7 +122,10 @@ describe("live scan dashboard", () => {
       cost,
       signal: controller.signal,
     });
-    input.emit("data", "-30\r");
+    for (const byte of Buffer.from("é🙂"))
+      input.emit("data", Uint8Array.of(byte));
+    expect(stderr.text()).toContain("é🙂_");
+    input.emit("data", "\u0015-30\r");
     expect(stderr.text()).toContain("Enter a finite total above");
     input.emit("data", "\u00150\r");
     input.emit("data", "\u0015Infinity\r");
@@ -124,16 +153,403 @@ describe("live scan dashboard", () => {
     expect(input.listenerCount("data")).toBe(0);
   });
 
+  test.each([
+    "\u001B[A",
+    "\u001B[B",
+    "\u001B[H",
+    "\u001B[F",
+    "\u001B[1~",
+    "\u001B[4~",
+    "\u001B[5~",
+    "\u001B[6~",
+  ])(
+    "keeps the budget prompt open across every split of %j",
+    async (sequence) => {
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(capture(true).stream, {
+        input,
+        maxCostUsd: 20,
+      });
+      dashboard.start();
+      try {
+        for (let split = 0; split <= sequence.length; split++) {
+          const answer = dashboard.requestBudgetIncrease({
+            maxCostUsd: 20,
+            cost: {
+              ...fakeResult([], "complete", {
+                input_tokens: 100,
+                output_tokens: 1,
+              }).cost!,
+              estimatedUsd: 16,
+            },
+            signal: new AbortController().signal,
+          });
+          input.emit("data", sequence.slice(0, split));
+          input.emit("data", sequence.slice(split) + "30\r");
+          await expect(answer).resolves.toBe(30);
+        }
+      } finally {
+        dashboard.stop();
+      }
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((coalesced) =>
+      [1, 2, 3].map((escapes) => ({ coalesced, escapes })),
+    ),
+  )(
+    "cancels the budget before navigation coalesced=$coalesced escapes=$escapes",
+    async ({ coalesced, escapes }) => {
+      jest.useFakeTimers();
+      for (const navigation of [
+        "\u001B[A",
+        "\u001B[B",
+        "\u001B[H",
+        "\u001B[F",
+        "\u001B[1~",
+        "\u001B[4~",
+        "\u001B[5~",
+        "\u001B[6~",
+        "\u001BOA",
+        "\u001BOB",
+        "\u001B[1;3A",
+        "\u001B[1;5A",
+      ]) {
+        const input = new DashboardTestInput();
+        const dashboard = createDashboard(capture(true).stream, { input });
+        dashboard.start();
+        try {
+          const answer = dashboard.requestBudgetIncrease({
+            maxCostUsd: 20,
+            cost: fakeResult([], "complete", {
+              input_tokens: 100,
+              output_tokens: 1,
+            }).cost!,
+            signal: new AbortController().signal,
+          });
+          input.emit("data", "30");
+          const prefix = "\u001B".repeat(escapes);
+          const chunks = coalesced
+            ? [prefix + navigation]
+            : [prefix, navigation];
+          for (const chunk of chunks) input.emit("data", Buffer.from(chunk));
+          input.emit("data", "\r");
+          await expect(answer).resolves.toBeUndefined();
+        } finally {
+          dashboard.stop();
+          await Promise.resolve();
+        }
+        expect(jest.getTimerCount()).toBe(0);
+      }
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((coalesced) =>
+      [1, 2, 3].map((escapes) => ({ coalesced, escapes })),
+    ),
+  )(
+    "returns from a component before navigation coalesced=$coalesced escapes=$escapes",
+    async ({ coalesced, escapes }) => {
+      jest.useFakeTimers();
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(stderr.stream, {
+        input,
+        presentation: "components",
+      });
+      const components: ComponentReceipt[] = ["API", "Web"].map(
+        (name, index) => ({
+          id: `component-${index}`,
+          name,
+          paths: [`src/${name}`],
+          status: "started",
+          outputDir: `/synthetic/results/${index}`,
+        }),
+      );
+      dashboard.start();
+      try {
+        dashboard.setComponents(components);
+        for (const component of components)
+          dashboard.recordComponentEvent({
+            componentId: component.id,
+            type: "activity",
+            value: {
+              id: component.id,
+              kind: "message",
+              status: "completed",
+              description: `${component.name} activity`,
+              paths: [],
+            },
+          });
+        input.emit("data", "\r");
+        expect(lastFrame(stderr)).toContain("API activity");
+        const prefix = "\u001B".repeat(escapes);
+        const chunks = coalesced ? [prefix + "\u001B[B"] : [prefix, "\u001B[B"];
+        for (const chunk of chunks) input.emit("data", Buffer.from(chunk));
+        input.emit("data", "\r");
+        expect(lastFrame(stderr)).toContain("Web activity");
+        expect(lastFrame(stderr)).not.toContain("API activity");
+      } finally {
+        dashboard.stop();
+        await Promise.resolve();
+      }
+      expect(jest.getTimerCount()).toBe(0);
+    },
+  );
+
+  test("discards pasted keys and partial sequences after a budget answer", async () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const onInterrupt = mock();
+    const dashboard = createDashboard(
+      { ...stderr.stream, rows: 14 },
+      { input, onInterrupt, maxCostUsd: 20 },
+    );
+    dashboard.start();
+    try {
+      for (let index = 0; index < 20; index++)
+        dashboard.note(`Activity ${index}`);
+      const answer = dashboard.requestBudgetIncrease({
+        maxCostUsd: 20,
+        cost: {
+          ...fakeResult([], "complete", { input_tokens: 100, output_tokens: 1 })
+            .cost!,
+          estimatedUsd: 16,
+        },
+        signal: new AbortController().signal,
+      });
+      input.emit("data", "30\rd\u0003\u001B[");
+      await expect(answer).resolves.toBe(30);
+      input.emit("data", "A");
+      expect(lastFrame(stderr)).not.toContain("above live");
+      expect(lastFrame(stderr)).not.toContain("DETAILS");
+      expect(onInterrupt).not.toHaveBeenCalled();
+      input.emit("data", "d");
+      expect(lastFrame(stderr)).toContain("DETAILS");
+    } finally {
+      dashboard.stop();
+    }
+  });
+
+  test.each(["\u001B", "\u001B["])(
+    "discards a pending %j when entering a budget prompt",
+    async (sequence) => {
+      jest.useFakeTimers();
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(capture(true).stream, { input });
+      dashboard.start();
+      try {
+        input.emit("data", sequence);
+        const answer = dashboard.requestBudgetIncrease({
+          maxCostUsd: 20,
+          cost: fakeResult([], "complete", {
+            input_tokens: 100,
+            output_tokens: 1,
+          }).cost!,
+          signal: new AbortController().signal,
+        });
+        await Promise.resolve();
+        expect(jest.getTimerCount()).toBe(0);
+        jest.runAllTimers();
+        input.emit("data", "30\r");
+        await expect(answer).resolves.toBe(30);
+      } finally {
+        dashboard.stop();
+      }
+    },
+  );
+
+  test("discards a partial key when a budget request aborts externally", async () => {
+    jest.useFakeTimers();
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(
+      { ...stderr.stream, rows: 14 },
+      { input },
+    );
+    const controller = new AbortController();
+    dashboard.start();
+    try {
+      for (let index = 0; index < 20; index++)
+        dashboard.note(`Activity ${index}`);
+      const answer = dashboard.requestBudgetIncrease({
+        maxCostUsd: 20,
+        cost: fakeResult([], "complete", {
+          input_tokens: 100,
+          output_tokens: 1,
+        }).cost!,
+        signal: controller.signal,
+      });
+      input.emit("data", "\u001B[");
+      controller.abort();
+      await expect(answer).resolves.toBeUndefined();
+      input.emit("data", "A");
+      expect(lastFrame(stderr)).not.toContain("above live");
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      dashboard.stop();
+    }
+  });
+
+  test("owns only its input listeners and drops pending Escape on stop and restart", async () => {
+    jest.useFakeTimers();
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    input.isRaw = true;
+    const observer = mock();
+    input.on("data", observer);
+    input.on("keypress", observer);
+    const onInterrupt = mock();
+    const dashboard = createDashboard(stderr.stream, { input, onInterrupt });
+    dashboard.start();
+    input.emit("data", "\u001B");
+    expect(jest.getTimerCount()).toBe(1);
+    dashboard.stop();
+    await Promise.resolve();
+    expect(jest.getTimerCount()).toBe(0);
+    const stopped = stderr.text();
+    jest.runAllTimers();
+    expect(stderr.text()).toBe(stopped);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(input.isRaw).toBe(true);
+    expect(input.listenerCount("data")).toBe(1);
+    expect(input.listenerCount("keypress")).toBe(1);
+    dashboard.start();
+    input.emit("data", "d");
+    expect(lastFrame(stderr)).toContain("DETAILS");
+    dashboard.stop();
+    expect(observer).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(["scan", "budget", "components", "component detail"] as const)(
+    "preserves Escape-prefixed cancellation and chunk ownership in %s",
+    async (mode) => {
+      jest.useFakeTimers();
+      for (const chunks of [
+        ["\u001B", "\u0003"],
+        ["\u001B\u0003"],
+        ["\u001B", "\u001B"],
+        ["\u001B\u001B"],
+        ["\u001B[", "\u0003"],
+        ["\u001B[\u0003"],
+        ["\u001BO", "\u0003"],
+        ["\u001BO\u0003"],
+        ["\u001B", "\u0003d"],
+        ["\u001B\u0003d"],
+        ["\u001B", "\u001B\u0003"],
+        ["\u001B\u001B", "\u0003"],
+        ["\u001B\u001B\u0003"],
+        ["\u001B", "\u001B\u0003d"],
+        ["\u001B\u001B[\u0003"],
+        ["\u001B", "\u001B[\u0003"],
+        ["\u001B\u001B", "[\u0003"],
+        ["\u001B\u001B[", "\u0003"],
+        ["\u001B", "\u001B", "[\u0003"],
+        ["\u001B", "\u001B[", "\u0003"],
+        ["\u001B\u001B", "[", "\u0003"],
+        ["\u001B", "\u001B", "[", "\u0003"],
+        ...Array.from({ length: 8 }, (_, index) => {
+          const escapes = "\u001B".repeat(index + 1);
+          return [
+            ["\u001B", `${escapes}\u0003`],
+            [escapes, "\u001B\u0003"],
+            [escapes, "\u0003"],
+            [`${escapes}\u0003`],
+          ];
+        }).flat(),
+      ]) {
+        const stderr = capture(true);
+        const input = new DashboardTestInput();
+        input.isRaw = true;
+        const observer = mock();
+        input.on("data", observer);
+        input.on("keypress", observer);
+        const controller = new AbortController();
+        const onInterrupt = mock(() => controller.abort("SIGINT"));
+        const dashboard = createDashboard(stderr.stream, {
+          input,
+          presentation: mode.startsWith("component") ? "components" : "scan",
+          onInterrupt,
+        });
+        let answer: number | undefined | "pending" = "pending";
+        const pasted =
+          mode === "budget"
+            ? Array.from(Buffer.from("é🙂界"), (byte) => Uint8Array.of(byte))
+            : [];
+        dashboard.start();
+        try {
+          if (mode === "component detail") {
+            dashboard.setComponents([
+              {
+                id: "component",
+                name: "Component",
+                paths: ["src"],
+                status: "started",
+                outputDir: "/synthetic/results",
+              },
+            ]);
+            input.emit("data", "\r");
+          }
+          if (mode === "budget")
+            void dashboard
+              .requestBudgetIncrease({
+                maxCostUsd: 20,
+                cost: fakeResult([], "complete", {
+                  input_tokens: 100,
+                  output_tokens: 1,
+                }).cost!,
+                signal: controller.signal,
+              })
+              .then((value) => {
+                answer = value;
+              });
+          for (const chunk of pasted) input.emit("data", chunk);
+          if (mode === "budget") {
+            expect(lastFrame(stderr)).toContain("é🙂界");
+            expect(lastFrame(stderr)).not.toContain("\uFFFD");
+          }
+          for (const chunk of chunks) input.emit("data", Buffer.from(chunk));
+          await Promise.resolve();
+          jest.runAllTimers();
+          await Promise.resolve();
+          const interrupted =
+            chunks.some((chunk) => chunk.includes("\u0003")) &&
+            (mode !== "budget" || chunks.length > 1);
+          expect(onInterrupt).toHaveBeenCalledTimes(interrupted ? 1 : 0);
+          expect(controller.signal.aborted).toBe(interrupted);
+          if (mode === "budget") {
+            expect(answer).toBeUndefined();
+            if (chunks.at(-1)?.endsWith("d"))
+              expect(lastFrame(stderr).includes("DETAILS")).toBe(
+                chunks.length > 1,
+              );
+          }
+        } finally {
+          dashboard.stop();
+          await Promise.resolve();
+        }
+        expect(input.isRaw).toBe(true);
+        expect(input.listenerCount("data")).toBe(1);
+        expect(input.listenerCount("keypress")).toBe(1);
+        expect(observer).toHaveBeenCalledTimes(
+          pasted.length + chunks.length + Number(mode === "component detail"),
+        );
+        expect(jest.getTimerCount()).toBe(0);
+      }
+    },
+  );
+
   test.each(["enter", "escape", "abort", "stop", "interrupt", "eof"] as const)(
     "dismisses a budget prompt without increasing the limit on %s",
     async (action) => {
       const stderr = capture(true);
       const input = new DashboardTestInput();
       let interrupted = false;
-      const dashboard = new ScanDashboard(stderr.stream, {
+      const dashboard = createDashboard(stderr.stream, {
         repository: "/synthetic/repository",
         maxCostUsd: 20,
-        clock: fakeClock(),
         input,
         onInterrupt: () => {
           interrupted = true;
@@ -168,7 +584,8 @@ describe("live scan dashboard", () => {
     },
   );
 
-  test("shows concurrent components and keeps their activity and costs separate", () => {
+  test("shows concurrent components and keeps their activity and costs separate", async () => {
+    jest.useFakeTimers();
     const stderr = capture(true);
     const input = new DashboardTestInput();
     let timers = 0;
@@ -276,7 +693,10 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("API session detail");
     expect(frame()).not.toContain("Web session detail");
     input.emit("data", "\u001B");
-    input.emit("data", "\u001B[B\r");
+    jest.advanceTimersToNextTimer();
+    await Promise.resolve();
+    input.emit("data", "\u001B[");
+    input.emit("data", "B\r");
     expect(frame()).toContain("Web only activity");
     expect(frame()).not.toContain("API only activity");
     dashboard.updateComponent({
@@ -312,21 +732,17 @@ describe("live scan dashboard", () => {
     expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
   });
 
-  test("navigates a long component list and shows sanitized failure details", () => {
+  test("navigates a long component list and shows original failure details", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    let interrupted = false;
-    const dashboard = new ScanDashboard(
+    const onInterrupt = mock();
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
       {
         repository: "/synthetic/project",
         presentation: "components",
         input,
-        clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
-        onInterrupt: () => {
-          interrupted = true;
-        },
+        onInterrupt,
       },
     );
     const receipts: ComponentReceipt[] = Array.from(
@@ -351,7 +767,7 @@ describe("live scan dashboard", () => {
     input.emit("data", "\u001B[F");
     expect(frame()).toContain("Component 19");
     expect(frame()).not.toContain("Component 0 ");
-    expect(frame()).toContain("[redacted] unavailable");
+    expect(frame()).toContain("synthetic-secret unavailable");
     expect(frame()).not.toContain("Cost");
     expect(
       frame()
@@ -361,21 +777,20 @@ describe("live scan dashboard", () => {
     input.emit("data", "\r");
     expect(frame()).not.toContain("COST");
     input.emit("data", "\u0003");
-    expect(interrupted).toBe(true);
+    expect(onInterrupt).toHaveBeenCalled();
     dashboard.stop();
   });
 
   test("renders publication progress without scan-only inventory and cost fields", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 100, rows: 18 },
       {
         repository: "/synthetic/payments-api",
         presentation: "publication",
         input,
         color: false,
-        clock: fakeClock(),
       },
     );
 
@@ -412,31 +827,23 @@ describe("live scan dashboard", () => {
   test("restores terminal state when dashboard initialization fails", () => {
     const input = new DashboardTestInput();
     const output: string[] = [];
-    let timerCleared = false;
+    const clearIntervalMock = mock();
     const dashboard = new ScanDashboard(
       {
-        write(chunk: string): boolean {
-          output.push(chunk);
-          if (chunk.includes("\u001B[H")) {
-            throw new Error("Dashboard rendering failed.");
-          }
-          return true;
-        },
+        write: failingDashboardOutput(output),
       },
       {
         repository: "/synthetic/repository",
         input,
         clock: {
           ...fakeClock(),
-          clearInterval: () => {
-            timerCleared = true;
-          },
+          clearInterval: clearIntervalMock,
         },
       },
     );
 
     expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
-    expect(timerCleared).toBe(true);
+    expect(clearIntervalMock).toHaveBeenCalled();
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
     expect(output.join("")).toContain("\u001B[?25h\u001B[?1049l");
@@ -453,10 +860,9 @@ describe("live scan dashboard", () => {
           : "Raw mode cleanup failed.",
       );
     };
-    const dashboard = new ScanDashboard(stderr.stream, {
+    const dashboard = createDashboard(stderr.stream, {
       repository: "/synthetic/repository",
       input,
-      clock: fakeClock(),
     });
 
     expect(() => dashboard.start()).toThrow("Raw mode initialization failed.");
@@ -472,17 +878,11 @@ describe("live scan dashboard", () => {
       input.isRaw = enabled;
       return input;
     };
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       {
-        write(chunk: string): boolean {
-          output.push(chunk);
-          if (chunk.includes("\u001B[H")) {
-            throw new Error("Dashboard rendering failed.");
-          }
-          return true;
-        },
+        write: failingDashboardOutput(output),
       },
-      { repository: "/synthetic/repository", input, clock: fakeClock() },
+      { repository: "/synthetic/repository", input },
     );
 
     expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
@@ -591,6 +991,8 @@ describe("live scan dashboard", () => {
       filesCompleted: 0,
       filesTotal: 1_258,
     });
+    expect(lastFrame(stderr)).toContain("1,258 in scope");
+    expect(lastFrame(stderr)).not.toContain("reviewed");
     dashboard.record({
       id: "read-1",
       kind: "command",
@@ -605,6 +1007,13 @@ describe("live scan dashboard", () => {
         output_tokens: 236,
       }).cost!,
     );
+    dashboard.setFiles({
+      phase: "discovery",
+      filesCompleted: 3,
+      filesTotal: 1_258,
+    });
+    expect(lastFrame(stderr)).toContain("3 / 1,258 reviewed");
+    expect(lastFrame(stderr)).not.toContain("in scope");
     dashboard.stop();
 
     const text = stripVTControlCharacters(stderr.text());
@@ -620,7 +1029,6 @@ describe("live scan dashboard", () => {
     expect(text).toContain("               routes/login.ts");
     expect(text).not.toContain("[09:41:19]   routes/login.ts");
     expect(text).toContain("routes/login.ts");
-    expect(text).toContain("0 / 1,258 reviewed");
     expect(text).not.toContain("opened");
     expect(text).not.toContain("3 / 6 active");
     expect(text.replace(/\s+/gu, " ")).toContain(
@@ -637,13 +1045,9 @@ describe("live scan dashboard", () => {
 
   test("hides stage and file counts during Deep scans without wasting screen rows", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 12 },
-      {
-        repository: "/code/juice-shop",
-        mode: "deep",
-        clock: fakeClock(),
-      },
+      { mode: "deep" },
     );
 
     dashboard.start();
@@ -723,10 +1127,7 @@ describe("live scan dashboard", () => {
 
   test("shows repeated file inventory commands as one activity", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream);
 
     dashboard.start();
     for (const [id, description] of [
@@ -751,10 +1152,7 @@ describe("live scan dashboard", () => {
 
   test("labels actual delegated worker activity", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream);
 
     dashboard.start();
     dashboard.record({
@@ -774,10 +1172,7 @@ describe("live scan dashboard", () => {
 
   test("keeps parent and worker file inventories distinct", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream);
 
     dashboard.start();
     for (const activity of [
@@ -802,17 +1197,10 @@ describe("live scan dashboard", () => {
   test("scrolls through history while keeping terminal text selectable", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    let interrupted = false;
-    const dashboard = new ScanDashboard(
+    const onInterrupt = mock();
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
-      {
-        repository: "/code/juice-shop",
-        input,
-        onInterrupt: () => {
-          interrupted = true;
-        },
-        clock: fakeClock(),
-      },
+      { input, onInterrupt },
     );
 
     dashboard.start();
@@ -834,7 +1222,8 @@ describe("live scan dashboard", () => {
       frame.indexOf("finding-20"),
     );
 
-    input.emit("data", "\u001B[A");
+    input.emit("data", "\u001B");
+    input.emit("data", "[A");
     frame = lastFrame(stderr);
     expect(frame).toContain("finding-15");
     expect(frame).not.toContain("finding-20");
@@ -846,19 +1235,21 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("finding-20");
     expect(frame).toContain("1 line above live");
 
-    input.emit("data", "\u001B[H");
+    input.emit("data", "\u001B[");
+    input.emit("data", "H");
     frame = lastFrame(stderr);
     expect(frame).toContain("finding-1");
     expect(frame).not.toContain("finding-20");
 
-    input.emit("data", "\u001B[F");
+    input.emit("data", "\u001B[");
+    input.emit("data", "F");
     frame = lastFrame(stderr);
     expect(frame).toContain("finding-20");
     expect(frame).not.toContain("events · live");
     expect(frame).not.toContain("ACTIVITY");
 
     input.emit("data", "\u0003");
-    expect(interrupted).toBe(true);
+    expect(onInterrupt).toHaveBeenCalled();
     dashboard.stop();
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
@@ -871,9 +1262,9 @@ describe("live scan dashboard", () => {
   test("batches trackpad scroll events without dropping movement", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
-      { repository: "/code/juice-shop", input, clock: fakeClock() },
+      { input },
     );
 
     dashboard.start();
@@ -908,9 +1299,9 @@ describe("live scan dashboard", () => {
   test("scrolls half a page with Mac-friendly Ctrl+U and Ctrl+D", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
-      { repository: "/code/juice-shop", input, clock: fakeClock() },
+      { input },
     );
 
     dashboard.start();
@@ -938,25 +1329,21 @@ describe("live scan dashboard", () => {
     expect(frame).toContain("finding-20");
     expect(frame).not.toContain("above live");
 
-    input.emit("data", "\u001B[5~");
+    input.emit("data", "\u001B[5");
+    input.emit("data", "~");
     expect(lastFrame(stderr)).toContain("7 lines above live");
-    input.emit("data", "\u001B[6~");
+    input.emit("data", "\u001B");
+    input.emit("data", "[6~");
     expect(lastFrame(stderr)).not.toContain("above live");
     dashboard.stop();
   });
 
-  test("shows unredacted, chronological session events and keeps the activity view safe", () => {
+  test("preserves chronological session events and strips terminal controls from activity", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 140, rows: 24 },
-      {
-        repository: "/code/juice-shop",
-        input,
-        color: true,
-        clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
-      },
+      { input, color: true },
     );
 
     dashboard.start();
@@ -1029,7 +1416,7 @@ describe("live scan dashboard", () => {
     }
 
     let frame = lastFrame(stderr);
-    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).toContain("rg -n synthetic-secret routes/login.ts");
     expect(frame).toContain("d details");
 
     input.emit("data", "d");
@@ -1077,17 +1464,16 @@ describe("live scan dashboard", () => {
 
     input.emit("data", "d");
     frame = lastFrame(stderr);
-    expect(frame).toContain("rg -n [redacted] routes/login.ts");
-    expect(frame).not.toContain("synthetic-secret");
+    expect(frame).toContain("rg -n synthetic-secret routes/login.ts");
     dashboard.stop();
   });
 
   test("filters workers and scrolls the details separately from scan activity", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 120, rows: 14 },
-      { repository: "/code/juice-shop", input, clock: fakeClock() },
+      { input },
     );
     let payloadReads = 0;
     const event = (threadId: string, text: string, worker?: number) => {
@@ -1168,13 +1554,11 @@ describe("live scan dashboard", () => {
 
   test("wraps real reasoning and assistant prose into chronological history", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
-      { ...stderr.stream, columns: 55, rows: 18 },
-      {
-        repository: "/code/juice-shop",
-        clock: fakeClock(),
-      },
-    );
+    const dashboard = createDashboard({
+      ...stderr.stream,
+      columns: 55,
+      rows: 18,
+    });
 
     dashboard.start();
     dashboard.record({
@@ -1211,13 +1595,9 @@ describe("live scan dashboard", () => {
 
   test("shows streamed worker reasoning fully expanded and updates it in place", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 72, rows: 45 },
-      {
-        repository: "/code/juice-shop",
-        color: true,
-        clock: fakeClock(),
-      },
+      { color: true },
     );
     const details = `${"The login route crosses an organization authorization boundary. ".repeat(18)}Final tenant-isolation check.`;
 
@@ -1252,10 +1632,11 @@ describe("live scan dashboard", () => {
     const stderr = capture(true);
     const target =
       "/private/tmp/codex security/scans/promptfoo-cloud/artifacts/02_discovery/raw_candidates_02.jsonl";
-    const dashboard = new ScanDashboard(
-      { ...stderr.stream, columns: 55, rows: 18 },
-      { repository: "/code/juice-shop", clock: fakeClock() },
-    );
+    const dashboard = createDashboard({
+      ...stderr.stream,
+      columns: 55,
+      rows: 18,
+    });
 
     dashboard.start();
     dashboard.record({
@@ -1272,16 +1653,16 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("/private/tmp/");
     expect(frame.match(/\[09:41:00\]/gu)).toHaveLength(1);
     expect(stderr.text()).toContain(
-      `\u001B]8;;file:///private/tmp/codex%20security/scans/promptfoo-cloud/artifacts/02_discovery/raw_candidates_02.jsonl\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
+      `\u001B]8;;${pathToFileURL(target).href}\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
     );
     dashboard.stop();
   });
 
   test("renders fenced Markdown code with exact indentation and one timestamp", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 90, rows: 18 },
-      { repository: "/code/juice-shop", color: true, clock: fakeClock() },
+      { color: true },
     );
 
     dashboard.start();
@@ -1318,9 +1699,9 @@ describe("live scan dashboard", () => {
 
   test("renders inline code while preserving clickable links and exact commands", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 120, rows: 18 },
-      { repository: "/code/juice-shop", color: true, clock: fakeClock() },
+      { color: true },
     );
 
     dashboard.start();
@@ -1340,9 +1721,11 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("`db.raw(  input  )`");
     expect(stderr.text()).toContain("\u001B[2mdb.raw(  input  )\u001B[22m");
     expect(stderr.text()).toContain(
-      "\u001B]8;;file:///tmp/report.md\u0007report\u001B]8;;\u0007",
+      `\u001B]8;;${pathToFileURL("/tmp/report.md").href}\u0007report\u001B]8;;\u0007`,
     );
-    expect(stderr.text()).not.toContain("\u001B]8;;file:///tmp/example.md");
+    expect(stderr.text()).not.toContain(
+      `\u001B]8;;${pathToFileURL("/tmp/example.md").href}`,
+    );
 
     dashboard.record({
       id: "command-inline-code",
@@ -1355,16 +1738,11 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("redacts external Markdown link targets and rejects unsafe links", () => {
+  test("preserves external Markdown link targets and rejects unsafe links", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 120, rows: 18 },
-      {
-        repository: "/code/juice-shop",
-        color: false,
-        clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("secret-token", "[redacted]"),
-      },
+      { color: false },
     );
 
     dashboard.start();
@@ -1377,12 +1755,9 @@ describe("live scan dashboard", () => {
       paths: [],
     });
 
-    const frame = lastFrame(stderr);
-    expect(frame).toContain("See report, unsafe, and control.");
     expect(stderr.text()).toContain(
-      "\u001B]8;;https://example.com/report?token=[redacted]\u0007report\u001B]8;;\u0007",
+      "See \u001B]8;;https://example.com/report?token=secret-token\u0007report\u001B]8;;\u0007, unsafe, and control.",
     );
-    expect(stderr.text()).not.toContain("secret-token");
     expect(stderr.text()).not.toContain("javascript:");
     expect(stderr.text()).not.toContain("spoof");
     expect(stderr.text()).not.toContain("\u001B]8;;javascript:");
@@ -1395,21 +1770,17 @@ describe("live scan dashboard", () => {
       paths: [],
     });
     expect(lastFrame(stderr)).toContain("printf '[report](/tmp/report.md)'");
-    expect(stderr.text()).not.toContain("\u001B]8;;file:///tmp/report.md");
+    expect(stderr.text()).not.toContain(
+      `\u001B]8;;${pathToFileURL("/tmp/report.md").href}`,
+    );
     dashboard.stop();
   });
 
-  test("sanitizes complete activity descriptions before line wrapping", () => {
+  test("preserves credential-shaped activity descriptions across line wrapping", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 50, rows: 18 },
-      {
-        repository: "/code/juice-shop",
-        color: false,
-        clock: fakeClock(),
-        sanitize: (value) =>
-          value.includes("client_secret=") ? "[redacted]" : value,
-      },
+      { color: false },
     );
 
     dashboard.start();
@@ -1422,18 +1793,14 @@ describe("live scan dashboard", () => {
       paths: [],
     });
 
-    expect(lastFrame(stderr)).toContain("[redacted]");
-    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET_VALUE");
+    expect(lastFrame(stderr)).toContain("client_secret=");
+    expect(lastFrame(stderr)).toContain("SYNTHETIC_SECRET_VALUE");
     dashboard.stop();
   });
 
   test("colors important activity while keeping prose readable across terminal themes", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      color: true,
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream, { color: true });
 
     dashboard.start();
     dashboard.record({
@@ -1487,11 +1854,7 @@ describe("live scan dashboard", () => {
 
   test("colors successful scan milestones and warnings distinctly", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      color: true,
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream, { color: true });
 
     dashboard.start();
     for (const status of [
@@ -1515,11 +1878,7 @@ describe("live scan dashboard", () => {
 
   test("leaves activity uncolored when colors are disabled", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      color: false,
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream, { color: false });
 
     dashboard.start();
     dashboard.record({
@@ -1567,3 +1926,13 @@ describe("live scan dashboard", () => {
     );
   });
 });
+
+function failingDashboardOutput(output: string[]) {
+  return (chunk: string): boolean => {
+    output.push(chunk);
+    if (chunk.includes("\u001B[H")) {
+      throw new Error("Dashboard rendering failed.");
+    }
+    return true;
+  };
+}

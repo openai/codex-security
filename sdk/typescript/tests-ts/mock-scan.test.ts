@@ -1,15 +1,15 @@
+import type { JsonObject, ScanOptions } from "../src/index.js";
 import {
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   realpath,
-  rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { DiffTarget } from "../src/targets.js";
 import { runWorkbench } from "../src/runtime.js";
@@ -19,17 +19,15 @@ import { TestClient } from "./support/api-client.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting, throwing } from "./support/errors.js";
 
-const roots: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
+afterEach(cleanup);
 
 async function fixture() {
   const root = await mkdtemp(join(await realpath(tmpdir()), "mock-scan-test-"));
-  roots.push(root);
+  roots.track(root);
   const repository = join(root, "repository");
   await mkdir(repository);
   await writeFile(
@@ -49,12 +47,8 @@ async function fixture() {
     {
       environment,
       runWorkbench,
-      prepareRuntime: async () => {
-        throw new Error("Mock scan initialized Codex");
-      },
-      matchFindings: async () => {
-        throw new Error("Mock scan called model matching");
-      },
+      prepareRuntime: rejecting("Mock scan initialized Codex"),
+      matchFindings: rejecting("Mock scan called model matching"),
     },
   );
   return { root, repository, client, environment, python: python! };
@@ -63,16 +57,30 @@ async function fixture() {
 test("mock scans seal real artifacts and index shared and unique findings without Codex", async () => {
   const { repository, client, environment, python } = await fixture();
   const callbacks: string[] = [];
+  const registrations: Array<
+    Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0]
+  > = [];
   try {
     const first = await client.run(repository, {
       mock: true,
       auth: "api-key",
       maxCostUsd: 0.01,
+      failureSeverity: "informational",
       onAuthentication: () => callbacks.push("authentication"),
+      onScanRegistered: (scan) => {
+        callbacks.push("registered");
+        registrations.push(scan);
+      },
       onScanStarted: () => callbacks.push("started"),
     });
     const second = await client.run(repository, { mock: true });
-    expect(callbacks).toEqual(["started"]);
+    expect(callbacks).toEqual(["registered", "started"]);
+    expect(registrations).toEqual([
+      {
+        scanId: first.manifest.scan.id,
+        scanDir: first.scanDir,
+      },
+    ]);
     expect(first.findings.findings).toHaveLength(12);
     expect(first.coverage.completeness).toBe("complete");
     expect(first.manifest.scan.status).toBe("completed");
@@ -132,11 +140,32 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       ["list-scans", "--repository", repository],
     );
     expect(history["scans"]).toHaveLength(2);
+    const saved = await runWorkbench(
+      { python, pluginRoot: PLUGIN_ROOT, environment },
+      ["get-scan", "--scan-id", first.manifest.scan.id],
+    );
+    const savedScan = saved["scan"] as JsonObject;
+    expect(typeof savedScan["updatedAt"]).toBe("string");
+    const showOutput = capture(true);
+    const showDiagnostics = capture();
+    expect(
+      await main(
+        ["scans", "show", first.manifest.scan.id],
+        showOutput.stream,
+        showDiagnostics.stream,
+        dependencies({ onWorkbench: async () => saved }),
+      ),
+    ).toBe(0);
+    expect(showDiagnostics.text()).toContain(
+      `updated ${savedScan["updatedAt"]}`,
+    );
+    expect(showOutput.text()).toContain("UPDATED");
+    expect(showOutput.text()).toContain(savedScan["updatedAt"] as string);
     const recipe = await runWorkbench(
       { python, pluginRoot: PLUGIN_ROOT, environment },
       ["get-scan-recipe", "--scan-id", first.manifest.scan.id],
     );
-    let rerunMock: boolean | undefined;
+    const onTurn = mock((_repository: string, { mock }: ScanOptions) => mock);
     expect(
       await main(
         ["scans", "rerun", first.manifest.scan.id],
@@ -145,13 +174,12 @@ test("mock scans seal real artifacts and index shared and unique findings withou
         dependencies({
           currentDirectory: repository,
           onWorkbench: async () => recipe,
-          onTurn: (_repository, options) => {
-            rerunMock = (options as { mock?: boolean }).mock;
-          },
+          onTurn,
         }),
       ),
     ).toBe(0);
-    expect(rerunMock).toBe(true);
+    expect(onTurn.mock.results.at(-1)?.value).toBe(true);
+    expect(onTurn.mock.lastCall?.[1].failureSeverity).toBe("informational");
   } finally {
     await client.close();
   }
@@ -167,31 +195,36 @@ test("mock scans preserve output protection and archive existing completed resul
       }),
     ).rejects.toThrow();
     const outputDir = join(root, "results");
-    const first = await client.run(repository, {
+    const firstOptions = {
       mock: true,
       outputDir,
       target: ["example.ts"],
-    });
+      workflowId: "synthetic-archived-workflow",
+    };
+    const first = await client.run(repository, firstOptions);
     const original = await readFile(first.manifestPath, "utf8");
     await expect(
       client.run(repository, { mock: true, outputDir }),
     ).rejects.toThrow();
     expect(await readFile(first.manifestPath, "utf8")).toBe(original);
-    let archive = "";
+    const onOutputArchived = mock((_path: string) => {});
     const second = await client.run(repository, {
       mock: true,
       outputDir,
       archiveExisting: true,
-      onOutputArchived: (path) => {
-        archive = path;
-      },
+      onOutputArchived,
     });
+    const archive = onOutputArchived.mock.lastCall?.[0] ?? "";
     expect(await readFile(join(archive, "scan-manifest.json"), "utf8")).toBe(
       original,
     );
     expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
     expect(first.coverage.mode).toBe("scoped_path");
     expect(first.coverage.includePaths).toEqual(["example.ts"]);
+    const resumed = await client.run(repository, firstOptions);
+    expect(resumed.manifest).toEqual(first.manifest);
+    expect(resumed.scanDir).toBe(archive);
+    expect(resumed.sarifPath).toBe(join(archive, "exports", "results.sarif"));
   } finally {
     await client.close();
   }
@@ -200,7 +233,7 @@ test("mock scans preserve output protection and archive existing completed resul
 test("mock scan CLI forwards the flag and never offers authentication or patching", async () => {
   const stdout = capture();
   const stderr = capture(true);
-  let mock: boolean | undefined;
+  const onTurn = mock((_repository: string, { mock }: ScanOptions) => mock);
   const code = await main(
     ["scan", ".", "--mock", "--fail-on-severity", "high", "--auth", "api-key"],
     stdout.stream,
@@ -208,40 +241,32 @@ test("mock scan CLI forwards the flag and never offers authentication or patchin
     {
       ...dependencies({
         result: fakeResult(["high"]),
-        onTurn: (_repository, options) => {
-          mock = (options as { mock?: boolean }).mock;
-        },
+        onTurn,
       }),
-      confirmPatchReview: async () => {
-        throw new Error("Unexpected patch prompt");
-      },
+      confirmPatchReview: rejecting("Unexpected patch prompt"),
     },
   );
   expect(code).toBe(1);
-  expect(mock).toBe(true);
+  expect(onTurn.mock.results.at(-1)?.value).toBe(true);
   expect(stderr.text()).toContain("Mock scan");
 });
 
 test("mock scans bind clean Git, committed diff, and working-tree snapshots", async () => {
   const { root, repository, client } = await fixture();
   const git = async (...args: string[]) => {
-    const result = await runCommand(
-      "git",
-      [
-        "-C",
-        repository,
-        "-c",
-        `core.hooksPath=${join(root, "hooks")}`,
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "user.name=Example",
-        "-c",
-        "user.email=example@example.test",
-        ...args,
-      ],
-      { timeout: 10000 },
-    );
+    const result = await runCommand("git", [
+      "-C",
+      repository,
+      "-c",
+      `core.hooksPath=${join(root, "hooks")}`,
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.name=Example",
+      "-c",
+      "user.email=example@example.test",
+      ...args,
+    ]);
     expect(result.status).toBe(0);
   };
   try {
@@ -310,9 +335,7 @@ test.each(["--dry-run", "--patch"])(
       capture().stream,
       stderr.stream,
       dependencies({
-        onRun: () => {
-          throw new Error("Unexpected scan");
-        },
+        onRun: throwing("Unexpected scan"),
       }),
     );
     expect(code).toBe(2);

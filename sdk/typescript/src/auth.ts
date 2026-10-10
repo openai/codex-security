@@ -5,7 +5,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import type { JsonObject } from "./config.js";
-import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
+import {
+  CodexSecurityError,
+  PluginBootstrapError,
+  errorMessage,
+} from "./errors.js";
 import {
   executablePathForSpawn,
   expandHome,
@@ -30,11 +34,23 @@ export function environmentEntry(
 }
 
 /** @internal */
+export function withoutOpenAiApiKeys<Value>(
+  environment: Record<string, Value>,
+): Record<string, Value> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
+  );
+}
+
+/** @internal */
 export function configuredCodexHome(environment: ProcessEnvironment): string {
+  const configured = environmentEntry(environment, "CODEX_HOME");
   return resolve(
     expandHome(
-      environmentEntry(environment, "CODEX_HOME")?.trim() ||
-        join(homedir(), ".codex"),
+      configured?.trim() ? configured : join(homedir(), ".codex"),
       environment,
     ),
   );
@@ -56,7 +72,8 @@ export async function readCodexHomeConfig(
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw new CodexSecurityError(
-      "Could not read the configured Codex provider.",
+      `Could not read the configured Codex provider: ${errorMessage(error)}`,
+      { cause: error },
     );
   }
 }
@@ -99,11 +116,15 @@ export class CodexLoginHandle {
   ) {
     void this.#urlReady.promise.catch(() => undefined);
     void this.#deviceReady.promise.catch(() => undefined);
-    this.#child = spawn(executablePathForSpawn(command.command), [...args], {
-      env: environment,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    this.#child = spawn(
+      executablePathForSpawn(command.command),
+      [...(command.args ?? []), ...args],
+      {
+        env: environment,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
     this.#child.stdin.end();
     this.#child.stdout.setEncoding("utf8");
     this.#child.stderr.setEncoding("utf8");
@@ -126,7 +147,9 @@ export class CodexLoginHandle {
         };
         this.#settleInstructionWaiters(result);
         if (result.success) {
-          Promise.resolve(onSuccess()).then(() => resolve(result), reject);
+          Promise.resolve()
+            .then(onSuccess)
+            .then(() => resolve(result), reject);
         } else {
           resolve(result);
         }
@@ -173,8 +196,14 @@ export class CodexLoginHandle {
 
   public cancel(): void {
     this.#canceled = true;
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null)
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
+      // Descendants can retain inherited pipes after the login process exits.
+      // Cancellation must release those pipes so the close event can settle.
+      this.#child.stdin.destroy();
+      this.#child.stdout.destroy();
+      this.#child.stderr.destroy();
       return;
+    }
     this.#child.kill("SIGTERM");
     if (this.#forcedTermination !== undefined) return;
     this.#forcedTermination = setTimeout(() => {
@@ -298,9 +327,10 @@ export const CODEX_AUTH_CONFIG_KEYS = [
 
 /** @internal Shared login recovery guidance for model commands. */
 export const NO_CREDENTIALS_MESSAGE =
-  "No credentials were found. Run 'codex-security login', use " +
-  "'codex-security login --device-auth' on a remote or headless machine, or set " +
-  "OPENAI_API_KEY or CODEX_API_KEY for CI.";
+  "No credentials were found. Run 'codex-security login'. On a remote or headless " +
+  "machine, use 'codex-security login --device-auth' if your workspace allows it. " +
+  "If device auth is disabled, see 'codex-security login --help' for browser login over SSH. " +
+  "For CI, set OPENAI_API_KEY or CODEX_API_KEY.";
 
 function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
@@ -308,8 +338,10 @@ function preferredAuthUrl(value: string): string | null {
   )) {
     const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
     try {
-      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
       if (
+        parsed.protocol === "https:" &&
         hostname !== "localhost" &&
         !hostname.endsWith(".localhost") &&
         !(isIP(hostname) === 4 && hostname.startsWith("127.")) &&
@@ -330,7 +362,7 @@ function preferredAuthUrl(value: string): string | null {
 }
 
 function userCodeFromOutput(value: string): string | null {
-  const output = plainTerminalText(value);
+  const output = plainTerminalText(value).replace(/https?:\/\/[^\s<>"']+/g, "");
   return (
     output.match(/(?:code|user code)\s*[:=]\s*([A-Z0-9-]{4,})/i)?.[1] ??
     output.match(/\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/)?.[0] ??

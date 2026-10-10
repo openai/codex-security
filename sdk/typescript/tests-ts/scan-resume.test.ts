@@ -1,27 +1,36 @@
+import { createCliTest } from "./support/cli-run.js";
+import { workbenchCommand } from "./support/workbench-command.js";
+import { gitText } from "./support/shell.js";
+import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
   cp,
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
-import type { ScanOptions } from "../src/api.js";
+import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
+import type { JsonObject } from "../src/config.js";
 import { runWorkbench } from "../src/runtime.js";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
+import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
+import { workflowDigest } from "../src/finding-workflow.js";
 import { capture, dependencies } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPython } from "./support/python-probe.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { fail } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -31,9 +40,15 @@ async function interruptedScan(
   bulk = false,
   settings: Pick<
     ScanOptions,
-    "safetyIdentifier" | "postScanPrompt" | "auth"
-  > = {},
+    | "safetyIdentifier"
+    | "postScanPrompt"
+    | "auth"
+    | "knowledgeBasePaths"
+    | "cyberAccessProgram"
+  > & { config?: JsonObject } = {},
   resolvedDeep = false,
+  modelProvider?: string,
+  knowledgeState: "saved" | "legacy" = "saved",
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -50,9 +65,7 @@ async function interruptedScan(
   const input = join(root, "repositories.csv");
   if (bulk) {
     const git = (...args: string[]) =>
-      execFileSync("git", ["-C", repository, ...args], {
-        encoding: "utf8",
-      }).trim();
+      gitText(["-C", repository, ...args]).trim();
     git("init", "-q");
     git("add", ".");
     git(
@@ -78,7 +91,27 @@ async function interruptedScan(
     );
     await writeFile(
       join(root, "manifest.json"),
-      JSON.stringify({ version: 1, tasks: [task] }, null, 2) + "\n",
+      JSON.stringify(
+        {
+          version: 2,
+          tasks: [task],
+          ...(settings.knowledgeBasePaths?.length
+            ? {
+                knowledgeBaseDigests: {
+                  [mode]: workflowDigest(
+                    (
+                      await readKnowledgeBaseSnapshot(
+                        settings.knowledgeBasePaths,
+                      )
+                    ).documents,
+                  ),
+                },
+              }
+            : {}),
+        },
+        null,
+        2,
+      ) + "\n",
     );
     await writeFile(
       join(root, "results.jsonl"),
@@ -100,20 +133,38 @@ async function interruptedScan(
     TMP: process.env["TMP"],
     CODEX_HOME: codexHome,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    ...(modelProvider === "amazon-bedrock"
+      ? { AWS_PROFILE: "synthetic-bedrock" }
+      : {}),
     ...(settings.safetyIdentifier === undefined
       ? {}
       : { OPENAI_API_KEY: "synthetic-resume-key" }),
   };
-  const command = (args: readonly string[], input?: string) =>
-    runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args, input);
+  const command = workbenchCommand(python, () => environment);
+  const knowledgeSnapshot =
+    !bulk && knowledgeState === "saved" && settings.knowledgeBasePaths?.length
+      ? await readKnowledgeBaseSnapshot(settings.knowledgeBasePaths)
+      : undefined;
   const recipe = {
     repository,
     target: { kind: "repository", paths: [] },
     mode,
-    config: { model: "gpt-5.6-sol", approval_policy: "never" },
+    config: {
+      model: "gpt-5.6-sol",
+      approval_policy: "never",
+      ...(modelProvider === undefined ? {} : { model_provider: modelProvider }),
+    },
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
     ...settings,
+    ...(knowledgeSnapshot === undefined
+      ? {}
+      : {
+          scanInputs: scanInputIdentity(
+            "Keep the original scan instructions.",
+            knowledgeSnapshot,
+          ),
+        }),
     ...(mode === "deep"
       ? {
           deepScan: {
@@ -147,6 +198,8 @@ async function interruptedScan(
     }),
   );
   const scanId = registration["scanId"] as string;
+  if (knowledgeSnapshot !== undefined)
+    await saveScanKnowledge(scanDir, knowledgeSnapshot);
   const threadId = randomUUID();
   await command([
     "set-scan-thread",
@@ -316,8 +369,26 @@ test.each([
   },
 );
 
-test("CLI resumes the owning Codex thread and preserves running state on a transport failure", async () => {
+test("CLI resumes through native execution with current permissions and preserves interrupted state", async () => {
   const f = await interruptedScan();
+  const originalHome = join(f.root, "original-codex-home");
+  await appendFile(
+    f.sessionPath,
+    JSON.stringify({
+      type: "turn_context",
+      payload: {
+        permission_profile: {
+          type: "managed",
+          file_system: {
+            type: "restricted",
+            entries: [
+              { path: { type: "path", path: originalHome }, access: "deny" },
+            ],
+          },
+        },
+      },
+    }) + "\n",
+  );
   const before = await f.command([
     "get-deep-scan",
     "--scan-id",
@@ -326,60 +397,82 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
     f.threadId,
   ]);
   let resumedThread: string | undefined;
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
-    ["scans", "resume", f.scanId, "--json"],
-    stdout.stream,
-    stderr.stream,
-    {
-      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-      runWorkbench: f.command,
-      createSecurity: (config) =>
-        new TestClient(config, {
-          environment: f.environment,
-          prepareRuntime: async () => preparedRuntime(f.codexHome),
-          resolvePluginPython: async () => f.python,
-          runWorkbench,
-          createCodex: (options) => ({
-            startThread() {
-              throw new Error("Resume must not create a new thread.");
-            },
-            resumeThread(threadId, threadOptions) {
-              resumedThread = threadId;
-              expect(threadOptions.workingDirectory).toBe(f.scanDir);
-              expect(options.env).toMatchObject({
-                CODEX_SECURITY_SCAN_ID: f.scanId,
-                CODEX_SECURITY_SCAN_DIR: f.scanDir,
-              });
-              return {
-                id: threadId,
-                async runStreamed(prompt) {
-                  expect(prompt).toContain(f.scanId);
-                  expect(prompt).toContain(
-                    "Keep the original scan instructions.",
-                  );
-                  const joined = await f.command([
-                    "begin-deep-scan",
-                    "--scan-id",
-                    f.scanId,
-                    "--thread-id",
-                    threadId,
-                    "--available-parallelism",
-                    "4",
-                  ]);
-                  expect(joined["deepScan"]).toMatchObject({
-                    scanId: f.scanId,
-                  });
-                  throw new Error("Synthetic transport disconnected");
-                },
-              };
-            },
-          }),
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: (config) =>
+      new TestClient(config, {
+        environment: f.environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(f.codexHome),
+          deepScanConfigDirectory: join(f.codexHome, "worker-config"),
+          deepScanConfigPath: join(
+            f.codexHome,
+            "worker-config",
+            "deep-scan-config.toml",
+          ),
         }),
-    },
-  );
+        resolvePluginPython: async () => f.python,
+        runWorkbench,
+        runDeepScan: async function* () {
+          throw new Error("Resumed scans must refresh native permissions.");
+        },
+        createCodex: (options) => ({
+          startThread: () => fail("Resume must not create a new thread."),
+          resumeThread(threadId, threadOptions) {
+            resumedThread = threadId;
+            expect(threadOptions.workingDirectory).toBe(f.scanDir);
+            expect(threadOptions.approvalPolicy).toBe("never");
+            expect(options.config).toMatchObject({
+              model: f.recipe.config["model"],
+              default_permissions: "codex_security_scan",
+            });
+            const permissions = parseToml(
+              options.configOverrides!.join("\n"),
+            ) as {
+              permissions: {
+                codex_security_scan: { filesystem: Record<string, unknown> };
+              };
+            };
+            const filesystem =
+              permissions.permissions.codex_security_scan.filesystem;
+            expect(filesystem[f.codexHome]).toEqual({ ".": "deny" });
+            expect(filesystem[originalHome]).toBeUndefined();
+            expect(options.env).toMatchObject({
+              CODEX_SECURITY_SCAN_ID: f.scanId,
+              CODEX_SECURITY_SCAN_DIR: f.scanDir,
+            });
+            return {
+              id: threadId,
+              async runStreamed(prompt) {
+                expect(prompt).toContain(f.scanId);
+                expect(prompt).toContain(
+                  "Keep the original scan instructions.",
+                );
+                const joined = await f.command([
+                  "begin-deep-scan",
+                  "--scan-id",
+                  f.scanId,
+                  "--thread-id",
+                  threadId,
+                  "--available-parallelism",
+                  "4",
+                ]);
+                expect(joined["deepScan"]).toMatchObject({
+                  scanId: f.scanId,
+                });
+                throw new Error("Synthetic transport disconnected");
+              },
+            };
+          },
+        }),
+      }),
+  });
   expect(stderr.text()).toContain("Synthetic transport disconnected");
+  expect(stderr.text()).toContain(`scans show ${f.scanId}`);
+  expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
   expect(code).not.toBe(0);
   expect(resumedThread).toBe(f.threadId);
   expect(
@@ -397,49 +490,94 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
 
-function resumeClient(
+test("resumed Bedrock scans retain provider context for the account advisory", async () => {
+  const f = await interruptedScan("deep", false, {}, false, "amazon-bedrock");
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(
+    ["scans", "resume", f.scanId, "--json"],
+    resumeDependencies(
+      f,
+      (options) => ({
+        startThread() {
+          throw new Error("Resume must not create a new thread.");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          expect(options.env).toMatchObject({
+            AWS_PROFILE: "synthetic-bedrock",
+          });
+          expect(options.apiKey).toBeUndefined();
+          return {
+            id: threadId,
+            async runStreamed(prompt) {
+              expect(prompt).toContain(
+                "Amazon Bedrock with AWS authentication",
+              );
+              expect(prompt).toContain(
+                "Skip the ChatGPT account Daybreak access advisory",
+              );
+              throw new Error("Resumed Bedrock prompt captured");
+            },
+          };
+        },
+      }),
+      { deepScanConfigPath: join(f.codexHome, "deep-scan.toml") },
+    ),
+  );
+  expect(code).not.toBe(0);
+  expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
+});
+
+function resumeDependencies(
   f: Awaited<ReturnType<typeof interruptedScan>>,
   createCodex: NonNullable<
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
+  runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
 ) {
-  return (config: ConstructorParameters<typeof TestClient>[0]) =>
-    new TestClient(config, {
-      environment: f.environment,
-      prepareRuntime: async () => {
-        const runtime = preparedRuntime(f.codexHome);
-        runtime.plugin.version = JSON.parse(
-          await readFile(
-            join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
-            "utf8",
-          ),
-        ).version;
-        return runtime;
-      },
-      resolvePluginPython: async () => f.python,
-      runWorkbench,
-      createCodex,
-    });
+  return {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: (config: ConstructorParameters<typeof TestClient>[0]) =>
+      new TestClient(config, {
+        environment: f.environment,
+        prepareRuntime: async () => {
+          const runtime = {
+            ...preparedRuntime(f.codexHome),
+            ...runtimeOverrides,
+          };
+          runtime.configPath = join(f.root, "resumed-runtime.toml");
+          runtime.environment = Object.fromEntries(
+            Object.entries(f.environment).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          );
+          runtime.plugin.version = JSON.parse(
+            await readFile(
+              join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
+              "utf8",
+            ),
+          ).version;
+          return runtime;
+        },
+        resolvePluginPython: async () => f.python,
+        runWorkbench,
+        createCodex,
+      }),
+  };
 }
 
 async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   // Advance the persisted clock to exercise a coordinator reaching its time cap.
-  const expired = Bun.spawnSync(
-    [
-      f.python,
-      "-I",
-      "-B",
-      "-c",
-      "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET created_at = '2000-01-01T00:00:00+00:00' WHERE scan_id = ?\", (sys.argv[2],)); c.commit()",
-      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-      f.scanId,
-    ],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const expired = runPython(f.python, [
+    "-c",
+    "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET created_at = '2000-01-01T00:00:00+00:00' WHERE scan_id = ?\", (sys.argv[2],)); c.commit()",
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    f.scanId,
+  ]);
   expect(expired.exitCode, new TextDecoder().decode(expired.stderr)).toBe(0);
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), f.scanDir, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(f.scanDir);
   for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
     const path = join(f.scanDir, name);
     const doc = JSON.parse(await readFile(path, "utf8"));
@@ -474,6 +612,54 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   ]);
 }
 
+test.each([false, true])(
+  "resumed CLI starts with terminal Deep progress (interactive=%p)",
+  async (interactive) => {
+    const f = await interruptedScan();
+    await finishDiscovery(f);
+    const { stderr, runCli } = createCliTest(main, { stderr: interactive });
+    const progress = Promise.withResolvers<void>();
+    const deps = resumeDependencies(f, () => ({
+      startThread: () => fail("Unexpected new session"),
+      resumeThread(threadId) {
+        expect(threadId).toBe(f.threadId);
+        return {
+          id: threadId,
+          async runStreamed() {
+            await progress.promise;
+            const text = stripVTControlCharacters(stderr.text()).replace(
+              /\s+/gu,
+              " ",
+            );
+            expect(text).toContain("consolidating results");
+            expect(text).toContain("Reviews: 0 completed, 0 active, cap 40");
+            expect(text).not.toContain("Scan phase: discovery");
+            throw new Error("Terminal progress captured");
+          },
+        };
+      },
+    }));
+    const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+      ...deps,
+      createSecurity: (config) => {
+        const security = deps.createSecurity(config);
+        const run = security.run.bind(security);
+        security.run = (repository, options = {}) =>
+          run(repository, {
+            ...options,
+            onDeepProgress(update) {
+              options.onDeepProgress?.(update);
+              progress.resolve();
+            },
+          });
+        return security;
+      },
+    });
+    expect(code).toBe(2);
+    expect(stderr.text()).toContain("Terminal progress captured");
+  },
+);
+
 test.each([
   [false, false],
   [true, false],
@@ -496,46 +682,32 @@ test.each([
         },
       }) + "\n",
     );
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      stdout.stream,
-      stderr.stream,
-      {
-        ...dependencies({
-          environment: f.environment,
-          currentDirectory: f.root,
-        }),
-        runWorkbench: f.command,
-        createSecurity: resumeClient(f, () => ({
-          startThread() {
-            throw new Error("Unexpected new session");
-          },
-          resumeThread(threadId) {
-            expect(threadId).toBe(f.threadId);
-            return {
-              id: threadId,
-              async runStreamed() {
-                if (!alreadyFinished) await finishDiscovery(f);
-                return { events: completedEvents(threadId) };
-              },
-            };
-          },
-        })),
-      },
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              if (!alreadyFinished) await finishDiscovery(f);
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
     );
     // Preserve the CLI's nonzero exit for a valid, sealed partial result.
     expect(code, stderr.text()).toBe(2);
     const result = JSON.parse(stdout.text());
     if (bulk) {
       expect(result, stderr.text()).toMatchObject({ incomplete: 1, failed: 0 });
-      const receipts = (await readFile(result.resultsPath, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
+      const receipts = await readJsonLines(result.resultsPath);
       expect(receipts).toHaveLength(2);
       expect(receipts[1]).toMatchObject({
         attempt: 1,
@@ -553,9 +725,7 @@ test.each([
           stderr.stream,
           {
             ...dependencies({
-              onRun() {
-                throw new Error("A sealed scan needs no Codex invocation");
-              },
+              onRun: () => fail("A sealed scan needs no Codex invocation"),
             }),
             runWorkbench: f.command,
           },
@@ -565,10 +735,7 @@ test.each([
         incomplete: 1,
         failed: 0,
       });
-      const reconciled = (await readFile(result.resultsPath, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
+      const reconciled = await readJsonLines(result.resultsPath);
       expect(reconciled[1]).toMatchObject({
         attempt: 1,
         cost: { inputTokens: 10000, outputTokens: 2000 },
@@ -625,7 +792,7 @@ test.each([
     const f = await interruptedScan("deep", scenario === "bulk");
     await finishDiscovery(f);
     const oldPlugin = join(f.root, "old-plugin");
-    for (const path of ["scripts", "schemas", ".codex-plugin"]) {
+    for (const path of ["scripts", "schemas", "shared", ".codex-plugin"]) {
       await cp(join(PLUGIN_ROOT, path), join(oldPlugin, path), {
         recursive: true,
       });
@@ -662,36 +829,25 @@ test.each([
     const before = await f.command(["get-scan", "--scan-id", f.scanId]);
     const rejected = !["single", "bulk"].includes(scenario);
     let turns = 0;
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       scenario === "bulk"
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      stdout.stream,
-      stderr.stream,
-      {
-        ...dependencies({
-          environment: f.environment,
-          currentDirectory: f.root,
-        }),
-        runWorkbench: f.command,
-        createSecurity: resumeClient(f, () => ({
-          startThread() {
-            throw new Error("Unexpected new session");
-          },
-          resumeThread(threadId) {
-            expect(threadId).toBe(f.threadId);
-            return {
-              id: threadId,
-              async runStreamed() {
-                turns++;
-                return { events: completedEvents(threadId) };
-              },
-            };
-          },
-        })),
-      },
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              turns++;
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
     );
     expect(code, stderr.text()).toBe(2);
     expect(
@@ -714,10 +870,7 @@ test.each([
           incomplete: 1,
           failed: 0,
         });
-        const receipts = (await readFile(join(f.root, "results.jsonl"), "utf8"))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line));
+        const receipts = await readJsonLines(join(f.root, "results.jsonl"));
         expect(receipts).toHaveLength(2);
         expect(receipts[1]).toMatchObject({
           attempt: 1,
@@ -754,15 +907,10 @@ test.each(["chatgpt", "api-key"] as const)(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-launch-key",
     };
-    const command = (args: readonly string[], input?: string) =>
-      runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
-        args,
-        input,
-      );
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const command = workbenchCommand(python, () => environment);
+    const { stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       [
         "scan",
         repository,
@@ -779,8 +927,6 @@ test.each(["chatgpt", "api-key"] as const)(
         promptFile,
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({ environment, currentDirectory: root }),
         runWorkbench: command,
@@ -790,9 +936,7 @@ test.each(["chatgpt", "api-key"] as const)(
             prepareRuntime: async () => preparedRuntime(codexHome),
             resolvePluginPython: async () => python,
             runWorkbench,
-            createCodex: () => {
-              throw new Error("Synthetic stop after registration");
-            },
+            createCodex: () => fail("Synthetic stop after registration"),
           }),
       },
     );
@@ -832,8 +976,26 @@ test.each([
 ] as const)(
   "resume restores saved launch settings with %s auth (bulk: %p)",
   async (auth, bulk) => {
+    const profile =
+      auth === "chatgpt"
+        ? "review.v2"
+        : auth === "api-key"
+          ? "review mode"
+          : "分析";
+    const selected = {
+      model: `synthetic-${auth ?? "auto"}-model`,
+      model_reasoning_effort: "high",
+      features: { goals: false },
+    };
     const settings = {
+      config: scanPreflightCodexConfig({
+        model: "synthetic-root-model",
+        model_reasoning_effort: "low",
+        profile,
+        profiles: { [profile]: selected },
+      }),
       auth,
+      cyberAccessProgram: "daybreak_blue" as const,
       safetyIdentifier:
         auth === "chatgpt" ? undefined : "synthetic-original-user",
       postScanPrompt: "Run these exact saved post-scan instructions.\n",
@@ -850,59 +1012,79 @@ test.each([
     await mkdir(join(ambientHome, "codex-security"), { recursive: true });
     await writeFile(ambientDeepConfig, "invalid ambient TOML [");
     const prompts: string[] = [];
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      stdout.stream,
-      stderr.stream,
-      {
-        ...dependencies({
-          environment: f.environment,
-          currentDirectory: f.root,
-        }),
-        runWorkbench: f.command,
-        createSecurity: resumeClient(f, (options) => {
-          expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
-            settings.safetyIdentifier,
-          );
-          expect(options.apiKey).toBe(
-            auth === "chatgpt" ? undefined : "synthetic-resume-key",
-          );
-          expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
-          expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
-          return {
-            startThread() {
-              throw new Error("Resume must use the original session.");
-            },
-            resumeThread(threadId) {
-              expect(threadId).toBe(f.threadId);
-              return {
-                id: threadId,
-                async runStreamed(prompt) {
-                  prompts.push(prompt as string);
-                  if (prompts.length === 1) {
-                    expect(prompt).toContain(
-                      "Keep the original scan instructions.",
-                    );
-                    const deep = await readFile(
-                      join(f.codexHome, "codex-security", "config.toml"),
-                      "utf8",
-                    );
-                    expect(deep).toContain("subagents = 0");
-                    expect(deep).toContain("stop_after_consecutive_errors = 2");
-                    expect(deep).toContain("max_time_hours = 1.5");
-                    await finishDiscovery(f);
-                  }
-                  return { events: completedEvents(threadId) };
-                },
-              };
-            },
-          };
-        }),
-      },
+      resumeDependencies(f, (options) => {
+        expect(options.config).toMatchObject(selected);
+        expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
+          settings.safetyIdentifier,
+        );
+        expect(options.apiKey).toBe(
+          auth === "chatgpt" ? undefined : "synthetic-resume-key",
+        );
+        expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
+        expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
+        expect(options.config?.["features"]).toMatchObject({
+          api_key_cyber_access_programs: true,
+        });
+        return {
+          startThread: () => fail("Resume must use the original session."),
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            return {
+              id: threadId,
+              async runStreamed(prompt, turnOptions) {
+                expect(turnOptions?.cyberAccessProgram).toBe(
+                  settings.cyberAccessProgram,
+                );
+                prompts.push(prompt as string);
+                if (prompts.length === 1) {
+                  expect(prompt).toContain(
+                    "Keep the original scan instructions.",
+                  );
+                  const deep = await readFile(
+                    join(f.codexHome, "codex-security", "config.toml"),
+                    "utf8",
+                  );
+                  expect(deep).toContain("subagents = 0");
+                  expect(deep).toContain("stop_after_consecutive_errors = 2");
+                  expect(deep).toContain("max_time_hours = 1.5");
+                  const workerConfigPath =
+                    options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+                  expect(workerConfigPath).toBe(
+                    join(f.root, "resumed-runtime.toml"),
+                  );
+                  const workerConfig = parseToml(
+                    await readFile(workerConfigPath!, "utf8"),
+                  );
+                  expect(workerConfig).toMatchObject({
+                    codex_security: {
+                      cyber_access_program: settings.cyberAccessProgram,
+                    },
+                    features: {
+                      api_key_cyber_access_programs: true,
+                    },
+                  });
+                  const saved = await f.command([
+                    "get-scan-recipe",
+                    "--scan-id",
+                    f.scanId,
+                  ]);
+                  expect(saved["recipe"]).toMatchObject({
+                    cyberAccessProgram: settings.cyberAccessProgram,
+                  });
+                  await finishDiscovery(f);
+                }
+                return { events: completedEvents(threadId) };
+              },
+            };
+          },
+        };
+      }),
     );
     expect(code, stderr.text()).toBe(2);
     expect(prompts, stderr.text()).toHaveLength(2);
@@ -917,22 +1099,191 @@ test.each([
   },
 );
 
-test("missing session logs do not create another session or fail the original scan", async () => {
-  const f = await interruptedScan();
-  await rm(f.sessionPath);
+test.each(["unchanged", "edited", "deleted"] as const)(
+  "single Deep resume uses saved knowledge when original files are %s",
+  async (sourceState) => {
+    const documentRoot = await temporaryDirectory();
+    const document = join(documentRoot, "architecture.md");
+    await writeFile(document, "Original architecture.\n");
+    const f = await interruptedScan("deep", false, {
+      knowledgeBasePaths: [document],
+    });
+    const before = await f.command([
+      "get-deep-scan",
+      "--scan-id",
+      f.scanId,
+      "--thread-id",
+      f.threadId,
+    ]);
+    if (sourceState === "edited")
+      await writeFile(document, "Changed architecture.\n");
+    if (sourceState === "deleted") await rm(document);
+    const stdout = capture();
+    const stderr = capture();
+    let resumed = false;
+    let staged = "";
+    const code = await main(
+      ["scans", "resume", f.scanId, "--json"],
+      stdout.stream,
+      stderr.stream,
+      resumeDependencies(f, (codex) => ({
+        startThread() {
+          throw new Error("Expected original session");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed(prompt) {
+              expect(prompt).toContain("Keep the original scan instructions.");
+              staged = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+              expect(
+                await readFile(join(staged, "0-architecture.md.txt"), "utf8"),
+              ).toBe("Original architecture.\n");
+              resumed = true;
+              throw new Error("synthetic interrupted transport");
+            },
+          };
+        },
+      })),
+    );
+    expect(resumed, stderr.text()).toBe(true);
+    expect(code).toBe(2);
+    expect(
+      await readFile(join(f.scanDir, ".scan-knowledge.json"), "utf8"),
+    ).toContain("Original architecture.");
+    expect(await readdir(staged).catch(() => null)).toBeNull();
+    expect(
+      await f.command([
+        "get-deep-scan",
+        "--scan-id",
+        f.scanId,
+        "--thread-id",
+        f.threadId,
+      ]),
+    ).toEqual(before);
+    expect(
+      (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
+    ).toEqual(f.recipe);
+  },
+);
+
+test.each(["legacy", "missing", "modified"] as const)(
+  "single Deep resume preserves saved work when knowledge snapshot is %s",
+  async (snapshotState) => {
+    const documentRoot = await temporaryDirectory();
+    const document = join(documentRoot, "architecture.md");
+    await writeFile(document, "Original architecture.");
+    const f = await interruptedScan(
+      "deep",
+      false,
+      { knowledgeBasePaths: [document] },
+      false,
+      undefined,
+      snapshotState === "legacy" ? "legacy" : "saved",
+    );
+    const snapshot = join(f.scanDir, ".scan-knowledge.json");
+    if (snapshotState === "missing") await rm(snapshot);
+    if (snapshotState === "modified") {
+      const value = JSON.parse(await readFile(snapshot, "utf8"));
+      value.documents["0-architecture.md.txt"] = "Changed architecture.";
+      await writeFile(snapshot, JSON.stringify(value));
+    }
+    const before = await readFile(f.checkpoint, "utf8");
+    const stderr = capture();
+    const code = await main(
+      ["scans", "resume", f.scanId, "--json"],
+      capture().stream,
+      stderr.stream,
+      resumeDependencies(f, () =>
+        fail("Cannot run with missing or changed original context"),
+      ),
+    );
+    expect(code).toBe(2);
+    expect(stderr.text()).toMatch(/new scan/i);
+    expect(await readFile(f.checkpoint, "utf8")).toBe(before);
+    expect(
+      (await f.command(["get-cli-scan-resume", "--scan-id", f.scanId]))[
+        "recipe"
+      ],
+    ).toEqual(f.recipe);
+  },
+);
+
+test("bulk Deep resume stages campaign knowledge after its source is removed", async () => {
+  const documentRoot = await temporaryDirectory();
+  const document = join(documentRoot, "architecture.md");
+  await writeFile(document, "Original architecture.");
+  const f = await interruptedScan("deep", true, {
+    knowledgeBasePaths: [document],
+  });
   const stdout = capture();
   const stderr = capture();
+  let resumed = false;
   const code = await main(
-    ["scans", "resume", f.scanId],
+    [
+      "bulk-scan",
+      f.input,
+      "--output-dir",
+      f.root,
+      "--recover",
+      "--knowledge-base",
+      document,
+      "--json",
+    ],
     stdout.stream,
     stderr.stream,
     {
-      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-      runWorkbench: f.command,
-      createSecurity: resumeClient(f, () => {
-        throw new Error("Must not invoke Codex without the original session");
-      }),
+      ...resumeDependencies(f, (codex) => ({
+        startThread() {
+          throw new Error("Expected original session");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+              expect(await readdir(directory)).toEqual([
+                "0-architecture.md.txt",
+              ]);
+              expect(
+                await readFile(
+                  join(directory, "0-architecture.md.txt"),
+                  "utf8",
+                ),
+              ).toBe("Original architecture.");
+              resumed = true;
+              await finishDiscovery(f);
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
+      runWorkbench: async (args, input) => {
+        if (args[0] === "get-cli-scan-resume") await rm(document);
+        return f.command(args, input);
+      },
     },
+  );
+  expect(resumed, stderr.text()).toBe(true);
+  expect(code, stderr.text()).toBe(2);
+  expect(JSON.parse(stdout.text())).toMatchObject({ incomplete: 1, failed: 0 });
+  expect(
+    (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
+  ).toMatchObject({ knowledgeBasePaths: [document] });
+});
+
+test("missing session logs do not create another session or fail the original scan", async () => {
+  const f = await interruptedScan();
+  await rm(f.sessionPath);
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(
+    ["scans", "resume", f.scanId],
+    resumeDependencies(f, () =>
+      fail("Must not invoke Codex without the original session"),
+    ),
   );
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("original Codex session");
@@ -960,18 +1311,16 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
       await rm(f.repository, { recursive: true });
     if (scenario === "missing-session") await rm(f.sessionPath);
     const before = await f.command(["get-scan", "--scan-id", f.scanId]);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies({
       environment: f.environment,
       currentDirectory: f.root,
     });
     let attempts = 0;
     expect(
-      await main(
+      await runCli(
         ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
-        stdout.stream,
-        stderr.stream,
         {
           ...deps,
           runWorkbench: f.command,
@@ -1017,13 +1366,11 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
 );
 
 test("resume requires an explicit scan ID", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(["scans", "resume"], stdout.stream, stderr.stream, {
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["scans", "resume"], {
     ...dependencies(),
-    runWorkbench: async () => {
-      throw new Error("Must select a scan explicitly");
-    },
+    runWorkbench: async () => fail("Must select a scan explicitly"),
   });
   expect(code).toBe(2);
   expect(stderr.text()).toContain("scanId");
