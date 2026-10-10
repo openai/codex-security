@@ -4186,7 +4186,7 @@ function scanPrompt(
         ]),
     ...(hasConfigPath
       ? [
-          `For normal config-preflight helper calls, append --config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")} so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.`,
+          `For normal config-preflight helper calls, append --config ${process.platform === "win32" ? '"%CODEX_SECURITY_CONFIG_PATH%" inside the documented CMD command' : shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")} so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.`,
         ]
       : []),
     ...(hasKnowledgeBase
@@ -4200,7 +4200,7 @@ function scanPrompt(
             : []),
         ]
       : []),
-    "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
+    "Runtime paths are environment-backed; keep references quoted. Use $NAME in POSIX shells, $env:NAME in PowerShell expressions, and %NAME% inside CMD command strings. Do not copy or reparse their values.",
     targetInstruction(target, python),
     ...(skillName === "security-scan" || enforceCostLimit || customValidation
       ? [

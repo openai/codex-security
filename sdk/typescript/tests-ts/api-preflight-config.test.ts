@@ -1,6 +1,4 @@
-import { pythonExecutable } from "./support/python.js";
-import { execFileSync } from "node:child_process";
-import { runNodePython } from "./support/python-probe.js";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,16 +45,19 @@ function runPreflight(
   profile: string,
   options: readonly string[] = [],
 ): { status: number | null; payload: Record<string, unknown> } {
-  const interpreter = pythonExecutable(false);
-  expect(interpreter).not.toBeNull();
-  const result = runNodePython(interpreter!, [
-    join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-    "--profile",
-    profile,
-    "--config",
-    config,
-    ...options,
-  ]);
+  const result = spawnSync(
+    Bun.which("node")!,
+    [
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+      "config-preflight",
+      "--profile",
+      profile,
+      "--config",
+      config,
+      ...options,
+    ],
+    { encoding: "utf8" },
+  );
   expect(result.error).toBeUndefined();
   return {
     status: result.status,
@@ -167,18 +168,20 @@ describe("CodexSecurity preflight configuration", () => {
         },
       });
 
-      const interpreter = pythonExecutable();
-      expect(interpreter).not.toBeNull();
-      const result = runNodePython(
-        interpreter!,
+      const result = spawnSync(
+        Bun.which("node")!,
         [
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "config-preflight",
           "--profile",
           "security_scan",
           "--cwd",
           repository,
         ],
-        { env: { PATH: process.env["PATH"], CODEX_HOME: codexHome } },
+        {
+          encoding: "utf8",
+          env: { PATH: process.env["PATH"], CODEX_HOME: codexHome },
+        },
       );
       expect(result.error).toBeUndefined();
       const payload = JSON.parse(result.stdout) as Record<string, unknown>;
@@ -703,12 +706,11 @@ describe("CodexSecurity preflight configuration", () => {
     ]) {
       expect(serialized).not.toContain(secret);
     }
-    const interpreter = pythonExecutable(false);
-    expect(interpreter).not.toBeNull();
     const output = execFileSync(
-      interpreter!,
+      Bun.which("node")!,
       [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "config-preflight",
         "--skill",
         "security-scan",
         "--config",
@@ -759,9 +761,10 @@ describe("CodexSecurity preflight configuration", () => {
     expect(bridgeSerialized).not.toContain("BRIDGE_TOKEN");
     expect(bridgeSerialized).not.toContain("BRIDGE_MCP_TOKEN");
     const bridgeOutput = execFileSync(
-      interpreter!,
+      Bun.which("node")!,
       [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "config-preflight",
         "--skill",
         "security-scan",
         "--config",

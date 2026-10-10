@@ -708,6 +708,9 @@ binding.readdir = function (...args) {
       const project = join(root, "project");
       for (const [home, path] of [
         [root, "~/project"],
+        [`${root}/`, "~/project"],
+        [`${root}///`, "~/project"],
+        ["/", `~${project}`],
         [undefined, `~/${relative(userInfo().homedir, project)}`],
         ["", `~${project}`],
       ] as const) {

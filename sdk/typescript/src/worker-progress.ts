@@ -3,7 +3,8 @@ import { isSafeNonNegativeInteger, parseJson } from "./value.js";
 
 const WORKER_STATUS_PREFIX = "CODEX_SECURITY_WORKER_STATUS ";
 const SCAN_PROGRESS_PREFIX = "CODEX_SECURITY_SCAN_PROGRESS ";
-const PREFLIGHT_COMMAND = /(?:^|[\\/])config_preflight\.py(?=$|["'\s])/u;
+const PREFLIGHT_COMMAND =
+  /(?:(?:^|[\\/])config_preflight\.py|(?:^|[\\/\s"'])(?:launch_codex_security_mcp(?:\.cmd)?["']?\s+["']?--helper["']?|helpers\.mjs["']?)\s+["']?config-preflight)(?=$|["'\s])/u;
 const WORKER_PHASES = new Set([
   "ranking",
   "file_review",
