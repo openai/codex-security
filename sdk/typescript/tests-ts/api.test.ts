@@ -8732,8 +8732,7 @@ test.each([
         "fail-scan",
         "--scan-id",
         "scan_example_001",
-        "--message",
-        `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+        `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
         "--cost-json",
         JSON.stringify(cost),
       ]);
@@ -8812,8 +8811,10 @@ test.each([
             .update(coverageBytes)
             .digest("hex");
           await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+          const message = args.find((arg) => arg.startsWith("--message="));
+          expect(message).toBeDefined();
           return {
-            scan: { warnings: [args[args.indexOf("--message") + 1]!] },
+            scan: { warnings: [message!.slice("--message=".length)] },
           };
         },
         createCodex: () => ({
@@ -8974,7 +8975,7 @@ test.each([
         (args) => args[0] === "complete-budget-exhausted-scan",
       );
       expect(recovery?.includes("--cost-json")).toBe(true);
-      expect(recovery?.includes("--message")).toBe(true);
+      expect(recovery?.some((arg) => arg.startsWith("--message="))).toBe(true);
       expect(
         JSON.parse(recovery![recovery!.indexOf("--cost-json") + 1]!),
       ).toMatchObject({ estimatedUsd: expectedCostUsd });
