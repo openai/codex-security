@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { appendFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { startRpc } from "./package-rpc.mjs";
@@ -25,8 +25,19 @@ async function trace(event) {
 
 async function run() {
   const args = process.argv.slice(2);
+  const overrides = [];
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === "-c" || args[index] === "--config")
+      overrides.push(args[++index]);
+  }
   if (args.includes("app-server")) {
     await trace({ phase: "preflight", args });
+    const owner = "package-sdk-owner";
+    const sessionPath = join(
+      process.env.CODEX_HOME,
+      "sessions",
+      `${owner}.jsonl`,
+    );
     for await (const line of createInterface({ input: process.stdin })) {
       const message = JSON.parse(line);
       if (message.id === undefined) continue;
@@ -66,6 +77,73 @@ async function run() {
         case "account/read":
           result = { account: null, requiresOpenaiAuth: true };
           break;
+        case "thread/start":
+          assert.equal(message.params.threadSource, "security_scan");
+          assert.equal(message.params.ephemeral, false);
+          await mkdir(join(process.env.CODEX_HOME, "sessions"), {
+            recursive: true,
+          });
+          await writeFile(
+            sessionPath,
+            JSON.stringify({
+              type: "session_meta",
+              payload: {
+                id: owner,
+                cwd: message.params.cwd,
+                timestamp: new Date().toISOString(),
+              },
+            }) + "\n",
+          );
+          result = {
+            thread: { id: owner, path: sessionPath },
+            model: parse(
+              overrides.findLast((value) => value.startsWith("model=")),
+            ).model,
+            reasoningEffort: parse(
+              overrides.findLast((value) =>
+                value.startsWith("model_reasoning_effort="),
+              ),
+            ).model_reasoning_effort,
+          };
+          break;
+        case "thread/inject_items":
+          assert.equal(message.params.threadId, owner);
+          await appendFile(
+            sessionPath,
+            [
+              ...message.params.items.map((payload) => ({
+                type: "response_item",
+                payload,
+              })),
+              {
+                type: "turn_context",
+                payload: {
+                  permission_profile: {
+                    type: "managed",
+                    file_system: {
+                      type: "restricted",
+                      entries: [
+                        {
+                          path: { type: "special", value: { kind: "root" } },
+                          access: "read",
+                        },
+                      ],
+                    },
+                    network: "restricted",
+                  },
+                },
+              },
+            ]
+              .map((entry) => JSON.stringify(entry))
+              .join("\n") + "\n",
+          );
+          await trace({
+            phase: "parent-session",
+            threadId: owner,
+            scanId: process.env.CODEX_SECURITY_SCAN_ID,
+          });
+          result = {};
+          break;
         default:
           throw new Error(`Unexpected preflight method: ${message.method}`);
       }
@@ -75,11 +153,6 @@ async function run() {
   }
   let prompt = "";
   for await (const chunk of process.stdin) prompt += chunk;
-  const overrides = [];
-  for (let index = 0; index < args.length; index++) {
-    if (args[index] === "-c" || args[index] === "--config")
-      overrides.push(args[++index]);
-  }
   const config = parse(overrides.join("\n"));
   const artifacts = config.mcp_servers.cs_artifacts;
   const env = artifacts.env;
