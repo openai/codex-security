@@ -76,7 +76,14 @@ function trustedTool(name: "git" | "rg", target: string): string | undefined {
               append(windows ? entry.replace(/^"|"$/gu, "") : entry, name),
             ),
           );
-  for (const candidate of candidates) {
+  for (const selected of candidates) {
+    const candidate =
+      name === "rg" &&
+      (!isAbsolute(selected) || (windows && /^[\\/](?![\\/])/u.test(selected)))
+        ? windows
+          ? resolve(target, selected)
+          : append(target, selected)
+        : selected;
     let invocation: string, resolved: string;
     try {
       invocation = append(canonical(dirname(candidate)), basename(candidate));

@@ -244,6 +244,72 @@ require("node:module").syncBuiltinESMExports();
   }
 }
 
+for (const command of [
+  "generate-in-scope-files",
+  "make-repo-scope-input",
+  "make-repo-rank-input",
+]) {
+  for (const location of [
+    "relative",
+    "symlink parent",
+    "Windows bridge",
+  ] as const) {
+    test.skipIf(
+      location === "symlink parent"
+        ? process.platform === "win32"
+        : location === "Windows bridge" && process.platform !== "win32",
+    )(
+      `${command} resolves ${location} ripgrep PATH entries from the repository`,
+      () => {
+        const f = fixture();
+        f.write("scope/visible.py");
+        const env = { ...f.toolEnvironment };
+        const pathKey =
+          Object.keys(env).find((key) => key.toUpperCase() === "PATH") ??
+          "PATH";
+        const executable = Bun.which("rg", { PATH: env[pathKey] });
+        expect(executable).not.toBeNull();
+        const tools = join(
+          f.root,
+          ...(location === "symlink parent" ? ["physical"] : []),
+          "tools",
+        );
+        mkdirSync(tools, { recursive: true });
+        copyFileSync(
+          executable!,
+          join(tools, process.platform === "win32" ? "rg.exe" : "rg"),
+        );
+        if (location === "symlink parent") {
+          const child = join(f.root, "physical", "child");
+          mkdirSync(child);
+          symlinkSync(child, join(f.root, "link"), "dir");
+        }
+        env[pathKey] =
+          location === "symlink parent" ? "../link/../tools" : "../tools";
+        if (location === "Windows bridge")
+          env["HOME"] = join(f.root, "home-\ud800");
+        env["CODEX_SECURITY_GIT"] = "";
+        const scopes = join(f.root, "scopes.json");
+        writeFileSync(scopes, '["scope"]');
+        const result = f.run(
+          command,
+          command === "generate-in-scope-files"
+            ? ["--scope", "scope"]
+            : ["--scopes-file", scopes],
+          env,
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const output = readFileSync(f.out, "utf8");
+        expect(
+          command === "generate-in-scope-files"
+            ? output.trim()
+            : JSON.parse(output).path,
+        ).toBe("scope/visible.py");
+      },
+    );
+  }
+}
+
 for (const scope of [".", "src", "./src", "src/résumé.py"]) {
   test(`path inventory preserves ripgrep spelling and byte order for ${scope}`, () => {
     const f = fixture();
