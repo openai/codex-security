@@ -1,5 +1,6 @@
 import { Tiktoken } from "js-tiktoken/lite";
 import cl100kBase from "js-tiktoken/ranks/cl100k_base";
+import { errorMessage } from "../errors.js";
 import type { Finding } from "../models.js";
 import { FindingsError } from "./errors.js";
 import type { FindingEmbedding } from "./storage.js";
@@ -100,11 +101,11 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
           input: chunks.map(({ tokens }) => tokens),
         }),
       });
-    } catch {
+    } catch (error) {
       this.signal?.throwIfAborted();
       throw new FindingsError(
         "embedding_failed",
-        "Could not reach the embedding provider.",
+        `Could not request finding embeddings: ${errorMessage(error)}`,
       );
     }
     if (!response.ok) {

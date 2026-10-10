@@ -49,6 +49,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -65,7 +66,9 @@ try {
   await buildServer(runtimeBundle, {
     define: {
       __dirname: JSON.stringify(path.join(bundledPluginRoot, "mcp")),
-      "import.meta.url": "__filename",
+      "import.meta.url": JSON.stringify(
+        pathToFileURL(path.join(bundledPluginRoot, "mcp", "server.mjs")).href,
+      ),
     },
     logOverride: { "empty-import-meta": "silent" },
     target: "node20",
@@ -138,7 +141,7 @@ async function testCompactDiffScanCompletion(
       mode: "diff",
       diffTarget: { kind: "range", baseRevision, headRevision },
     };
-    const { scanId, handoffClaimToken } = await startScan(
+    const { scanId, scanDir, handoffClaimToken } = await startScan(
       call,
       ownerThread,
       selection,
@@ -157,6 +160,24 @@ async function testCompactDiffScanCompletion(
       }),
       `${runtimeLabel}: authenticate compact diff owner`,
     );
+
+    for (const name of [
+      "list_codex_security_review_items",
+      "list_codex_security_candidates",
+    ]) {
+      for (const page of [
+        { cursor: "-1" },
+        { cursor: "01" },
+        { limit: 0 },
+        { limit: 1001 },
+      ]) {
+        requireToolError(
+          await call(name, { scanId, ...page }),
+          /Input validation error/,
+          `${runtimeLabel}: reject invalid ${name} paging`,
+        );
+      }
+    }
 
     for (const reserved of [
       "artifacts/02_discovery/candidate_ledger.jsonl",
@@ -197,18 +218,19 @@ async function testCompactDiffScanCompletion(
       { path: "src/handler.py" },
     ]);
 
+    const candidateInput = {
+      cwe_ids: [],
+      locations: [
+        { path: "src/handler.py", start_line: 1, role: "root_control" },
+      ],
+      summary: "The changed handler may rely on the removed guard.",
+      evidence: "The selected change removes a neighboring guard.",
+    };
     requireSuccessfulTool(
       await call("record_codex_security_discovery_candidates", {
         scanId,
         candidates: [
-          {
-            cwe_ids: [],
-            locations: [
-              { path: "src/handler.py", start_line: 1, role: "root_control" },
-            ],
-            summary: "The changed handler may rely on the removed guard.",
-            evidence: "The selected change removes a neighboring guard.",
-          },
+          candidateInput,
           {
             cwe_ids: [],
             locations: [
@@ -222,6 +244,20 @@ async function testCompactDiffScanCompletion(
       }),
       `${runtimeLabel}: record a diff candidate alongside a deleted file`,
     );
+    const ledger = path.join(
+      scanDir,
+      "artifacts/02_discovery/candidate_ledger.jsonl",
+    );
+    const before = await readFile(ledger, "utf8");
+    requireToolError(
+      await call("record_codex_security_discovery_candidates", {
+        scanId,
+        candidates: [candidateInput, { ...candidateInput, evidence: "  " }],
+      }),
+      /Input validation error/,
+      `${runtimeLabel}: reject a malformed mixed discovery batch`,
+    );
+    assert.equal(await readFile(ledger, "utf8"), before);
     const candidates = requireSuccessfulTool<{
       rows: { candidate_id: string; instance?: string; evidence?: string }[];
     }>(
@@ -1061,6 +1097,43 @@ async function testClaimedParentArtifactOperations(
     });
 
     const originalLedger = await readFile(ledgerPath, "utf8");
+    const { validation, attack_path: attackPath } = JSON.parse(originalLedger);
+    const validationLedger = `${originalLedger}${JSON.stringify({
+      ...seededCandidate,
+      candidate_id: "candidate-valid",
+    })}\n`;
+    await writeFile(ledgerPath, validationLedger);
+    requireToolError(
+      await call("record_codex_security_candidate_validations", {
+        scanId,
+        validations: [
+          { candidateId, validation: { ...validation, confidence: "certain" } },
+          { candidateId: "candidate-valid", validation },
+        ],
+      }),
+      /confidence/,
+      `${runtimeLabel}: reject invalid validation confidence`,
+    );
+    assert.equal(await readFile(ledgerPath, "utf8"), validationLedger);
+    await writeFile(ledgerPath, originalLedger);
+    for (const invalid of [
+      { severity: "moderate" },
+      { decision: "ignore" },
+      { decision: "deferred" },
+      { severity_rationale: "  " },
+    ]) {
+      requireToolError(
+        await call("record_candidate_attack_paths", {
+          scanId,
+          attackPaths: [
+            { candidateId, attackPath: { ...attackPath, ...invalid } },
+          ],
+        }),
+        /Input validation error/,
+        `${runtimeLabel}: reject invalid attack-path judgment`,
+      );
+      assert.equal(await readFile(ledgerPath, "utf8"), originalLedger);
+    }
     for (const [name, arguments_] of phaseCalls) {
       requireToolError(
         await call(name, arguments_, otherThread),

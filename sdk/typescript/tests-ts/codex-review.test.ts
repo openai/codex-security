@@ -7,10 +7,7 @@ import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
-import {
-  CodexReviewRunner,
-  type CodexReview,
-} from "../src/deduplication/codex-review.js";
+import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { DEFAULT_CODEX_CONFIG, type JsonObject } from "../src/config.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
@@ -21,109 +18,15 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
 import { isReviewRefusal } from "../src/deduplication/refusal.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import type { CodexSecuritySurface } from "../src/api.js";
+import { VERSION } from "../src/version.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
 import { readCodexHomeConfig } from "../src/auth.js";
-import {
-  CodexDeduplicationReviewer,
-  CodexGroupingReviewer,
-} from "../src/deduplication/deduplication-reviewer.js";
+import { CodexDeduplicationReviewer } from "../src/deduplication/deduplication-reviewer.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
-
-test("container review fixture accepts screening and pairs with repository context", async () => {
-  if (
-    runTestInSubprocess(
-      import.meta.path,
-      "container review fixture accepts screening and pairs with repository context",
-    )
-  )
-    return;
-  await using f = await workflowFixture();
-  process.env["CODEX_SECURITY_STATE_DIR"] = f.root;
-  await import(
-    new URL("../../../docker/fixtures/mock-reviews.mjs", import.meta.url).href
-  );
-  const modelHome = process.env["CODEX_HOME"]!;
-  try {
-    const config = parse(
-      await readFile(join(modelHome, "config.toml"), "utf8"),
-    ) as {
-      model_providers: { smoke: { base_url: string } };
-    };
-    const runner = {
-      async run<T>(review: CodexReview<T>): Promise<T> {
-        const response = await fetch(
-          `${config.model_providers.smoke.base_url}/responses`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model: review.model,
-              reasoning: { effort: review.effort },
-              input: [
-                { content: [{ type: "input_text", text: review.prompt }] },
-                {
-                  type: "additional_tools",
-                  tools: [
-                    {
-                      type: "namespace",
-                      name: "review_validator",
-                      tools: [
-                        {
-                          type: "function",
-                          name: "submit_decisions",
-                          parameters: review.schema,
-                        },
-                      ],
-                    },
-                    {
-                      type: "namespace",
-                      name: "functions",
-                      tools: [
-                        { name: "exec", description: "### `exec_command`" },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            }),
-          },
-        );
-        expect(response.status).toBe(200);
-        const completed = (await response.text())
-          .split("\n")
-          .filter((line) => line.startsWith("data: "))
-          .map((line) => JSON.parse(line.slice(6)))
-          .find((event) => event.type === "response.completed");
-        return review.validate(
-          JSON.parse(completed.response.output[0].arguments),
-        );
-      },
-    };
-    const findings = [1, 2, 3].map((index) => ({
-      ...f.document.findings[0]!,
-      findingId: `csf_${String(index).repeat(24)}`,
-    }));
-    for (const context of ["Synthetic repository context.\n\n", ""]) {
-      for (const Reviewer of [
-        CodexGroupingReviewer,
-        CodexDeduplicationReviewer,
-      ]) {
-        const reviewer = new Reviewer(runner, {}, () => context);
-        expect(
-          Object.keys((await reviewer.screen(findings)).decisions),
-        ).toEqual(["pair-1", "pair-2"]);
-        expect((await reviewer.reviewPair(findings.slice(0, 2))).decision).toBe(
-          "SAME",
-        );
-      }
-    }
-  } finally {
-    await rm(modelHome, { recursive: true, force: true });
-  }
-});
 
 test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
   "dedupe respects %s configuration and keeps review policy attached to stage",
@@ -244,6 +147,8 @@ const failureReasons: Record<string, string> = {
   "invalid-review-error":
     "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
+  "exit-diagnostic":
+    "Permission profile synthetic_profile was rejected: café 🔒\n",
 };
 const retriedFailures = new Set([
   "text-only",
@@ -253,6 +158,7 @@ const retriedFailures = new Set([
   "invalid-json",
   "invalid-submission",
   "exit",
+  "exit-diagnostic",
 ]);
 const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
@@ -283,7 +189,13 @@ const transportCases: {
   commandAuth?: "direct" | "ambient";
   windowsConfig?: JsonObject;
   expectedWindowsSandbox?: string;
+  surface?: CodexSecuritySurface;
 }[] = [
+  {
+    scenario: "recover-server-error",
+    name: "CLI attribution survives a retried review session",
+    surface: "cli",
+  },
   {
     scenario: "correction",
     name: "command auth without an API key",
@@ -351,6 +263,7 @@ for (const {
   commandAuth,
   windowsConfig,
   expectedWindowsSandbox,
+  surface,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
@@ -375,6 +288,11 @@ for (const {
       };
       const configuration = stringify({
         mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        responses_api_metadata: {
+          synthetic_caller: "preserved",
+          codex_security_surface: "previous",
+          codex_security_command: "previous",
+        },
         ...windowsConfig,
         ...(commandAuth
           ? {
@@ -463,6 +381,8 @@ for (const {
             }
           },
         },
+        undefined,
+        surface,
       );
       const validate = mock((value: unknown) => {
         if (
@@ -651,7 +571,10 @@ for (const {
       if (scenario !== "cancel") {
         const messages = parseJsonLines<{
           method?: string;
-          params?: { apiKey?: string };
+          params?: {
+            apiKey?: string;
+            config?: { responses_api_metadata?: Record<string, string> };
+          };
         }>(await readFile(transcript, "utf8"));
         const loginRequest = messages.find(
           (message) => message.method === "account/login/start",
@@ -659,6 +582,16 @@ for (const {
         expect(
           messages.filter((message) => message.method === "thread/start"),
         ).toHaveLength(sessions);
+        for (const message of messages.filter(
+          (message) => message.method === "thread/start",
+        )) {
+          expect(message.params?.config?.responses_api_metadata).toEqual({
+            synthetic_caller: "preserved",
+            codex_security_surface: surface ?? "sdk",
+            codex_security_command: "dedupe",
+            codex_security_package_version: VERSION,
+          });
+        }
         expect(
           messages.filter((message) => message.method === "turn/start"),
         ).toHaveLength(

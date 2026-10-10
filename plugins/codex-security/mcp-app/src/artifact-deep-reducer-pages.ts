@@ -22,14 +22,12 @@ export interface DeepReducerPage {
 
 type Finding = DeepReductionInput["findings"][number];
 
-interface ReducerDocuments {
-  inputs: string;
-  findings: Map<string, Finding | string>;
-}
-
 // Each artifact server binds one immutable reducer assignment. Cache that
 // snapshot so small pages do not repeatedly read and serialize all inputs.
-const documents = new WeakMap<ArtifactContext, Promise<ReducerDocuments>>();
+const documents = new WeakMap<
+  ArtifactContext,
+  Promise<ReturnType<typeof createDocuments>>
+>();
 
 /** The single payload representation used by both the tool and byte accounting. */
 export function deepReducerPageResponse(page: DeepReducerPage): {
@@ -67,7 +65,7 @@ export async function getCodexSecurityDeepReducerInputsPage(
   return pageDocument(json, input);
 }
 
-function createDocuments(sources: DeepReductionSources): ReducerDocuments {
+function createDocuments(sources: DeepReductionSources) {
   const findings = new Map<string, Finding | string>();
   const discoveries = sources.discoveries.map((discovery) => ({
     workerId: discovery.workerId,

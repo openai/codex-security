@@ -4,10 +4,7 @@ import { recoverWorkerCandidateReceipts } from "./artifact-worker-receipts.js";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import reducerSchema from "../../schemas/tools/deep-reducer.schema.json";
 import scanDraftSchema from "../../schemas/tools/scan-draft.schema.json";
-import type {
-  ArtifactContext,
-  DeepReducerContext,
-} from "./artifact-context.js";
+import type { ArtifactContext } from "./artifact-context.js";
 import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   parsePersistedScanDraft,
@@ -23,7 +20,6 @@ import {
   readJsonObject,
   requireRegularFile,
   writeJsonAtomic,
-  type DeepScanArtifacts,
 } from "./deep-scan/artifacts.js";
 import {
   discoveryReductionInput,
@@ -51,13 +47,6 @@ export const deepReductionInputSchema = loadArtifactZodSchema(
   reducerSchema.$id,
   "reductionInput",
 ) as ZodType<DeepReductionInput>;
-
-interface BoundReducer {
-  artifacts: DeepScanArtifacts;
-  state: DeepReducerContext;
-  resultPath: string;
-  scanId?: string;
-}
 
 /** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(
@@ -164,7 +153,7 @@ export async function recordCodexSecurityDeepReduction(
   });
 }
 
-function bindDeepReducer(context: ArtifactContext): BoundReducer {
+function bindDeepReducer(context: ArtifactContext) {
   const state = context.deepReducer;
   if (context.layout !== "reducer" || !state) {
     throw new Error(
@@ -203,7 +192,7 @@ function bindDeepReducer(context: ArtifactContext): BoundReducer {
 }
 
 async function readPreviousReduction(
-  bound: BoundReducer,
+  bound: ReturnType<typeof bindDeepReducer>,
 ): Promise<DeepReductionInput | null> {
   const { previousReducerResultPath } = bound.state;
   if (!previousReducerResultPath) return null;

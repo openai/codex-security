@@ -5,7 +5,11 @@ import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import { importSource } from "./import-module.ts";
-import { draftApi, fixture } from "./scan-draft-recovery-fixture.ts";
+import {
+  draftApi,
+  fixture,
+  recordCodexSecurityScanDraft,
+} from "./scan-draft-recovery-fixture.ts";
 import { finding } from "./scan-draft-fixture.ts";
 import { readJson } from "./support/json.ts";
 
@@ -106,7 +110,7 @@ for (const mode of ["standard", "worker"] as const) {
       };
       const write =
         mode === "standard"
-          ? draftApi.recordCodexSecurityScanDraft
+          ? recordCodexSecurityScanDraft
           : draftApi.recordCodexSecurityWorkerScanDraft;
       if (scenario !== "same-publication") await write(context, draft);
       const update = {

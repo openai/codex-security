@@ -84,12 +84,6 @@ interface SavedScanDraft {
   attempt?: string;
 }
 
-type PublishScanDraft = (
-  draft: PreparedScanDraft,
-  expectedDigest: string | undefined,
-  checkpoint: ScanDraftInput,
-) => Promise<string[] | void>;
-
 const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
 
 export const scanDraftInputSchema = loadArtifactZodSchema(
@@ -104,11 +98,11 @@ export const completedScanInputSchema = loadArtifactZodSchema(
   "completedScanInput",
 ) as z.ZodType<CompletedScanInput>;
 
-/** Replace the three existing final-input documents without completing or sealing a scan. */
-export async function recordCodexSecurityScanDraft(
+/** Stage a parent draft, then publish it under the workbench completion lock. */
+export async function recordCodexSecurityScanDraftViaWorkbench(
   context: ArtifactContext,
   input: ScanDraftInput,
-  publishDraft?: PublishScanDraft,
+  runWorkbench: RunArtifactWorkbench,
   signal?: AbortSignal,
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
@@ -173,8 +167,6 @@ export async function recordCodexSecurityScanDraft(
       candidates,
       submitted,
     );
-    if (!publishDraft && resolvedDeferred(checkpoint.coverage).length === 0)
-      await saveScanDraftCheckpoint(context, checkpoint, false);
     signal?.throwIfAborted();
     // Deep results replace findings and coverage while retaining an omitted model.
     const preserved = finalDeepDraft
@@ -182,7 +174,7 @@ export async function recordCodexSecurityScanDraft(
       : await preserveScanDraft(
           context,
           { ...submitted, findings: checkpoint.findings },
-          !publishDraft && resolvedDeferred(submitted.coverage).length > 0,
+          false,
           scanDraftCheckpointName(checkpoint),
           candidates,
           submitted.findings,
@@ -192,7 +184,6 @@ export async function recordCodexSecurityScanDraft(
       candidates,
       submitted,
     );
-    if (!publishDraft) await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(
       context.targetContract,
       "scan draft: authoritative target contract",
@@ -226,129 +217,73 @@ export async function recordCodexSecurityScanDraft(
       ...(hardening === undefined ? {} : { hardening }),
     };
 
+    const draft = {
+      findings: { findings },
+      coverage,
+      manifest: { scan: manifestScan },
+    };
+    const publicationCheckpoint = finalDeepDraft ? reconciled : checkpoint;
+    const expectedDigest = preserved.previousDigest;
+    let documentWarnings: string[] | undefined;
+    const checkpointPath = await artifactDestination(
+      context,
+      ["drafts", `${randomUUID()}.checkpoint.json`],
+      "staged scan checkpoint",
+    );
+    const draftPath = await artifactDestination(
+      context,
+      ["drafts", `${randomUUID()}.json`],
+      "staged scan draft",
+    );
     try {
-      const draft = {
-        findings: { findings },
-        coverage,
-        manifest: { scan: manifestScan },
-      };
-      let documentWarnings: string[] | void = undefined;
-      if (publishDraft) {
-        documentWarnings = await publishDraft(
-          draft,
-          preserved.previousDigest,
-          finalDeepDraft ? reconciled : checkpoint,
-        );
-      } else {
-        const destinations = await Promise.all([
-          artifactDestination(
-            context,
-            ["findings.json"],
-            "scan draft findings",
-          ),
-          artifactDestination(
-            context,
-            ["coverage.json"],
-            "scan draft coverage",
-          ),
-          artifactDestination(
-            context,
-            ["scan-manifest.json"],
-            "scan draft manifest",
-          ),
-        ]);
-        await replaceArtifactJson(destinations[0], { findings });
-        await replaceArtifactJson(destinations[1], coverage);
-        await replaceArtifactJson(destinations[2], { scan: manifestScan });
-        const warning = await saveThreatModelDocument(
-          context,
-          reconciled.threatModel,
-        );
-        if (warning !== undefined) documentWarnings = [warning];
+      const { handoffClaimToken: _claim, ...snapshot } = publicationCheckpoint;
+      await Promise.all([
+        replaceArtifactJson(checkpointPath, snapshot),
+        replaceArtifactJson(draftPath, draft),
+      ]);
+      const arguments_ = [
+        "write-scan-draft",
+        "--scan-id",
+        input.scanId,
+        "--draft-path",
+        draftPath,
+        "--checkpoint-path",
+        checkpointPath,
+      ];
+      if (expectedDigest !== undefined) {
+        arguments_.push("--expected-draft-digest", expectedDigest);
       }
-      return {
-        scanId: reconciled.scanId,
-        findingCount: findings.length,
-        surfaceCount: (coverage.surfaces as unknown[]).length,
-        coverage,
-        operation: "replace",
-        status: "draft_written",
-        ...(documentWarnings?.length ? { warnings: documentWarnings } : {}),
-      };
-    } catch (error) {
-      if (!isScanDraftConflict(error)) throw error;
-      signal?.throwIfAborted();
-    }
-  }
-}
-
-/** Stage a parent draft, then publish it under the workbench completion lock. */
-export async function recordCodexSecurityScanDraftViaWorkbench(
-  context: ArtifactContext,
-  input: ScanDraftInput,
-  runWorkbench: RunArtifactWorkbench,
-  signal?: AbortSignal,
-): Promise<ScanDraftResult> {
-  return recordCodexSecurityScanDraft(
-    context,
-    input,
-    async (draft, expectedDigest, checkpoint) => {
-      const checkpointPath = await artifactDestination(
-        context,
-        ["drafts", `${randomUUID()}.checkpoint.json`],
-        "staged scan checkpoint",
-      );
-      const draftPath = await artifactDestination(
-        context,
-        ["drafts", `${randomUUID()}.json`],
-        "staged scan draft",
-      );
+      if (context.handoffClaimToken) {
+        arguments_.push("--claim-token", context.handoffClaimToken);
+      }
       try {
-        const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
-        await Promise.all([
-          replaceArtifactJson(checkpointPath, snapshot),
-          replaceArtifactJson(draftPath, draft),
-        ]);
-        const arguments_ = [
-          "write-scan-draft",
-          "--scan-id",
-          input.scanId,
-          "--draft-path",
-          draftPath,
-          "--checkpoint-path",
-          checkpointPath,
-        ];
-        if (expectedDigest !== undefined) {
-          arguments_.push("--expected-draft-digest", expectedDigest);
-        }
-        if (context.handoffClaimToken) {
-          arguments_.push("--claim-token", context.handoffClaimToken);
-        }
-        try {
-          const result = await runWorkbench(arguments_);
-          return Array.isArray(result?.warnings)
-            ? result.warnings.filter(
-                (warning): warning is string => typeof warning === "string",
-              )
-            : undefined;
-        } catch (error) {
-          if (!workbenchScanDraftConflict(error)) throw error;
-          throw Object.assign(
-            new Error(
-              "The canonical scan draft changed while this checkpoint was being reconciled.",
-            ),
-            { code: "scan_draft_conflict" },
-          );
-        }
-      } finally {
-        await Promise.all([
-          fs.rm(checkpointPath, { force: true }),
-          fs.rm(draftPath, { force: true }),
-        ]);
+        const result = await runWorkbench(arguments_);
+        documentWarnings = Array.isArray(result?.warnings)
+          ? result.warnings.filter(
+              (warning): warning is string => typeof warning === "string",
+            )
+          : undefined;
+      } catch (error) {
+        if (!workbenchScanDraftConflict(error)) throw error;
+        signal?.throwIfAborted();
+        continue;
       }
-    },
-    signal,
-  );
+    } finally {
+      await Promise.all([
+        fs.rm(checkpointPath, { force: true }),
+        fs.rm(draftPath, { force: true }),
+      ]);
+    }
+    return {
+      scanId: reconciled.scanId,
+      findingCount: findings.length,
+      surfaceCount: (coverage.surfaces as unknown[]).length,
+      coverage,
+      operation: "replace",
+      status: "draft_written",
+      ...(documentWarnings?.length ? { warnings: documentWarnings } : {}),
+    };
+  }
 }
 
 function confirmTerminalFindings(
@@ -1867,14 +1802,6 @@ function draftDigest(
   return digest.digest("hex");
 }
 
-function isScanDraftConflict(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    error.code === "scan_draft_conflict"
-  );
-}
-
 function workbenchScanDraftConflict(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const stderr =
@@ -2974,27 +2901,11 @@ function normalizeDeferred(
 
 function coverageMode(context: ArtifactContext, contract: JsonObject): string {
   if (context.mode === "diff") {
-    const diff = requireObject(
-      contract.diffTarget,
-      "scan draft: authoritative diff target",
-    );
-    const modes: Record<string, string> = {
-      commit: "commit",
-      range: "branch_diff",
-      working_tree: "working_tree",
-    };
-    const mode = modes[String(diff.kind)];
-    if (!mode)
-      throw new Error(
-        "scan draft: the authoritative diff coverage mode is invalid.",
-      );
-    return mode;
+    const kind = (contract.diffTarget as JsonObject).kind as string;
+    return kind === "range" ? "branch_diff" : kind;
   }
 
-  const trustedScope = requireObject(
-    contract.scope,
-    "scan draft: authoritative scope",
-  );
+  const trustedScope = contract.scope as JsonObject;
   const includes = trustedScope.requiredIncludePaths;
   const scoped = Array.isArray(includes)
     ? includes.length !== 1 || includes[0] !== "."
@@ -3097,10 +3008,7 @@ function validateFindingSemantics(findings: JsonObject[]): void {
         if (references === undefined) continue;
         if (
           !Array.isArray(references) ||
-          references.some(
-            (reference) =>
-              typeof reference !== "string" || !evidenceIds.has(reference),
-          )
+          references.some((reference) => !evidenceIds.has(reference))
         ) {
           throw new Error(
             `scan draft: findings[${findingIndex}].${sectionName}.${referencesName} ` +

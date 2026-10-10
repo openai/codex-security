@@ -3,7 +3,11 @@ import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { importSource } from "./import-module.ts";
-import { draftApi, fixture } from "./scan-draft-recovery-fixture.ts";
+import {
+  draftApi,
+  fixture,
+  recordCodexSecurityScanDraft,
+} from "./scan-draft-recovery-fixture.ts";
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
 
 const {
@@ -51,6 +55,7 @@ for (const mode of ["standard", "diff", "worker"] as const) {
                 f.root,
                 mode === "worker" ? "result.json" : "coverage.json",
               ),
+              path.join(f.root, "checkpoint-head.json"),
               ...(await readdir(path.join(f.root, "checkpoints"))).map((name) =>
                 path.join(f.root, "checkpoints", name),
               ),
@@ -68,6 +73,13 @@ for (const mode of ["standard", "diff", "worker"] as const) {
             const saved = JSON.parse(await readFile(file, "utf8"));
             const coverage = mode === "worker" ? saved.coverage : saved;
             coverage[field][0].sourceWorkerId = owner;
+            const earlierFiles = [
+              path.join(f.root, "checkpoint-head.json"),
+              ...(await readdir(path.join(f.root, "checkpoints"))).map((name) =>
+                path.join(f.root, "checkpoints", name),
+              ),
+            ];
+            await Promise.all(earlierFiles.map((saved) => utimes(saved, 1, 1)));
             await writeFile(file, JSON.stringify(saved, null, 2) + "\n");
           }
           const checkpointRoot = path.join(f.root, "checkpoints");
@@ -251,10 +263,7 @@ for (const candidateId of ["legacy-candidate", "review/auth"]) {
   }
 }
 
-const {
-  recordCodexSecurityScanDraft,
-  recordCodexSecurityScanDraftViaWorkbench,
-} = await importSource(
+const { recordCodexSecurityScanDraftViaWorkbench } = await importSource(
   new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
 );
 
@@ -654,6 +663,7 @@ for (const mode of ["standard", "diff"] as const) {
         if (source === "checkpoint") {
           const earlierFiles = [
             path.join(f.root, "coverage.json"),
+            path.join(f.root, "checkpoint-head.json"),
             ...(await readdir(path.join(f.root, "checkpoints"))).map((name) =>
               path.join(f.root, "checkpoints", name),
             ),
@@ -667,6 +677,13 @@ for (const mode of ["standard", "diff"] as const) {
           const file = path.join(f.root, "coverage.json");
           const coverage = JSON.parse(await readFile(file, "utf8"));
           coverage.surfaces[0].candidateId = previous.candidateId;
+          const earlierFiles = [
+            path.join(f.root, "checkpoint-head.json"),
+            ...(await readdir(path.join(f.root, "checkpoints"))).map((name) =>
+              path.join(f.root, "checkpoints", name),
+            ),
+          ];
+          await Promise.all(earlierFiles.map((saved) => utimes(saved, 1, 1)));
           await writeFile(file, JSON.stringify(coverage, null, 2) + "\n");
         }
         await f.write(

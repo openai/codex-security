@@ -32,13 +32,15 @@ const {
   preserveUnresolvedDiffCandidates,
   readDiffCandidates,
 } = await loadModule("artifact-diff-candidates.ts");
-const { recordCodexSecurityScanDraft, recordCodexSecurityWorkerScanDraft } =
-  await loadModule("artifact-scan-draft.ts");
+import { recordCodexSecurityScanDraft } from "./scan-draft-recovery-fixture.ts";
+const { recordCodexSecurityWorkerScanDraft } = await loadModule(
+  "artifact-scan-draft.ts",
+);
 const { discoveryReductionInput, reconcileDeepReduction } = await loadModule(
   "deep-scan/artifact-validation.ts",
 );
 const { recordCodexSecurityCandidateValidations } = await loadModule(
-  "artifact-validation-phase.ts",
+  "artifact-candidate-ledger.ts",
 );
 
 for (const complete of [false, true]) {
@@ -3731,8 +3733,18 @@ for (const payload of [
   });
 }
 
-const { recordCodexSecurityDiscoveryCandidates } = await loadModule(
-  "artifact-discovery.ts",
+const { recordCodexSecurityDiscoveryCandidates } = await importSource(
+  path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
+  {
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
+          import.meta.url,
+        ).href,
+      ),
+    },
+  },
 );
 for (const resolution of ["pending", "accepted", "rejected"] as const) {
   test(`workbench Diff rediscovery preserves reopened proof until ${resolution}`, async (t) => {
@@ -3981,17 +3993,20 @@ test("authored Diff proof gap keeps its original phase through a publication con
     },
   };
   let attempts = 0;
-  const result = await recordCodexSecurityScanDraft(
+  const result = await recordCodexSecurityScanDraftViaWorkbench(
     context,
     input,
-    async (published: FixtureObject) => {
+    async (args: string[]) => {
+      const published = JSON.parse(
+        await readFile(args[args.indexOf("--draft-path") + 1], "utf8"),
+      );
       attempts++;
       if (attempts === 1) {
         assert.deepEqual(published.coverage.deferred[0].candidate, original);
         await writeLedger(context, [next]);
-        throw Object.assign(new Error("Synthetic concurrent publication"), {
-          code: "scan_draft_conflict",
-        });
+        throw new Error(
+          "scan_draft_conflict: Synthetic concurrent publication",
+        );
       }
       assert.equal(published.coverage.deferred.length, 0);
       assert.equal(
