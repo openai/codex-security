@@ -19,6 +19,7 @@
   "apps": "./.app.json",
   "mcpServers": "./.mcp.json",
   "codexSecurity": {
+    "directDeepScanEngine": 1,
     "workerProviderSnapshot": 4
   },
   "interface": {

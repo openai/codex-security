@@ -64,7 +64,9 @@
   {
     "version": 8,
     "name": "sealed manifest digests",
-    "statements": ["ALTER TABLE scans\nADD COLUMN seal_manifest_digest TEXT;"]
+    "statements": [
+      "ALTER TABLE scans\nADD COLUMN seal_manifest_digest TEXT;"
+    ]
   },
   {
     "version": 9,
@@ -77,7 +79,9 @@
   {
     "version": 10,
     "name": "scan cancellation state",
-    "statements": ["ALTER TABLE scans\nADD COLUMN canceled_at TEXT;"]
+    "statements": [
+      "ALTER TABLE scans\nADD COLUMN canceled_at TEXT;"
+    ]
   },
   {
     "version": 11,
@@ -96,7 +100,9 @@
   {
     "version": 12,
     "name": "scan continuation threads",
-    "statements": ["ALTER TABLE scans\nADD COLUMN continuation_thread_id TEXT;"]
+    "statements": [
+      "ALTER TABLE scans\nADD COLUMN continuation_thread_id TEXT;"
+    ]
   },
   {
     "version": 13,
@@ -135,7 +141,9 @@
   {
     "version": 17,
     "name": "scan target summaries",
-    "statements": ["ALTER TABLE scans\nADD COLUMN target_summary TEXT;"]
+    "statements": [
+      "ALTER TABLE scans\nADD COLUMN target_summary TEXT;"
+    ]
   },
   {
     "version": 18,
@@ -190,7 +198,9 @@
   {
     "version": 24,
     "name": "persist scan cost estimates",
-    "statements": ["ALTER TABLE scans ADD COLUMN cost_json TEXT;"]
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN cost_json TEXT;"
+    ]
   },
   {
     "version": 25,
@@ -356,7 +366,9 @@
   {
     "version": 42,
     "name": "editable scan names",
-    "statements": ["ALTER TABLE scans ADD COLUMN name TEXT;"]
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN name TEXT;"
+    ]
   },
   {
     "version": 43,
@@ -369,7 +381,9 @@
   {
     "version": 44,
     "name": "version local finding embedding inputs",
-    "statements": ["ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"]
+    "statements": [
+      "ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"
+    ]
   },
   {
     "version": 45,
@@ -389,6 +403,13 @@
   },
   {
     "version": 47,
+    "name": "snapshot deep scan discovery context",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
+    ]
+  },
+  {
+    "version": 48,
     "name": "retain deep scan worker session ownership",
     "statements": [
       "CREATE TABLE deep_scan_worker_threads (\n            worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n            sdk_thread_id TEXT NOT NULL,\n            PRIMARY KEY (worker_id, sdk_thread_id)\n        );",

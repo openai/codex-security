@@ -61,6 +61,7 @@ def begin_target_scan(
     scan_root: Path,
     *,
     thread_id: str = "thread-deep-scan",
+    user_context: str | None = None,
 ) -> dict[str, object]:
     return begin_deep_scan(
         state_dir,
@@ -73,7 +74,9 @@ def begin_target_scan(
         str(scan_root),
         "--available-parallelism",
         "16",
+        *(("--user-context-stdin",) if user_context is not None else ()),
         environment=deep_environment(codex_home),
+        input_text=user_context,
     )
 
 
@@ -128,12 +131,12 @@ def upsert_worker(
     *,
     scan_id: str,
     worker_id: str,
-    kind: str,
-    status: str,
+    kind: str = "discovery",
+    status: str = "running",
     prompt_path: Path,
     artifact_dir: Path,
     result_path: Path | None = None,
-    attempt: int | None = None,
+    attempt: int | None = 1,
     thread_id: str | None = None,
     error: str | None = None,
     replaceable_failure_kind: str | None = None,
@@ -182,11 +185,8 @@ def dispatch_discovery_worker(
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
-        attempt=1,
         coordinator_generation=coordinator_generation,
     )
     if succeed:
@@ -196,12 +196,10 @@ def dispatch_discovery_worker(
             codex_home,
             scan_id=scan_id,
             worker_id=worker_id,
-            kind="discovery",
             status="succeeded",
             prompt_path=prompt_path,
             artifact_dir=artifact_dir,
             result_path=result_path,
-            attempt=1,
             coordinator_generation=coordinator_generation,
         )
     return worker_id, prompt_path, artifact_dir, result_path
@@ -240,10 +238,8 @@ def commit_reducer(
         scan_id=scan_id,
         worker_id=worker_id,
         kind="dedup",
-        status="running",
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
-        attempt=1,
         coordinator_generation=coordinator_generation,
     )
     write_canonical_artifacts(scan_dir)
@@ -573,10 +569,8 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
         coordinator_generation=2,
     )
     canonical = write_canonical_artifacts(scan_dir)["candidateLedgerPath"]
@@ -708,7 +702,6 @@ def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
             status="failed",
             prompt_path=prompt,
             artifact_dir=artifacts,
-            attempt=1,
             error="fixture reducer failure",
             coordinator_generation=2,
         )
@@ -790,11 +783,9 @@ def test_expired_generation_refunds_shutdown_canceled_discovery(
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="canceled",
         prompt_path=prompt,
         artifact_dir=artifacts,
-        attempt=1,
         error=None if legacy else "coordinator_shutdown: mcp_transport_closed",
         coordinator_generation=coordinator_generation,
     )
@@ -968,10 +959,8 @@ def test_reducer_commit_requires_safe_standard_canonical_artifacts(
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
 
     canonical = write_canonical_artifacts(scan_dir)
@@ -1082,22 +1071,16 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         codex_home,
         scan_id=scan_id,
         worker_id=first_worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=first_prompt,
         artifact_dir=first_artifacts,
-        attempt=1,
     )
     upsert_worker(
         state_dir,
         codex_home,
         scan_id=scan_id,
         worker_id=second_worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=second_prompt,
         artifact_dir=second_artifacts,
-        attempt=1,
     )
     assert independent_reviews() == {
         "active": 2,
@@ -1112,12 +1095,10 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         codex_home,
         scan_id=scan_id,
         worker_id=first_worker_id,
-        kind="discovery",
         status="succeeded",
         prompt_path=first_prompt,
         artifact_dir=first_artifacts,
         result_path=first_result,
-        attempt=1,
     )
     assert independent_reviews() == {
         "active": 1,
@@ -1131,11 +1112,9 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         codex_home,
         scan_id=scan_id,
         worker_id=second_worker_id,
-        kind="discovery",
         status="canceled",
         prompt_path=second_prompt,
         artifact_dir=second_artifacts,
-        attempt=1,
     )
     assert independent_reviews() == {
         "active": 0,
@@ -1579,11 +1558,8 @@ def test_replaceable_discovery_failures_count_once_and_reset_on_success(
         codex_home,
         scan_id=scan_id,
         worker_id=failed_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
 
     for _ in range(2):
@@ -1592,11 +1568,9 @@ def test_replaceable_discovery_failures_count_once_and_reset_on_success(
             codex_home,
             scan_id=scan_id,
             worker_id=failed_id,
-            kind="discovery",
             status="canceled",
             prompt_path=prompt,
             artifact_dir=artifact_dir,
-            attempt=1,
             error="policy_refusal: request refused by cybersecurity policy",
             replaceable_failure_kind="policy_refusal",
         )["deepScan"]
@@ -1695,11 +1669,9 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         codex_home,
         scan_id=scan_id,
         worker_id=discovery_failure,
-        kind="discovery",
         status="canceled",
         prompt_path=discovery_prompt,
         artifact_dir=discovery_dir,
-        attempt=1,
         error="transient_error: fixture discovery failure",
         replaceable_failure_kind="transient_error",
         coordinator_generation=2,
@@ -1725,10 +1697,8 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         scan_id=scan_id,
         worker_id=failed_reducer,
         kind="dedup",
-        status="running",
         prompt_path=failed_prompt,
         artifact_dir=failed_dir,
-        attempt=1,
         coordinator_generation=2,
     )
 
@@ -1741,7 +1711,6 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         status="failed",
         prompt_path=failed_prompt,
         artifact_dir=failed_dir,
-        attempt=1,
         error="fixture reducer exhausted its attempts",
         coordinator_generation=2,
     )["deepScan"]
@@ -1782,7 +1751,6 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         status="failed",
         prompt_path=failed_prompt,
         artifact_dir=failed_dir,
-        attempt=1,
         error="fixture reducer exhausted its attempts",
         coordinator_generation=2,
     )["deepScan"]
@@ -1797,10 +1765,8 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         scan_id=scan_id,
         worker_id=replacement_reducer,
         kind="dedup",
-        status="running",
         prompt_path=replacement_prompt,
         artifact_dir=replacement_dir,
-        attempt=1,
         coordinator_generation=2,
     )
     replacement_result.write_text("{}\n")
@@ -1863,11 +1829,8 @@ def test_ordinary_discovery_cancellation_does_not_increment_failure_streak(
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
 
     result = upsert_worker(
@@ -1875,11 +1838,9 @@ def test_ordinary_discovery_cancellation_does_not_increment_failure_streak(
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="canceled",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )["deepScan"]
 
     assert result["consecutiveErrors"] == 0
@@ -1915,7 +1876,9 @@ def test_invalid_discovery_error_threshold_fails_before_scan_creation(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
 
 
-@pytest.mark.parametrize("invalid_hours", ("0", "-0.5", "true", '"2"', "nan", "inf", "96.5"))
+@pytest.mark.parametrize(
+    "invalid_hours", ("0", "-0.5", "true", '"2"', "nan", "inf", "96.5", "9" * 400)
+)
 def test_invalid_discovery_time_limit_fails_before_scan_creation(
     tmp_path: Path, invalid_hours: str
 ) -> None:
@@ -1943,8 +1906,10 @@ def test_invalid_discovery_time_limit_fails_before_scan_creation(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
 
 
+@pytest.mark.parametrize("user_context", (None, "Review authentication only."))
 def test_target_continuation_reuses_terminal_coordinator_across_threads(
     tmp_path: Path,
+    user_context: str | None,
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -1959,6 +1924,7 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
         target,
         scan_root,
         thread_id="thread-before-continuation",
+        user_context=user_context,
     )
     scan_id = str(first["deepScan"]["scanId"])
     scan_dir = Path(str(first["deepScan"]["scanDir"]))
@@ -1971,10 +1937,12 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
         target,
         scan_root,
         thread_id="thread-after-continuation",
+        user_context=user_context,
     )
     assert continued["startDisposition"] == "joined"
     assert continued["deepScan"]["scanId"] == scan_id
     assert continued["deepScan"]["manifestPath"] == str(manifest)
+    assert continued["deepScan"]["userContext"] == user_context
     assert get_scan(state_dir, scan_id)["scan"]["progress"]["independentReviews"] == {
         "active": 0,
         "completed": 0,
@@ -2249,9 +2217,9 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         scan_id=scan_id,
         worker_id=worker_id,
         kind="setup",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
+        attempt=None,
     )
     setup_complete = upsert_worker(
         state_dir,
@@ -2262,6 +2230,7 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         status="succeeded",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
+        attempt=None,
     )
     assert setup_complete["deepScan"]["workers"][0]["status"] == "succeeded"
 
@@ -2414,31 +2383,12 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
     assert deep_scan["config"]["maxDiscoveryRuns"] == 1
     scan_id = str(deep_scan["scanId"])
     scan_dir = Path(str(deep_scan["scanDir"]))
-    worker_id = str(uuid.uuid4())
-    prompt, artifact_dir, result = worker_paths(scan_dir, "singleton-worker")
-    upsert_worker(
+    worker_id, prompt, artifact_dir, result = dispatch_discovery_worker(
         state_dir,
         codex_home,
         scan_id=scan_id,
-        worker_id=worker_id,
-        kind="discovery",
-        status="running",
-        prompt_path=prompt,
-        artifact_dir=artifact_dir,
-        attempt=1,
-    )
-    result.write_text("{}\n")
-    upsert_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        worker_id=worker_id,
-        kind="discovery",
-        status="succeeded",
-        prompt_path=prompt,
-        artifact_dir=artifact_dir,
-        result_path=result,
-        attempt=1,
+        scan_dir=scan_dir,
+        name="singleton-worker",
     )
     reducer_id = str(uuid.uuid4())
     reducer_prompt, reducer_dir, reducer_result = worker_paths(scan_dir, "singleton-reducer")
@@ -2461,10 +2411,8 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
-        attempt=1,
     )
     write_canonical_artifacts(scan_dir)
     reducer_result.write_text("{}\n")
@@ -2496,10 +2444,8 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
         scan_id=scan_id,
         worker_id=failed_setup_id,
         kind="setup",
-        status="running",
         prompt_path=failed_setup_prompt,
         artifact_dir=failed_setup_dir,
-        attempt=1,
     )
     upsert_worker(
         state_dir,
@@ -2510,7 +2456,6 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
         status="failed",
         prompt_path=failed_setup_prompt,
         artifact_dir=failed_setup_dir,
-        attempt=1,
         error="Setup failed.",
     )
     rejected = finish_deep_scan(
@@ -2669,11 +2614,9 @@ def test_discovery_deadline_caps_without_a_completed_discovery(
             codex_home,
             scan_id=scan_id,
             worker_id=worker_id,
-            kind="discovery",
             status="canceled",
             prompt_path=prompt,
             artifact_dir=artifact_dir,
-            attempt=1,
         )
 
     running = get_deep_scan(
@@ -2788,22 +2731,17 @@ def test_capped_completion_requires_canonical_artifacts(tmp_path: Path) -> None:
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
     upsert_worker(
         state_dir,
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="failed",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
         error="Retries exhausted.",
     )
     manifest = scan_dir / "coordinator-manifest.json"
@@ -2957,11 +2895,9 @@ def test_failure_capped_completion_preserves_partial_results_and_exact_omissions
         codex_home,
         scan_id=scan_id,
         worker_id=failed_id,
-        kind="discovery",
         status="failed",
         prompt_path=failed_prompt,
         artifact_dir=failed_dir,
-        attempt=1,
         error="Worker retries exhausted.",
     )
     finish_args = (
@@ -3044,11 +2980,8 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
     checkpoint = saved_draft(scan_id, completeness="partial", findings=[provisional])
     encoded = json.dumps(checkpoint).encode()
@@ -3123,10 +3056,8 @@ def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Pa
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
-        attempt=1,
     )
     finish_args = (
         "finish-deep-scan",
@@ -3153,7 +3084,6 @@ def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Pa
         status="canceled",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
-        attempt=1,
     )
     finished = run_workbench(state_dir, *finish_args, environment=deep_environment(codex_home))[
         "deepScan"
@@ -3267,6 +3197,7 @@ def test_saturated_completion_rejects_merging_workers(tmp_path: Path) -> None:
         status="canceled",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
+        attempt=None,
     )
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
@@ -3295,11 +3226,8 @@ def test_running_worker_updates_preserve_identity_and_dispatch_count(tmp_path: P
     update = {
         "scan_id": scan_id,
         "worker_id": worker_id,
-        "kind": "discovery",
-        "status": "running",
         "prompt_path": prompt,
         "artifact_dir": artifact_dir,
-        "attempt": 1,
     }
 
     initial = upsert_worker(state_dir, codex_home, **update)["deepScan"]
@@ -3337,11 +3265,8 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
     result.write_text("{}\n")
     accepted = upsert_worker(
@@ -3349,12 +3274,10 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="succeeded",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
         result_path=result,
-        attempt=1,
     )["deepScan"]
     accepted_worker = next(worker for worker in accepted["workers"] if worker["id"] == worker_id)
     replayed = upsert_worker(
@@ -3362,12 +3285,10 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="succeeded",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
         result_path=result,
-        attempt=1,
     )["deepScan"]
     replayed_worker = next(worker for worker in replayed["workers"] if worker["id"] == worker_id)
     assert replayed_worker == accepted_worker
@@ -3431,11 +3352,8 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
             codex_home,
             scan_id=scan_id,
             worker_id=worker_id,
-            kind="discovery",
-            status="running",
             prompt_path=prompt,
             artifact_dir=artifact_dir,
-            attempt=1,
         )
         result.write_text("{}\n")
         accepted = upsert_worker(
@@ -3443,12 +3361,10 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
             codex_home,
             scan_id=scan_id,
             worker_id=worker_id,
-            kind="discovery",
             status="succeeded",
             prompt_path=prompt,
             artifact_dir=artifact_dir,
             result_path=result,
-            attempt=1,
         )
         assert accepted["deepScan"]["workers"][-1]["mergeState"] == "buffered"
 
@@ -3475,10 +3391,8 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
-        attempt=1,
         error="Transient reducer failure.",
     )
     write_canonical_artifacts(scan_dir)
@@ -3524,10 +3438,8 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
         scan_id=scan_id,
         worker_id=second_reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=second_prompt,
         artifact_dir=second_dir,
-        attempt=1,
     )
     second_result.write_text("{}\n")
     late_worker_id, late_prompt, late_dir, late_result = dispatch_discovery_worker(
@@ -3566,12 +3478,10 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
         codex_home,
         scan_id=scan_id,
         worker_id=late_worker_id,
-        kind="discovery",
         status="succeeded",
         prompt_path=late_prompt,
         artifact_dir=late_dir,
         result_path=late_result,
-        attempt=1,
     )["deepScan"]
     accepted_late_worker = next(
         worker for worker in accepted_late["workers"] if worker["id"] == late_worker_id
@@ -3761,11 +3671,8 @@ def test_cancel_scan_cancels_coordinator_and_active_workers(tmp_path: Path) -> N
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
 
     cancel_scan(state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home))

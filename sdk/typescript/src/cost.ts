@@ -428,6 +428,10 @@ export class ScanCostTracker {
     if (rootThreadId === null) return;
     this.#rootOnlyReadError = false;
     const presentSessions = new Set<string>();
+    const repository =
+      this.#options.onActivity === undefined
+        ? undefined
+        : this.#options.repository;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     const paths = new Set(ownedPaths?.keys());
     for await (const path of sessionFiles(
@@ -447,7 +451,7 @@ export class ScanCostTracker {
             path,
             session,
             this.#options.model,
-            this.#options.repository,
+            repository,
             this.#options.maxCostUsd !== undefined,
           ))
         ) {
@@ -476,7 +480,7 @@ export class ScanCostTracker {
             completePath,
             session,
             this.#options.model,
-            this.#options.repository,
+            repository,
             true,
           );
           this.#sessions.set(completePath, session);
@@ -930,8 +934,14 @@ async function readSessionUsage(
   endOffset?: number,
 ): Promise<boolean> {
   if (session.unreadable !== null) {
-    if (requireReadableSessions) throw session.unreadable.error;
-    return true;
+    if (
+      !requireReadableSessions ||
+      !isSessionAccessDenied(session.unreadable.error)
+    ) {
+      if (requireReadableSessions) throw session.unreadable.error;
+      return true;
+    }
+    session.unreadable = null;
   }
   let file;
   try {

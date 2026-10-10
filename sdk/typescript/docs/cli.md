@@ -1,8 +1,9 @@
 # CLI and workflows
 
-Use `npx @openai/codex-security` without a global install. The examples below
-use `codex-security`, which is available after
-`npm install --global @openai/codex-security`.
+The global installation provides both `codex-security` and its short alias `cs`.
+They accept the same arguments and options. The examples below use
+`codex-security`; you can also use `cs` or, without a global installation,
+`npx @openai/codex-security`. See the [installation guide](../README.md#install).
 
 ```bash
 codex-security --help
@@ -301,6 +302,13 @@ execution failures with `--json`, JSON, or JSONL output produce:
 ```
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
+A scan that returns partial or unknown coverage uses that failure envelope and
+keeps its available results under `data`. This also applies to `scans rerun` and
+`scans resume`. If the scan target also changed, the error explains that the
+results no longer represent the current checkout. For incomplete `scans rerun` and
+`scans resume` envelopes, `--filter-output` applies to `data`; selecting an
+unavailable field can return `null` or omit `data`.
+
 Saved-scan setup failures use the same output shape with
 `SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
 available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
@@ -548,11 +556,21 @@ account authentication. Explicit `--auth chatgpt` selects stored account auth,
 omits the provider key, and clears any configured experimental bearer token for
 that command. Model, effort, and provider choices carry into patch-risk assessment.
 
+Model requests include Codex Security attribution in `responses_api_metadata`:
+`codex_security_surface` (`cli` or `sdk`), `codex_security_command`,
+`codex_security_package_version`, and `codex_security_plugin_version` when the
+selected plugin declares a version. These fields identify the workflow and
+versions producing a model request; they do not record command starts,
+completions, or failures.
+
 Disable Codex usage analytics and built-in metrics with
-`--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`
-and patch-risk assessment. It does not control configured OpenTelemetry exporters,
-integrations, authentication, or CLI update checks. Validation uses isolated
-configuration; patching and verification preserve ambient project trust.
+`--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
+patch-risk assessment, and Deep Scan discovery and reducer workers, including
+resumed workers. Deep Scan workers also preserve the scan's request metadata.
+Model-request attribution metadata remains attached when analytics are disabled.
+The setting does not control configured OpenTelemetry exporters, integrations,
+authentication, or CLI update checks. Validation uses isolated configuration;
+patching and verification preserve ambient project trust.
 
 For filesystem and approval behavior, see the
 [local security model](../README.md#local-security-model).
@@ -656,7 +674,70 @@ a larger total or `undefined`. It runs once per limit without blocking the scan.
 Late responses after cancellation/completion are ignored; invalid increases or
 save failures keep the existing limit. `onCost(cost, maxCostUsd)` reports changes.
 
+## Review one system across repositories
+
+Use a single directory/path scan when an application spans repositories and you
+want Codex to follow relationships between their source files. Put the checkouts
+under one parent directory; that parent does not need to be a Git repository.
+Select the relevant paths beneath it and supply the shared architecture and
+reporting instructions explicitly:
+
+```text
+workspace/
+├── application/
+│   ├── api/       # Git checkout
+│   ├── web/       # Git checkout
+│   └── shared/    # Git checkout
+├── context/
+│   ├── architecture.md
+│   └── scan-instructions.md
+└── results/
+```
+
+From `workspace/`, run:
+
+```bash
+codex-security scan ./application \
+  --mode deep \
+  --path api/src --path web/src --path shared/src \
+  --knowledge-base ./context/architecture.md \
+  --scan-prompt-file ./context/scan-instructions.md \
+  --output-dir ./results/system-review
+```
+
+Scope paths are relative to `application/`. Context and output paths in this
+example are relative to the working directory. Keep results outside the scanned
+directory and any enclosing Git worktree. You do not need to add `AGENTS.md` or
+`SECURITY.md` to each checkout to pass these documents.
+
+Include both sides of a boundary you want reviewed, such as an API caller and
+its authorization implementation. Architecture documents can explain deployment
+facts and trust boundaries, but cannot replace missing source evidence. Identify
+excluded or unavailable services in the context so their dependencies remain
+explicit coverage limitations. Distinguish source that supports an investigation
+from locations where you want findings reported.
+
+Record each checkout's commit and local changes before scanning, and keep the
+checkouts unchanged while a scan or resume is active. A non-Git parent is recorded
+as one directory snapshot, rather than one pinned revision per child repository.
+Use the saved scan ID when inspecting results and logs:
+
+```bash
+codex-security scans show SCAN_ID
+codex-security scans logs SCAN_ID
+```
+
+See [scan history and reruns](#scan-history-and-reruns) for the distinction between
+continuing an interrupted scan and starting a new run. Neither approach proves
+that every possible cross-service path was reviewed; inspect the reported
+coverage and unresolved questions alongside findings.
+
 ## Bulk scans
+
+Bulk scans run independent repository reviews in one resumable campaign. Shared
+knowledge-base documents give each review application context; they do not make
+the campaign a joint source review across repositories. For that workflow, use
+[one system scan](#review-one-system-across-repositories).
 
 Run `gh auth login`, then `codex-security bulk-scan` for interactive GitHub
 selection. It lists repositories pushed in the last 90 days, excluding forks
@@ -903,7 +984,9 @@ or effort. A successful run also writes `severity-classification.json`, but
 publication reads the database. Original findings and sealed artifacts remain
 unchanged.
 
-Repeat `--finding-id ID` for a subset, such as dedupe's `uniqueFindingIds`.
+Repeat `--finding-id ID` for a subset from the selected scan. Dedupe's
+`uniqueFindingIds` can represent findings from another scan; replace an outside-scan
+representative with a member of its `duplicateGroups` entry from this scan.
 Linear publication defaults to saved classification selection, omits exclusions,
 and uses assessed severity for title and priority. Descriptions retain original
 severity and add the classification rationale. Publication rejects incomplete or
@@ -925,7 +1008,10 @@ import {
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   publishScan,
+  type FindingsDocument,
 } from "@openai/codex-security";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 // Assess supplied reports in memory.
 const classification = await classifySeverity(findings, {
@@ -935,9 +1021,24 @@ const classification = await classifySeverity(findings, {
 
 // Save assessments for a scan ID or sealed directory.
 await classifyScanSeverity("SCAN_ID", { rubricPath: "/path/to/policy.md" });
+const scanFindings = (
+  JSON.parse(
+    await readFile(join(scanDirectory, "findings.json"), "utf8"),
+  ) as FindingsDocument
+).findings;
+const scanFindingIds = new Set(
+  scanFindings.map((finding) => finding.findingId),
+);
+// dedupeResult was produced by deduplicating this same scan.
+const selectedIds = dedupeResult.uniqueFindingIds.map((representative) => {
+  if (scanFindingIds.has(representative)) return representative;
+  return dedupeResult.duplicateGroups
+    .find((group) => group.includes(representative))!
+    .find((member) => scanFindingIds.has(member))!;
+});
 await classifyScanDirectorySeverity(scanDirectory, {
   rubricPath: "/path/to/policy.md",
-  findingIds: dedupeResult.uniqueFindingIds,
+  findingIds: selectedIds,
 });
 
 // Or supply an in-memory assessment directly to publication.
@@ -967,6 +1068,12 @@ codex-security suggest-owners findings.json --source-root /path/to/repo --json >
 Input is a findings document or `{ "findings": [...] }`. The source root
 defaults to the current directory. The command reads committed `HEAD`, relevant
 source, blame, and history; it does not read uncommitted source or assign tickets.
+Finding location paths are relative to the Git worktree root, including when
+`--source-root` points to a subdirectory. A location for `src/handler.ts` keeps
+that prefix; a location of `handler.ts` refers to the root file. Rebase imported
+subdirectory-relative locations to repository-relative paths before suggesting
+owners.
+
 Linked worktrees and bound separate Git directories are supported; borrowed
 external object stores such as `git clone --shared` are rejected.
 
@@ -1031,6 +1138,25 @@ least eight characters.
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
 | `findings list [REPOSITORY]`                          | List open findings.                                        |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
+
+Without an ID, `scans show` selects the latest completed scan, while `scans logs`
+selects the latest scan of any status. After a successful scan followed by a
+failed or active scan, these defaults refer to different runs. Human output
+identifies the selected run, labels its saved update time, and gives matching
+commands with its full scan ID:
+
+```bash
+codex-security scans show SCAN_ID
+codex-security scans logs SCAN_ID
+```
+
+Completion summaries include that ID and the saved results directory. Failure
+summaries include the same navigation when the current run was registered, plus
+the last observed phase when available. A failure before registration has no
+scan ID. The handoff uses that run's registration receipt without querying scan
+history. Inspect its saved status before choosing resume or rerun, and supply
+the original custom prompt files for reruns. Structured history and log output
+and command selection defaults are unchanged.
 
 Recipes save settings and authentication choice, not credentials. Reruns use the
 current checkout/context files and do not reload project files. Supply replacement
@@ -1357,8 +1483,8 @@ schema, and `completions bash|zsh|fish` for shell completions. Scan output suppo
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
 MCP exposes only read-only `info`, because the transport cannot cancel scans.
 
-For a local findings API and deduplication, see the
-[findings service guide](findings-service.md).
+For local findings storage, deduplication, and custom endpoints, see the
+[findings guide](findings-service.md).
 
 ## Containerized bulk scans
 

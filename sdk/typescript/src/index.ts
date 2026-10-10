@@ -93,6 +93,7 @@ export {
   DeduplicationReviewError,
   IncompleteScanError,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,

@@ -136,7 +136,7 @@ export async function importScan(
       signal,
     );
     const findings = await parseImportedFindings(
-      source.toString("utf8"),
+      new TextDecoder("utf-8", { fatal: true }).decode(source),
       options.format,
       pluginRoot,
     );
@@ -270,15 +270,17 @@ export async function importScan(
       "coverage.json": {
         completeness: "unknown",
         inventoryStrategy: "custom",
-        surfaces: [
-          {
-            id: "import",
-            label: basename(inputPath),
-            disposition: "reported",
-            receiptRefs: [sourceRef],
-            notes: IMPORT_DESCRIPTION,
-          },
-        ],
+        surfaces: findings.length
+          ? [
+              {
+                id: "import",
+                label: basename(inputPath),
+                disposition: "reported",
+                receiptRefs: [sourceRef],
+                notes: IMPORT_DESCRIPTION,
+              },
+            ]
+          : [],
         explicitExclusions: [],
         deferred: [],
       },
@@ -307,8 +309,7 @@ export async function importScan(
       contract.findings.findings.length !== findings.length ||
       contract.findings.findings.some(
         (finding) => !expectedIds.delete(finding.findingId),
-      ) ||
-      expectedIds.size !== 0
+      )
     ) {
       throw new CodexSecurityError(
         "Import finalization did not preserve every input finding; the scan was not completed.",
@@ -332,8 +333,7 @@ export async function importScan(
         "fail-scan",
         "--scan-id",
         activeScan.id,
-        "--message",
-        errorMessage(error).slice(0, 2400),
+        `--message=${errorMessage(error).slice(0, 2400)}`,
       ]).catch(() => undefined);
     }
     if (signal?.aborted) {

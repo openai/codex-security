@@ -63,7 +63,7 @@ export function findPotentialDuplicates(
        JOIN findings ON findings.id = embeddings.finding_id
        WHERE ${predicate}embeddings.model = (SELECT model FROM ${table} WHERE finding_id = ?)
        AND embeddings.finding_id != ?
-       ORDER BY findings.created_at, findings.id`,
+       ORDER BY julianday(upper(findings.created_at)), findings.id`,
     );
     const ranked: { id: string; similarity: number }[] = [];
     try {
@@ -242,7 +242,7 @@ export function listDedupeGroups(database: DatabaseSync, findingId: string) {
     JOIN finding_dedupe_groups AS groups ON groups.id = matched.group_id
     JOIN finding_dedupe_group_members AS members ON members.group_id = groups.id
     WHERE matched.finding_id = ?
-    GROUP BY groups.id ORDER BY groups.created_at, groups.id
+    GROUP BY groups.id ORDER BY julianday(upper(groups.created_at)), groups.id
   `);
   return {
     groups: rows

@@ -134,7 +134,7 @@ async function bundledWorkerExecutor(
     "resolveCodexPath",
     "executablePathForSpawn",
     "workerSubagentConfig",
-    "appendSafeItemDiagnostic",
+    "appendItemDiagnostic",
     "classifyCodexWorkerError",
     "isRecord",
     `${record}\n${abort}\n${diagnostic}\n${transport}\n${source}\nreturn CodexSdkWorkerExecutor;`,
