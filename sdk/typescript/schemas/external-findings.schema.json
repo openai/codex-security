@@ -982,6 +982,11 @@
       "title": "ImportedRepositoryReference",
       "type": "object"
     },
+    "ImportedSecretConfidence": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
     "ImportedSecretDetails": {
       "additionalProperties": false,
       "properties": {
@@ -1002,16 +1007,13 @@
         "confidence": {
           "anyOf": [
             {
-              "maxLength": 512,
-              "minLength": 1,
-              "type": "string"
+              "$ref": "#/$defs/ImportedSecretConfidence"
             },
             {
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Secret scanner confidence"
+          "default": null
         },
         "validation_status": {
           "anyOf": [
