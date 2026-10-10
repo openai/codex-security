@@ -157,6 +157,8 @@ export async function runDeepScans(
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
   validatePassDirectories(state);
+  if (state.discoveryUserContext === undefined)
+    state.discoveryUserContext = input.scanOptions.scanPrompt ?? null;
   const deadlineController = new AbortController();
   const externalStop = new AbortController();
   const executionSignal = AbortSignal.any([signal, externalStop.signal]);
@@ -679,6 +681,7 @@ export async function runDeepScans(
       try {
         result = await client.run(input.repository, {
           ...input.scanOptions,
+          scanPrompt: state.discoveryUserContext ?? undefined,
           mode: "standard",
           workflowId: undefined,
           postScanPrompt: undefined,

@@ -197,6 +197,42 @@ async function fixture(
   };
 }
 
+test.each(["Original discovery assumptions.", undefined])(
+  "freezes discovery context across interrupted and new passes: %p",
+  async (scanPrompt) => {
+    const h = await fixture({
+      workers: 1,
+      maxDiscoveryRuns: 2,
+      stopAfterNoNew: 3,
+    });
+    h.input.scanOptions.scanPrompt = scanPrompt;
+    const interruption = new ScanTransportClosedError("Synthetic restart.");
+    h.setExecute(async () => {
+      h.controller.abort(interruption);
+      throw interruption;
+    });
+    await expect(runDeepScans(h.input)).rejects.toThrow(interruption.message);
+    const original = h.calls[0]!;
+    h.input.scanOptions.scanPrompt = "Changed context after restart.";
+    h.input.signal = new AbortController().signal;
+    h.setExecute(async () => {});
+    await runDeepScans(h.input);
+    expect(h.calls).toHaveLength(3);
+    expect(h.calls[1]!.outputDir).toBe(original.outputDir);
+    expect(h.calls[1]!.resumeScanId).toBeDefined();
+    expect(h.calls[2]!.outputDir).not.toBe(original.outputDir);
+    expect(h.calls.map((call) => call.scanPrompt)).toEqual([
+      scanPrompt,
+      scanPrompt,
+      scanPrompt,
+    ]);
+    const checkpoint = JSON.parse(
+      await readFile(join(h.input.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+    );
+    expect(checkpoint.discoveryUserContext).toBe(scanPrompt ?? null);
+  },
+);
+
 test.each(
   (["discovery", "merge"] as const).flatMap((role) =>
     [false, true].flatMap((resumed) =>

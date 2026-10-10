@@ -505,7 +505,11 @@ export function providerProcessConfiguration(config: JsonObject): {
     if (!isRecord(source["model_providers"])) return;
     for (const provider of Object.values(source["model_providers"])) {
       if (!isRecord(provider)) continue;
-      for (const field of ["experimental_bearer_token", "http_headers"]) {
+      for (const field of [
+        "experimental_bearer_token",
+        "http_headers",
+        "auth",
+      ]) {
         if (!Object.hasOwn(provider, field)) continue;
         delete provider[field];
         requiresConfigFile = true;

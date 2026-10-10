@@ -95,7 +95,7 @@ if(args.includes("mcp")) { fs.appendFileSync(${JSON.stringify(capture)},JSON.str
 const provider = config["model_providers"].synthetic;
 const headers = {...provider["http_headers"]};
 for(const [key,name] of Object.entries(provider["env_http_headers"] ?? {})) { const value=process.env[name]; if(value?.trim()) headers[key]=value; }
-fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,ambientContents:fs.readFileSync(${JSON.stringify(configEntry)},"utf8"),config,headers,mcpServers:config.mcp_servers,bearer:provider.experimental_bearer_token ?? process.env[provider["env_key"]],unused:config["model_providers"].unused.experimental_bearer_token,ambientOverride:process.env.SYNTHETIC_OVERRIDE,literalCredentialInEnvironment:[provider.experimental_bearer_token,provider.http_headers?.["X-Synthetic"]].some(value=>typeof value==="string"&&Object.values(process.env).includes(value)),privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n");
+fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,ambientContents:fs.readFileSync(${JSON.stringify(configEntry)},"utf8"),config,headers,auth:provider.auth,role:process.env.SYNTHETIC_ROLE,mcpServers:config.mcp_servers,bearer:provider.experimental_bearer_token ?? process.env[provider["env_key"]],unused:config["model_providers"].unused.experimental_bearer_token,ambientOverride:process.env.SYNTHETIC_OVERRIDE,literalCredentialInEnvironment:[provider.experimental_bearer_token,provider.http_headers?.["X-Synthetic"],...Object.values(provider.auth?.env ?? {})].some(value=>typeof value==="string"&&Object.values(process.env).includes(value)),privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n");
 if(args.includes("app-server")) require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
  const request=JSON.parse(line); if(request.id===undefined)return;
  const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null};
@@ -128,6 +128,11 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
           model_providers: {
             synthetic: {
               base_url: "https://example.invalid/v1",
+              auth: {
+                command: "synthetic-auth",
+                args: [],
+                env: { CLIENT_SECRET: `synthetic-${name}-command` },
+              },
               experimental_bearer_token: `synthetic-${name}-bearer`,
               http_headers: {
                 "X-Synthetic": `synthetic-${name}-header`,
@@ -193,16 +198,16 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
             definedEnvironment(session.source.environment),
             { workingDirectory: root },
           );
-          for (const role of ["discovery", "merge"] as const) {
+          for (const role of ["ordinary", "discovery", "merge"] as const) {
             const worker =
               role === "discovery"
                 ? prepareDiscoveryExecution(session)
-                : prepareMergeExecution(session, 2);
-            const { codex } = createExecutionCodex(
-              { surface: "sdk" },
-              worker,
-              {},
-            );
+                : role === "merge"
+                  ? prepareMergeExecution(session, 2)
+                  : session;
+            const { codex } = createExecutionCodex({ surface: "sdk" }, worker, {
+              SYNTHETIC_ROLE: role,
+            });
             for (const resumed of [false, true]) {
               const options = {
                 workingDirectory: root,
@@ -228,7 +233,7 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line));
-      expect(rows).toHaveLength(18);
+      expect(rows).toHaveLength(26);
       for (const row of rows) {
         expect(row.args.join("\n")).not.toContain("synthetic-first-");
         expect(row.args.join("\n")).not.toContain("synthetic-second-");
@@ -241,7 +246,7 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
         expect(row.privateEnvironment).toEqual({});
       }
       const preflights = rows.filter((row) => row.args.includes("app-server"));
-      expect(preflights).toHaveLength(8);
+      expect(preflights).toHaveLength(12);
       for (const row of preflights) {
         const name = ["first", "second"].find(
           (name) => row.ambientOverride === `synthetic-${name}-override`,
@@ -262,14 +267,20 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
             row.args.includes("exec") &&
             row.bearer === `synthetic-${name}-bearer`,
         );
-        expect(selected).toHaveLength(4);
+        expect(selected).toHaveLength(6);
         for (const row of selected) {
           expect(row.ambientContents).toBe(originalContents);
           expect(row.args.join("\n")).not.toContain("synthetic-first-");
           expect(row.args.join("\n")).not.toContain("synthetic-second-");
           expect(row.unused).toBe(`synthetic-${name}-unused`);
           expect(row.mcpServers).toMatchObject(mcpSettings(name));
-          expect(row.mcpServers["codex-security"].enabled).toBe(false);
+          if (row.role !== "ordinary")
+            expect(row.mcpServers["codex-security"].enabled).toBe(false);
+          expect(row.auth).toEqual({
+            command: "synthetic-auth",
+            args: [],
+            env: { CLIENT_SECRET: `synthetic-${name}-command` },
+          });
           expect(row.headers).toEqual({
             "X-Synthetic": `synthetic-${name}-header`,
             "X-Fallback": `synthetic-${name}-fallback`,
@@ -307,7 +318,7 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
           selected
             .filter((row) => row.args.includes("exec"))
             .map((row) => row.args.includes("resume")),
-        ).toEqual([false, true, false, true]);
+        ).toEqual([false, true, false, true, false, true]);
       }
       expect(await readFile(configEntry, "utf8")).toBe(originalContents);
       const restoredMetadata = await lstat(configEntry);

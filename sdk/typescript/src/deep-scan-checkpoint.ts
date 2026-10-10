@@ -18,6 +18,8 @@ export interface DeepScanPass {
 interface CompositionMetadata {
   version: 3;
   startedAt: string;
+  /** Frozen before the first discovery pass; null records absent context. */
+  discoveryUserContext?: string | null;
   passes: DeepScanPass[];
   mergedScanIds: string[];
   noNewStreak: number;
