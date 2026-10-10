@@ -25,9 +25,23 @@ async function trace(event) {
 
 async function run() {
   const args = process.argv.slice(2);
+  const overrides = [];
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === "-c" || args[index] === "--config")
+      overrides.push(args[++index]);
+  }
+  const config = Object.assign({}, ...overrides.map((value) => parse(value)));
   if (args.includes("app-server")) {
-    await trace({ phase: "preflight", args });
-    const threadId = "package-sdk-owner";
+    const artifacts = config.mcp_servers?.cs_artifacts;
+    if (artifacts === undefined) await trace({ phase: "preflight", args });
+    const artifactRoot = artifacts?.env.CODEX_SECURITY_ARTIFACT_ROOT;
+    let threadId = artifacts
+      ? `package-${artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT}-${basename(artifactRoot)}-${basename(join(artifactRoot, ".."))}`
+      : "package-sdk-owner";
+    let resumed = false;
+    let threadModel;
+    let turnExecution;
+    const turnController = new AbortController();
     const sessionPath = join(process.env.CODEX_HOME, `${threadId}.jsonl`);
     for await (const line of createInterface({ input: process.stdin })) {
       const message = JSON.parse(line);
@@ -37,9 +51,25 @@ async function run() {
         case "initialize":
           result = { userAgent: "package-fixture" };
           break;
+        case "account/login/start":
+          assert.equal(message.params.type, "apiKey");
+          assert.equal(message.params.apiKey, "synthetic-package-deep-key");
+          result = { type: "apiKey" };
+          break;
+        case "thread/resume":
         case "thread/start":
-          assert.equal(message.params.threadSource, "security_scan");
-          assert.equal(message.params.ephemeral, false);
+          if (artifacts === undefined) {
+            assert.equal(message.params.threadSource, "security_scan");
+            assert.equal(message.params.ephemeral, false);
+          } else {
+            resumed = message.method === "thread/resume";
+            threadId = message.params.threadId ?? threadId;
+            threadModel = message.params.model;
+            assert.equal(
+              message.params.permissions,
+              "codex_security_deep_scan_worker",
+            );
+          }
           result = {
             thread: { id: threadId, path: sessionPath },
             model: "gpt-5.5",
@@ -72,7 +102,88 @@ async function run() {
           );
           result = {};
           break;
+        case "turn/start": {
+          assert.ok(artifacts, "Only workers run model turns in this fixture.");
+          const turnId = "package-worker-turn";
+          console.log(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: { turn: { id: turnId, status: "inProgress" } },
+            }),
+          );
+          console.log(
+            JSON.stringify({
+              method: "turn/started",
+              params: {
+                threadId,
+                turn: { id: turnId, status: "inProgress" },
+              },
+            }),
+          );
+          turnExecution = (async () => {
+            await runWorker(
+              args,
+              config,
+              resumed,
+              threadModel,
+              turnController.signal,
+            );
+            console.log(
+              JSON.stringify({
+                method: "thread/tokenUsage/updated",
+                params: {
+                  threadId,
+                  turnId,
+                  tokenUsage: {
+                    total: {
+                      inputTokens: 1,
+                      cachedInputTokens: 0,
+                      outputTokens: 1,
+                      reasoningOutputTokens: 0,
+                      totalTokens: 2,
+                    },
+                    last: {
+                      inputTokens: 1,
+                      cachedInputTokens: 0,
+                      outputTokens: 1,
+                      reasoningOutputTokens: 0,
+                      totalTokens: 2,
+                    },
+                  },
+                },
+              }),
+            );
+            console.log(
+              JSON.stringify({
+                method: "turn/completed",
+                params: {
+                  threadId,
+                  turn: {
+                    id: turnId,
+                    status: turnController.signal.aborted
+                      ? "interrupted"
+                      : "completed",
+                  },
+                },
+              }),
+            );
+          })().catch(async (error) => {
+            await trace({ phase: "fixture-error", error: error.stack });
+            console.error(error);
+            process.exit(1);
+          });
+          continue;
+        }
+        case "turn/interrupt":
+          assert.equal(message.params.threadId, threadId);
+          assert.equal(message.params.turnId, "package-worker-turn");
+          turnController.abort();
+          result = {};
+          break;
         case "config/read":
+          if (artifacts !== undefined)
+            await trace({ phase: "preflight", args });
           result = {
             config: {
               default_permissions: "codex_security_deep_scan_worker",
@@ -108,16 +219,33 @@ async function run() {
       }
       console.log(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
     }
+    await turnExecution;
     return;
   }
-  let prompt = "";
-  for await (const chunk of process.stdin) prompt += chunk;
-  const overrides = [];
-  for (let index = 0; index < args.length; index++) {
-    if (args[index] === "-c" || args[index] === "--config")
-      overrides.push(args[++index]);
-  }
-  const config = parse(overrides.join("\n"));
+  for await (const chunk of process.stdin) void chunk;
+  const artifactEnv = config.mcp_servers.cs_artifacts.env;
+  const artifactRoot = artifactEnv.CODEX_SECURITY_ARTIFACT_ROOT;
+  console.log(
+    JSON.stringify({
+      type: "thread.started",
+      thread_id: `package-${artifactEnv.CODEX_SECURITY_ARTIFACT_LAYOUT}-${basename(artifactRoot)}-${basename(join(artifactRoot, ".."))}`,
+    }),
+  );
+  await runWorker(
+    args,
+    config,
+    args.includes("resume"),
+    args[args.indexOf("--model") + 1],
+  );
+  console.log(
+    JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+    }),
+  );
+}
+
+async function runWorker(args, config, resumed, model, signal) {
   const artifacts = config.mcp_servers.cs_artifacts;
   const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;
@@ -125,8 +253,6 @@ async function run() {
   assert.equal(config.mcp_servers["codex-security"].enabled, false);
   assert.notEqual(artifacts.enabled, false);
   const layout = env.CODEX_SECURITY_ARTIFACT_LAYOUT;
-  const threadId = `package-${layout}-${basename(root)}-${basename(join(root, ".."))}`;
-  console.log(JSON.stringify({ type: "thread.started", thread_id: threadId }));
   if (
     layout === "worker" &&
     basename(join(root, "..")) === "discovery-0002" &&
@@ -134,7 +260,16 @@ async function run() {
     existsSync(process.env.PACKAGE_DEEP_HOLD)
   ) {
     await trace({ phase: "held", scanId: env.CODEX_SECURITY_SCAN_ID });
-    await new Promise(() => setInterval(() => {}, 1_000));
+    await new Promise((resolve) => {
+      const timer = setInterval(() => {}, 1_000);
+      const stop = () => {
+        clearInterval(timer);
+        resolve();
+      };
+      if (signal?.aborted) stop();
+      else signal?.addEventListener("abort", stop, { once: true });
+    });
+    return;
   }
   const server = await startRpc(artifacts.command, artifacts.args, {
     cwd: root,
@@ -192,23 +327,14 @@ async function run() {
     await trace({
       phase: layout,
       complete,
-      resumed: args.includes("resume"),
+      resumed,
+      model,
       scanId: env.CODEX_SECURITY_SCAN_ID,
       home: process.env.CODEX_HOME,
       hasApiKey: process.env.CODEX_API_KEY === "synthetic-package-deep-key",
       root,
       args,
     });
-    console.log(
-      JSON.stringify({
-        type: "turn.completed",
-        usage: {
-          input_tokens: 1,
-          cached_input_tokens: 0,
-          output_tokens: 1,
-        },
-      }),
-    );
   } finally {
     await server.close();
   }
