@@ -60,10 +60,6 @@ DIRECTORY_CHANGED_WARNING = (
     "Directory contents changed while the scan was running; "
     "results were saved for the original snapshot."
 )
-TARGET_UNAVAILABLE_WARNING = (
-    "The scan target became unavailable while the scan was running; "
-    "results were saved for the original revision or snapshot."
-)
 GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
@@ -669,8 +665,11 @@ def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: P
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["warnings"] == [TARGET_UNAVAILABLE_WARNING]
-    assert completed["targetWarnings"] == [TARGET_UNAVAILABLE_WARNING]
+    warnings = completed["scan"]["warnings"]
+    assert len(warnings) == 1
+    assert "selected checkout is no longer accessible" in warnings[0]
+    assert "results were saved" in warnings[0]
+    assert completed["targetWarnings"] == warnings
     assert completed["scan"]["findingCount"] == 1
     assert completed["scan"]["remediationAvailable"] is False
     assert (scan_dir / "report.md").is_file()
@@ -966,8 +965,9 @@ def test_completed_findings_are_summarized_and_sorted_by_severity(tmp_path: Path
 
 
 @pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("patch_name", ["remediation.patch", " remediation.patch"])
 def test_completed_finding_triage_and_remediation_persist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line_ending: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line_ending: str, patch_name: str
 ) -> None:
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
@@ -1038,8 +1038,10 @@ def test_completed_finding_triage_and_remediation_persist(
         state_dir, occurrence_id, "closed", "--close-reason", "already_fixed", check=False
     )
     assert "pending remediation operation" in str(pending_close["stderr"])
-    patch_path = scan_dir / "remediation.patch"
+    patch_path = scan_dir / patch_name
     write_remediation_patch(patch_path, newline="\n")
+    if patch_name.startswith(" "):
+        (scan_dir / patch_name.strip()).write_text("different patch contents\n")
     generated = set_remediation(
         state_dir,
         occurrence_id,
@@ -1048,7 +1050,7 @@ def test_completed_finding_triage_and_remediation_persist(
         "1",
         "generated",
         "--patch-path",
-        patch_path.name,
+        patch_name,
         "--patch-digest",
         f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
         "--summary",
@@ -1056,7 +1058,7 @@ def test_completed_finding_triage_and_remediation_persist(
     )["scan"]
     assert generated["findings"][0]["remediationState"]["state"] == "generated"
     assert generated["findings"][0]["remediationState"]["pendingAction"] is None
-    assert generated["findings"][0]["remediationState"]["patchPath"] == patch_path.name
+    assert generated["findings"][0]["remediationState"]["patchPath"] == patch_name
     assert generated["findings"][0]["remediationState"]["patch"] == patch_path.read_bytes().decode()
     assert generated["findings"][0]["remediationState"]["patchStats"] == {
         "additions": 1,
@@ -1219,6 +1221,8 @@ def test_completed_finding_triage_and_remediation_persist(
         "applied",
         "--base-revision",
         "unversioned",
+        "--patch-path",
+        str(generated["findings"][0]["remediationState"]["patchPath"]),
     )["scan"]
     assert applied["findings"][0]["remediationState"]["state"] == "applied"
     verify_token = str(uuid.uuid4())
@@ -1982,6 +1986,76 @@ def test_workbench_marks_nested_git_paths_as_review_changes_unsupported(tmp_path
     assert inspected["targetMetadata"]["isWorktree"] is True
     assert inspected["targetMetadata"]["hasHead"] is True
     assert inspected["targetMetadata"]["reviewChangesSupported"] is False
+
+
+@pytest.mark.parametrize("scope", ["src", " component", "component ", "./ "])
+def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: str) -> None:
+    if os.name == "nt" and scope.endswith(" "):
+        pytest.skip("Windows removes trailing spaces from directory names.")
+    state_dir = tmp_path / "state"
+    target = tmp_path / ("target" if os.name == "nt" else "target ")
+    target.mkdir()
+    if target.name.endswith(" "):
+        (tmp_path / "target").mkdir()
+    (target / scope).mkdir()
+    if scope != scope.strip() and scope.strip() != "./":
+        (target / scope.strip()).mkdir()
+    inspected = run_workbench(state_dir, "inspect-target", "--target-path", str(target))
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(
+        state_dir, workspace_id, "--target-path", inspected["targetPath"], "--scope", scope
+    )
+    assert created["targetPath"] == str(target)
+    assert created["scope"] == scope
+    saved = save_workspace(
+        state_dir, workspace_id, created["targetPath"], created["scope"], "standard"
+    )
+    assert saved["targetPath"] == str(target)
+    assert saved["scope"] == scope
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
+    scan = get_scan(state_dir, started["results"]["scanId"])["scan"]
+    assert scan["targetPath"] == str(target)
+    assert scan["scope"] == scope
+    assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
+
+
+@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000])
+def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
+    state_dir = tmp_path / "state"
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(state_dir, workspace_id, "--target-path", blank, "--scope", blank)
+    assert created["targetPath"] is None
+    assert created["scope"] == "."
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = save_workspace(state_dir, workspace_id, str(target), blank, "standard")
+    assert saved["targetPath"] == str(target)
+    assert saved["scope"] == "."
+
+
+@pytest.mark.parametrize("field", ["scope", "target-path"])
+@pytest.mark.parametrize("leading", [False, True])
+def test_workspace_checks_retained_literal_path_length(tmp_path: Path, field: str, leading: bool):
+    state_dir = tmp_path / "state"
+    value = " " * 5000 + "src" if leading else "src" + " " * 5000
+    result = run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        str(uuid.uuid4()),
+        f"--{field}={value}",
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert result["stderr"] == "Text value must be no longer than 4096 characters.\n"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
+
+
+def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
+    scope = " " * 4093 + "src"
+    created = create_workspace(tmp_path / "state", str(uuid.uuid4()), "--scope", scope)
+    assert created["scope"] == scope
 
 
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:

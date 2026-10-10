@@ -92,6 +92,68 @@ EXPECTED_MIGRATIONS = [
 ]
 
 
+@pytest.mark.parametrize(
+    "code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST]
+)
+def test_state_directory_failure_preserves_original_exception(
+    workbench_api, tmp_path, code, capsys
+):
+    error = OSError(code, os.strerror(code), str(tmp_path / "state"))
+    connect = workbench_api["connect"]
+    with (
+        mock.patch.dict(
+            connect.__globals__,
+            {
+                "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                "create_private_directory": mock.Mock(side_effect=error),
+            },
+        ),
+        pytest.raises(OSError) as failure,
+    ):
+        connect()
+    assert str(failure.value) == str(error)
+    assert failure.value is error
+    detail = capsys.readouterr().err
+    assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+    assert "SQLite journal files" in detail
+    assert "CODEX_SECURITY_STATE_DIR" in detail
+
+
+@pytest.mark.parametrize("during_open", [True, False])
+def test_state_open_or_migration_failure_preserves_original_exception(
+    workbench_api, tmp_path, during_open, capsys
+):
+    error = sqlite3.OperationalError("unable to open database file")
+    connect = workbench_api["connect"]
+    connection = sqlite3.connect(":memory:")
+    try:
+        with (
+            mock.patch.dict(
+                connect.__globals__,
+                {
+                    "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                    "apply_migrations": mock.Mock(side_effect=error),
+                },
+            ),
+            mock.patch.object(
+                sqlite3,
+                "connect",
+                side_effect=error if during_open else None,
+                return_value=connection,
+            ),
+            pytest.raises(sqlite3.OperationalError) as failure,
+        ):
+            connect()
+        assert failure.value is error
+        assert str(error) == "unable to open database file"
+        detail = capsys.readouterr().err
+        assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+        assert "SQLite journal files" in detail
+        assert "CODEX_SECURITY_STATE_DIR" in detail
+    finally:
+        connection.close()
+
+
 def create_historical_database(
     before_version: int,
     extra_migrations: tuple[tuple[int, str, str], ...] = (),
@@ -787,9 +849,7 @@ def test_severity_migration_only_copies_assessments_with_matching_scan_occurrenc
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-@pytest.mark.parametrize("operation", ["migration", "read"])
-def test_severity_work_scales_with_selected_findings(operation: str) -> None:
-    severity = load_script("workbench_severity")
+def test_severity_migration_scales_with_classified_scans() -> None:
     timestamp = "2026-09-01T00:00:00Z"
 
     def instruction_count(scale: int) -> int:
@@ -800,9 +860,7 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
                 "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', ?, ?)",
                 (timestamp, timestamp),
             )
-            scan_count, findings_per_scan = (
-                (scale, 10) if operation == "migration" else (1, scale * 10)
-            )
+            scan_count, findings_per_scan = scale, 10
             for scan in range(scan_count):
                 scan_id = f"scan-{scan}"
                 finding_ids = [f"finding-{scan}-{item}" for item in range(findings_per_scan)]
@@ -843,9 +901,6 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
                         (finding_id, occurrence_id, timestamp),
                     )
             connection.commit()
-            if operation == "read":
-                apply_migrations(connection)
-
             instructions = 0
 
             def progress() -> int:
@@ -855,12 +910,7 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
 
             connection.set_progress_handler(progress, 100)
             try:
-                if operation == "migration":
-                    apply_migrations(connection)
-                else:
-                    selected = list(reversed(finding_ids))
-                    result = severity.assessments(connection, selected, scan_id)
-                    assert [assessment["findingId"] for assessment in result] == selected
+                apply_migrations(connection)
             finally:
                 connection.set_progress_handler(None, 0)
             assert (

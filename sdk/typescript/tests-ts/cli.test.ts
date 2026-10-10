@@ -63,6 +63,7 @@ import {
 } from "./cli-fixtures.js";
 import { runCommand } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { fail, throwing } from "./support/errors.js";
 import {
   createCliTest,
@@ -108,6 +109,14 @@ const profileScenarios = [
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+
+function sampleUsage() {
+  return {
+    input_tokens: 1_250,
+    cached_input_tokens: 200,
+    output_tokens: 30,
+  };
+}
 
 async function multiscanInventory(root: string): Promise<void> {
   const repository = join(root, "repository");
@@ -381,7 +390,6 @@ describe("CLI", () => {
       ["info"],
       ["install-hook"],
       ["init"],
-      ["serve"],
       ["publish", "scan"],
       ["publish", "check"],
       ["import", "github"],
@@ -448,7 +456,7 @@ describe("CLI", () => {
   });
 
   test("marks findings as false positives without starting Codex", async () => {
-    const reason = "  Not reachable from untrusted input.  ";
+    const reason = "  --dry-run is an option in the sample.  ";
     const expectedReason = reason.trim();
     const response: JsonObject = {
       scan: {
@@ -498,8 +506,7 @@ describe("CLI", () => {
         "closed",
         "--close-reason",
         "false_positive",
-        "--note",
-        expectedReason,
+        `--note=${expectedReason}`,
       ],
     ]);
     expect(JSON.parse(stdout.text())).toEqual(response);
@@ -608,6 +615,19 @@ describe("CLI", () => {
       expect(normalize(migrated.hook)).toBe(hook);
       expect(migrated.failOnSeverity).toBe("medium");
       expect(await readFile(hook, "utf8")).toBe(trustedHook);
+      for (const unset of [
+        "",
+        "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n",
+      ]) {
+        await writeFile(hook, trustedHook.replace(/^unset .*\n/m, unset));
+        expect(
+          await migratedHook.run(
+            ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
+            deps,
+          ),
+        ).toBe(0);
+        expect(await readFile(hook, "utf8")).toBe(trustedHook);
+      }
 
       const existingHook = captureCli(main, "stderr");
       expect(await existingHook.run(["install-hook", "."], deps)).toBe(2);
@@ -687,6 +707,7 @@ describe("CLI", () => {
         },
       );
       expect(commit.status, commit.stderr).toBeGreaterThan(0);
+      expect(commit.stderr).not.toContain("GIT_INDEX_FILE is not supported");
       await expect(stat(maliciousMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -701,6 +722,112 @@ describe("CLI", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  (process.platform === "win32" ? test.skip : test)(
+    "installed hook clears Git repository overrides before scan execution",
+    async () => {
+      if (
+        runTestInSubprocess(
+          "./tests-ts/cli.test.ts",
+          "installed hook clears Git repository overrides before scan execution",
+        )
+      )
+        return;
+      const root = await temporaryDirectory("codex-security-hook-handoff-");
+      const repository = join(root, "repository");
+      const executable = join(root, "fixture-runtime.mjs");
+      const record = join(root, "scan-arguments.json");
+      const originalExecPath = Object.getOwnPropertyDescriptor(
+        process,
+        "execPath",
+      )!;
+      try {
+        await mkdir(repository);
+        await writeFile(
+          executable,
+          [
+            `#!${process.execPath}`,
+            `import { validatedGitEnvironment } from ${JSON.stringify(new URL("../src/targets.ts", import.meta.url).href)};`,
+            'import { writeFileSync } from "node:fs";',
+            "validatedGitEnvironment();",
+            `writeFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(3)));`,
+            'if (process.env.FIXTURE_POLICY_FAILURE) { console.error("Synthetic severity threshold exceeded"); process.exit(1); }',
+          ].join("\n"),
+          { mode: 0o700 },
+        );
+        expect(
+          (
+            await runCommand("git", ["-C", repository, "init", "-q"], {
+              timeout: 10000,
+            })
+          ).status,
+        ).toBe(0);
+        Object.defineProperty(process, "execPath", {
+          ...originalExecPath,
+          value: executable,
+        });
+        try {
+          expect(
+            await captureCli(main, "stdout").run(
+              ["install-hook", "."],
+              dependencies({ currentDirectory: repository }),
+            ),
+          ).toBe(0);
+        } finally {
+          Object.defineProperty(process, "execPath", originalExecPath);
+        }
+        const args = [
+          "-C",
+          repository,
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.test",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--allow-empty",
+          "-qm",
+          "fixture",
+        ];
+        const gitDirectory = join(repository, ".git");
+        const environment = {
+          ...process.env,
+          GIT_DIR: gitDirectory,
+          GIT_WORK_TREE: repository,
+          GIT_INDEX_FILE: join(gitDirectory, "index"),
+          GIT_OBJECT_DIRECTORY: join(gitDirectory, "objects"),
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: join(gitDirectory, "objects"),
+          GIT_COMMON_DIR: gitDirectory,
+          GIT_REPLACE_REF_BASE: "refs/replace/",
+        };
+        const clean = await runCommand("git", args, {
+          env: environment,
+          timeout: 10000,
+        });
+        expect(clean.status, clean.stderr).toBe(0);
+        expect(JSON.parse(await readFile(record, "utf8"))).toEqual([
+          "scan",
+          ".",
+          "--working-tree",
+          "--fail-on-severity",
+          "high",
+        ]);
+        const rejected = await runCommand("git", args, {
+          env: { ...environment, FIXTURE_POLICY_FAILURE: "1" },
+          timeout: 10_000,
+        });
+        expect(rejected.status).not.toBe(0);
+        expect(rejected.stderr).toContain(
+          "Synthetic severity threshold exceeded",
+        );
+        expect(rejected.stderr).not.toContain("is not supported");
+      } finally {
+        Object.defineProperty(process, "execPath", originalExecPath);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await temporaryDirectory("codex-security-cli-multiscan-");
@@ -1874,16 +2001,13 @@ describe("CLI", () => {
     ]) {
       const { stderr, runCli } = createCliTest(main, { stderr: isTTY });
 
-      const result = fakeResult([], "complete", {
-        input_tokens: 1_250,
-        cached_input_tokens: 200,
-        output_tokens: 30,
-      });
+      const result = fakeResult([], "complete", sampleUsage());
       const setIntervalMock = mock(fakeInterval);
       const deps = dependencies({
         environment,
         result,
         costUpdates: [result.cost!],
+        onTurn: (_repository, scan) => expect(scan?.onActivity).toBeUndefined(),
         scanProgress: [
           { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
         ],
@@ -2204,11 +2328,7 @@ describe("CLI", () => {
   test("omits stage and file counts from interactive Deep scan dashboards", async () => {
     const { stderr, runCli } = createCliTest(main, { stderr: true });
 
-    const result = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult([], "complete", sampleUsage());
 
     expect(
       await runCli(
@@ -3004,11 +3124,7 @@ describe("CLI", () => {
   test("emits verbose scan lifecycle diagnostics without changing JSON output", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const result = fakeResult(["high"], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult(["high"], "complete", sampleUsage());
     const deps = dependencies({
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_SECRET_123" },
     });
@@ -4031,18 +4147,15 @@ describe("CLI", () => {
   test("prints only the completion summary for default scans", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const result = fakeResult(["high"], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult(["high"], "complete", sampleUsage());
     result.manifest.scan.id = "12345678-abcd-4567-abcd-1234567890ab";
     result.manifest.scan.completedAt = "2026-01-01T00:06:37Z";
 
     expect(await runCli(["scan"], dependencies({ result }))).toBe(0);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Scan complete · 12345678");
-    expect(stderr.text()).not.toContain(result.manifest.scan.id);
+    expect(stderr.text()).toContain(`scans show ${result.manifest.scan.id}`);
+    expect(stderr.text()).toContain(`scans logs ${result.manifest.scan.id}`);
     expect(stderr.text()).toContain(
       [
         `  REPORT    ${result.reportPath}`,
@@ -4429,11 +4542,7 @@ describe("CLI", () => {
   test("shows live stage, files, workers, tokens, and opt-in cost without a budget", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const result = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult([], "complete", sampleUsage());
 
     expect(
       await runCli(
@@ -4500,11 +4609,7 @@ describe("CLI", () => {
     const result = fakeResult(
       ["critical", "high", "high", "informational"],
       "complete",
-      {
-        input_tokens: 1250,
-        cached_input_tokens: 200,
-        output_tokens: 30,
-      },
+      sampleUsage(),
     );
 
     expect(
@@ -4575,11 +4680,7 @@ describe("CLI", () => {
   test("reports a cost range while preserving the short-context scan budget", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const result = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult([], "complete", sampleUsage());
 
     expect(
       await runCli(
@@ -4624,11 +4725,7 @@ describe("CLI", () => {
   test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const cost = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    }).cost!;
+    const cost = fakeResult([], "complete", sampleUsage()).cost!;
 
     expect(
       await runCli(
@@ -4659,11 +4756,7 @@ describe("CLI", () => {
 
   test("accepts a scan at its estimated cost limit", async () => {
     const stdout = captureCli(main, "stdout");
-    const result = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    });
+    const result = fakeResult([], "complete", sampleUsage());
 
     expect(
       await stdout.run(

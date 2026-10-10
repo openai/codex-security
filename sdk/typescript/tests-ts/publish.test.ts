@@ -4,6 +4,8 @@ import { cancelInspection } from "./support/workbench-fakes.js";
 import { resolving } from "./support/promises.js";
 import { nodeCommand } from "./support/shell.js";
 import { randomUUID } from "node:crypto";
+import * as filesystem from "node:fs/promises";
+import { CodexSecurityError } from "../src/errors.js";
 import {
   appendFile,
   mkdir,
@@ -388,6 +390,15 @@ async function writeHandoff(
       )
       .join("\n")}\n`,
     "utf8",
+  );
+}
+
+function publicationHandoffRoot(injected: PublishScanDependencies): string {
+  return join(
+    injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+    "publications",
+    "linear",
+    "handoffs",
   );
 }
 
@@ -801,13 +812,7 @@ describe("direct Linear API publication", () => {
         ),
       ).toBe(false);
 
-      const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
-      const handoffRoot = join(
-        stateDirectory,
-        "publications",
-        "linear",
-        "handoffs",
-      );
+      const handoffRoot = publicationHandoffRoot(injected);
       const handoffDirectories = await readdir(handoffRoot);
       expect(handoffDirectories).toHaveLength(1);
       const handoffRecords = await readJsonLines<Record<string, unknown>>(
@@ -964,13 +969,7 @@ describe("direct Linear API publication", () => {
       counts: { findings: 3, created: 1, failed: 2 },
     });
 
-    const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
-    const handoffRoot = join(
-      stateDirectory,
-      "publications",
-      "linear",
-      "handoffs",
-    );
+    const handoffRoot = publicationHandoffRoot(injected);
     const handoffDirectories = await readdir(handoffRoot);
     expect(handoffDirectories).toHaveLength(1);
     const handoff = await readFile(
@@ -1060,13 +1059,7 @@ describe("direct Linear API publication", () => {
           ...(skipExisting ? { skipped: 1 } : {}),
         },
       });
-      const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
-      const handoffRoot = join(
-        stateDirectory,
-        "publications",
-        "linear",
-        "handoffs",
-      );
+      const handoffRoot = publicationHandoffRoot(injected);
       const handoffDirectories = await readdir(handoffRoot);
       expect(handoffDirectories).toHaveLength(1);
       expect(
@@ -2740,12 +2733,7 @@ describe("connected Linear publication", () => {
       publishScanInternal(publication.scanDirectory, OPTIONS, injected),
     ).rejects.toThrow("The Codex executable could not be resolved.");
 
-    const handoffRoot = join(
-      injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
-      "publications",
-      "linear",
-      "handoffs",
-    );
+    const handoffRoot = publicationHandoffRoot(injected);
     expect(
       await stat(handoffRoot).then(
         () => false,
@@ -2754,32 +2742,166 @@ describe("connected Linear publication", () => {
     ).toBe(true);
   });
 
-  test("removes source-bearing handoffs when the Codex executable cannot be spawned", async () => {
-    const publication = preparedPublication();
-    const persisted = mock(copyPublishedIssues);
-    const missingExecutable = join(
-      tmpdir(),
-      `codex-security-missing-executable-${randomUUID()}`,
-    );
-    const injected = dependencies(publication, {
-      resolveCodex: () => ({ command: missingExecutable }),
-      runCodex: undefined,
-      recordPublishedIssues: persisted,
-    });
+  test.each(process.platform === "win32" ? ["ENOENT"] : ["ENOENT", "EACCES"])(
+    "removes source-bearing handoffs when Codex spawn fails with %s",
+    async (code) => {
+      const publication = preparedPublication();
+      const persisted = mock(copyPublishedIssues);
+      const executable = join(await temporaryDirectory(), "unavailable-codex");
+      if (code === "EACCES")
+        await writeFile(executable, "synthetic", { mode: 0o600 });
+      const injected = dependencies(publication, {
+        resolveCodex: () => ({ command: executable }),
+        runCodex: undefined,
+        recordPublishedIssues: persisted,
+      });
+      let failure: unknown;
+      try {
+        await publishScanInternal(publication.scanDirectory, OPTIONS, injected);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(CodexSecurityError);
+      const cause = (failure as Error).cause as NodeJS.ErrnoException;
+      expect(cause.code).toBe(code);
+      expect((failure as Error).message).toContain(cause.message);
+      expect((failure as Error).message).toContain(executable);
+      const handoffRoot = publicationHandoffRoot(injected);
+      expect(await readdir(handoffRoot)).toEqual([]);
+      expect(persisted).not.toHaveBeenCalled();
+    },
+  );
 
-    await expect(
-      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
-    ).rejects.toThrow("Could not start Codex for Linear publication.");
-
-    const handoffRoot = join(
-      injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
-      "publications",
-      "linear",
-      "handoffs",
-    );
-    expect(await readdir(handoffRoot)).toEqual([]);
-    expect(persisted).not.toHaveBeenCalled();
-  });
+  test.each([
+    ["initial handoff-only read", 1, false, false],
+    ["later handoff-only read", 2, false, false],
+    ["initial connector-only read", 1, true, false],
+    ["later connector-only read", 2, true, false],
+    ["initial read and event-write failure", 1, true, true],
+    ["later read and event-write failure", 2, true, true],
+  ] as const)(
+    "preserves recovery evidence after %s fails",
+    async (_name, failedRead, hasEvents, eventWriteFails) => {
+      const publication = preparedPublication();
+      const persisted = mock(copyPublishedIssues);
+      const writeReceipt = mock(async (_receipt: PublishScanResult) => {});
+      const originalReadFile = filesystem.readFile;
+      const code = failedRead === 1 ? "EACCES" : "EIO";
+      const failure = Object.assign(
+        new Error(`${code}: could not read synthetic handoff`),
+        { code },
+      );
+      const event = issueEvent(publication.issues[0]!);
+      const writeFailure = new Error(
+        "Synthetic connector-event storage unavailable.",
+      );
+      let handoffFile = "",
+        reads = 0;
+      let restore = () => {};
+      let rejected: unknown;
+      try {
+        await publishScanInternal(
+          publication.scanDirectory,
+          OPTIONS,
+          dependencies(publication, {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              if (!hasEvents) {
+                await writeHandoff(input, [
+                  handoffRecord(publication, publication.issues[0]!, {
+                    identifier: "SEC-RECOVERABLE",
+                  }),
+                ]);
+              }
+              const read = spyOn(filesystem, "readFile").mockImplementation(
+                (async (...args: Parameters<typeof originalReadFile>) => {
+                  if (args[0] === handoffFile && ++reads === failedRead)
+                    throw failure;
+                  return originalReadFile(...args);
+                }) as typeof originalReadFile,
+              );
+              restore = () => {
+                read.mockRestore();
+              };
+              return {
+                exitCode: 0,
+                stdout: hasEvents ? event : "",
+                stderr: "",
+              };
+            },
+            ...(eventWriteFails
+              ? {
+                  writeEvents: async () => {
+                    throw writeFailure;
+                  },
+                }
+              : {}),
+            recordPublishedIssues: persisted,
+            writeReceipt,
+          }),
+        );
+      } catch (error) {
+        rejected = error;
+      } finally {
+        restore();
+      }
+      expect(rejected).toBeInstanceOf(CodexSecurityError);
+      expect((rejected as Error).message).toContain(failure.message);
+      expect((rejected as Error).message).toContain(handoffFile);
+      expect((rejected as Error).message).toContain(
+        "recover it before retrying",
+      );
+      expect(reads).toBe(failedRead === 1 && hasEvents ? 2 : failedRead);
+      const handoffContent = await readFile(handoffFile, "utf8");
+      if (hasEvents) {
+        if (failedRead === 1) {
+          expect(await readJsonLines(handoffFile)).toMatchObject([
+            {
+              findingId: publication.issues[0]!.findingId,
+              issueIdentifier: `SEC-${publication.issues[0]!.findingId.slice(8)}`,
+            },
+          ]);
+        } else {
+          expect(handoffContent).toBe("");
+        }
+        if (eventWriteFails) {
+          expect((rejected as Error).message).toContain(writeFailure.message);
+          expect((rejected as Error).message).toContain(
+            "Could not preserve Linear connector-event evidence",
+          );
+        } else {
+          const eventsFile = await publicationEventsFile(handoffFile);
+          expect(await readFile(eventsFile, "utf8")).toBe(`${event}\n`);
+          expect((rejected as Error).message).toContain(eventsFile);
+        }
+      } else {
+        expect(handoffContent).toContain("SEC-RECOVERABLE");
+        expect(
+          (await readdir(dirname(handoffFile))).filter((name) =>
+            name.startsWith("events-"),
+          ),
+        ).toEqual([]);
+      }
+      expect(
+        await readFile(join(dirname(handoffFile), "publication.json"), "utf8"),
+      ).toContain("unsafe(input)");
+      const causes: unknown[] = [];
+      for (let cause = rejected; cause instanceof Error; cause = cause.cause)
+        causes.push(cause);
+      expect(causes).toContain(failure);
+      if (failedRead === 1) {
+        expect(writeReceipt).toHaveBeenCalled();
+        for (const [receipt] of writeReceipt.mock.calls) {
+          expect(receipt.indeterminate).toBe(true);
+          expect(receipt.warnings?.join(" ")).toContain(failure.message);
+        }
+        expect(persisted).toHaveBeenCalledTimes(hasEvents ? 1 : 0);
+      } else {
+        expect(writeReceipt).not.toHaveBeenCalled();
+        expect(persisted).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   test("retains handoffs when an injected publisher rejects after a possible mutation", async () => {
     const publication = preparedPublication();
@@ -2792,7 +2914,18 @@ describe("connected Linear publication", () => {
             identifier: "SEC-RECOVERABLE",
           }),
         ]);
-        throw new Error("The publisher failed after a possible mutation.");
+        throw new CodexSecurityError(
+          "The publisher failed after a possible mutation.",
+          {
+            cause: Object.assign(
+              new Error("EACCES: synthetic publisher spawn failed"),
+              {
+                syscall: "spawn synthetic-codex",
+                code: "EACCES",
+              },
+            ),
+          },
+        );
       },
     });
 
@@ -3247,9 +3380,13 @@ describe("connected Linear publication", () => {
     );
   });
 
-  test("does not allow a failing progress observer to stop issue publication", async () => {
+  test.each([
+    ["throws", throwing("The optional progress display failed.")],
+    ["rejects", rejecting("The optional progress display failed.")],
+    ["never settles", () => new Promise<void>(() => {})],
+  ] as const)("ignores optional progress that %s", async (_name, observer) => {
     const publication = preparedPublication();
-    const onProgress = mock(throwing("The optional progress display failed."));
+    const onProgress = mock(observer);
     const result = await publishScanInternal(
       publication.scanDirectory,
       {

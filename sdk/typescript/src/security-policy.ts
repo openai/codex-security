@@ -1013,6 +1013,7 @@ export async function securityPolicyDiff(
     "    if not line.endswith('\\n'): sys.stdout.buffer.write(b'\\n\\\\ No newline at end of file\\n')",
   ].join("\n");
   const diff = await new Promise<string>((resolve, reject) => {
+    let inputError: Error | undefined;
     const child = execFile(
       interpreter,
       ["-I", "-c", script],
@@ -1021,9 +1022,26 @@ export async function securityPolicyDiff(
         maxBuffer: Infinity,
         signal,
       },
-      (error, stdout) => (error === null ? resolve(stdout) : reject(error)),
+      (error, stdout) => {
+        const failure = error ?? inputError;
+        if (failure === undefined) resolve(stdout);
+        else reject(failure);
+      },
     );
-    child.stdin!.on("error", reject);
+    const releaseFailedInput = () => {
+      if (inputError === undefined) return;
+      if (child.exitCode === null && child.signalCode === null) {
+        if (child.pid !== undefined) reject(inputError);
+        return;
+      }
+      child.stdout!.destroy();
+      child.stderr!.destroy();
+    };
+    child.once("exit", releaseFailedInput);
+    child.stdin!.on("error", (error: Error) => {
+      inputError = error;
+      releaseFailedInput();
+    });
     child.stdin!.end(
       JSON.stringify([
         draft.previousContent ?? "",

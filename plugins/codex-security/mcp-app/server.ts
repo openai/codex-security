@@ -7,7 +7,6 @@ import { isRecord as isJsonObject } from "./src/record.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -24,14 +23,11 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
-import { createScanArtifactContext } from "./src/artifact-context.js";
-import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
   AsyncLock,
-  startOrJoinDeepScanCoordinator,
 } from "./src/deep-scan/registry.js";
-import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
+import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveDeepWorkerParentSandbox,
@@ -39,28 +35,20 @@ import {
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
 import type { DeepScanRunState } from "./src/deep-scan/types.js";
+import { WORKBENCH_PYTHON } from "./src/server/workbench-process.js";
 
 const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
-const CONFIGURED_WORKBENCH_STATE_DIR =
-  process.env.CODEX_SECURITY_STATE_DIR?.trim();
 const PLUGIN_ROOT =
   process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
-const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
-  "resolve-scan-root",
-  "inspect-target",
-  "inspect-setup",
-  "save-artifact",
-  "read-artifact",
-]);
-
-let fallbackWorkbenchStateDir: Promise<string> | undefined;
-let persistentWorkbenchStateSucceeded = false;
-const workbenchStateSelectionLock = new AsyncLock();
-
 const userContextSchema = z.string().trim().min(1);
 const editableUserContextSchema = z.string().trim();
+const pathSchema = z
+  .string()
+  .min(1)
+  .max(4096)
+  .refine((value) => value.trim().length > 0, "Path must not be blank.");
 const verifiedAccessGrantSchema = z
   .strictObject({
     level: z.enum(["tac1", "tac2", "tac3", "government"]),
@@ -107,18 +95,6 @@ const daybreakEntitlementContextSchema = z.object({
 });
 
 async function scanRoot(): Promise<string> {
-  if (
-    !CONFIGURED_SCAN_ROOT &&
-    !CONFIGURED_WORKBENCH_STATE_DIR &&
-    !persistentWorkbenchStateSucceeded &&
-    !fallbackWorkbenchStateDir
-  ) {
-    // Select the workbench state before choosing its default artifact directory.
-    await runWorkbench(["list-scans", "--limit", "1"]);
-  }
-  if (!CONFIGURED_SCAN_ROOT && fallbackWorkbenchStateDir) {
-    return join(await fallbackWorkbenchStateDir, "scans");
-  }
   const result = await runWorkbench([
     "resolve-scan-root",
     ...optionalArg("--scan-root", CONFIGURED_SCAN_ROOT),
@@ -160,11 +136,7 @@ const openSchema = {
     .enum(["diff", "standard", "deep"])
     .optional()
     .describe("Initial scan mode inferred from the user's request."),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  scope: pathSchema
     .optional()
     .describe(
       "Optional directory inside targetPath. Use '.' or omit it for the whole target. Target-relative paths are preferred; absolute paths inside targetPath are normalized.",
@@ -176,11 +148,7 @@ const openSchema = {
     .describe(
       "Existing workspace ID to reopen without changing its setup. When provided, omit all other fields.",
     ),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema
     .optional()
     .describe("Optional resolved local target path."),
   targetSummary: z
@@ -216,18 +184,10 @@ const startPromptOnlyScanSchema = {
     .describe(
       "Prompt-driven scan mode. Deep Scan uses start_codex_security_deep_scan instead.",
     ),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Directory inside targetPath. Use '.' for the whole target."),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Resolved local target path."),
+  scope: pathSchema.describe(
+    "Directory inside targetPath. Use '.' for the whole target.",
+  ),
+  targetPath: pathSchema.describe("Resolved local target path."),
   targetSummary: z
     .string()
     .trim()
@@ -240,17 +200,8 @@ const startPromptOnlyScanSchema = {
     .describe("Optional security focus supplied by the user."),
 };
 const startHeadlessStandardScanSchema = {
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Resolved local target path."),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema.describe("Resolved local target path."),
+  scope: pathSchema
     .optional()
     .describe(
       "Optional directory inside targetPath. Omit it or use '.' for the whole target.",
@@ -329,22 +280,22 @@ const requestUserInputSchema = {
   ),
 };
 const targetInspectionSchema = {
-  targetPath: z.string().trim().min(1).max(4096),
+  targetPath: pathSchema,
 };
 const submissionSchema = {
   diffTarget: diffTargetSchema.optional(),
   mode: z.enum(["diff", "standard", "deep"]),
-  scope: z.string().trim().min(1).max(4096),
+  scope: pathSchema,
   sessionId: z.string().uuid(),
-  targetPath: z.string().trim().min(1).max(4096),
+  targetPath: pathSchema,
   targetSummary: z.string().trim().max(2400).optional(),
   userContext: editableUserContextSchema.optional(),
 };
 const setupInspectionSchema = {
   diffTarget: diffTargetSchema.optional(),
   mode: z.enum(["diff", "standard", "deep"]),
-  scope: z.string().trim().min(1).max(4096),
-  targetPath: z.string().trim().min(1).max(4096),
+  scope: pathSchema,
+  targetPath: pathSchema,
 };
 const scanSchema = { scanId: z.string().uuid() };
 const startDeepScanSchema = {
@@ -353,20 +304,12 @@ const startDeepScanSchema = {
     .uuid()
     .optional()
     .describe("Existing app-created or previously returned Deep Scan ID."),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema
     .optional()
     .describe(
       "Resolved local target path for a first terminal or headless Deep Scan call.",
     ),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  scope: pathSchema
     .optional()
     .describe(
       "Scope inside targetPath. Deep Scan currently requires the whole target.",
@@ -519,16 +462,11 @@ const findingRemediationSchema = {
     .string()
     .regex(/^sha256:[a-f0-9]{64}$/)
     .optional(),
-  patchPath: z.string().trim().min(1).max(4096).optional(),
+  patchPath: pathSchema.optional(),
   requestId: z.string().uuid(),
   state: z.enum(["generated", "applied", "verifying", "verified", "failed"]),
   summary: z.string().trim().max(2400).optional(),
   verificationSummary: z.string().trim().max(2400).optional(),
-};
-const findingRemediationRequestSchema = {
-  actionToken: z.string().uuid(),
-  occurrenceId: occurrenceIdSchema,
-  requestId: z.string().uuid(),
 };
 const findingRemediationActionRequestSchema = {
   action: z.enum(["apply", "verify"]),
@@ -807,12 +745,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Fallback for interactive Codex Security workflows when the host-native request_user_input tool is unavailable. Presents one to three non-sensitive multiple-choice questions through standard MCP form elicitation and waits for the user's response. Never call this tool in headless, automation, or other non-interactive sessions.",
       inputSchema: requestUserInputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: { ...readingAnnotations, idempotentHint: false },
       _meta: modelActionMeta,
     },
     async ({ questions }, extra) => {
@@ -939,8 +872,7 @@ export function createCodexSecurityServer(): McpServer {
         "inspect-setup",
         "--target-path",
         targetPath,
-        "--scope",
-        scope,
+        `--scope=${scope}`,
         "--mode",
         mode,
         ...diffTargetArgs(diffTarget),
@@ -979,8 +911,7 @@ export function createCodexSecurityServer(): McpServer {
             sessionId,
             "--target-path",
             targetPath,
-            "--scope",
-            scope,
+            `--scope=${scope}`,
             "--mode",
             mode,
             ...definedArg("--target-summary", targetSummary),
@@ -1090,64 +1021,18 @@ export function createCodexSecurityServer(): McpServer {
           }
           const immediate = deepScanTerminalResult(begun);
           if (immediate) return { begun, immediate };
-          const started = await startOrJoinDeepScanCoordinator({
+          const started = await startDeepScanEngine({
             run: begun,
             registry: deepScanCoordinators,
-            options: {
-              store: deepScanStore,
-              executor: new CodexSdkWorkerExecutor({
-                ...modelSettings,
-                parentSandbox,
-                artifactContext: {
-                  pluginRoot: PLUGIN_ROOT,
-                  repoRoot: begun.targetPath,
-                  scanId: begun.scanId,
-                  scope: begun.scope,
-                  pythonCommand: await resolvePythonCommand(),
-                },
-              }),
-              pluginRoot: PLUGIN_ROOT,
-              log: logDeepScanEvent,
-              handoffClaimToken,
-              threadId,
-              onComplete: async (draft, signal) => {
-                const context = await createScanArtifactContext(
-                  begun.scanId,
-                  runWorkbench,
-                  {
-                    requireRunning: true,
-                    requireClaim: true,
-                    handoffClaimToken,
-                    pluginRoot: PLUGIN_ROOT,
-                  },
-                );
-                await recordCodexSecurityScanDraftViaWorkbench(
-                  context,
-                  {
-                    ...draft,
-                    ...(handoffClaimToken === undefined
-                      ? {}
-                      : { handoffClaimToken }),
-                  },
-                  runWorkbench,
-                  signal,
-                );
-              },
-              onStopped: async (run) => {
-                await runWorkbench([
-                  "preserve-scan-results",
-                  "--scan-id",
-                  run.scanId,
-                  "--thread-id",
-                  threadId,
-                  ...optionalArg("--claim-token", handoffClaimToken),
-                  ...optionalArg(
-                    "--coordinator-generation",
-                    run.coordinatorGeneration?.toString(),
-                  ),
-                ]);
-              },
-            },
+            store: deepScanStore,
+            runWorkbench,
+            ...modelSettings,
+            parentSandbox,
+            pythonCommand: await resolvePythonCommand(),
+            pluginRoot: PLUGIN_ROOT,
+            log: logDeepScanEvent,
+            handoffClaimToken,
+            threadId,
           });
           return { begun, ...started };
         })
@@ -1678,8 +1563,7 @@ export function createCodexSecurityServer(): McpServer {
         "fail-scan",
         "--scan-id",
         scanId,
-        "--message",
-        message,
+        `--message=${message}`,
         ...optionalArg("--claim-token", handoffClaimToken),
       ]);
       deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
@@ -1721,7 +1605,7 @@ export function createCodexSecurityServer(): McpServer {
       title: "Request Codex Security Finding Remediation",
       description:
         "App-only. Queue a completed finding for Codex remediation before sending the host a generate or regenerate request.",
-      inputSchema: findingRemediationRequestSchema,
+      inputSchema: findingRemediationClaimSchema,
       annotations: writingAnnotations,
       _meta: appMeta,
     },
@@ -1769,105 +1653,69 @@ export function createCodexSecurityServer(): McpServer {
       ),
   );
 
-  server.registerTool(
-    "claim_codex_security_finding_remediation_resend",
+  for (const { name, title, description, annotations, command, message } of [
     {
+      name: "claim_codex_security_finding_remediation_resend",
       title: "Claim Codex Security Finding Remediation Resend",
       description:
         "App-only. Atomically take ownership of an unowned or stale remediation host request before resending it.",
-      inputSchema: findingRemediationClaimSchema,
       annotations: writingAnnotations,
-      _meta: appMeta,
+      command: "claim-finding-remediation-resend",
+      message: "Claimed the local Codex Security finding remediation resend.",
     },
-    async ({ occurrenceId, requestId, actionToken }) =>
-      scanActionResult(
-        await runWorkbench([
-          "claim-finding-remediation-resend",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
-        "Claimed the local Codex Security finding remediation resend.",
-      ),
-  );
-
-  server.registerTool(
-    "release_codex_security_finding_remediation_claim",
     {
+      name: "release_codex_security_finding_remediation_claim",
       title: "Release Codex Security Finding Remediation Claim",
       description:
         "App-only. Release a locally owned remediation host request after message delivery fails.",
-      inputSchema: findingRemediationClaimSchema,
       annotations: writingAnnotations,
-      _meta: appMeta,
+      command: "release-finding-remediation-claim",
+      message: "Released the local Codex Security finding remediation claim.",
     },
-    async ({ occurrenceId, requestId, actionToken }) =>
-      scanActionResult(
-        await runWorkbench([
-          "release-finding-remediation-claim",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
-        "Released the local Codex Security finding remediation claim.",
-      ),
-  );
-
-  server.registerTool(
-    "cancel_codex_security_finding_remediation_request",
     {
+      name: "cancel_codex_security_finding_remediation_request",
       title: "Cancel Codex Security Finding Remediation Request",
       description:
         "App-only. Roll back an owned remediation request after the user declines its host follow-up.",
-      inputSchema: findingRemediationClaimSchema,
       annotations: destructiveAnnotations,
-      _meta: appMeta,
+      command: "cancel-finding-remediation-request",
+      message: "Canceled the local Codex Security finding remediation request.",
     },
-    async ({ occurrenceId, requestId, actionToken }) =>
-      scanActionResult(
-        await runWorkbench([
-          "cancel-finding-remediation-request",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
-        "Canceled the local Codex Security finding remediation request.",
-      ),
-  );
-
-  server.registerTool(
-    "mark_codex_security_finding_remediation_delivered",
     {
+      name: "mark_codex_security_finding_remediation_delivered",
       title: "Mark Codex Security Finding Remediation Delivered",
       description:
         "App-only. Seal host-message delivery ownership before Codex starts a remediation worker.",
-      inputSchema: findingRemediationClaimSchema,
       annotations: writingAnnotations,
-      _meta: appMeta,
-    },
-    async ({ occurrenceId, requestId, actionToken }) =>
-      scanActionResult(
-        await runWorkbench([
-          "mark-finding-remediation-delivered",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
+      command: "mark-finding-remediation-delivered",
+      message:
         "Marked the local Codex Security finding remediation request as delivered.",
-      ),
-  );
+    },
+  ]) {
+    server.registerTool(
+      name,
+      {
+        title,
+        description,
+        inputSchema: findingRemediationClaimSchema,
+        annotations,
+        _meta: appMeta,
+      },
+      async ({ occurrenceId, requestId, actionToken }) =>
+        scanActionResult(
+          await runWorkbench([
+            command,
+            "--occurrence-id",
+            occurrenceId,
+            "--request-id",
+            requestId,
+            "--action-token",
+            actionToken,
+          ]),
+          message,
+        ),
+    );
+  }
 
   server.registerTool(
     "set_codex_security_finding_remediation",
@@ -2036,8 +1884,7 @@ async function startPromptOnlyScan(
       threadId,
       "--target-path",
       targetPath,
-      "--scope",
-      scope,
+      `--scope=${scope}`,
       "--mode",
       mode,
       ...optionalArg("--model", modelSettings.model),
@@ -2069,8 +1916,7 @@ async function startHeadlessStandardScan(
       threadId,
       "--target-path",
       input.targetPath,
-      "--scope",
-      input.scope ?? ".",
+      `--scope=${input.scope ?? "."}`,
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
       ...optionalArg("--target-summary", input.targetSummary),
@@ -2312,20 +2158,25 @@ function logDeepScanEvent(event: {
   );
 }
 
-async function runWorkbench(
+interface WorkbenchOptions {
+  isolatedPython?: boolean;
+}
+
+export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
+  options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbenchWithStateSelection(pythonCommand, args, input);
+    return await executeWorkbench(pythonCommand, args, input, options);
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
       : undefined;
     if (launchError) {
-      throw new Error(launchError);
+      throw new Error(launchError, { cause: error });
     }
     if (isExecError(error) && error.stderr.trim()) {
       throw new Error(error.stderr.trim(), { cause: error });
@@ -2334,83 +2185,12 @@ async function runWorkbench(
   }
 }
 
-async function executeWorkbenchWithStateSelection(
-  pythonCommand: string,
-  args: string[],
-  input?: string | Buffer,
-): Promise<JsonObject> {
-  if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
-  if (CONFIGURED_WORKBENCH_STATE_DIR) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
-  if (fallbackWorkbenchStateDir) {
-    return await executeWorkbench(
-      pythonCommand,
-      args,
-      await fallbackWorkbenchStateDir,
-      input,
-    );
-  }
-  if (persistentWorkbenchStateSucceeded) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
-  return await workbenchStateSelectionLock.run(async () => {
-    if (fallbackWorkbenchStateDir) {
-      return await executeWorkbench(
-        pythonCommand,
-        args,
-        await fallbackWorkbenchStateDir,
-        input,
-      );
-    }
-    if (persistentWorkbenchStateSucceeded) {
-      return await executeWorkbench(pythonCommand, args, undefined, input);
-    }
-    try {
-      const result = await executeWorkbench(
-        pythonCommand,
-        args,
-        undefined,
-        input,
-      );
-      persistentWorkbenchStateSucceeded = true;
-      return result;
-    } catch (error) {
-      if (!isUnwritableSqliteOpenError(error)) throw error;
-      const fallbackStateDir = await pinFallbackWorkbenchStateDir();
-      console.error(
-        JSON.stringify({
-          component: "codex_security_workbench",
-          event: "state_fallback_pinned",
-          reason: "persistent_sqlite_unwritable",
-        }),
-      );
-      return await executeWorkbench(
-        pythonCommand,
-        args,
-        fallbackStateDir,
-        input,
-      );
-    }
-  });
-}
-
 async function executeWorkbench(
   pythonCommand: string,
   args: string[],
-  stateDir?: string,
   input?: string | Buffer,
+  options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
-  const userContextIndex = args.indexOf("--user-context");
-  const userContext =
-    userContextIndex === -1 ? undefined : args[userContextIndex + 1];
-  const workbenchArgs = [...args];
-  if (userContextIndex !== -1) {
-    workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
-  }
-  const workbenchInput = input ?? userContext;
   const timeout = [
     "begin-deep-scan",
     "cancel-scan",
@@ -2441,25 +2221,30 @@ async function executeWorkbench(
     : 30_000;
   const execution = execFileAsync(
     pythonCommand,
-    [workbenchScriptPath(), ...workbenchArgs],
+    [
+      ...(options.isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      "-c",
+      WORKBENCH_PYTHON,
+      workbenchScriptPath(),
+    ],
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,
-      env: stateDir
-        ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
-        : process.env,
+      env: process.env,
       encoding: "utf8" as const,
       // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
       maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
       timeout,
     },
   );
-  if (workbenchInput !== undefined) {
-    execution.child.stdin!.on("error", () => {
-      // The workbench may exit before consuming stdin; surface its process error.
-    });
-    execution.child.stdin!.end(workbenchInput);
-  }
+  execution.child.stdin!.on("error", () => {
+    // The workbench may exit before consuming stdin; surface its process error.
+  });
+  // Match native argv's UTF-8 encoding while framing NUL separately from stdin.
+  execution.child.stdin!.write(
+    `${JSON.stringify(args.map((argument) => argument.toWellFormed()))}\n`,
+  );
+  execution.child.stdin!.end(input);
   const { stdout } = await execution.catch((error: unknown) => {
     if (
       error instanceof Error &&
@@ -2482,27 +2267,16 @@ async function executeWorkbench(
   return result;
 }
 
-async function pinFallbackWorkbenchStateDir(): Promise<string> {
-  fallbackWorkbenchStateDir ??= (async () => {
-    const stateDir = CONFIGURED_SCAN_ROOT
-      ? join(await scanRoot(), "workbench-state")
-      : await fs.mkdtemp(join(tmpdir(), "codex-security-state-"));
-    await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
-    return stateDir;
-  })();
-  return await fallbackWorkbenchStateDir;
-}
-
 function workbenchScriptPath(): string {
   return join(PLUGIN_ROOT, "scripts", "workbench_db.py");
 }
 
 function optionalArg(name: string, value: string | undefined): string[] {
-  return value ? [name, value] : [];
+  return value ? [`${name}=${value}`] : [];
 }
 
 function definedArg(name: string, value: string | undefined): string[] {
-  return value === undefined ? [] : [name, value];
+  return value === undefined ? [] : [`${name}=${value}`];
 }
 
 function optionalNumberArg(name: string, value: number | undefined): string[] {
@@ -2637,14 +2411,4 @@ function deepScanFailureMessage(run: DeepScanRunState): string {
     "Do not call complete_codex_security_scan in this response.",
     "Do not start a replacement Deep Scan, call cancel for this terminal scan, claim a successful or no-findings scan, satisfy a successful-scan output schema, or emit benchmark JSON.",
   ].join("\n");
-}
-
-function isUnwritableSqliteOpenError(error: unknown): boolean {
-  return /sqlite3\.OperationalError:\s*unable to open database file/i.test(
-    isExecError(error)
-      ? error.stderr
-      : error instanceof Error
-        ? error.message
-        : "",
-  );
 }

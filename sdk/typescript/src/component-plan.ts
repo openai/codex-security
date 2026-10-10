@@ -1,8 +1,6 @@
-import { execFile as execFileCallback } from "node:child_process";
 import { lstat, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { promisify } from "node:util";
 import { z } from "incur";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
@@ -14,13 +12,12 @@ import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import {
   nullIfMissingFile,
   enclosingGitWorktreeRoot,
+  gitOutput,
   normalizeRepository,
   normalizeTarget,
   validatedGitEnvironment,
 } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
 
-const execFile = promisify(execFileCallback);
 /** @internal */
 export const componentPlanSchema = z.strictObject({
   components: z
@@ -269,16 +266,16 @@ async function inventoryFiles(
   signal?: AbortSignal,
 ): Promise<string[]> {
   signal?.throwIfAborted();
-  if (await enclosingGitWorktreeRoot(repository, signal)) {
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  if (
+    await enclosingGitWorktreeRoot(repository, signal, {
+      requireIfPresent: true,
+    })
+  ) {
     validatedGitEnvironment();
-    const git = await resolveTrustedExecutable("git", process.env, repository);
-    if (git === null)
-      throw new Error("Git is required to inventory this repository.");
-    const { stdout } = await execFile(
-      git.executable,
+    const stdout = await gitOutput(
+      repository,
       [
-        "-C",
-        repository,
         "ls-files",
         "--cached",
         "--others",
@@ -288,15 +285,22 @@ async function inventoryFiles(
         "--",
         ".",
       ],
-      { env: git.environment, signal, maxBuffer: Infinity },
+      signal,
+      undefined,
+      undefined,
+      "buffer",
     );
     const files: string[] = [];
-    for (const path of stdout.split("\0").filter(Boolean)) {
+    for (const path of stdout.toString("latin1").split("\0").filter(Boolean)) {
       signal?.throwIfAborted();
-      const metadata = await lstat(join(repository, path)).catch(
-        nullIfMissingFile,
-      );
-      if (metadata?.isFile()) files.push(join(repository, path));
+      const bytes = Buffer.from(path, "latin1");
+      const metadata = await lstat(
+        Buffer.from(
+          join(Buffer.from(repository).toString("latin1"), path),
+          "latin1",
+        ),
+      ).catch(nullIfMissingFile);
+      if (metadata?.isFile()) files.push(join(repository, utf8.decode(bytes)));
     }
     return files.length === 0
       ? []
@@ -307,11 +311,27 @@ async function inventoryFiles(
   while (pending.length > 0) {
     signal?.throwIfAborted();
     const directory = pending.pop()!;
-    for (const entry of await readdir(join(repository, directory), {
-      withFileTypes: true,
-    })) {
-      if (entry.name === ".git") continue;
-      const path = directory ? `${directory}/${entry.name}` : entry.name;
+    const directoryPath = join(repository, directory);
+    // Bun's buffer encoding omits Dirent metadata even with withFileTypes.
+    const entries = process.versions["bun"]
+      ? await readdir(directoryPath, {
+          withFileTypes: true,
+          encoding: process.platform === "win32" ? "utf8" : "latin1",
+        })
+      : await readdir(directoryPath, {
+          withFileTypes: true,
+          encoding: "buffer",
+        });
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isFile()) continue;
+      const name =
+        typeof entry.name === "string"
+          ? process.platform === "win32"
+            ? entry.name
+            : utf8.decode(Buffer.from(entry.name, "latin1"))
+          : utf8.decode(entry.name);
+      if (name === ".git") continue;
+      const path = directory ? `${directory}/${name}` : name;
       if (entry.isDirectory()) pending.push(path);
       else if (entry.isFile()) files.push(path);
     }

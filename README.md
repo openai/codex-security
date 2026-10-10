@@ -88,6 +88,11 @@ cs scan . --mode deep
 Use `cs --help` to browse commands, or `cs scan --help`
 for scan options, cost limits, and patching after a scan.
 
+For an application spread across repositories, see
+[review one system across repositories](sdk/typescript/docs/cli.md#review-one-system-across-repositories).
+Use [bulk scans](sdk/typescript/docs/cli.md#bulk-scans) for independent repository
+reviews in one resumable campaign.
+
 ## TypeScript SDK
 
 Install the package locally in your TypeScript project:
@@ -198,23 +203,13 @@ which keeps results and authentication between runs. See the
 The [workflow runner](docker/README.md#workflow-runner) runs individual CLI stages
 in containers and can connect to a separately deployed findings service.
 
-## Findings service (preview)
+## Findings storage and deduplication
 
-Store findings, browse them in a dashboard, and review potential duplicates.
-Start the local service with:
-
-```bash
-cs serve
-```
-
-Publish a completed scan with `publish scan --to custom`, then use `dedupe` to
-review potential duplicates and save accepted groups. Point both commands at the
-service with `--findings-url`. The [service guide](sdk/typescript/docs/findings-service.md)
-covers setup, publishing, deduplication, and Docker deployment.
-
-The API has no built-in authentication. Imports send complete finding JSON to
-the configured embeddings endpoint and need an embedding API key, even after
-ChatGPT login.
+The [findings guide](sdk/typescript/docs/findings-service.md) covers local
+storage, deduplication, and compatibility with independently operated endpoints
+through `publish scan --to custom` and explicit `--findings-url`. The local
+`serve` command and browser dashboard have been removed; existing databases and
+scan artifacts remain available.
 
 ## Other providers
 
