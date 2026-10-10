@@ -368,6 +368,34 @@
   },
   {
     "version": 44,
+    "name": "version local finding embedding inputs",
+    "statements": ["ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"]
+  },
+  {
+    "version": 45,
+    "name": "separate local and service embedding caches",
+    "statements": [
+      "CREATE TABLE local_finding_embeddings (\n    finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,\n    model TEXT NOT NULL,\n    vector_json TEXT NOT NULL,\n    cache_key TEXT NOT NULL\n);",
+      "INSERT INTO local_finding_embeddings\n    SELECT finding_id, model, vector_json, cache_key FROM finding_embeddings\n    WHERE cache_key IS NOT NULL;",
+      "DELETE FROM finding_embeddings WHERE cache_key IS NOT NULL;"
+    ]
+  },
+  {
+    "version": 46,
+    "name": "invalidate local embeddings when finding bodies change",
+    "statements": [
+      "CREATE TRIGGER invalidate_local_finding_embedding\nAFTER UPDATE OF details_json ON findings\nWHEN OLD.details_json IS NOT NEW.details_json\nBEGIN\n    DELETE FROM local_finding_embeddings WHERE finding_id = NEW.id;\nEND;"
+    ]
+  },
+  {
+    "version": 47,
+    "name": "snapshot deep scan discovery context",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
+    ]
+  },
+  {
+    "version": 48,
     "name": "persist authorized source excerpt scopes",
     "statements": ["ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;"]
   }

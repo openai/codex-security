@@ -531,7 +531,10 @@ describe("CLI workbench", () => {
       const calls: Array<readonly string[]> = [];
       const stdout = captureCli(main, "stdout");
       const deps = dependencies({
-        environment: { CODEX_SECURITY_STATE_DIR: state },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: state,
+          CODEX_HOME: join(state, "codex-home"),
+        },
         onWorkbench: (args): JsonObject => {
           calls.push(args);
           if (args[0] === "list-scans") {
@@ -1499,61 +1502,90 @@ describe("CLI workbench", () => {
     expect(onTurn.mock.lastCall?.[1]?.parentScanId).toBe(scanId);
   });
 
+  test.each([null, "", "unknown", 1])(
+    "rejects an invalid saved severity policy: %j",
+    async (failOnSeverity) => {
+      const stderr = captureCli(main, "stderr");
+      const onRun = mock();
+      const saved = savedRecipe();
+      expect(
+        await stderr.run(
+          ["scans", "rerun", saved.scanId],
+          dependencies({
+            onRun,
+            onWorkbench: () => ({
+              ...saved,
+              recipe: { ...saved.recipe, failOnSeverity },
+            }),
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain("invalid severity policy");
+      expect(onRun).not.toHaveBeenCalled();
+    },
+  );
+
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     const onConfig = mock<(config: CodexSecurityConfig) => void>();
     const onTurn = mock<(repository: string, options: ScanOptions) => void>();
-    const knowledgeBasePath = resolve("/original/security.md");
-    const savedConfig = {
-      approval_policy: "on-request",
-      model: "gpt-original",
-      model_reasoning_effort: "high",
-      features: { goals: true },
-      agents: { max_threads: 6 },
-    };
-    expect(
-      await runCapturedCli(
-        main,
-        ["scans", "rerun", "scan-original"],
-        dependencies({
-          onConfig,
-          onTurn,
-          onWorkbench: () => ({
-            scanId: "scan-original",
-            recipe: {
-              repository: "/original/repository",
-              target: { kind: "paths", paths: ["src", "packages/core"] },
-              mode: "deep",
-              pluginVersion: "1.2.3",
-              failOnSeverity: "high",
-              knowledgeBasePaths: [knowledgeBasePath],
-              deepScan: {
-                workers: 2,
-                subagents: 0,
-                stopAfterNoNew: 3,
-                maxDiscoveryRuns: 10,
-                maxTimeHours: 1.5,
+    const knowledgeRoot = await temporaryDirectory("rerun-knowledge-");
+    try {
+      const knowledgeBasePath = join(knowledgeRoot, "security.md");
+      await writeFile(knowledgeBasePath, "Synthetic architecture context.\n");
+      const savedConfig = {
+        approval_policy: "on-request",
+        model: "gpt-original",
+        model_reasoning_effort: "high",
+        features: { goals: true },
+        agents: { max_threads: 6 },
+      };
+      expect(
+        await runCapturedCli(
+          main,
+          ["scans", "rerun", "scan-original"],
+          dependencies({
+            onConfig,
+            onTurn,
+            onWorkbench: () => ({
+              scanId: "scan-original",
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "paths", paths: ["src", "packages/core"] },
+                mode: "deep",
+                pluginVersion: "1.2.3",
+                failOnSeverity: "high",
+                knowledgeBasePaths: [knowledgeBasePath],
+                deepScan: {
+                  workers: 2,
+                  subagents: 0,
+                  stopAfterNoNew: 3,
+                  maxDiscoveryRuns: 10,
+                  maxTimeHours: 1.5,
+                },
+                config: savedConfig,
               },
-              config: savedConfig,
-            },
+            }),
           }),
-        }),
-      ),
-    ).toBe(0);
-    expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual(savedConfig);
-    expect(onTurn.mock.lastCall?.[0]).toBe("/original/repository");
-    expect(onTurn.mock.lastCall?.[1]).toMatchObject({
-      target: ["src", "packages/core"],
-      mode: "deep",
-      parentScanId: "scan-original",
-      expectedPluginVersion: "1.2.3",
-      failureSeverity: "high",
-      knowledgeBasePaths: [knowledgeBasePath],
-      workers: 2,
-      subagents: 0,
-      stopAfterNoNew: 3,
-      maxDiscoveryRuns: 10,
-      maxTimeHours: 1.5,
-    });
+        ),
+      ).toBe(0);
+      expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual(savedConfig);
+      expect(onTurn.mock.lastCall?.[0]).toBe("/original/repository");
+      expect(onTurn.mock.lastCall?.[1]).toMatchObject({
+        target: ["src", "packages/core"],
+        mode: "deep",
+        parentScanId: "scan-original",
+        expectedPluginVersion: "1.2.3",
+        failureSeverity: "high",
+        knowledgeBasePaths: [knowledgeBasePath],
+        workers: 2,
+        subagents: 0,
+        stopAfterNoNew: 3,
+        maxDiscoveryRuns: 10,
+        maxTimeHours: 1.5,
+      });
+    } finally {
+      await rm(knowledgeRoot, { recursive: true, force: true });
+    }
 
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =
       [
