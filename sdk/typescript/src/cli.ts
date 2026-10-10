@@ -7567,9 +7567,7 @@ function patchChangeSources(
     const source = relative(repository, resolve(root, changes[index++]!));
     if (!/^[RC]/u.test(status)) continue;
     const destination = relative(repository, resolve(root, changes[index++]!));
-    if (
-      [...selected].some((file) => !isOutsidePath(relative(file, destination)))
-    ) {
+    if (files.some((file) => !isOutsidePath(relative(file, destination)))) {
       transferred.add(source);
       if (status.startsWith("R")) {
         if (isOutsidePath(source))
