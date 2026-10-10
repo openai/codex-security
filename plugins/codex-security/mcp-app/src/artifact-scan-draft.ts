@@ -2,7 +2,7 @@ import type { JsonObject } from "./types.js";
 import { isRecord as isObject, isNonEmptyString } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
@@ -21,6 +21,7 @@ import {
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { requireRegularFile } from "./deep-scan/artifacts.js";
 
 export interface ScanDraftInput {
   scanId: string;
@@ -221,6 +222,35 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
+  // Record host-resolved shared ownership in the first immutable checkpoint.
+  const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
+  const scanRoot = dirname(dirname(dirname(dirname(dirname(context.root)))));
+  for (const surface of parsed.coverage.surfaces as JsonObject[]) {
+    if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
+    const shared: string[] = [];
+    for (const value of (surface.receiptRefs as string[] | undefined) ?? []) {
+      const ref = posix.normalize(value);
+      if (ref.startsWith(activePrefix)) continue;
+      try {
+        await requireRegularFile(join(context.root, ref), context.root, true);
+        continue;
+      } catch {
+        // Shared receipts are resolved only when no worker-local receipt exists.
+      }
+      try {
+        await requireRegularFile(join(scanRoot, ref), scanRoot, true);
+        shared.push(ref);
+      } catch {
+        // Unavailable references retain the existing draft validation behavior.
+      }
+    }
+    if (shared.length > 0) {
+      surface.provenance = {
+        ...(isObject(surface.provenance) ? surface.provenance : {}),
+        scanReceiptRefs: exactUnion(shared),
+      };
+    }
+  }
   const scope = context.scope;
   let scoped =
     scope && scope !== "."
@@ -291,6 +321,25 @@ export async function saveScanDraftCheckpoint(
   }
 }
 
+function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
+  const content = (surface: JsonObject) => {
+    const { provenance, receiptRefs, ...fields } = surface;
+    const { scanReceiptRefs: _hostRefs, ...authoredProvenance } = isObject(
+      provenance,
+    )
+      ? provenance
+      : {};
+    return {
+      ...fields,
+      receiptRefs: ((receiptRefs as string[] | undefined) ?? []).map((ref) =>
+        posix.normalize(ref),
+      ),
+      provenance: authoredProvenance,
+    };
+  };
+  return isDeepStrictEqual(content(left), content(right));
+}
+
 async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
@@ -326,6 +375,47 @@ async function preserveScanDraft(
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
+  if (context.layout === "worker" && sources.length > 0) {
+    // Retained observations keep saved ownership; fresh observations use this worker.
+    const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
+    for (const surface of result.coverage.surfaces as JsonObject[]) {
+      if (!Array.isArray(surface.receiptRefs)) continue;
+      const previous = sources
+        .flatMap((source) => source.coverage.surfaces as JsonObject[])
+        .find((saved) => sameAuthoredSurface(surface, saved));
+      const shared = new Set<string>(
+        isObject(previous?.provenance) &&
+          Array.isArray(previous.provenance.scanReceiptRefs)
+          ? previous.provenance.scanReceiptRefs.filter(
+              (ref): ref is string => typeof ref === "string",
+            )
+          : [],
+      );
+      if (shared.size > 0) {
+        surface.provenance = {
+          ...(isObject(surface.provenance) ? surface.provenance : {}),
+          scanReceiptRefs: [...shared],
+        };
+      }
+      surface.receiptRefs = await Promise.all(
+        (surface.receiptRefs as string[]).map(async (value) => {
+          const ref = posix.normalize(value);
+          if (shared.has(ref)) return ref;
+          try {
+            await requireRegularFile(
+              join(context.root, ref),
+              context.root,
+              true,
+            );
+            return `${activePrefix}${ref}`;
+          } catch {
+            // Archived and shared references retain their resolved source context.
+            return ref;
+          }
+        }),
+      );
+    }
+  }
   // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(
     (source) => source.coverage.deferred as JsonObject[],
@@ -511,6 +601,36 @@ async function preserveScanDraft(
   });
 
   for (const source of sources) {
+    for (const previous of source.coverage.surfaces as JsonObject[]) {
+      const current = (result.coverage.surfaces as JsonObject[]).find(
+        (surface) =>
+          coverageEntryPresent([surface], previous, ambiguousDeferredIds) &&
+          (sameAuthoredSurface(surface, previous) ||
+            resolvedSurfaces.has(previous)),
+      );
+      if (!current || !isObject(previous.provenance)) continue;
+      const inherited = previous.provenance.scanReceiptRefs;
+      if (!Array.isArray(inherited)) continue;
+      const refs = new Set(
+        ((current.receiptRefs as string[] | undefined) ?? []).map((ref) =>
+          posix.normalize(ref),
+        ),
+      );
+      const retained = inherited.filter(
+        (ref) => typeof ref === "string" && refs.has(ref),
+      );
+      if (retained.length === 0) continue;
+      const provenance = isObject(current.provenance) ? current.provenance : {};
+      current.provenance = {
+        ...provenance,
+        scanReceiptRefs: exactUnion(
+          Array.isArray(provenance.scanReceiptRefs)
+            ? provenance.scanReceiptRefs
+            : [],
+          retained,
+        ),
+      };
+    }
     const deferred = result.coverage.deferred as JsonObject[];
     const dispositions = (result.coverage.surfaces as JsonObject[]).filter(
       (surface) =>
@@ -580,10 +700,15 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
-        ...candidateRows
+        ...dispositions
           .filter((item) => !keepsGenericWork(item))
           .map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
+    );
+    const pendingIds = new Set(
+      deferred
+        .filter((item) => !keepsGenericWork(item))
+        .map((item) => item.candidateId ?? item.id),
     );
     const previousCoverage = {
       ...source.coverage,
@@ -602,7 +727,9 @@ async function preserveScanDraft(
         return (
           (keepsGenericWork(surface) ||
             typeof candidateId !== "string" ||
-            !resolvedIds.has(candidateId)) &&
+            (!resolvedIds.has(candidateId) &&
+              (surface.disposition === "needs_follow_up" ||
+                !pendingIds.has(candidateId)))) &&
           !coverageEntryPresent(
             result.coverage.surfaces as unknown[],
             surface,
@@ -1270,6 +1397,9 @@ async function readArchivedWorkerCheckpoints(
   }
 
   const archived: SavedScanDraft[] = [];
+  const archivePrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/attempts/`;
+  const activePrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/output/`;
+  const scanRoot = dirname(dirname(dirname(dirname(canonicalWorkerRoot))));
   const attempts = (
     await fs.readdir(canonicalAttemptsRoot, { withFileTypes: true })
   )
@@ -1358,9 +1488,57 @@ async function readArchivedWorkerCheckpoints(
         Number(right.result) - Number(left.result) ||
         right.name.localeCompare(left.name),
     );
-    archived.push(
-      ...drafts.map((draft) => ({ ...draft, attempt: attempt.name })),
-    );
+    for (const draft of drafts) {
+      // Archive moves receipts with their attempt; preserve the checkpoint bytes.
+      for (const surface of draft.input.coverage.surfaces as JsonObject[]) {
+        if (!Array.isArray(surface.receiptRefs)) continue;
+        surface.receiptRefs = await Promise.all(
+          (surface.receiptRefs as string[]).map(async (value) => {
+            const ref = posix.normalize(value);
+            if (ref.startsWith(archivePrefix)) return ref;
+            if (
+              isObject(surface.provenance) &&
+              Array.isArray(surface.provenance.scanReceiptRefs) &&
+              surface.provenance.scanReceiptRefs.includes(ref)
+            )
+              return ref;
+            if (!ref.startsWith(activePrefix)) {
+              try {
+                await requireRegularFile(
+                  join(attemptRoot, ref),
+                  attemptRoot,
+                  true,
+                );
+                return `${archivePrefix}${attempt.name}/${ref}`;
+              } catch {
+                // An explicit shared receipt remains at the scan root.
+              }
+              try {
+                await requireRegularFile(join(scanRoot, ref), scanRoot, true);
+                const provenance = isObject(surface.provenance)
+                  ? surface.provenance
+                  : {};
+                surface.provenance = {
+                  ...provenance,
+                  scanReceiptRefs: [
+                    ...new Set([
+                      ...((provenance.scanReceiptRefs as
+                        string[] | undefined) ?? []),
+                      ref,
+                    ]),
+                  ],
+                };
+                return ref;
+              } catch {
+                // Worker-output receipts moved with this archived attempt.
+              }
+            }
+            return `${archivePrefix}${attempt.name}/${ref.startsWith(activePrefix) ? ref.slice(activePrefix.length) : ref}`;
+          }),
+        );
+      }
+      archived.push({ ...draft, attempt: attempt.name });
+    }
   }
   return archived;
 }
@@ -1526,6 +1704,11 @@ function deferredEntryPresent(
         isObject(previous) &&
         !ambiguousGenericEntry(current, ambiguousIds) &&
         !ambiguousGenericEntry(previous, ambiguousIds) &&
+        !(
+          typeof current.id === "string" &&
+          typeof previous.id === "string" &&
+          current.id !== previous.id
+        ) &&
         [previous.id, previous.candidateId].some(
           (id) =>
             typeof id === "string" &&
@@ -1547,6 +1730,13 @@ function coverageEntryPresent(
         ? { question: previous.trim() }
         : structuredClone(previous);
     if (isObject(current) && isObject(original)) {
+      // Distinct records can describe the same candidate's separate proof gaps.
+      if (
+        typeof current.id === "string" &&
+        typeof original.id === "string" &&
+        current.id !== original.id
+      )
+        return false;
       if (
         ambiguousGenericEntry(current, ambiguousIds) ||
         ambiguousGenericEntry(original, ambiguousIds)
@@ -1774,6 +1964,7 @@ function parsePersistedCheckpoint(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
+  delete compatible.previousParentCheckpoints;
   if (isObject(compatible.scope)) {
     delete compatible.scope.includePaths;
     delete compatible.scope.excludePaths;

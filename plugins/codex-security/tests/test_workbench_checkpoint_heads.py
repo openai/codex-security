@@ -58,7 +58,7 @@ def test_late_head_changes_require_explicit_recovery(
     tmp_path: Path, selection: str, has_result: bool
 ) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
     reopened = write_checkpoint(result.parent / "checkpoints", pending)
     completed = write_checkpoint(result.parent / "checkpoints", closed)
@@ -78,7 +78,7 @@ def test_late_head_changes_require_explicit_recovery(
     assert any("/checkpoint-heads/" in path for path in frozen)
     assert not any(path.endswith("checkpoint-head.json") for path in frozen)
     assert not any(
-        row["id"] == "review"
+        row["id"] == "review" or row.get("provenance", {}).get("sourceId") == "review"
         for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
     )
     assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
@@ -92,7 +92,13 @@ def test_late_head_changes_require_explicit_recovery(
     recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert recovered["scan"]["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert any(row["id"] == "review" for row in coverage["deferred"]) is (selection == "reopened")
+    expected = {"id": "review", "reason": "Review remains."}
+    if has_result:
+        expected.update(
+            id=f"{worker_id}-attempt-1-deferred-1",
+            provenance={"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+        )
+    assert (expected in coverage["deferred"]) is (selection == "reopened")
     published = manifest_path.read_bytes()
     scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert manifest_path.read_bytes() == published
@@ -927,8 +933,16 @@ def test_parent_head_selection_matches_frozen_publication_retry(
         json.loads((scan_dir / "findings.json").read_text()),
         json.loads((scan_dir / "coverage.json").read_text()),
     )
+    projected_child_work = {
+        **child_work,
+        "id": f"{worker_id}-attempt-1-deferred-1",
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": child_work["id"]},
+    }
     for findings, coverage in (first[0], replay):
-        assert child_work in coverage["deferred"]
+        child_rows = [
+            row for row in coverage["deferred"] if row.get("reason") == child_work["reason"]
+        ]
+        assert child_rows == [projected_child_work]
         if evidence == "deferred":
             assert (parent_work in coverage["deferred"]) is (head_time <= 100)
         else:
@@ -1123,3 +1137,73 @@ def test_older_attempt_selected_head_cannot_supersede_current_result(tmp_path):
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     for result in (first, replay):
         assert result[2]["surfaces"] == [current]
+
+
+@pytest.mark.parametrize("prior_owner", ["shared", "worker"])
+@pytest.mark.parametrize("collision", [False, True])
+def test_generic_worker_closeout_preserves_receipt_owners(
+    tmp_path: Path, checkpoint_scan, prior_owner: str, collision: bool
+) -> None:
+    scan_id, _, _, binding = checkpoint_scan
+    output = tmp_path / "artifacts" / "deep_discovery" / "workers" / "worker" / "output"
+    archived = output.parent / "attempts" / "attempt-01"
+    output.mkdir(parents=True)
+    archived.mkdir(parents=True)
+    previous_ref = "artifacts/review.txt" if collision else "artifacts/previous.txt"
+    previous_path = (tmp_path if prior_owner == "shared" else archived) / previous_ref
+    previous_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_path.write_text("Synthetic previous evidence.\n")
+    current_ref = "artifacts/review.txt" if collision else "artifacts/current.txt"
+    current_path = output / current_ref
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text("Synthetic current evidence.\n")
+    surface = {
+        "id": "api",
+        "label": "API",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [previous_ref],
+    }
+    pending = saved_draft(
+        scan_id,
+        surfaces=[surface],
+        deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+    )
+    prior_checkpoint = write_checkpoint(archived / "checkpoints", pending)
+    os.utime(prior_checkpoint, ns=(100, 100))
+    (archived / "result.json").write_text(json.dumps(pending))
+    os.utime(archived / "result.json", ns=(100, 100))
+    closed = saved_draft(
+        scan_id,
+        surfaces=[{**surface, "disposition": "no_issue_found", "receiptRefs": [current_ref]}],
+        closures=[{"id": "review", "reason": "Review completed."}],
+        complete=True,
+    )
+    current_checkpoint = write_checkpoint(output / "checkpoints", closed)
+    os.utime(current_checkpoint, ns=(200, 200))
+    select(output, current_checkpoint, 300)
+    (output / "result.json").write_text(json.dumps(closed))
+    os.utime(output / "result.json", ns=(200, 200))
+    worker = {
+        **saved_discovery_worker(output, "worker", 2),
+        "status": "succeeded",
+        "result_manifest_path": str(output / "result.json"),
+    }
+    source_bytes = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [worker], [], stopped=True, reason="interrupted"
+    )
+    expected = {
+        previous_path.relative_to(tmp_path).as_posix(),
+        current_path.relative_to(tmp_path).as_posix(),
+    }
+    for result in (first, replay_saved_results(saved, first, tmp_path, scan_id, binding, [worker])):
+        assert result is not None
+        recovered = [row for row in result[2]["surfaces"] if row["label"] == "API"]
+        assert len(recovered) == 1
+        assert recovered[0]["disposition"] == "no_issue_found"
+        assert set(recovered[0]["receiptRefs"]) == expected
+        assert {(tmp_path / ref).read_text() for ref in recovered[0]["receiptRefs"]} == {
+            "Synthetic previous evidence.\n",
+            "Synthetic current evidence.\n",
+        }
+    assert all(path.read_bytes() == contents for path, contents in source_bytes.items())

@@ -223,10 +223,13 @@ async function testReducerValidation(root: string) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = await readJson(resultPath);
+  const { sourceCoverage, ...persistedResult } = validatedSnapshot.result;
+  assert.ok(sourceCoverage);
+  assert.equal(sourceCoverage.completeness, "unknown");
   assert.deepEqual(
-    validatedSnapshot.result,
+    persistedResult,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "accepted findings retain the legacy persisted shape while coverage stays host-owned",
   );
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [

@@ -100,6 +100,8 @@ def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int
     return {
         "id": worker_id,
         "kind": "discovery",
+        "status": "running",
+        "merge_state": "buffered",
         "artifact_dir": str(output),
         "result_manifest_path": None,
         "attempt": attempt,

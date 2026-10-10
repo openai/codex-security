@@ -37,7 +37,7 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, latest_pending: bool
 ) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
     old, latest = (closed, pending) if latest_pending else (pending, closed)
     result.write_text(json.dumps(old))
@@ -73,7 +73,18 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
         "standard-worker-thread",
     )
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert any(row["id"] == "review" for row in coverage["deferred"]) is latest_pending
+    pending_rows = [row for row in coverage["deferred"] if row.get("reason") == "Review remains."]
+    assert pending_rows == (
+        [
+            {
+                **pending["coverage"]["deferred"][0],
+                "id": f"{worker_id}-attempt-1-deferred-1",
+                "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+            }
+        ]
+        if latest_pending
+        else []
+    )
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
         == frozen
@@ -86,7 +97,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_recovery: bool, layout: str
 ) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
     result.write_text(json.dumps(closed))
     os.utime(result, ns=(100, 100))
@@ -122,7 +133,16 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     )
     assert len(published) == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert any(row["id"] == "review" for row in coverage["deferred"])
+    expected = pending["coverage"]["deferred"][0]
+    if layout == "worker":
+        expected = {
+            **expected,
+            "id": f"{worker_id}-attempt-1-deferred-1",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+        }
+    assert [row for row in coverage["deferred"] if row.get("reason") == "Review remains."] == [
+        expected
+    ]
     sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
     assert published[0].relative_to(scan_dir).as_posix() in sources
     assert any("/checkpoint-heads/" in f"/{path}" for path in sources)

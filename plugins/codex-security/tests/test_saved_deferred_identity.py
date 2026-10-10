@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -346,7 +347,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     outcome: str,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     candidate = {
         "id": "caller-review",
         "reason": "Caller needs validation.",
@@ -402,7 +403,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     observed = 300 if rejected_here else 200
     os.utime(head, ns=(observed, observed))
     if outcome == "other_worker":
-        _, other_result = accepted_standard_worker(
+        other_worker_id, other_result = accepted_standard_worker(
             state, codex_home, scan_dir, scan_id, name="other-worker"
         )
         other_result.write_text(
@@ -413,17 +414,52 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     first_coverage, recovered = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
+    expected_surface_id = f"{worker_id}-attempt-1-surface-1"
+    expected_candidate = {
+        **candidate,
+        "id": f"{worker_id}-attempt-1-deferred-1",
+        "surfaceIds": [expected_surface_id],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": candidate["id"]},
+    }
+    if "candidateId" in candidate:
+        expected_candidate["candidateId"] = (
+            f"{worker_id}-attempt-1-candidate-{hashlib.sha256(candidate['candidateId'].encode()).hexdigest()}"
+        )
+        expected_candidate["provenance"]["candidateId"] = candidate["candidateId"]
     for coverage in (first_coverage, recovered):
-        api_surfaces = [row for row in coverage["surfaces"] if row["id"] == "api"]
+        api_surfaces = [
+            row
+            for row in coverage["surfaces"]
+            if row.get("provenance") == {"workerId": worker_id, "attempt": 1, "sourceId": "api"}
+        ]
         assert len(api_surfaces) == 1
+        actual_surface_id = api_surfaces[0]["id"]
+        assert isinstance(actual_surface_id, str)
         expected_disposition = "no_issue_found" if rejected_here else "needs_follow_up"
         assert api_surfaces[0]["disposition"] == expected_disposition
+        assert api_surfaces[0] == {
+            **pending_surface,
+            "id": actual_surface_id,
+            "disposition": expected_disposition,
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "api"},
+        }
         assert not any(row["id"] == generic["id"] for row in coverage["deferred"])
-        assert (
-            any(row["id"] == candidate["id"] for row in coverage["deferred"]) is not rejected_here
-        )
+        assert any(row == expected_candidate for row in coverage["deferred"]) is not rejected_here
         if outcome != "unresolved":
-            assert rejection in coverage["surfaces"]
+            owner = other_worker_id if outcome == "other_worker" else worker_id
+            index = 1 if outcome == "other_worker" else 2
+            expected_rejection = {
+                **rejection,
+                "id": f"{owner}-attempt-1-surface-{index}",
+                "candidateId": f"{owner}-attempt-1-candidate-{hashlib.sha256(rejection['candidateId'].encode()).hexdigest()}",
+                "provenance": {
+                    "workerId": owner,
+                    "attempt": 1,
+                    "sourceId": rejection["id"],
+                    "candidateId": rejection["candidateId"],
+                },
+            }
+            assert expected_rejection in coverage["surfaces"]
     assert recovered["surfaces"] == first_coverage["surfaces"]
     assert recovered["deferred"] == first_coverage["deferred"]
 
@@ -510,7 +546,7 @@ def test_unnamed_observation_does_not_replace_saved_context(
     observation: str,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     broad = {
         "id": "caller-review",
         "reason": "Review the caller paths.",
@@ -548,6 +584,12 @@ def test_unnamed_observation_does_not_replace_saved_context(
     first_coverage, replay = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
+    if layout == "worker" and observation == "explicit-update":
+        expected = {
+            **expected,
+            "id": f"{worker_id}-attempt-1-deferred-1",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": broad["id"]},
+        }
     for coverage in (first_coverage, replay):
         pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
         assert expected in pending

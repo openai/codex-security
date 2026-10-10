@@ -1893,13 +1893,32 @@ try {
   const partialDeferredFinding = {
     summary: "Partial evidence captured before validation.",
   };
+  const partialDeferredDraft = {
+    ...workerInput,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [],
+      deferred: [
+        {
+          id: "first-gap",
+          candidateId: finding.provenance.candidateId,
+          reason: "Validation is pending.",
+          finding: partialDeferredFinding,
+        },
+        {
+          id: "second-gap",
+          candidateId: finding.provenance.candidateId,
+          reason: "The second boundary also needs validation.",
+        },
+      ],
+    },
+  };
   await recordCodexSecurityWorkerScanDraft(
     partialDeferredContext,
-    partialWorkerInput({
-      candidateId: finding.provenance.candidateId,
-      reason: "Validation is pending.",
-      finding: partialDeferredFinding,
-    }),
+    partialDeferredDraft,
   );
   await recordCodexSecurityWorkerScanDraft(partialDeferredContext, workerInput);
   const resolvedPartialDeferred = await readJson(
@@ -1910,6 +1929,31 @@ try {
     resolvedPartialDeferred.findings[0].provenance.previousFindings,
     [partialDeferredFinding],
   );
+  assert.deepEqual(resolvedPartialDeferred.coverage.deferred, []);
+
+  for (const disposition of ["rejected", "not_applicable"]) {
+    const dispositionRoot = path.join(root, `${disposition}-deferred-worker`);
+    await mkdir(dispositionRoot);
+    const dispositionContext = { ...workerContext, root: dispositionRoot };
+    await recordCodexSecurityWorkerScanDraft(
+      dispositionContext,
+      partialDeferredDraft,
+    );
+    await recordCodexSecurityWorkerScanDraft(dispositionContext, {
+      ...workerInput,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{ ...rejection, disposition }],
+      },
+    });
+    const resolved = JSON.parse(
+      await readFile(path.join(dispositionRoot, "result.json"), "utf8"),
+    );
+    assert.deepEqual(resolved.coverage.deferred, []);
+    assert.equal(resolved.coverage.completeness, "complete");
+    assert.equal(resolved.coverage.surfaces[0].disposition, disposition);
+  }
 
   const recorded = await recordCodexSecurityScanDraft(context, input);
   assert.deepEqual(recorded, {
