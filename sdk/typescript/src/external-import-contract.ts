@@ -17,6 +17,11 @@ const ajv = new Ajv2020({
 });
 const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
   description: 65536,
+  snippet: 65536,
+  remediation_instructions: 65536,
+  expected: 65536,
+  actual: 65536,
+  file_url: 2048,
   path: 2048,
   url: 2048,
   manifest_path: 2048,
@@ -34,7 +39,10 @@ function validateModelStrings(input: unknown): void {
   for (const [field, value] of Object.entries(input)) {
     if (field === "source_data") continue;
     if (typeof value === "string") {
-      if (!value.trim() || value.includes("\0"))
+      if (
+        (!value.trim() && !["snippet", "expected", "actual"].includes(field)) ||
+        value.includes("\0")
+      )
         throw new Error(
           `${field} must be nonempty and contain no NUL characters.`,
         );
@@ -61,6 +69,25 @@ function validator<T>(name: keyof typeof schema.$defs) {
     $ref: `#/$defs/${name}`,
   });
   return (input: unknown): T => {
+    // The backend omits a null details wrapper while retaining all legacy
+    // defaults. Match that wire representation for saved requests and readback.
+    const omitNullDetails = (value: unknown): void => {
+      if (value !== null && typeof value === "object") {
+        const fields = value as Record<string, unknown>;
+        if (fields["details"] === null) delete fields["details"];
+      }
+    };
+    if (name === "ImportedFindingEvidence") omitNullDetails(input);
+    else if (input && typeof input === "object") {
+      if (name === "SourceReport" && "evidence" in input)
+        omitNullDetails(input.evidence);
+      if (
+        name === "FindingImportRequest" &&
+        "items" in input &&
+        Array.isArray(input.items)
+      )
+        for (const item of input.items) omitNullDetails(item?.evidence);
+    }
     if (!check(input))
       throw new Error(`${name}: ${ajv.errorsText(check.errors)}`);
     validateModelStrings(input);
@@ -93,8 +120,22 @@ export function validateExternalEvidence(
     )
       throw new Error("Locations must use repository-relative paths.");
   }
-  if (result.url !== null && result.url !== undefined) {
-    const url = result.url
+  const endLine = result.details?.code?.end_line;
+  if (endLine !== null && endLine !== undefined) {
+    const firstLine = result.locations?.[0]?.line;
+    if (firstLine === null || firstLine === undefined || endLine < firstLine)
+      throw new Error(
+        "The code end line requires a first source location line and cannot precede it.",
+      );
+  }
+  const urls = [
+    result.url,
+    result.details?.repository.url,
+    result.details?.file_url,
+  ];
+  for (const value of urls) {
+    if (value === null || value === undefined) continue;
+    const url = value
       .replace(/[\t\r\n]/gu, "")
       .replace(/^[\u0000-\u0020]+/u, "");
     const authority = /^https?:\/\/([^/?#]+)/iu.exec(url)?.[1];

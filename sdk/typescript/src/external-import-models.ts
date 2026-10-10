@@ -44,12 +44,40 @@ export type SourceScanId = string | null;
  */
 export type ImageDigests = string[];
 export type SourceUpdatedAt = number | null;
+export type Kind = "sast" | "secret" | "iac";
+export type Url1 = string;
+export type Id1 = string | null;
+export type Name1 = string | null;
+export type SourceStatus = string | null;
+export type ScannerOrigin = string | null;
+export type ScannerVerdict = string | null;
+export type Id2 = string | null;
+export type ShortId = string | null;
+export type Name2 = string | null;
+/**
+ * @maxItems 100
+ */
+export type WeaknessIds = string[];
+export type RemediationInstructions = string | null;
+export type EndLine = number | null;
+export type Snippet = string | null;
+export type Type = string | null;
+export type Confidence = string | null;
+export type ValidationStatus = string | null;
+export type IsEncrypted = boolean | null;
+export type IsManaged = boolean | null;
+export type IntroducedCommit = string | null;
+export type Platform = string | null;
+export type CloudPlatform = string | null;
+export type Expected = string | null;
+export type Actual = string | null;
+export type FileUrl = string | null;
 /**
  * @minItems 1
  * @maxItems 100
  */
 export type Items = FindingImportItem[];
-export type Id1 = string;
+export type Id3 = string;
 export type Object = "security.finding_import";
 export type Actor = string;
 export type CreatedAt = number;
@@ -69,17 +97,17 @@ export type Code =
 export type Message = string;
 export type Results = FindingImportResult[];
 export type Object1 = "page";
-export type Id2 = string;
+export type Id4 = string;
 export type Object2 = "security.repository";
 export type RepoConnectorId1 = string;
-export type Url1 = string;
+export type Url2 = string;
 export type DefaultBranch = string | null;
 export type ResetMarker1 = string;
 export type ImportEnvironmentId = string | null;
 export type Data = ImportRepository[];
 export type HasMore = boolean;
 export type Next = string | null;
-export type Id3 = string;
+export type Id5 = string;
 export type Object3 = "security.source_report";
 export type Origin = "imported";
 export type RepoId = string;
@@ -90,13 +118,13 @@ export type SourceFindingId1 = string;
 export type ObservationId1 = string;
 export type Version1 = number;
 export type State = "not_assessed";
-export type Id4 = string;
+export type Id6 = string;
 export type Actor1 = string;
 export type CreatedAt1 = number;
 export type CreatedAt2 = number;
 export type UpdatedAt = number;
 export type Object4 = "page";
-export type Id5 = string;
+export type Id7 = string;
 export type Object5 = "security.source_report_summary";
 export type Origin1 = "imported";
 export type RepoId1 = string;
@@ -162,6 +190,7 @@ export interface ImportedFindingEvidence {
   image_digests?: ImageDigests;
   source_updated_at?: SourceUpdatedAt;
   source_data?: SourceData;
+  details?: ImportedFindingDetails | null;
 }
 export interface ImportedPackage {
   name: Name;
@@ -177,8 +206,59 @@ export interface ImportedLocation {
 export interface SourceData {
   [k: string]: unknown;
 }
+/**
+ * Typed repository evidence; vendor state is not a Codex assessment.
+ */
+export interface ImportedFindingDetails {
+  kind: Kind;
+  repository: ImportedRepositoryReference;
+  source_status?: SourceStatus;
+  scanner_origin?: ScannerOrigin;
+  scanner_verdict?: ScannerVerdict;
+  rule?: ImportedFindingRule | null;
+  weakness_ids?: WeaknessIds;
+  remediation_instructions?: RemediationInstructions;
+  code?: ImportedCodeContext | null;
+  secret?: ImportedSecretDetails | null;
+  configuration?: ImportedConfigurationDetails | null;
+  file_url?: FileUrl;
+}
+/**
+ * Vendor repository identity, resolved to the full source-control URL.
+ */
+export interface ImportedRepositoryReference {
+  url: Url1;
+  id?: Id1;
+  name?: Name1;
+}
+export interface ImportedFindingRule {
+  id?: Id2;
+  short_id?: ShortId;
+  name?: Name2;
+}
+/**
+ * Optional range and snippet for the evidence's first source location.
+ */
+export interface ImportedCodeContext {
+  end_line?: EndLine;
+  snippet?: Snippet;
+}
+export interface ImportedSecretDetails {
+  type?: Type;
+  confidence?: Confidence;
+  validation_status?: ValidationStatus;
+  is_encrypted?: IsEncrypted;
+  is_managed?: IsManaged;
+  introduced_commit?: IntroducedCommit;
+}
+export interface ImportedConfigurationDetails {
+  platform?: Platform;
+  cloud_platform?: CloudPlatform;
+  expected?: Expected;
+  actual?: Actual;
+}
 export interface FindingImportReceipt {
-  id: Id1;
+  id: Id3;
   object?: Object;
   repository: ImportDestination;
   source: ImportSource;
@@ -214,16 +294,16 @@ export interface ImportRepositoryPage {
   next: Next;
 }
 export interface ImportRepository {
-  id: Id2;
+  id: Id4;
   object?: Object2;
   repo_connector_id: RepoConnectorId1;
-  url: Url1;
+  url: Url2;
   default_branch?: DefaultBranch;
   reset_marker: ResetMarker1;
   import_environment_id?: ImportEnvironmentId;
 }
 export interface SourceReport {
-  id: Id3;
+  id: Id5;
   object?: Object3;
   origin?: Origin;
   repo_id: RepoId;
@@ -244,7 +324,7 @@ export interface ImportedAssessment {
   state?: State;
 }
 export interface LastImport {
-  id: Id4;
+  id: Id6;
   actor: Actor1;
   created_at: CreatedAt1;
 }
@@ -255,7 +335,7 @@ export interface SourceReportPage {
   next: Next1;
 }
 export interface SourceReportSummary {
-  id: Id5;
+  id: Id7;
   object?: Object5;
   origin?: Origin1;
   repo_id: RepoId1;

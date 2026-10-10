@@ -1,0 +1,650 @@
+import { hash } from "node:crypto";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { gzipSync } from "node:zlib";
+import { afterEach, expect, test } from "bun:test";
+import { main } from "../src/cli.js";
+import { prepareExternalPublication } from "../src/external-findings-publish.js";
+import { validateExternalEvidence } from "../src/external-import-contract.js";
+import type {
+  FindingImportRequest,
+  SourceReport,
+} from "../src/external-import-models.js";
+import { readVendorFindings } from "../src/wiz-findings.js";
+import { dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
+
+const directories: string[] = [];
+afterEach(async () => {
+  await Promise.all(
+    directories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
+const repository = { id: "wiz-repository", name: "example/project" };
+const repositoryUrl = "https://github.com/example/project";
+const inventory = {
+  nodes: [
+    {
+      id: "wiz-branch-inventory",
+      platform: "GITHUB",
+      providerID: "github.com##example/project##feature/parser",
+      type: "REPOSITORY_BRANCH",
+      repository: { ...repository, url: repositoryUrl },
+    },
+  ],
+  pageInfo: { hasNextPage: false },
+};
+const sast = {
+  id: "occurrence-1",
+  name: "Untrusted query construction",
+  description: "Synthetic source finding",
+  severity: "HIGH",
+  status: "OPEN",
+  createdAt: "2026-10-01T10:00:00.123Z",
+  filePath: "src/query.ts",
+  startLine: 10,
+  endLine: 12,
+  snippet: "query(input)",
+  repository,
+  repositoryBranch: {
+    id: "wiz-branch",
+    name: "example/project/feature/parser",
+  },
+  weaknesses: [{ id: "CWE-89", name: "SQL injection" }],
+  origin: "THIRD_PARTY_SCANNER",
+  remediationInstructions: "Use a parameterized query.",
+  aiAnalysis: { verdict: "FALSE_POSITIVE" },
+};
+const secret = {
+  id: "occurrence-1",
+  name: "Example credential metadata",
+  severity: "MEDIUM",
+  type: "API_KEY",
+  confidence: "HIGH",
+  validationStatus: "NOT_VALIDATED",
+  isEncrypted: false,
+  isManaged: true,
+  status: "RESOLVED",
+  lastUpdatedAt: "2026-10-01T10:00:00.987Z",
+  resolvedAt: "2026-10-01T10:00:00.987Z",
+  rule: { id: "example-secret-rule", name: "Example API key", type: "API_KEY" },
+  resource: {
+    id: "wiz-branch",
+    type: "REPOSITORY_BRANCH",
+    name: "example/project/feature/parser",
+    typedProperties: { repository },
+  },
+  secretDataEntities: [
+    { id: "metadata-only", name: "Example detector metadata", type: "API_KEY" },
+  ],
+};
+const iac = {
+  id: "occurrence-1",
+  name: "Example infrastructure setting",
+  severity: "LOW",
+  status: "OPEN",
+  expectedContent: "",
+  foundContent: "  ",
+  matchContent: "enabled = true",
+  filePath: "infra/main.tf",
+  startLine: 20,
+  endLine: 22,
+  repository,
+  branch: { id: "wiz-branch", name: "feature/parser" },
+  platform: "TERRAFORM",
+  cloudPlatform: "AWS",
+  fileURL: "https://github.com/example/project/blob/main/infra/main.tf",
+  wizUrl: "https://vendor.example.test/findings/occurrence-1",
+  firstSeenAt: "2026-10-01T10:00:00Z",
+  lastSeenAt: "2026-10-02T10:00:00Z",
+  rule: { id: "example-rule", shortId: "EXAMPLE-1", name: "Example setting" },
+  resourceGraphEntity: {
+    id: "logical-resource",
+    type: "BUCKET",
+    properties: { deployed: false },
+  },
+  fileRemediation: { filePath: "infra/main.tf" },
+};
+
+function envelope(root: string, nodes: unknown[], withInventory = true) {
+  return {
+    data: {
+      [root]: { nodes, pageInfo: { hasNextPage: false } },
+      ...(withInventory ? { versionControlResources: inventory } : {}),
+    },
+  };
+}
+
+async function fixture(payload: unknown, compressed = false) {
+  const root = await mkdtemp(join(tmpdir(), "wiz-repository-findings-"));
+  directories.push(root);
+  const file = join(root, "selected.json");
+  const contents = JSON.stringify(payload);
+  await writeFile(file, compressed ? gzipSync(contents) : contents);
+  return { root, file };
+}
+
+async function parse(payload: unknown) {
+  const { file } = await fixture(payload);
+  return readVendorFindings(file);
+}
+
+test("SAST maps source range, CWE, scanner verdict, and repository inventory without changing raw evidence", async () => {
+  const { file } = await fixture(envelope("sastFindings", [sast]), true);
+  const parsed = await readVendorFindings(file);
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]).toMatchObject({
+    source_finding_id: "sast:occurrence-1",
+    evidence: {
+      severity: "high",
+      locations: [{ path: "src/query.ts", line: 10 }],
+      branch: "feature/parser",
+      code_revision: null,
+      source_scan_id: null,
+      source_updated_at: null,
+      advisory_ids: [],
+      packages: [],
+      source_data: sast,
+      details: {
+        kind: "sast",
+        repository: { ...repository, url: repositoryUrl },
+        source_status: "OPEN",
+        scanner_origin: "THIRD_PARTY_SCANNER",
+        scanner_verdict: "FALSE_POSITIVE",
+        weakness_ids: ["CWE-89"],
+        remediation_instructions: sast.remediationInstructions,
+        code: { end_line: 12, snippet: "query(input)" },
+      },
+    },
+  });
+  expect(parsed.findings[0]!.evidence).not.toHaveProperty("assessment");
+});
+
+test("repository secrets preserve detector and vendor validation metadata without inventing a source location or scanned revision", async () => {
+  const detailed = {
+    ...secret,
+    id: "detailed",
+    path: "config/example.env",
+    lineNumber: 3,
+    vcsDetails: { initialCommitHash: "a".repeat(40) },
+  };
+  const parsed = await parse(envelope("secretInstances", [secret, detailed]));
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.evidence).toMatchObject({
+    severity: "medium",
+    locations: [],
+    source_updated_at: 1790848800,
+    code_revision: null,
+    source_data: secret,
+    details: {
+      kind: "secret",
+      source_status: "RESOLVED",
+      rule: { id: "example-secret-rule", name: "Example API key" },
+      secret: {
+        type: "API_KEY",
+        confidence: "HIGH",
+        validation_status: "NOT_VALIDATED",
+        is_encrypted: false,
+        is_managed: true,
+        introduced_commit: null,
+      },
+    },
+  });
+  expect(parsed.findings[1]!.evidence).toMatchObject({
+    locations: [{ path: detailed.path, line: 3 }],
+    code_revision: null,
+    details: { secret: { introduced_commit: "a".repeat(40) } },
+    source_data: detailed,
+  });
+});
+
+test("IaC keeps exact empty comparison text, the rule, file link, and logical resource separately", async () => {
+  const parsed = await parse(envelope("iacFindings", [iac]));
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.evidence).toMatchObject({
+    url: iac.wizUrl,
+    source_updated_at: null,
+    code_revision: null,
+    source_data: iac,
+    details: {
+      kind: "iac",
+      rule: {
+        id: "example-rule",
+        short_id: "EXAMPLE-1",
+        name: "Example setting",
+      },
+      code: { end_line: 22, snippet: "enabled = true" },
+      configuration: {
+        platform: "TERRAFORM",
+        cloud_platform: "AWS",
+        expected: "",
+        actual: "  ",
+      },
+      file_url: iac.fileURL,
+    },
+  });
+});
+
+test("explicit finding families namespace reused vendor occurrence IDs", async () => {
+  const parsed = await parse({
+    data: {
+      versionControlResources: inventory,
+      sastFindings: { nodes: [sast] },
+      secretInstances: { nodes: [secret] },
+      iacFindings: { nodes: [iac] },
+    },
+  });
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings.map((finding) => finding.source_finding_id)).toEqual([
+    "sast:occurrence-1",
+    "secret:occurrence-1",
+    "iac:occurrence-1",
+  ]);
+});
+
+test("bare arrays cannot guess a new finding family even when package fields also exist", async () => {
+  const ambiguous = {
+    ...sast,
+    detailedName: "example-package",
+    vulnerableAsset: { id: "asset" },
+  };
+  const parsed = await parse([sast, secret, iac, ambiguous]);
+  expect(parsed.findings).toEqual([]);
+  expect(parsed.excluded).toHaveLength(4);
+  expect(parsed.excluded.every((item) => item.reason.includes("named"))).toBe(
+    true,
+  );
+  expect(
+    (await parse(envelope("sastFindings", [ambiguous]))).findings[0]!.evidence
+      .source_data,
+  ).toEqual(ambiguous);
+});
+
+test("repository mapping joins only repository.id, accepts supplied URLs, and rejects conflicts", async () => {
+  const wrongJoin = {
+    ...inventory,
+    nodes: [
+      {
+        ...inventory.nodes[0],
+        id: repository.id,
+        repository: {
+          id: "different-repository",
+          name: repository.name,
+          url: repositoryUrl,
+        },
+      },
+    ],
+  };
+  const missing = await parse({
+    data: {
+      sastFindings: { nodes: [sast] },
+      versionControlResources: wrongJoin,
+    },
+  });
+  expect(missing.findings).toEqual([]);
+  expect(missing.excluded[0]!.reason).toContain(
+    "verified source repository URL",
+  );
+  const enriched = {
+    ...sast,
+    repository: { ...repository, url: repositoryUrl },
+  };
+  expect(
+    (await parse(envelope("sastFindings", [enriched], false))).excluded,
+  ).toEqual([]);
+  const conflict = {
+    ...sast,
+    repository: { ...repository, url: "https://github.com/example/other" },
+  };
+  expect(
+    (await parse(envelope("sastFindings", [conflict]))).excluded[0]!.reason,
+  ).toContain("conflicting");
+});
+
+test("workload secrets and cloud configuration remain visible exclusions in a mixed explicit export", async () => {
+  const workload = {
+    ...secret,
+    id: "workload",
+    resource: { ...secret.resource, type: "VIRTUAL_MACHINE" },
+  };
+  const parsed = await parse({
+    data: {
+      versionControlResources: inventory,
+      secretInstances: { nodes: [secret, workload] },
+      configurationFindings: {
+        nodes: [{ id: "configuration", name: "Example check" }],
+      },
+    },
+  });
+  expect(parsed.findings).toHaveLength(1);
+  expect(parsed.excluded).toEqual([
+    expect.objectContaining({
+      source_finding_id: "workload",
+      reason: expect.stringContaining("Workload secrets"),
+    }),
+    expect.objectContaining({
+      source_finding_id: "configuration",
+      reason: expect.stringContaining("Cloud configuration"),
+    }),
+  ]);
+});
+
+test("GraphQL errors, unfinished finding pages, and unfinished inventory stop parsing", async () => {
+  await expect(
+    parse({
+      ...envelope("sastFindings", [sast]),
+      errors: [{ message: "partial" }],
+    }),
+  ).rejects.toThrow("GraphQL errors");
+  await expect(
+    parse({
+      data: {
+        sastFindings: { nodes: [sast], pageInfo: { hasNextPage: true } },
+      },
+    }),
+  ).rejects.toThrow("another page");
+  await expect(
+    parse({
+      data: {
+        sastFindings: { nodes: [sast] },
+        versionControlResources: {
+          ...inventory,
+          pageInfo: { hasNextPage: true },
+        },
+      },
+    }),
+  ).rejects.toThrow("inventory has another page");
+});
+
+test("new adapters do not fabricate missing occurrence IDs, severity, or line ranges", async () => {
+  const invalid = [
+    { ...sast, id: null },
+    { ...sast, severity: null },
+    { ...sast, startLine: null },
+    { ...sast, endLine: 9 },
+    { ...sast, filePath: "../outside.ts" },
+  ];
+  const parsed = await parse(envelope("sastFindings", invalid));
+  expect(parsed.findings).toEqual([]);
+  expect(parsed.excluded).toHaveLength(invalid.length);
+});
+
+test("legacy evidence defaults retain their saved-submission bytes, including explicit null details", () => {
+  const input = {
+    title: "Legacy evidence",
+    severity: "high",
+    locations: [{ path: "package.json" }],
+    packages: [{ name: "example-package" }],
+  };
+  const legacy = validateExternalEvidence(structuredClone(input));
+  expect(hash("sha256", JSON.stringify(legacy))).toBe(
+    "88f2d96656a5ad322d5f16fce7704366e359a8101d035b311a1917d4f6e31caf",
+  );
+  const withNull = validateExternalEvidence({
+    ...structuredClone(input),
+    details: null,
+  });
+  expect(withNull).toEqual(legacy);
+  expect(withNull).not.toHaveProperty("details");
+});
+
+test("normalized JSONL retains explicit IDs, original evidence, and empty source text", async () => {
+  const raw = { details: null, example: "raw evidence stays exact" };
+  const payload = {
+    source_finding_id: "explicit-identity",
+    evidence: {
+      title: "Explicit finding",
+      severity: "high",
+      source_data: raw,
+      details: {
+        kind: "sast",
+        repository: { url: repositoryUrl },
+        code: { snippet: "  " },
+      },
+    },
+  };
+  const parsed = await parse([payload]);
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.source_finding_id).toBe("explicit-identity");
+  expect(parsed.findings[0]!.evidence.source_data).toEqual(raw);
+  expect(parsed.findings[0]!.evidence.details?.code?.snippet).toBe("  ");
+});
+
+test("new detail links and long source text follow the same Cloud constraints", async () => {
+  const good = { ...sast, snippet: "é".repeat(32768) };
+  const tooLong = { ...sast, id: "long", snippet: "é".repeat(32769) };
+  const unsafeUrl = {
+    ...sast,
+    id: "unsafe",
+    repository: { ...repository, url: "https://user@example.test/project" },
+  };
+  const parsed = await parse(envelope("sastFindings", [good, tooLong]));
+  expect(parsed.findings).toHaveLength(1);
+  expect(parsed.excluded[0]!.reason).toContain("65536 UTF-8 bytes");
+  expect(
+    (await parse(envelope("sastFindings", [unsafeUrl], false))).excluded[0]!
+      .reason,
+  ).toContain("without credentials");
+});
+
+async function cloudFixture(payload: unknown) {
+  const f = await fixture(payload);
+  const environment = {
+    ...process.env,
+    CODEX_HOME: join(f.root, "login"),
+    CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
+  };
+  await mkdir(environment.CODEX_HOME);
+  await writeFile(
+    join(environment.CODEX_HOME, "config.toml"),
+    'cli_auth_credentials_store = "file"\n',
+  );
+  await writeFile(
+    join(environment.CODEX_HOME, "auth.json"),
+    JSON.stringify({
+      tokens: {
+        access_token: "synthetic-token",
+        account_id: "synthetic-account",
+      },
+    }),
+  );
+  const destination = {
+    id: "cloud-repository",
+    object: "security.repository",
+    repo_connector_id: "github",
+    url: repositoryUrl,
+    default_branch: "main",
+    reset_marker: "generation-1",
+    import_environment_id: "environment-1",
+  };
+  const posts: FindingImportRequest[] = [];
+  const calls: string[] = [];
+  const reports = new Map<string, SourceReport>();
+  const transport = async (
+    url: string,
+    init: RequestInit,
+  ): Promise<Response> => {
+    calls.push(`${init.method} ${url}`);
+    const target = new URL(url);
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        headers: { "Content-Type": "application/json" },
+      });
+    if (target.pathname.endsWith("/repositories"))
+      return json({ data: [destination], has_more: false, next: null });
+    if (target.pathname.endsWith("/source_reports")) {
+      const report = reports.get(target.searchParams.get("source_finding_id")!);
+      const summaries = report
+        ? [
+            {
+              ...report,
+              object: "security.source_report_summary",
+              evidence: undefined,
+              last_import: undefined,
+              title: report.evidence.title,
+              severity: report.evidence.severity,
+              source_updated_at: report.evidence.source_updated_at,
+            },
+          ]
+        : [];
+      return json({ data: summaries, has_more: false, next: null });
+    }
+    if (target.pathname.includes("/source_reports/"))
+      return json(
+        [...reports.values()].find(
+          (report) => report.id === target.pathname.split("/").at(-1),
+        ),
+      );
+    if (
+      target.pathname.endsWith("/finding_imports") &&
+      init.method === "POST"
+    ) {
+      const request = JSON.parse(String(init.body)) as FindingImportRequest;
+      posts.push(request);
+      const counts = { created: 0, updated: 0, unchanged: 0, error: 0 };
+      const results = request.items.map((item) => {
+        const previous = reports.get(item.source_finding_id);
+        const outcome = previous
+          ? JSON.stringify(previous.evidence) === JSON.stringify(item.evidence)
+            ? "unchanged"
+            : "updated"
+          : "created";
+        counts[outcome]++;
+        const version =
+          (previous?.version ?? 0) + (outcome === "unchanged" ? 0 : 1);
+        const identity = hash("sha256", item.source_finding_id);
+        const report: SourceReport = {
+          id: `aif_${identity}`,
+          repo_id: destination.id,
+          repo_connector_id: destination.repo_connector_id,
+          environment_id: "environment-1",
+          canonical_finding_id:
+            previous?.canonical_finding_id ?? `acf_${identity.slice(0, 32)}`,
+          source: request.source,
+          source_finding_id: item.source_finding_id,
+          observation_id: `aio_${hash("sha256", `${identity}:${version}`)}`,
+          version,
+          evidence: item.evidence,
+          assessment: { state: "not_assessed" },
+          created_at: 1,
+          updated_at: 1,
+        };
+        if (previous) report.id = previous.id;
+        reports.set(item.source_finding_id, report);
+        return {
+          client_id: item.client_id,
+          outcome,
+          source_report_id: report.id,
+          observation_id: report.observation_id,
+          canonical_finding_id: report.canonical_finding_id,
+          version,
+        };
+      });
+      return json({
+        id: request.request_id,
+        repository: request.repository,
+        source: request.source,
+        actor: "synthetic-user",
+        created_at: 1,
+        item_count: request.items.length,
+        counts,
+        results,
+      });
+    }
+    throw new Error(`Unexpected injected Cloud request ${init.method} ${url}`);
+  };
+  const options = {
+    provider: "wiz" as const,
+    sourceKey: "synthetic-tenant/wiz",
+    repository: repositoryUrl,
+  };
+  const command = [
+    "publish",
+    "findings",
+    f.file,
+    "--to",
+    "cloud",
+    "--provider",
+    "wiz",
+    "--repository",
+    repositoryUrl,
+    "--source-key",
+    options.sourceKey,
+    "--format",
+    "json",
+  ];
+  return {
+    ...f,
+    posts,
+    calls,
+    reports,
+    options,
+    command,
+    environment,
+    deps: { environment, fetch: transport },
+    cliDeps: { ...dependencies(), environment, cloudFetch: transport },
+  };
+}
+
+for (const [root, record, kind] of [
+  ["sastFindings", sast, "sast"],
+  ["secretInstances", secret, "secret"],
+  ["iacFindings", iac, "iac"],
+] as const) {
+  test(`CLI previews, publishes, and reimports ${kind} through injected transport without changing Codex assessment`, async () => {
+    const f = await cloudFixture(envelope(root, [record]));
+    const cli = createCliTest(main);
+    expect(await cli.runCli([...f.command, "--dry-run"], f.cliDeps)).toBe(0);
+    const preview = JSON.parse(cli.stdout.text());
+    expect(preview.findings[0].evidence.details.kind).toBe(kind);
+    expect(f.posts).toHaveLength(0);
+    const upload = createCliTest(main);
+    const exitCode = await upload.runCli([...f.command, "--yes"], f.cliDeps);
+    expect(exitCode, upload.stdout.text() + upload.stderr.text()).toBe(0);
+    expect(f.posts).toHaveLength(1);
+    const first = f.reports.get(`${kind}:occurrence-1`)!;
+    expect(first.assessment).toEqual({ state: "not_assessed" });
+    expect(first.evidence.source_data).toEqual(record);
+    const replay = await prepareExternalPublication(f.file, f.options, f.deps);
+    expect((await replay.publish()).counts.unchanged).toBe(1);
+    expect(f.reports.get(`${kind}:occurrence-1`)!.canonical_finding_id).toBe(
+      first.canonical_finding_id,
+    );
+    const changed = { ...record, status: "RESOLVED" };
+    await writeFile(f.file, JSON.stringify(envelope(root, [changed])));
+    await (
+      await prepareExternalPublication(f.file, f.options, f.deps)
+    ).publish();
+    expect(f.reports.get(`${kind}:occurrence-1`)!.assessment).toEqual({
+      state: "not_assessed",
+    });
+    expect(f.reports.get(`${kind}:occurrence-1`)!.evidence.source_data).toEqual(
+      changed,
+    );
+  });
+}
+
+test("a wrong source repository stops raw and normalized imports before source lookup or upload", async () => {
+  const other = {
+    ...sast,
+    repository: { ...repository, url: "https://github.com/example/other" },
+  };
+  const f = await cloudFixture(envelope("sastFindings", [other], false));
+  await expect(
+    prepareExternalPublication(f.file, f.options, f.deps),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.calls).toHaveLength(1);
+  expect(f.posts).toEqual([]);
+  const normalized = (await readVendorFindings(f.file)).findings;
+  await writeFile(f.file, JSON.stringify(normalized));
+  await expect(
+    prepareExternalPublication(f.file, f.options, f.deps),
+  ).rejects.toThrow("does not match");
+  expect(f.posts).toEqual([]);
+  expect(
+    await readdir(join(f.root, "state")).catch(() => undefined),
+  ).toBeUndefined();
+});

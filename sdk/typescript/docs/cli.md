@@ -793,19 +793,20 @@ again when rerunning.
 
 ## Publish findings to Cloud
 
-### Import Wiz package vulnerabilities
+### Import Wiz findings
 
-Import selected Wiz package vulnerabilities without creating a scan. Imported
-records retain vendor evidence and remain **not assessed by Codex**. Raw SAST,
-secret, IaC, and external network findings need separate mappings; this is not
-a synchronization of every finding in Wiz.
+Import selected Wiz package vulnerabilities, SAST findings, repository secrets,
+and IaC findings without creating a scan. Imported records retain vendor evidence
+and remain **not assessed by Codex**, including when Wiz marks them resolved or
+reports an AI verdict. Workload secrets, cloud configuration findings, and external
+network findings are not supported by this repository importer.
 
 Before the first import:
 
 1. Select an existing repository in Codex Security Cloud and copy its repository
    URL (for example, a GitHub URL) or Cloud repository ID. The repository needs an
    authorized environment, but does not need a completed native scan.
-2. In Wiz **Vulnerability Findings**, filter to the intended repository and
+2. For **package vulnerabilities**, in Wiz **Vulnerability Findings**, filter to the intended repository and
    findings. Choose **Save as → Report**, select **Repository Branch** as the
    resource type (remove the default Virtual Machine selection), **JSON** format,
    and **Detailed** columns. Retain the repository filter and download the completed
@@ -816,7 +817,9 @@ Before the first import:
    authorized Wiz connection and save their JSON. Include `id`, `name`,
    `detailedName`, `vendorSeverity` (or `severity`), and `vulnerableAsset.id`;
    retain available package, image, and source metadata. The command does not
-   fetch from Wiz.
+   fetch from Wiz. For SAST, repository secrets, and IaC, use the named API
+   collections and repository metadata described below; their report formats
+   differ from package vulnerability reports.
 3. Choose a stable source key such as `TENANT_ID/vulnerability-finding`. Reuse it
    for that Wiz tenant and finding class across exports. Do not create a new key
    for each project filter or import; that creates different source identities.
@@ -867,12 +870,12 @@ exclusions. `--dry-run --format json` retains all normalized findings and comple
 evidence for inspection. A prompt explicitly includes any records that will be
 skipped.
 
-Input can be a downloaded Wiz JSON vulnerability report, a vulnerability finding,
-an array, a complete
-`data.vulnerabilityFindings.nodes` response, or JSONL with one vendor record per
-line. Plain and gzip-compressed files are accepted. A response that advertises
-another page is rejected: save the explicitly
-selected records as an array. Normalized JSONL is also accepted:
+Package input can be a downloaded Wiz JSON vulnerability report, a vulnerability
+finding, an array, a complete `data.vulnerabilityFindings.nodes` response, or JSONL
+with one package record per line. Plain and gzip-compressed files are accepted.
+A response that advertises another page is rejected. Complete the requested pages
+or save only the explicitly selected records; retain the named collection for
+SAST, repository secrets, and IaC. Normalized JSONL is also accepted:
 
 ```json
 {
@@ -895,6 +898,98 @@ source-code locations. It does not
 fetch from Wiz, assess findings, or change vendor or Cloud triage decisions.
 Findings from external network scans are excluded from this package vulnerability
 mapping.
+
+For SAST, repository secrets, and IaC, save the documented JSON API collection:
+
+| Finding family     | Collection                   | Raw occurrence identity |
+| ------------------ | ---------------------------- | ----------------------- |
+| SAST               | `data.sastFindings.nodes`    | `sast:<id>`             |
+| Repository secrets | `data.secretInstances.nodes` | `secret:<id>`           |
+| IaC                | `data.iacFindings.nodes`     | `iac:<id>`              |
+
+The collection identifies the mapping. Bare arrays of these raw findings are
+excluded because their overlapping fields do not identify a family. An export
+may contain multiple named collections. GraphQL errors and unfinished pages stop
+the import. Secret resources must have `type: "REPOSITORY_BRANCH"`; a workload's
+relationship to source code does not make it a repository secret.
+
+Each new finding needs a verified source repository URL. Supply `repository.url`
+in the finding's repository metadata, or include the matching repository inventory
+in `data.versionControlResources.nodes`. For secrets, repository metadata is under
+`resource.typedProperties.repository`. The importer joins the inventory's
+`repository.id` to that source ID and uses `repository.url`; inventory node IDs,
+`providerID`, names, and Wiz UUIDs are not Cloud repository IDs. A supplied URL
+must agree with the inventory and with the selected Cloud repository before any
+finding is uploaded. For example, this synthetic selection supplies the inventory
+alongside its SAST collection:
+
+```json
+{
+  "data": {
+    "sastFindings": {
+      "nodes": [
+        {
+          "id": "finding-42",
+          "name": "Untrusted query construction",
+          "severity": "HIGH",
+          "repository": { "id": "source-repository-1" },
+          "filePath": "src/query.ts",
+          "startLine": 10,
+          "endLine": 12
+        }
+      ]
+    },
+    "versionControlResources": {
+      "nodes": [
+        {
+          "repository": {
+            "id": "source-repository-1",
+            "url": "https://github.com/example/project"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+The adapters preserve each selected raw node exactly in `source_data`. Typed
+`evidence.details` carries `kind`, verified `repository`, vendor `source_status`,
+and family-specific evidence:
+
+| Family             | Evidence retained in typed fields                                                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| SAST               | CWE IDs, first location's end line and snippet, scanner origin and verdict, remediation instructions                                           |
+| Repository secrets | Detector rule, type, confidence, vendor validation status, encryption/management flags, introduced commit when supplied                        |
+| IaC                | Rule IDs and name, first location's range and matched content, platform, expected/actual content, separate file link, remediation instructions |
+
+Vendor status and verdict remain separate from Codex assessment. A secret's
+introduced commit is not its scanned revision. Missing source revisions and scan
+IDs stay unknown. A logical IaC resource is retained in the original record and
+does not establish that it is deployed. Precise original timestamps remain in
+`source_data`; only an explicit record-update timestamp maps to the whole-second
+`source_updated_at` field. SAST creation time and IaC last-seen time are not update
+timestamps.
+
+Native SAST and secret report downloads can be CSV, including gzip-compressed
+CSV. CSV is not parsed directly. Convert a selected report with a reviewed mapping
+for its actual column headers into normalized JSONL, preserving each original row
+in `source_data`. Set `details.kind` and `details.repository.url` explicitly after
+verifying the source repository. Use the same prefixed occurrence ID shown above
+so API and report imports update the same finding; normalized IDs are accepted
+exactly as supplied. Never substitute a rule ID, CWE, title, token, or file path
+for a vendor occurrence ID. Missing IDs or severity must be corrected at the
+source rather than invented.
+
+For repository-secret reports, select `path` and `lineNumber` for source
+navigation, detector fields under `rule`, and `vcsDetails.initialCommitHash` only
+as the introduced commit. The standard secret metadata API does not supply a
+path or line. For IaC reports, explicitly select `filePath`, `startLine`, `endLine`,
+`rule.id`, `rule.shortId`, `expectedContent`, `foundContent`, `matchContent`, and
+repository/branch metadata. Preserve the original fields; source locations must
+be repository-relative, and an end line requires a start line. Keep credential
+values out of the metadata selection; the importer does not retrieve or test
+credentials or apply remediation instructions.
 
 Inputs must be valid UTF-8. Integer-valued evidence outside JavaScript's safe
 integer range is rejected; export those values as strings to preserve them

@@ -3150,14 +3150,16 @@ export async function main(
   });
   publication.command("findings", {
     description:
-      "Preview and import selected Wiz package vulnerabilities to Cloud.",
-    hint: "Supply a selected Wiz vulnerability JSON report or normalized JSONL; gzip downloads are supported (not CSV, scan events, SAST, secrets, or IaC exports).\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      "Preview and import selected Wiz repository findings to Cloud.",
+    hint: "Supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
       file: z
         .string()
-        .describe("Saved Wiz vulnerability findings JSON or normalized JSONL."),
+        .describe(
+          "Saved Wiz finding collections, package vulnerability JSON, or normalized JSONL.",
+        ),
     }),
     options: z.object({
       to: z.literal("cloud").describe("Publication destination."),
