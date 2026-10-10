@@ -1623,12 +1623,14 @@ def complete_scan_locked(
             """
             UPDATE scans
             SET status = 'complete', phase = 'reporting', completed_at = ?, updated_at = ?,
-                seal_manifest_digest = ?, cost_json = ?, completion_warnings_json = ?
+                log_completed_at = ?, seal_manifest_digest = ?, cost_json = ?,
+                completion_warnings_json = ?
             WHERE id = ? AND status = 'running'
             """,
             (
                 timestamp,
                 timestamp,
+                now(),
                 manifest_digest,
                 cost_json,
                 json.dumps(warnings),
@@ -2792,6 +2794,7 @@ def scan_result(
         "artifacts": artifacts,
         **model_fields,
         "canceledAt": scan["canceled_at"],
+        "logCompletedAt": scan["log_completed_at"],
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],

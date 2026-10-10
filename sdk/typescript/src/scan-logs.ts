@@ -23,6 +23,7 @@ interface ScanLogOptions {
   codexHome: string | readonly string[];
   scanDirectory?: string;
   completedAt?: string | null;
+  logCompletedAt?: string | null;
   allowMissingRoot?: boolean;
 }
 
@@ -33,6 +34,7 @@ export type ScanLogSource = JsonObject & {
   executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
+  logCompletedAt?: string | null;
   progress?: { status?: string; updatedAt?: string };
 };
 
@@ -47,6 +49,10 @@ export function readSavedScanLogs(
       `No session is associated with scan ${scan.scanId}.`,
     );
   }
+  const status = scan.progress?.status;
+  const terminal =
+    status === "complete" || status === "failed" || status === "canceled";
+  const logCompletedAt = terminal ? (scan.logCompletedAt ?? null) : null;
   return readScanLogs({
     scanId: scan.scanId,
     threadId: threadId ?? scan.threadIds?.[0],
@@ -55,14 +61,15 @@ export function readSavedScanLogs(
     codexHome,
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+    // Legacy completion still bounds inferred workers, but cannot identify the
+    // final scan turn when sealed artifacts were completed before a resume.
     completedAt:
-      scan.progress?.status === "running"
+      status === "running"
         ? null
-        : scan.progress?.status === "complete" ||
-            scan.progress?.status === "failed" ||
-            scan.progress?.status === "canceled"
-          ? (scan.progress.updatedAt ?? "")
+        : terminal
+          ? (logCompletedAt ?? scan.progress?.updatedAt ?? "")
           : "",
+    logCompletedAt,
   });
 }
 
@@ -175,6 +182,9 @@ export async function readScanLogs(options: ScanLogOptions) {
     sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
+  // Recorded completion can precede the scan turn's final response. Keep that
+  // turn's remaining events, then stop before a post-completion turn starts.
+  const completionBoundary = sessionStartedAt(options.logCompletedAt);
   for (const session of sessions) {
     let replaying = false;
     for await (const event of sessionEvents(session.path)) {
@@ -192,6 +202,15 @@ export async function readScanLogs(options: ScanLogOptions) {
           continue;
         }
         replaying = false;
+      }
+      if (
+        completionBoundary !== null &&
+        event["type"] === "event_msg" &&
+        isRecord(payload) &&
+        payload["type"] === "task_started"
+      ) {
+        const timestamp = sessionStartedAt(event["timestamp"]);
+        if (timestamp !== null && timestamp >= completionBoundary) break;
       }
       events.push({ threadId: session.threadId, event });
     }

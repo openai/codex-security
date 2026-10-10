@@ -4,6 +4,7 @@ import copy
 import json
 import uuid
 from argparse import Namespace
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -343,18 +344,49 @@ def test_deep_publication_does_not_require_old_worker_files(
 
 
 def test_deep_prepare_and_complete_preserve_the_same_aggregate(
-    workbench_api, workbench_db, publication_scan
+    workbench_api, workbench_db, publication_scan, monkeypatch
 ):
     scan = publication_scan()
+    started_at = datetime.fromisoformat(scan.timestamp.replace("Z", "+00:00"))
+
+    def at_minute(minute):
+        timestamp = (started_at + timedelta(minutes=minute)).isoformat().replace("+00:00", "Z")
+        monkeypatch.setitem(
+            workbench_api["complete_scan_locked"].__globals__, "now", lambda: timestamp
+        )
+        return timestamp
+
+    at_minute(1)
+    workbench_api["set_scan_thread"](
+        workbench_db, Namespace(scan_id=scan.scan_id, thread_id="thread-prepared-resume")
+    )
     prepared = complete(workbench_api, workbench_db, scan, prepare_only=True)
     assert prepared["progress"]["status"] == "running"
+    assert prepared["logCompletedAt"] is None
     names = ("scan-manifest.json", "findings.json", "coverage.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in names}
 
+    at_minute(2)
+    current = workbench_api["require_scan"](workbench_db, scan.scan_id)
+    resumed = workbench_api["scan_history"].cli_scan_resume(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        current,
+        workbench_api["require_workspace"](workbench_db, current["workspace_id"]),
+    )
+    assert resumed["threadId"] == "thread-prepared-resume"
     complete(workbench_api, workbench_db, scan, prepare_only=True)
-    complete(workbench_api, workbench_db, scan)
+    terminal_at = at_minute(3)
+    completed = complete(workbench_api, workbench_db, scan)
+    assert completed["logCompletedAt"] == terminal_at
+    assert (
+        workbench_api["scan_history"].list_scans(workbench_db)["scans"][0]["logCompletedAt"]
+        == terminal_at
+    )
+    at_minute(4)
     repeated = complete(workbench_api, workbench_db, scan)
 
+    assert repeated["logCompletedAt"] == terminal_at
     assert repeated["progress"]["status"] == "complete"
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
     assert_published_aggregate(scan)
