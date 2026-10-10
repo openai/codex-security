@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import { prepareExternalPublication } from "../src/external-findings-publish.js";
+import {
+  ExternalPublicationError,
+  prepareExternalPublication,
+} from "../src/external-findings-publish.js";
+import { DEFAULT_CLOUD_BASE_URL } from "../src/cloud-endpoint.js";
 import { validateExternalEvidence } from "../src/external-import-contract.js";
 import type {
   ExternalFindingEvidence,
@@ -468,6 +472,7 @@ async function cloudFixture(payload: unknown) {
   const state: {
     failReadback: boolean;
     readbackDetails?: ExternalFindingEvidence["details"];
+    readbackEvidence?: ExternalFindingEvidence;
   } = { failReadback: false };
   const transport = async (
     url: string,
@@ -507,6 +512,8 @@ async function cloudFixture(payload: unknown) {
       const report = [...reports.values()].find(
         (item) => item.id === target.pathname.split("/").at(-1),
       );
+      if (report && state.readbackEvidence)
+        return json({ ...report, evidence: state.readbackEvidence });
       return json(
         report && state.readbackDetails
           ? {
@@ -833,3 +840,184 @@ test("Cloud repository selection accepts a GitHub URL case variant", async () =>
   expect(prepared.preview.destination.id).toBe(f.destination.id);
   expect(f.posts).toEqual([]);
 });
+
+test("Node reads a large complete named collection without a function argument limit", async () => {
+  const count = 150_000;
+  const records = Array.from({ length: count }, (_, index) => ({
+    id: `vendor-${index}`,
+    name: "CVE-2099-0001",
+    detailedName: "example-package",
+    severity: "HIGH",
+    vulnerableAsset: { id: "synthetic-asset" },
+  }));
+  const f = await fixture(envelope("vulnerabilityFindings", records, false));
+  // Run the actual parser under Node; Bun does not have the same argument limit.
+  const bundle = await mkdtemp(join(import.meta.dir, "..", ".wiz-parser-"));
+  directories.push(bundle);
+  const runner = join(bundle, "large-input.mts");
+  await writeFile(
+    runner,
+    `
+    import { readVendorFindings } from "../src/wiz-findings.js";
+    const parsed = await readVendorFindings(process.argv[2]!);
+    console.log(JSON.stringify({
+      read: parsed.read, ready: parsed.findings.length, excluded: parsed.excluded.length,
+      first: parsed.findings[0]?.source_finding_id,
+      last: parsed.findings.at(-1)?.source_finding_id,
+    }));
+  `,
+  );
+  const built = await Bun.build({
+    entrypoints: [runner],
+    outdir: bundle,
+    target: "node",
+    format: "esm",
+    packages: "external",
+  });
+  expect(built.success).toBe(true);
+  const child = Bun.spawn(
+    [Bun.which("node")!, built.outputs[0]!.path, f.file],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  expect(exitCode, stderr).toBe(0);
+  expect(JSON.parse(stdout)).toEqual({
+    read: count,
+    ready: count,
+    excluded: 0,
+    first: "vendor-0",
+    last: `vendor-${count - 1}`,
+  });
+});
+
+test("Unicode member reordering preserves readback equality and historical checkpoint filenames", async () => {
+  const input = {
+    source_finding_id: "unicode-evidence",
+    evidence: {
+      title: "Unicode vendor metadata",
+      severity: "high",
+      source_data: { é: "precomposed", "e\u0301": "combining", Z: 1, a: 2 },
+    },
+  };
+  const f = await cloudFixture([input]);
+  const deps = {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+    },
+  };
+  const prepared = await prepareExternalPublication(f.file, f.options, deps);
+  f.state.failReadback = true;
+  let failure: ExternalPublicationError | undefined;
+  try {
+    await prepared.publish();
+  } catch (error) {
+    expect(error).toBeInstanceOf(ExternalPublicationError);
+    failure = error as ExternalPublicationError;
+  }
+  // Frozen from the original publisher's production checkpoint format.
+  expect(failure?.result.savedSubmission).toBe(
+    join(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+      "external-finding-publications",
+      "ddeb8ec0be8765f89ef5aeb759dde7753d7ff72f8b8bb25f89a591b045ad40ae.pending.json",
+    ),
+  );
+  const evidence = structuredClone(prepared.preview.findings[0]!.evidence);
+  evidence.source_data = Object.fromEntries(
+    Object.entries(evidence.source_data!).reverse(),
+  );
+  f.state.readbackEvidence = evidence;
+  f.state.failReadback = false;
+  const retry = await prepareExternalPublication(f.file, f.options, deps);
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toHaveLength(1);
+  expect(f.posts[0]!.items[0]!.evidence.source_data).toEqual(
+    input.evidence.source_data,
+  );
+});
+
+for (const format of ["json", "jsonl"] as const) {
+  test(`failed ${format} full-output imports emit failure envelopes`, async () => {
+    const f = await cloudFixture(envelope("sastFindings", [sast]));
+    await writeFile(f.file, "{");
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(
+        [
+          ...f.command.slice(0, -2),
+          "--format",
+          format,
+          "--full-output",
+          "--yes",
+        ],
+        f.cliDeps,
+      ),
+    ).toBe(2);
+    const output = JSON.parse(cli.stdout.text());
+    expect(output.ok).toBe(false);
+    expect(output.error.code).toBe("IMPORT_FAILED");
+    expect(output.data.status).toBe("failed");
+    expect(output.meta.command).toBe("publish findings");
+    expect(f.calls).toEqual([]);
+  });
+
+  test(`interrupted ${format} full-output preserves acknowledged receipts and resumes`, async () => {
+    const f = await cloudFixture(envelope("sastFindings", [sast]));
+    f.state.failReadback = true;
+    const command = [
+      ...f.command.slice(0, -2),
+      "--format",
+      format,
+      "--full-output",
+      "--yes",
+    ];
+    const cli = createCliTest(main);
+    expect(await cli.runCli(command, f.cliDeps)).toBe(2);
+    const output = JSON.parse(cli.stdout.text());
+    expect(output.ok).toBe(false);
+    expect(output.error.code).toBe("IMPORT_FAILED");
+    expect(output.data).toMatchObject({
+      status: "interrupted",
+      counts: { created: 1 },
+      verified: 0,
+    });
+    expect(output.data.receipts).toHaveLength(1);
+    expect(output.data.savedSubmission).toBeString();
+    f.state.failReadback = false;
+    const retry = createCliTest(main);
+    expect(await retry.runCli(command, f.cliDeps)).toBe(0);
+    expect(JSON.parse(retry.stdout.text())).toMatchObject({
+      ok: true,
+      data: { status: "complete", verified: 1 },
+    });
+    expect(f.posts).toHaveLength(1);
+  });
+}
+
+test.each([undefined, "toon", "yaml", "md"])(
+  "unsupported full-output format %s is rejected before reading or contacting Cloud",
+  async (format) => {
+    const f = await cloudFixture(envelope("sastFindings", [sast]));
+    await rm(f.file);
+    const cli = createCliTest(main);
+    const command = [
+      ...f.command.slice(0, -2),
+      ...(format ? ["--format", format] : []),
+      "--full-output",
+      "--yes",
+    ];
+    expect(await cli.runCli(command, f.cliDeps)).toBe(2);
+    expect(
+      (cli.stdout.text() + cli.stderr.text()).replace(/\s+/g, " "),
+    ).toContain("--format json or --format jsonl");
+    expect(f.calls).toEqual([]);
+    expect(f.posts).toEqual([]);
+  },
+);
