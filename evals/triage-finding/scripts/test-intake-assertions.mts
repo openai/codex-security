@@ -162,6 +162,46 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     );
   }
 }
+// Match the complete collection endpoint, allowing prose delimiters.
+for (const repository of ["{owner}/{repo}", "example/project"]) {
+  for (const [behavior, output] of Object.entries({
+    dependabot_malware: `GET /repos/${repository}/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: advisory`,
+    advisories_private_reports: `GET /repos/${repository}/security-advisories?per_page=100, with separate state=triage, state=draft, state=published, state=closed requests. Triage includes private vulnerability reports. source_type: advisory`,
+  })) {
+    for (const suffix of [
+      "/42/instances",
+      "-wrong",
+      ".json",
+      "_wrong",
+      "Extra",
+    ]) {
+      expectPass(
+        github,
+        output.replaceAll("?", `${suffix}?`),
+        githubContext(behavior),
+        false,
+      );
+    }
+    for (const delimiter of [
+      "\n",
+      "` ",
+      '\" ',
+      " ",
+      ") ",
+      ", ",
+      ". ",
+      "; ",
+      ": ",
+      "] ",
+    ]) {
+      expectPass(
+        github,
+        output.replaceAll("?", `${delimiter}?`),
+        githubContext(behavior),
+      );
+    }
+  }
+}
 const codeScanning = {
   alerts: {
     path: "/repos/example/project/code-scanning/alerts",
