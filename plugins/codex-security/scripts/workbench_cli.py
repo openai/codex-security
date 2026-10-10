@@ -310,8 +310,6 @@ def parse_args(description: str) -> argparse.Namespace:
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
     subparsers.add_parser("local-dedupe")
-    subparsers.add_parser("severity-classification")
-    add_command("read-severity-classification", "--scan-id")
     arguments = sys.argv[1:]
     if "--user-context-stdin" in arguments:
         if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:

@@ -936,7 +936,12 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       }
       for (const name of layout === "worker"
         ? ["result.json", "checkpoint-head.json"]
-        : ["coverage.json", "scan-manifest.json", "findings.json"])
+        : [
+            "coverage.json",
+            "scan-manifest.json",
+            "findings.json",
+            "checkpoint-head.json",
+          ])
         await utimes(path.join(f.root, name), 2, 2);
       const before = new Set(await readdir(checkpoints));
       const followUp = {
@@ -1019,12 +1024,18 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       assert.deepEqual((await f.read()).deferred, []);
       assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
       const checkpointRoot = path.join(f.root, "checkpoints");
-      const originalClosures: [string, number][] = [];
+      const originalClosures: [string, number, Buffer, boolean][] = [];
       for (const name of await readdir(checkpointRoot)) {
         const file = path.join(checkpointRoot, name);
         const saved = await readJson(file);
         if (saved.coverage.resolvedDeferred?.length)
-          originalClosures.push([file, (await stat(file)).mtimeMs]);
+          originalClosures.push([
+            file,
+            (await stat(file)).mtimeMs,
+            await readFile(file),
+            // Raw scopes forbid bound paths; normalized snapshots have them.
+            layout === "worker" || Array.isArray(saved.scope?.includePaths),
+          ]);
       }
       const reopened = {
         ...pending,
@@ -1037,11 +1048,12 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       assert.deepEqual(saved.deferred, [reopened]);
       assert.deepEqual(saved.resolvedDeferred ?? [], []);
       await fail(closing);
-      for (const [file, modified] of originalClosures)
-        assert.equal((await stat(file)).mtimeMs, modified);
+      for (const [file, modified, bytes, fixedTime] of originalClosures) {
+        assert.deepEqual(await readFile(file), bytes);
+        if (fixedTime) assert.equal((await stat(file)).mtimeMs, modified);
+      }
       await f.write(f.draft({}, true));
-      const accepted =
-        destination === "result.json" || destination === "scan-manifest.json";
+      const accepted = layout !== "worker" || destination === "result.json";
       assert.deepEqual((await f.read()).deferred, accepted ? [] : [reopened]);
       await f.write(closing);
       await f.write(f.draft({}, true));

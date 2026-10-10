@@ -64,12 +64,6 @@ interface SavedScanDraft {
   attempt?: string;
 }
 
-type PublishScanDraft = (
-  draft: PreparedScanDraft,
-  expectedDigest: string | undefined,
-  checkpoint: ScanDraftInput,
-) => Promise<string[] | void>;
-
 const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
 
 export const scanDraftInputSchema = loadArtifactZodSchema(
@@ -84,11 +78,11 @@ export const completedScanInputSchema = loadArtifactZodSchema(
   "completedScanInput",
 ) as z.ZodType<CompletedScanInput>;
 
-/** Replace the three existing final-input documents without completing or sealing a scan. */
-export async function recordCodexSecurityScanDraft(
+/** Stage a parent draft, then publish it under the workbench completion lock. */
+export async function recordCodexSecurityScanDraftViaWorkbench(
   context: ArtifactContext,
   input: ScanDraftInput,
-  publishDraft?: PublishScanDraft,
+  runWorkbench: RunArtifactWorkbench,
   signal?: AbortSignal,
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
@@ -99,8 +93,6 @@ export async function recordCodexSecurityScanDraft(
       "scan draft: terminal Deep drafts cannot resolve child deferred work.",
     );
   }
-  if (finalDeepDraft && !publishDraft)
-    await saveScanDraftCheckpoint(context, parsed);
 
   for (;;) {
     signal?.throwIfAborted();
@@ -108,10 +100,8 @@ export async function recordCodexSecurityScanDraft(
     // Do not merge older review work into them.
     const preserved = finalDeepDraft
       ? await preserveDeepThreatModel(context, parsed)
-      : await preserveScanDraft(context, parsed, !publishDraft);
+      : await preserveScanDraft(context, parsed, false);
     const reconciled = preserved.input;
-    if (finalDeepDraft && !publishDraft && reconciled !== parsed)
-      await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(
       context.targetContract,
       "scan draft: authoritative target contract",
@@ -145,129 +135,73 @@ export async function recordCodexSecurityScanDraft(
       ...(hardening === undefined ? {} : { hardening }),
     };
 
+    const draft = {
+      findings: { findings },
+      coverage,
+      manifest: { scan: manifestScan },
+    };
+    const checkpoint = finalDeepDraft ? reconciled : parsed;
+    const expectedDigest = preserved.previousDigest;
+    let documentWarnings: string[] | undefined;
+    const checkpointPath = await artifactDestination(
+      context,
+      ["drafts", `${randomUUID()}.checkpoint.json`],
+      "staged scan checkpoint",
+    );
+    const draftPath = await artifactDestination(
+      context,
+      ["drafts", `${randomUUID()}.json`],
+      "staged scan draft",
+    );
     try {
-      const draft = {
-        findings: { findings },
-        coverage,
-        manifest: { scan: manifestScan },
-      };
-      let documentWarnings: string[] | void = undefined;
-      if (publishDraft) {
-        documentWarnings = await publishDraft(
-          draft,
-          preserved.previousDigest,
-          finalDeepDraft ? reconciled : parsed,
-        );
-      } else {
-        const destinations = await Promise.all([
-          artifactDestination(
-            context,
-            ["findings.json"],
-            "scan draft findings",
-          ),
-          artifactDestination(
-            context,
-            ["coverage.json"],
-            "scan draft coverage",
-          ),
-          artifactDestination(
-            context,
-            ["scan-manifest.json"],
-            "scan draft manifest",
-          ),
-        ]);
-        await replaceArtifactJson(destinations[0], { findings });
-        await replaceArtifactJson(destinations[1], coverage);
-        await replaceArtifactJson(destinations[2], { scan: manifestScan });
-        const warning = await saveThreatModelDocument(
-          context,
-          reconciled.threatModel,
-        );
-        if (warning !== undefined) documentWarnings = [warning];
+      const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
+      await Promise.all([
+        replaceArtifactJson(checkpointPath, snapshot),
+        replaceArtifactJson(draftPath, draft),
+      ]);
+      const arguments_ = [
+        "write-scan-draft",
+        "--scan-id",
+        input.scanId,
+        "--draft-path",
+        draftPath,
+        "--checkpoint-path",
+        checkpointPath,
+      ];
+      if (expectedDigest !== undefined) {
+        arguments_.push("--expected-draft-digest", expectedDigest);
       }
-      return {
-        scanId: reconciled.scanId,
-        findingCount: findings.length,
-        surfaceCount: (coverage.surfaces as unknown[]).length,
-        coverage,
-        operation: "replace",
-        status: "draft_written",
-        ...(documentWarnings?.length ? { warnings: documentWarnings } : {}),
-      };
-    } catch (error) {
-      if (!isScanDraftConflict(error)) throw error;
-      signal?.throwIfAborted();
-    }
-  }
-}
-
-/** Stage a parent draft, then publish it under the workbench completion lock. */
-export async function recordCodexSecurityScanDraftViaWorkbench(
-  context: ArtifactContext,
-  input: ScanDraftInput,
-  runWorkbench: RunArtifactWorkbench,
-  signal?: AbortSignal,
-): Promise<ScanDraftResult> {
-  return recordCodexSecurityScanDraft(
-    context,
-    input,
-    async (draft, expectedDigest, checkpoint) => {
-      const checkpointPath = await artifactDestination(
-        context,
-        ["drafts", `${randomUUID()}.checkpoint.json`],
-        "staged scan checkpoint",
-      );
-      const draftPath = await artifactDestination(
-        context,
-        ["drafts", `${randomUUID()}.json`],
-        "staged scan draft",
-      );
+      if (context.handoffClaimToken) {
+        arguments_.push("--claim-token", context.handoffClaimToken);
+      }
       try {
-        const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
-        await Promise.all([
-          replaceArtifactJson(checkpointPath, snapshot),
-          replaceArtifactJson(draftPath, draft),
-        ]);
-        const arguments_ = [
-          "write-scan-draft",
-          "--scan-id",
-          input.scanId,
-          "--draft-path",
-          draftPath,
-          "--checkpoint-path",
-          checkpointPath,
-        ];
-        if (expectedDigest !== undefined) {
-          arguments_.push("--expected-draft-digest", expectedDigest);
-        }
-        if (context.handoffClaimToken) {
-          arguments_.push("--claim-token", context.handoffClaimToken);
-        }
-        try {
-          const result = await runWorkbench(arguments_);
-          return Array.isArray(result?.warnings)
-            ? result.warnings.filter(
-                (warning): warning is string => typeof warning === "string",
-              )
-            : undefined;
-        } catch (error) {
-          if (!workbenchScanDraftConflict(error)) throw error;
-          throw Object.assign(
-            new Error(
-              "The canonical scan draft changed while this checkpoint was being reconciled.",
-            ),
-            { code: "scan_draft_conflict" },
-          );
-        }
-      } finally {
-        await Promise.all([
-          fs.rm(checkpointPath, { force: true }),
-          fs.rm(draftPath, { force: true }),
-        ]);
+        const result = await runWorkbench(arguments_);
+        documentWarnings = Array.isArray(result?.warnings)
+          ? result.warnings.filter(
+              (warning): warning is string => typeof warning === "string",
+            )
+          : undefined;
+      } catch (error) {
+        if (!workbenchScanDraftConflict(error)) throw error;
+        signal?.throwIfAborted();
+        continue;
       }
-    },
-    signal,
-  );
+    } finally {
+      await Promise.all([
+        fs.rm(checkpointPath, { force: true }),
+        fs.rm(draftPath, { force: true }),
+      ]);
+    }
+    return {
+      scanId: reconciled.scanId,
+      findingCount: findings.length,
+      surfaceCount: (coverage.surfaces as unknown[]).length,
+      coverage,
+      operation: "replace",
+      status: "draft_written",
+      ...(documentWarnings?.length ? { warnings: documentWarnings } : {}),
+    };
+  }
 }
 
 /** Save a Standard worker draft in its assigned output directory. */
@@ -1484,14 +1418,6 @@ function draftDigest(
     else digest.update("present\0").update(contents).update("\0");
   }
   return digest.digest("hex");
-}
-
-function isScanDraftConflict(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    error.code === "scan_draft_conflict"
-  );
 }
 
 function workbenchScanDraftConflict(error: unknown): boolean {

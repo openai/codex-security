@@ -25,11 +25,11 @@ import type {
 } from "./worker-runner.js";
 import {
   boundedDeepScanErrorPair,
+  confirmedOwnershipChange,
   errorNameWithCode,
   abortError,
   errorMessage,
   boundedDeepScanErrorMessage,
-  isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
   CodexWorkerExecutor,
@@ -312,7 +312,12 @@ export class DeepScanCoordinator {
         this.publicationAbortController.signal,
       );
       if (this.canceled || this.externallyFailed) return;
-      const completed = await this.finishWithReplay(schedulerResult);
+      const completed = await this.options.store.finish({
+        scanId: this.state.scanId,
+        reason: schedulerResult.reason,
+        manifestPath: join(this.state.scanDir, "scan-manifest.json"),
+        omittedWorkerIds: schedulerResult.omittedWorkerIds,
+      });
       if (this.canceled || this.externallyFailed) return;
       this.state = completed;
       this.log({
@@ -324,12 +329,7 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) {
         return;
       }
-      if (
-        await this.stopAfterOwnershipChange(
-          this.options.threadId,
-          isStaleCoordinatorGenerationError(error),
-        )
-      ) {
+      if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
         return;
       }
       const message = errorMessage(error);
@@ -354,6 +354,14 @@ export class DeepScanCoordinator {
         this.state = failed;
       } catch (persistError) {
         if (this.canceled || this.externallyFailed) return;
+        if (
+          confirmedOwnershipChange(persistError, this.state.scanId) &&
+          (await this.stopAfterOwnershipChange(
+            this.options.threadId,
+            persistError,
+          ))
+        )
+          return;
         this.state = {
           ...this.state,
           status: "failed",
@@ -536,7 +544,7 @@ export class DeepScanCoordinator {
     }
     this.scheduleHeartbeat();
     if (this.terminal || this.ownershipCheck) return;
-    const ownershipCheck = this.stopAfterOwnershipChange(threadId, false);
+    const ownershipCheck = this.stopAfterOwnershipChange(threadId);
     this.ownershipCheck = ownershipCheck;
     try {
       await ownershipCheck;
@@ -548,29 +556,27 @@ export class DeepScanCoordinator {
 
   private async stopAfterOwnershipChange(
     threadId: string | undefined,
-    leaseLossConfirmed: boolean,
+    error?: unknown,
   ): Promise<boolean> {
     if (this.externallyFailed || this.terminal || !threadId)
       return this.externallyFailed;
-    let current: DeepScanRunState;
+    let current = confirmedOwnershipChange(error, this.state.scanId)?.run;
     try {
-      current = await this.options.store.get(this.state.scanId, threadId);
+      current ??= await this.options.store.get(this.state.scanId, threadId);
     } catch (readError) {
       this.log({
         event: "coordinator_ownership_read_failed",
         scanId: this.state.scanId,
         reason: errorKind(readError),
       });
-      if (!leaseLossConfirmed) return this.externallyFailed;
-      current = this.state;
+      return this.externallyFailed;
     }
     if (this.externallyFailed || this.terminal) return this.externallyFailed;
     const replacementConfirmed =
-      leaseLossConfirmed ||
-      (current.status === "running" &&
-        current.coordinatorGeneration !== undefined &&
-        this.state.coordinatorGeneration !== undefined &&
-        current.coordinatorGeneration > this.state.coordinatorGeneration);
+      current.status === "running" &&
+      current.coordinatorGeneration !== undefined &&
+      this.state.coordinatorGeneration !== undefined &&
+      current.coordinatorGeneration > this.state.coordinatorGeneration;
     if (current.status === "running" && !replacementConfirmed) return false;
 
     this.externallyFailed = true;
@@ -662,8 +668,7 @@ export class DeepScanCoordinator {
     let lastReplaceableFailure:
       Extract<DiscoveryOutcome, { status: "failed" }> | undefined;
 
-    const errorLimit =
-      config.stopAfterConsecutiveErrors ?? config.stopAfterNoNew;
+    const errorLimit = config.stopAfterConsecutiveErrors;
     let reducerFailures = persistedReducerFailureStreak(
       this.state.persistedWorkers ?? [],
     );
@@ -731,6 +736,8 @@ export class DeepScanCoordinator {
       let firstFailure: unknown | undefined;
       for (const result of results) {
         if (result.status === "rejected") {
+          if (confirmedOwnershipChange(result.reason, this.state.scanId))
+            throw result.reason;
           firstFailure ??= result.reason;
           continue;
         }
@@ -753,6 +760,26 @@ export class DeepScanCoordinator {
       if ("status" in outcome) return outcome.error;
       if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       return undefined;
+    };
+
+    const settleFailure = async (error: unknown): Promise<never> => {
+      this.abortController.abort(errorMessage(error));
+      const reducerFailure = await reconcileReducerSettlement();
+      const discoveries = await Promise.allSettled([...active.values()]);
+      // SDK iterator cleanup can let a later generic rejection settle first.
+      // Inspect every active worker's result before discarding confirmed ownership.
+      const failures = [
+        error,
+        reducerFailure,
+        ...discoveries.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        ),
+      ];
+      throw (
+        failures.find((failure) =>
+          confirmedOwnershipChange(failure, this.state.scanId),
+        ) ?? error
+      );
     };
 
     await this.options.store.updateProgress({
@@ -831,10 +858,7 @@ export class DeepScanCoordinator {
 
       const settlement = await nextSettlement();
       if (settlement.status === "rejected") {
-        this.abortController.abort(errorMessage(settlement.error));
-        await reconcileReducerSettlement();
-        await this.settleSchedulerWork();
-        throw settlement.error;
+        return await settleFailure(settlement.error);
       }
       const outcome = settlement.outcome;
       if (outcome.type === "discovery") {
@@ -863,15 +887,9 @@ export class DeepScanCoordinator {
               outcome.error.message,
               outcome.error,
             );
-            this.abortController.abort(thresholdError.message);
-            await reconcileReducerSettlement();
-            await this.settleSchedulerWork();
-            throw thresholdError;
+            return await settleFailure(thresholdError);
           }
-          this.abortController.abort(outcome.error.message);
-          await reconcileReducerSettlement();
-          await this.settleSchedulerWork();
-          throw outcome.error;
+          return await settleFailure(outcome.error);
         }
         if (outcome.status === "canceled") {
           if (
@@ -909,9 +927,7 @@ export class DeepScanCoordinator {
           outcome.error.message,
           outcome.error,
         );
-        this.abortController.abort(thresholdError.message);
-        await this.settleSchedulerWork();
-        throw thresholdError;
+        return await settleFailure(thresholdError);
       }
       reducerFailures = 0;
       if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
@@ -1065,39 +1081,6 @@ export class DeepScanCoordinator {
       count,
       completed: count,
     });
-  }
-
-  /**
-   * A workbench process can commit SQLite and still lose its stdout response.
-   * Replay the exact idempotent finish once before treating the run as failed;
-   * otherwise we could overwrite a successful terminal state after durable success.
-   */
-  private async finishWithReplay(
-    result: SchedulerResult,
-  ): Promise<DeepScanRunState> {
-    const input = {
-      scanId: this.state.scanId,
-      reason: result.reason,
-      manifestPath: join(this.state.scanDir, "scan-manifest.json"),
-      omittedWorkerIds: result.omittedWorkerIds,
-    };
-    try {
-      return await this.options.store.finish(input);
-    } catch (firstError) {
-      this.log({
-        event: "coordinator_finish_replay",
-        scanId: this.state.scanId,
-        reason: errorKind(firstError),
-      });
-      try {
-        return await this.options.store.finish(input);
-      } catch (replayError) {
-        throw new Error(
-          `Deep Scan terminal persistence replay failed: ${errorMessage(replayError)}`,
-          { cause: firstError },
-        );
-      }
-    }
   }
 }
 

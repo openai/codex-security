@@ -1,4 +1,7 @@
 import { readJson, writeJson } from "./support/json.ts";
+import { randomUUID } from "node:crypto";
+import { loadWorkbenchProcess } from "./support/workbench-process.ts";
+import { finding, workerDraft } from "./scan-draft-fixture.ts";
 import { assertFlagPair } from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { mock } from "node:test";
@@ -15,6 +18,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  stat,
   symlink,
   utimes,
   writeFile,
@@ -32,12 +36,22 @@ import type {
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
+const { bundledCodexSdkEnvironment } = await importModule({
+  entryPoints: [
+    fileURLToPath(
+      new URL(
+        "../../../../sdk/typescript/src/codex-sdk-environment.ts",
+        import.meta.url,
+      ),
+    ),
+  ],
+});
 
 const {
   CodexSdkWorkerExecutor,
   resolveCodexPath,
   snapshotWorkerEnvironment,
-  appendSafeItemDiagnostic,
+  appendItemDiagnostic,
   classifyCodexWorkerError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
@@ -48,7 +62,7 @@ const {
   stdin: {
     // Test the environment snapshot without adding a production export.
     contents: `${await readFile(executorSource, "utf8")}
-export { snapshotWorkerEnvironment, appendSafeItemDiagnostic };
+export { snapshotWorkerEnvironment, appendItemDiagnostic };
 export * from "./errors.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
@@ -56,7 +70,7 @@ export * from "./errors.js";`,
   },
 });
 
-const temporaryDirectories = createTemporaryDirectories();
+const temporaryDirectories = createTemporaryDirectories(true);
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const trustedParentSandbox = Object.freeze({
   filesystemDenies: [],
@@ -66,8 +80,11 @@ const trustedParentSandboxWithDenials = Object.freeze({
     "/repo/.env",
     "/repo/**/.secret",
     "/repo/**/*.pem",
+    "/repo/temp[1]",
+    "/repo/secret[1]",
     "/repo/.env",
   ],
+  literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
   globScanMaxDepth: 3,
 });
 const emptyWorkerPermissionProfile = {
@@ -84,6 +101,9 @@ const deniedWorkerPermissionProfile = {
     "/repo/.env": "deny",
     "/repo/**/.secret": "deny",
     "/repo/**/*.pem": "deny",
+    "/repo/temp[1]": { ".": "deny" },
+    "/repo/secret[1]": { ".": "deny" },
+    "/": { "repo/temp[1]": "deny", "repo/secret[1]": "deny" },
     glob_scan_max_depth: 3,
   },
   network: { enabled: false },
@@ -92,6 +112,8 @@ const deniedWorkerPermissionProfile = {
 try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
+  await testWorkerCancellation();
+  await testNullUsageCompletion();
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
@@ -113,8 +135,11 @@ try {
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
     await testRetryNotificationDoesNotInterruptTurn();
-    await testSandboxNamespaceDiagnosticIsSanitized();
-    await testOwnedArtifactToolFailureDiagnosticIsSanitized();
+    await testSandboxNamespaceDiagnosticIsPreserved();
+    await testOwnedArtifactToolFailureDiagnosticIsPreserved();
+    for (const reference of ["discovery:\0" + "0", "😀".repeat(1300)]) {
+      await testArtifactDiagnosticSurvivesWorkerRetries(reference);
+    }
     await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
     await testStreamTerminationWithoutTerminalEventFails();
     await testAbortPropagation();
@@ -809,6 +834,13 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
   await mkdir(nonExecutableDirectory);
   await mkdir(path.join(directoryShadow, "codex"), { recursive: true });
   await mkdir(binaryDirectory);
+  const bundledTools = path.join(fixture.root, "codex-path");
+  await mkdir(bundledTools);
+  await writeFile(
+    path.join(bundledTools, "rg"),
+    "#!/bin/sh\nprintf 'synthetic bundled search\\n'\n",
+    { mode: 0o755 },
+  );
   await mkdir(homeTargetChild, { recursive: true });
   await mkdir(codexHome, { recursive: true });
   assert.notEqual(workingDirectory, originalCwd);
@@ -817,8 +849,16 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
     path.join(nonExecutableDirectory, "codex"),
     "not executable\n",
   );
-  await copyFile(fixture.executablePath, codexPath);
-  await chmod(codexPath, 0o755);
+  // A shell wrapper lets the OS select this file before Node loads the fixture.
+  const shellArguments = [process.execPath, fixture.executablePath]
+    .map((value) => `'${value.replaceAll("'", `'"'"'`)}'`)
+    .join(" ");
+  await writeFile(codexPath, `#!/bin/sh\nexec ${shellArguments} "$@"\n`, {
+    mode: 0o755,
+  });
+  await mkdir(path.join(binaryDirectory, "child"));
+  const executableLink = path.join(fixture.root, "executable-link");
+  await symlink(path.join(binaryDirectory, "child"), executableLink, "dir");
   await symlink(homeTargetChild, homeLink, "dir");
   const relativeHome = `${path.relative(originalCwd, homeLink)}/../home`;
   const expectedHome = await realpath(relativeHome);
@@ -837,36 +877,92 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
     path.dirname(process.execPath),
   ].join(path.delimiter);
   try {
-    for (const [configured, expectedExecutable] of [
+    const defaultSearchPath = process.env.PATH;
+    for (const [configured, expectedExecutable, searchPath] of [
       [
         path.relative(originalCwd, fixture.executablePath),
         fixture.executablePath,
       ],
       [undefined, codexPath],
+      [`${binaryDirectory}/./codex`, codexPath],
       ["codex", codexPath],
+      [`${executableLink}/../codex`, codexPath],
+      [`${path.relative(originalCwd, executableLink)}/../codex`, codexPath],
+      ...[
+        `${executableLink}/..`,
+        `${path.relative(originalCwd, executableLink)}/..`,
+      ].flatMap(
+        (entry) =>
+          [
+            [
+              undefined,
+              codexPath,
+              `${entry}${path.delimiter}${path.dirname(process.execPath)}`,
+            ],
+            [
+              "codex",
+              codexPath,
+              `${entry}${path.delimiter}${path.dirname(process.execPath)}`,
+            ],
+          ] as const,
+      ),
     ] as const) {
+      process.env.PATH = searchPath ?? defaultSearchPath;
       if (configured === undefined) delete process.env.CODEX_CLI_PATH;
       else process.env.CODEX_CLI_PATH = configured;
-      assert.equal(resolveCodexPath(), expectedExecutable);
-      const result = await runWorker(promptPath, workingDirectory);
+      const hasBundledTools = expectedExecutable === codexPath;
+      if (hasBundledTools) {
+        process.env.PATH = bundledCodexSdkEnvironment(resolveCodexPath(), {
+          PATH: process.env.PATH,
+        }).PATH;
+      }
+      await writeFile(
+        promptPath,
+        hasBundledTools
+          ? "CAPTURE_SYNTHETIC_RG"
+          : "fixture bound worker executable and home",
+      );
+      assert.equal(
+        await realpath(resolveCodexPath()),
+        await realpath(expectedExecutable),
+      );
+      for (const kind of ["discovery", "dedup"] as const)
+        for (const resumeThreadId of [undefined, "resumed-thread"]) {
+          const result = await runWorker(promptPath, workingDirectory, {
+            kind,
+            resumeThreadId,
+          });
 
-      assert.equal(result.threadId, "fixture-thread-id");
-      const preflight = await readJson(fixture.preflightMarkerPath);
-      const invocation = await readJson(fixture.markerPath);
-      assert.equal(preflight.cwd, await realpath(workingDirectory));
-      assert.equal(invocation.cwd, originalCwd);
-      assert.equal(preflight.codexHome, expectedHome);
-      assert.equal(invocation.codexHome, expectedHome);
-      assert.equal(process.env.CODEX_HOME, relativeHome);
-      assert.deepEqual(preflight.requests, [
-        { method: "config/read", cwd: workingDirectory },
-        { method: "permissionProfile/list", cwd: workingDirectory },
-      ]);
-      assert.deepEqual(invocation.argv.slice(0, 2), [
-        "exec",
-        "--experimental-json",
-      ]);
-      assertFlagPair(invocation.argv, "--cd", workingDirectory);
+          assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+          const preflight = await readJson(fixture.preflightMarkerPath);
+          const invocation = await readJson(fixture.markerPath);
+          assert.equal(preflight.cwd, await realpath(workingDirectory));
+          assert.equal(invocation.cwd, originalCwd);
+          assert.equal(preflight.codexHome, expectedHome);
+          assert.equal(invocation.codexHome, expectedHome);
+          if (hasBundledTools) {
+            assert.equal(
+              invocation.runtimeEnvironment.PATH.split(path.delimiter)[0],
+              bundledTools,
+            );
+            assert.equal(invocation.bundledTool, "synthetic bundled search");
+            assert.equal(
+              preflight.gitEnvironment.PATH,
+              invocation.runtimeEnvironment.PATH,
+            );
+          }
+          assert.equal(process.env.CODEX_HOME, relativeHome);
+          assert.deepEqual(preflight.requests, [
+            { method: "config/read", cwd: workingDirectory },
+            { method: "permissionProfile/list", cwd: workingDirectory },
+          ]);
+          assert.deepEqual(invocation.argv.slice(0, 2), [
+            "exec",
+            "--experimental-json",
+          ]);
+          assertFlagPair(invocation.argv, "--cd", workingDirectory);
+          assertReadOnlyWorkerPolicy(invocation.argv);
+        }
     }
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousCodexPath);
@@ -1038,6 +1134,8 @@ async function testOpenAiCredentialsReachWorker() {
           ? ""
           : process.env.LD_LIBRARY_PATH + path.delimiter) +
         path.join(fixture.root, "libraries"),
+      DYLD_LIBRARY_PATH: path.join(fixture.root, "dylibs"),
+      DYLD_FALLBACK_LIBRARY_PATH: path.join(fixture.root, "fallback-libraries"),
       CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
       RUNNER_TRACKING_ID: "synthetic-worker-job",
     };
@@ -1256,11 +1354,13 @@ async function testWorkerRuntimeSettings() {
   ];
   const saved = [
     "PYTHON",
+    "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
     "CODEX_CLI_PATH",
+    "CODEX_MCP_NODE_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_PLUGIN_ROOT",
@@ -1272,9 +1372,13 @@ async function testWorkerRuntimeSettings() {
     "SYNTHETIC_HEADER_VALUE",
     "CODEX_SQLITE_HOME",
     "XDG_CACHE_HOME",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   try {
+    process.env.CODEX_SECURITY_PYTHON_COMMAND = "stale-ambient-python";
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
     delete process.env.SYNTHETIC_GATEWAY_KEY;
@@ -1412,6 +1516,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index === 0
               ? undefined
               : {
+                  goals: index % 2 === 0,
                   shell_tool: index % 2 === 0,
                   unified_exec: false,
                   view_image: index % 2 !== 0,
@@ -1433,7 +1538,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
             ],
-            literalFilesystemDenies: [deepPath, codexHome],
+            literalFilesystemDenies: [
+              ...trustedParentSandboxWithDenials.literalFilesystemDenies,
+              deepPath,
+              codexHome,
+            ],
             globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
           };
           const provider = index === 0 ? undefined : "synthetic.gateway";
@@ -1491,6 +1600,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                       `native-state-${index}`,
                     ),
                   },
+            authentication:
+              index === 0
+                ? {}
+                : {
+                    cli_auth_credentials_store:
+                      index % 2 ? "file" : "ephemeral",
+                    forced_login_method: index % 2 ? "api" : "chatgpt",
+                    forced_chatgpt_workspace_id: `synthetic-workspace-${index}`,
+                  },
             endpoint,
             serviceTier,
             instructionsFile,
@@ -1499,6 +1617,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             autoCompactTokenLimit:
               index === 0 ? undefined : 24_000 * (index + 1),
             windowsSandbox,
+            shellPolicy:
+              index === 0
+                ? undefined
+                : {
+                    inherit: index % 2 === 0 ? "core" : "none",
+                    include_only: ["PATH", "SYNTHETIC_INCLUDED"],
+                    exclude: ["SYNTHETIC_EXCLUDED"],
+                    set: { SYNTHETIC_SHELL_MARKER: `scan-${index}` },
+                  },
             webSearch,
             features,
             telemetry,
@@ -1555,6 +1682,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               entry.deepPath,
               stringifyToml({
                 worker_runtime: {
+                  ...entry.authentication,
                   ...entry.workerTelemetry,
                   ...(entry.endpoint === undefined
                     ? {}
@@ -1572,6 +1700,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         native_profile: entry.nativeProfile,
                         environment: entry.environment,
                         windows: { sandbox: entry.windowsSandbox },
+                        shell_environment_policy: entry.shellPolicy,
                         features: entry.features,
                       }),
                 },
@@ -1637,6 +1766,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         );
       }) as typeof childProcess.spawn;
       syncBuiltinESMExports();
+      const nodePaths = settings.map((_, index) =>
+        path.join(fixture.root, `selected node ${index}`, "node"),
+      );
+
       const executors = settings.map(
         (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
@@ -1646,7 +1779,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
-              pythonCommand: helperPython,
+              pythonCommand: `${helperPython}-${index} `,
             },
           }),
       );
@@ -1657,6 +1790,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           await Promise.all(
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
+              process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
               process.env.CODEX_SECURITY_KNOWLEDGE_BASE =
@@ -1665,6 +1799,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 fixture.root,
                 `cache-${index} `,
               );
+              for (const name of [
+                "LD_LIBRARY_PATH",
+                "DYLD_LIBRARY_PATH",
+                "DYLD_FALLBACK_LIBRARY_PATH",
+              ]) {
+                process.env[name] = path.join(
+                  fixture.root,
+                  `libraries-${index}`,
+                );
+              }
               restoreEnv(
                 "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
                 workerConfigurations[index].workerConfigPath,
@@ -1746,6 +1890,20 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgePath,
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            for (const name of [
+              "LD_LIBRARY_PATH",
+              "DYLD_LIBRARY_PATH",
+              "DYLD_FALLBACK_LIBRARY_PATH",
+            ]) {
+              assert.equal(
+                workerLaunch.environment![name],
+                path.join(fixture.root, `libraries-${index}`),
+              );
+              assert.equal(
+                invocation.runtimeEnvironment[name],
+                workerLaunch.environment![name],
+              );
+            }
             assert.equal(
               invocation.knowledgePath,
               workerConfigurations[index].knowledgePath,
@@ -1756,7 +1914,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.providerKey, providerKeys[index]);
+            assert.equal(invocation.mcpNodePath, nodePaths[index]);
+            assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
             assert.equal(invocation.providerHeader, providerHeaders[index]);
+
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
               workerLaunch.environment!.CODEX_SQLITE_HOME,
@@ -1765,6 +1926,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
             assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
             assertConfigOverrides(invocation.argv, {
+              ...workerConfigurations[index].authentication,
               openai_base_url: workerConfigurations[index].endpoint,
               model_reasoning_summary: expected,
               service_tier: workerConfigurations[index].serviceTier,
@@ -1873,8 +2035,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             }
             assert.equal(invocation.python, python);
             assertConfigOverrides(invocation.argv, {
-              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
-                helperPython,
+              "mcp_servers.cs_artifacts.command": process.execPath,
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
               "mcp_servers.cs_artifacts.args.0": path.join(
                 fixture.root,
                 `plugin-${index}`,
@@ -1890,6 +2052,20 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               invocation.deepConfigPath,
               workerConfigurations[index].workerConfigPath,
+            );
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(
+                  parseToml(
+                    invocation.argv
+                      .filter((arg: string) =>
+                        arg.startsWith("shell_environment_policy="),
+                      )
+                      .join("\n"),
+                  ),
+                ),
+              ).shell_environment_policy,
+              workerConfigurations[index].shellPolicy,
             );
             const workerFeatures = parseToml(
               invocation.argv
@@ -2013,7 +2189,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nopenai_base_url = "https://changed-snapshot.example.test/v1"\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n[worker_runtime.analytics]\nenabled = false\n[worker_runtime.responses_api_metadata]\ncustom_tag = "changed"\n',
+                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nopenai_base_url = "https://changed-snapshot.example.test/v1"\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.shell_environment_policy]\ninherit = "all"\n[worker_runtime.shell_environment_policy.set]\nSYNTHETIC_SHELL_MARKER = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n[worker_runtime.analytics]\nenabled = false\n[worker_runtime.responses_api_metadata]\ncustom_tag = "changed"\n',
                 ),
               ]),
             ),
@@ -2341,6 +2517,13 @@ async function testRetryNotificationDoesNotInterruptTurn() {
       subagents: 3,
     });
     assert.equal(result.threadId, "fixture-thread-id");
+    assert.deepEqual(result.diagnostics, [
+      {
+        code: "worker_error",
+        message:
+          "Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)",
+      },
+    ]);
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--model"), false);
     assertConfigOverrides(invocation.argv, {
@@ -2349,7 +2532,7 @@ async function testRetryNotificationDoesNotInterruptTurn() {
   });
 }
 
-async function testSandboxNamespaceDiagnosticIsSanitized() {
+async function testSandboxNamespaceDiagnosticIsPreserved() {
   const result = await runFixtureWorker(
     "BWRAP_NAMESPACE_FAILURE",
     "discovery",
@@ -2358,14 +2541,229 @@ async function testSandboxNamespaceDiagnosticIsSanitized() {
   assert.deepEqual(result.diagnostics, [
     {
       code: "sandbox_namespace_exhausted",
-      message: "Codex worker sandbox namespace creation failed (bwrap ENOSPC).",
+      message:
+        "private source text\nbwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_user_namespaces exceeded (ENOSPC)",
     },
   ]);
   const serialized = JSON.stringify(result);
-  assert.doesNotMatch(serialized, /super-secret-command|private source text/);
+  assert.doesNotMatch(serialized, /super-secret-command/);
 }
 
-async function testOwnedArtifactToolFailureDiagnosticIsSanitized() {
+async function testArtifactDiagnosticSurvivesWorkerRetries(reference: string) {
+  const { executeWorkbench } = await loadWorkbenchProcess();
+  const {
+    WorkbenchDeepScanStore,
+    DeepScanWorkerRunner,
+    createDeepScanArtifacts,
+    requireRegularFile,
+    recordCodexSecurityDeepReduction,
+  } = await importModule({
+    stdin: {
+      contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
+export { DeepScanWorkerRunner } from "./src/deep-scan/worker-runner.ts";
+export { createDeepScanArtifacts, requireRegularFile } from "./src/deep-scan/artifacts.ts";
+export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";`,
+      resolveDir: path.resolve(import.meta.dirname, ".."),
+    },
+    loader: { ".md": "text" },
+  });
+  await withWorkerFixture(async (fixture) => {
+    const saved = [
+      "CODEX_HOME",
+      "CODEX_SECURITY_STATE_DIR",
+      "FAKE_CODEX_ARTIFACT_EVENT",
+    ].map((name) => [name, process.env[name]] as const);
+    process.env.CODEX_HOME = fixture.root;
+    process.env.CODEX_SECURITY_STATE_DIR = path.join(fixture.root, "state");
+    try {
+      const targetPath = path.join(fixture.root, "target");
+      await mkdir(targetPath);
+      await writeFile(
+        path.join(targetPath, "fixture.py"),
+        "print(1)\nprint(2)\n",
+      );
+      const store = new WorkbenchDeepScanStore(
+        (args: string[], input?: string) =>
+          executeWorkbench(
+            process.env.PYTHON?.trim() || "python3",
+            args,
+            input,
+          ),
+      );
+      const started = await store.begin({
+        targetPath,
+        threadId: "diagnostic-owner",
+        scanRoot: path.join(fixture.root, "scans"),
+      });
+      assert.ok(
+        (
+          await stat(path.join(fixture.root, "state", "workbench.sqlite3"))
+        ).isFile(),
+      );
+      const { run } = await store.claimCoordinator({
+        scanId: started.scanId,
+        threadId: "diagnostic-owner",
+      });
+      const artifacts = createDeepScanArtifacts(run.scanDir);
+      const sourcePath = path.join(
+        artifacts.workersRoot,
+        "discovery/output/result.json",
+      );
+      const artifactDir = path.join(
+        artifacts.dedupRoot,
+        randomUUID(),
+        "output",
+      );
+      const promptPath = path.join(path.dirname(artifactDir), "prompt.md");
+      await mkdir(path.dirname(sourcePath), { recursive: true });
+      await mkdir(artifactDir, { recursive: true });
+      await writeFile(promptPath, "Record the reducer result.");
+      const sourceFinding = finding("fixture", "fixture.py");
+      await writeJson(
+        sourcePath,
+        workerDraft([sourceFinding], { scanId: run.scanId }),
+      );
+      const workerIds = [randomUUID(), randomUUID()];
+      for (const id of workerIds) {
+        const worker = {
+          id,
+          scanId: run.scanId,
+          kind: "discovery",
+          promptPath,
+          artifactDir: path.dirname(sourcePath),
+          attempt: 1,
+        };
+        await store.updateWorker({ ...worker, status: "running" });
+        await store.updateWorker({
+          ...worker,
+          status: "succeeded",
+          resultManifestPath: sourcePath,
+        });
+      }
+      const workerId = randomUUID();
+      await store.claimDedup({
+        id: workerId,
+        scanId: run.scanId,
+        workerIds,
+        promptPath,
+        artifactDir,
+      });
+      const deepReducer = {
+        scanRoot: run.scanDir,
+        claimedWorkers: [{ id: "discovery", resultPath: sourcePath }],
+      };
+      let message = "";
+      await assert.rejects(
+        () =>
+          recordCodexSecurityDeepReduction(
+            {
+              root: artifactDir,
+              repoRoot: targetPath,
+              layout: "reducer",
+              scanId: run.scanId,
+              deepReducer,
+            },
+            {
+              scanId: run.scanId,
+              findings: [
+                {
+                  ...sourceFinding,
+                  provenance: {
+                    ...sourceFinding.provenance,
+                    sourceFindingIds: [reference],
+                  },
+                },
+              ],
+            },
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          message = error.message;
+          return message.includes(reference);
+        },
+      );
+      // Truncating the long, well-formed emoji message splits a surrogate pair.
+      const persistedDiagnostic = reference.includes("\0")
+        ? message
+        : "\ufffd\n...[truncated; sha256:";
+      process.env.FAKE_CODEX_ARTIFACT_EVENT = JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "diagnostic",
+          type: "mcp_tool_call",
+          server: "cs_artifacts",
+          tool: "record_codex_security_deep_reduction",
+          status: "failed",
+          error: null,
+          result: { isError: true, content: [{ type: "text", text: message }] },
+        },
+      });
+      let retries = 0;
+      const runner = new DeepScanWorkerRunner({
+        run,
+        store,
+        executor: new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+        }),
+        artifacts,
+        pluginRoot: path.resolve(import.meta.dirname, "../.."),
+        clock: {
+          now: () => new Date(),
+          sleep: async () => {
+            retries++;
+            const state = await store.get(run.scanId, "diagnostic-owner");
+            const worker = state.persistedWorkers.find(
+              (worker: { id: string }) => worker.id === workerId,
+            );
+            assert.equal(worker.attempt, 1);
+            assert.ok(worker.error.includes(persistedDiagnostic));
+            assert.equal(
+              (await readJson(fixture.markerPath)).argv.includes("resume"),
+              false,
+            );
+          },
+        },
+        random: () => 0,
+        log: () => {},
+        retryDelaysMs: [0],
+        signal: new AbortController().signal,
+      });
+      const outcome = await runner.runWorkerWithRetries({
+        workerId,
+        kind: "dedup",
+        promptPath,
+        promptRoot: path.join(path.dirname(artifactDir), "prompts"),
+        artifactDir,
+        artifactContext: { root: artifactDir, layout: "reducer", deepReducer },
+        subagents: 0,
+        validate: () =>
+          requireRegularFile(
+            path.join(artifactDir, "result.json"),
+            artifactDir,
+          ),
+        beforeRetry: async () => {},
+      });
+      assert.equal(outcome.status, "failed");
+      assert.equal(retries, 1);
+      const state = await store.get(run.scanId, "diagnostic-owner");
+      const worker = state.persistedWorkers.find(
+        (worker: { id: string }) => worker.id === workerId,
+      );
+      assert.equal(worker.status, "failed");
+      assert.equal(worker.attempt, 2);
+      assert.ok(worker.error.includes(persistedDiagnostic));
+      const invocation = await readJson(fixture.markerPath);
+      assert.equal(
+        invocation.argv[invocation.argv.indexOf("resume") + 1],
+        "fixture-thread-id",
+      );
+    } finally {
+      for (const [name, value] of saved) restoreEnv(name, value);
+    }
+  });
+}
+
+async function testOwnedArtifactToolFailureDiagnosticIsPreserved() {
   for (const { prompt, tool, reason } of [
     {
       prompt: "OWNED_ARTIFACT_TOOL_REJECTED",
@@ -2404,7 +2802,11 @@ async function testOwnedArtifactToolFailureDiagnosticIsSanitized() {
       assert.deepEqual(result.diagnostics, [
         {
           code: "artifact_tool_failed",
-          message: `Codex worker artifact tool ${tool} ${reason}.`,
+          message: prompt.includes("TRANSPORT_FAILED")
+            ? "--provider-error transport closed sk-proj-synthetic-secret /private/customer/path"
+            : prompt.includes("REJECTED")
+              ? "private output sk-proj-synthetic-secret"
+              : `Codex worker artifact tool ${tool} ${reason}.`,
         },
       ]);
     } else {
@@ -2412,7 +2814,7 @@ async function testOwnedArtifactToolFailureDiagnosticIsSanitized() {
     }
     assert.doesNotMatch(
       JSON.stringify(result),
-      /synthetic-secret|private source|private output|private\/customer\/path/i,
+      /Bearer synthetic-secret|private source text/i,
     );
   }
 }
@@ -2430,13 +2832,23 @@ function testCodeModeFrameDiagnosticBoundaries() {
   for (const item of [
     { type: "error", message: ipcFrameError },
     { ...failedArtifactTool, error: { message: ipcFrameError } },
+    {
+      ...failedArtifactTool,
+      server: "foreign_server",
+      error: { message: ipcFrameError },
+    },
     { ...failedArtifactTool, result: resultWithText(ipcFrameError) },
   ]) {
     const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendSafeItemDiagnostic(diagnostics, failedArtifactTool);
-    appendSafeItemDiagnostic(diagnostics, item);
-    appendSafeItemDiagnostic(diagnostics, failedArtifactTool);
+    appendItemDiagnostic(diagnostics, failedArtifactTool);
+    appendItemDiagnostic(diagnostics, item);
+    appendItemDiagnostic(diagnostics, failedArtifactTool);
     assert.deepEqual(diagnostics, [
+      {
+        code: "artifact_tool_failed",
+        message:
+          "Codex worker artifact tool get_codex_security_deep_reducer_inputs failed.",
+      },
       { code: "artifact_tool_failed", message: ipcFrameError },
     ]);
   }
@@ -2449,17 +2861,14 @@ function testCodeModeFrameDiagnosticBoundaries() {
     "private path /customer/repo: IPC frame limit exceeded",
   ]) {
     const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendSafeItemDiagnostic(diagnostics, { type: "error", message });
-    appendSafeItemDiagnostic(diagnostics, {
+    appendItemDiagnostic(diagnostics, { type: "error", message });
+    appendItemDiagnostic(diagnostics, {
       ...failedArtifactTool,
       result: resultWithText(message),
     });
     assert.deepEqual(diagnostics, [
-      {
-        code: "artifact_tool_failed",
-        message:
-          "Codex worker artifact tool get_codex_security_deep_reducer_inputs returned an error.",
-      },
+      { code: "worker_error", message },
+      { code: "artifact_tool_failed", message },
     ]);
   }
   for (const item of [
@@ -2467,6 +2876,11 @@ function testCodeModeFrameDiagnosticBoundaries() {
       ...failedArtifactTool,
       server: "foreign_server",
       result: resultWithText(ipcFrameError),
+    },
+    {
+      ...failedArtifactTool,
+      server: "foreign_server",
+      error: { message: "Synthetic unrelated transport failure" },
     },
     {
       type: "command_execution",
@@ -2477,7 +2891,7 @@ function testCodeModeFrameDiagnosticBoundaries() {
     { type: "unknown", status: "failed", error: { message: ipcFrameError } },
   ]) {
     const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendSafeItemDiagnostic(diagnostics, item);
+    appendItemDiagnostic(diagnostics, item);
     assert.deepEqual(diagnostics, []);
   }
 }
@@ -2950,14 +3364,17 @@ const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const toolProbe = stdin.includes('CAPTURE_SYNTHETIC_RG') ? spawnSync('rg', ['--version'], { encoding: 'utf8' }) : undefined;
+if (toolProbe && toolProbe.status !== 0) throw toolProbe.error ?? new Error(toolProbe.stderr);
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
 if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
+
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }
 if (stdin.includes('MCP_STARTUP_TIMEOUT') || stdin.includes('CATALOG_AUTH_ONLY') || stdin.includes('SYNC_AUTH_ONLY')) {
@@ -2978,6 +3395,7 @@ const resumeIndex = process.argv.indexOf('resume');
 const threadId = resumeIndex === -1 ? 'fixture-thread-id' : process.argv[resumeIndex + 1];
 console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));
 if (stdin.includes('IPC_DIAGNOSTIC_EVENT')) console.log(stdin.split('\\n')[1]);
+if (process.env.FAKE_CODEX_ARTIFACT_EVENT) console.log(process.env.FAKE_CODEX_ARTIFACT_EVENT);
 if (stdin.includes('MALFORMED_COMMAND_EVENT')) {
   const output = JSON.parse(stdin.split('\\n')[1]);
   const event = { type: 'item.completed', item: { id: 'fixture-command', type: 'command_execution', command: 'cat example.ts', aggregated_output: output, exit_code: 0, status: 'completed' } };
@@ -2988,6 +3406,7 @@ const permissionProfileFallbackWarning = 'Configured value for \`permission_prof
 if (stdin.includes('PERMISSION_PROFILE_FALLBACK_ITEM')) console.log(JSON.stringify({ type: 'item.completed', item: { id: 'warning-1', type: 'error', message: permissionProfileFallbackWarning } }));
 if (stdin.includes('PERMISSION_PROFILE_FALLBACK_EVENT')) console.log(JSON.stringify({ type: 'error', message: permissionProfileFallbackWarning }));
 if (stdin.includes('BLOCK_AFTER_START')) await new Promise(() => {});
+if (stdin.includes('FAIL_THEN_HANG')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'fixture worker failed' } })); setInterval(() => {}, 1_000); await new Promise(() => {}); }
 if (stdin.includes('RATE_LIMIT_CYBER_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: '429 Too Many Requests: Request blocked by cyberPolicy.' } })); process.exit(0); }
 if (stdin.includes('CYBER_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'Request blocked by cyberPolicy.' } })); process.exit(0); }
 if (stdin.includes('SAFETY_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'Request blocked by a safety policy violation.' } })); process.exit(0); }
@@ -3001,11 +3420,11 @@ if (stdin.includes('BWRAP_NAMESPACE_FAILURE')) console.log(JSON.stringify({ type
 if (stdin.includes('ARTIFACT_TOOL_')) {
   const server = stdin.includes('FOREIGN_ARTIFACT_TOOL_') ? 'untrusted_server' : stdin.includes('LEGACY_OWNED_ARTIFACT_TOOL_') ? 'codex_security_artifacts' : 'cs_artifacts';
   const tool = stdin.includes('ADDITIONAL_OWNED_ARTIFACT_TOOL_') ? 'additional_codex_security_worker_tool' : stdin.includes('DISCOVERY_OWNED_ARTIFACT_TOOL_') ? 'record_codex_security_discovery_candidates' : 'record_codex_security_deep_reduction';
-  const item = { id: 'mcp-1', type: 'mcp_tool_call', server, tool, arguments: { secret: 'Bearer synthetic-secret', source: 'private source text' }, result: stdin.includes('REJECTED') ? { content: [{ type: 'text', text: 'private output sk-proj-synthetic-secret' }] } : null, error: stdin.includes('TRANSPORT_FAILED') ? { message: 'transport closed sk-proj-synthetic-secret /private/customer/path' } : null, status: 'failed' };
+  const item = { id: 'mcp-1', type: 'mcp_tool_call', server, tool, arguments: { secret: 'Bearer synthetic-secret', source: 'private source text' }, result: stdin.includes('REJECTED') ? { content: [{ type: 'text', text: 'private output sk-proj-synthetic-secret' }] } : null, error: stdin.includes('TRANSPORT_FAILED') ? { message: '--provider-error transport closed sk-proj-synthetic-secret /private/customer/path' } : null, status: 'failed' };
   console.log(JSON.stringify({ type: 'item.completed', item }));
 }
 console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));
-console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
+console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }
 `,
@@ -3123,6 +3542,194 @@ async function withWorkerFixture<Result>(
     await mkdir(workingDirectory);
     return await action(fixture, promptPath, workingDirectory);
   } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
+async function testWorkerCancellation() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  const originalSpawn = childProcess.spawn;
+  let worker: ChildProcess | undefined;
+  let workerSignal: AbortSignal | undefined;
+  let cancelDuringCleanup: (() => void) | undefined;
+  let timeout: NodeJS.Timeout | undefined;
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[] = [],
+    options: SpawnOptions = {},
+  ) => {
+    const child = originalSpawn(
+      command,
+      command === process.execPath ||
+        command === path.toNamespacedPath(process.execPath)
+        ? [fixture.executablePath, ...args]
+        : args,
+      options,
+    );
+    if (args[0] === "exec") {
+      assertFlagPair(args, "--thread-source", "security_scan");
+      worker = child;
+      workerSignal = options.signal;
+      const kill = child.kill;
+      child.kill = function (...args: Parameters<ChildProcess["kill"]>) {
+        cancelDuringCleanup?.();
+        return kill.apply(this, args);
+      };
+    }
+    return child;
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  process.env.CODEX_CLI_PATH = process.execPath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    const executor = new CodexSdkWorkerExecutor({
+      parentSandbox: trustedParentSandbox,
+    });
+    const run = (controller: AbortController, onThreadStarted?: () => void) =>
+      executor.run({
+        kind: "discovery",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: controller.signal,
+        onThreadStarted,
+      });
+    const preAborted = new AbortController();
+    const beforeStartup = new Error(
+      "coordinator canceled before worker startup",
+    );
+    preAborted.abort(beforeStartup);
+    await assert.rejects(
+      run(preAborted),
+      (error: Error) => error === beforeStartup,
+    );
+    assert.equal(worker, undefined);
+    await assert.rejects(readFile(fixture.preflightMarkerPath), {
+      code: "ENOENT",
+    });
+    await assert.rejects(readFile(fixture.markerPath), { code: "ENOENT" });
+
+    for (const prompt of [
+      "BLOCK_AFTER_START",
+      "COMPLETE_THEN_HANG",
+      "FAIL_THEN_HANG",
+    ]) {
+      await writeFile(promptPath, `${prompt}\n`);
+      const controller = new AbortController();
+      const cancellation = new Error(
+        "coordinator canceled its remaining workers",
+      );
+      // Exercise cancellation inside the real SDK's iterator cleanup, before kill returns.
+      cancelDuringCleanup =
+        prompt === "COMPLETE_THEN_HANG"
+          ? () => controller.abort(cancellation)
+          : undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${prompt} worker did not settle`)),
+          10_000,
+        );
+      });
+      const execution = Promise.race([
+        run(controller, () => {
+          if (prompt === "BLOCK_AFTER_START") controller.abort(cancellation);
+        }),
+        deadline,
+      ]);
+      if (prompt === "BLOCK_AFTER_START") {
+        await assert.rejects(
+          execution,
+          (error: Error) =>
+            error?.name === "AbortError" ||
+            /abort|SIGTERM/i.test(error?.message ?? ""),
+        );
+        assert(workerSignal);
+        assert.equal(workerSignal.aborted, true);
+        assert.equal(workerSignal.reason, cancellation);
+      } else {
+        if (prompt === "FAIL_THEN_HANG") {
+          await assert.rejects(execution, /fixture worker failed/);
+          controller.abort(cancellation);
+        } else {
+          const result = await execution;
+          assert.equal(result.threadId, "fixture-thread-id");
+        }
+        assert.equal(controller.signal.aborted, true);
+        assert(workerSignal);
+        assert.equal(workerSignal.aborted, false);
+      }
+      assert.notEqual(workerSignal, controller.signal);
+      const currentWorker = worker as ChildProcess | undefined;
+      assert(currentWorker);
+      assert.equal(currentWorker.killed, true);
+      if (
+        currentWorker.exitCode === null &&
+        currentWorker.signalCode === null
+      ) {
+        await Promise.race([
+          new Promise<void>((resolve) =>
+            worker!.once("close", () => resolve()),
+          ),
+          deadline,
+        ]);
+      }
+      clearTimeout(timeout);
+      cancelDuringCleanup = undefined;
+    }
+  } finally {
+    clearTimeout(timeout);
+    cancelDuringCleanup = undefined;
+    if (worker && worker.exitCode === null && worker.signalCode === null)
+      worker.kill("SIGKILL");
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
+async function testNullUsageCompletion() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[] = [],
+    options: SpawnOptions = {},
+  ) =>
+    originalSpawn(
+      command,
+      command === process.execPath ||
+        command === path.toNamespacedPath(process.execPath)
+        ? [fixture.executablePath, ...args]
+        : args,
+      options,
+    )) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  process.env.CODEX_CLI_PATH = process.execPath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    await writeFile(promptPath, "NULL_USAGE\n");
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+        const result = await new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+        }).run({
+          kind,
+          promptPath,
+          workingDirectory: fixture.root,
+          subagents: 0,
+          resumeThreadId,
+          signal: new AbortController().signal,
+        });
+        assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+      }
+    }
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }
 }

@@ -43,7 +43,6 @@ import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
-import workbench_severity as severity
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -116,6 +115,7 @@ from workbench_target import (
     require_remediation_target,
     require_scan_target_identity,
     require_scan_target_unchanged,
+    restore_directory_junctions,
     scan_target_warning,
     worktree_content_digest,
     worktree_content_digest_for_context,
@@ -219,18 +219,21 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 def connect(*, deferred: bool = False) -> sqlite3.Connection:
     path = database_path()
+    guidance = (
+        f"Workbench database: {path}. Ensure the state directory and SQLite journal files "
+        "are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside "
+        "the scanned repository."
+    )
     try:
         create_private_directory(path.parent)
-    except OSError as exc:
-        if exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
-            exc._codex_security_state_unavailable = True
+    except OSError:
+        print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
             connection = sqlite3.connect(path, timeout=5)
-        except sqlite3.OperationalError as exc:
-            if str(exc) == "unable to open database file":
-                exc._codex_security_state_unavailable = True
+        except sqlite3.OperationalError:
+            print(guidance, file=sys.stderr)
             raise
         try:
             connection.row_factory = sqlite3.Row
@@ -244,6 +247,7 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
         except sqlite3.OperationalError as exc:
             connection.close()
             if attempt == SQLITE_RETRY_ATTEMPTS - 1 or not sqlite_busy(exc):
+                print(guidance, file=sys.stderr)
                 raise
             time.sleep(0.05 * (2**attempt))
     raise AssertionError("SQLite retry loop exhausted unexpectedly.")
@@ -326,7 +330,11 @@ def require_diff_target(
         if commit is None:
             raise SystemExit(f"Commit is not available in the local checkout: {head}")
         parent_line = next(
-            (line for line in commit.splitlines() if line.startswith(b"parent ")),
+            (
+                line
+                for line in commit.split(b"\n\n", 1)[0].splitlines()
+                if line.startswith(b"parent ")
+            ),
             None,
         )
         if parent_line is None:
@@ -2399,11 +2407,10 @@ def require_reviewed_patch_applied(
         )
     unversioned = remediation["base_revision"] == "unversioned"
     excluded = (Path(scan["scan_dir"]),)
-    git_dir = None
-    pathspec = None
+    # Unborn repositories still need their config while metadata junctions are deferred.
+    git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
     if not unversioned:
-        _, pathspec = git_worktree_context(target)
-        git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
+        repository, pathspec = git_worktree_context(target)
         if git_dir is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
         excluded += tuple(path for path, _ in git_submodule_entries(target))
@@ -2420,9 +2427,9 @@ def require_reviewed_patch_applied(
         checkout_root = Path(temporary) / "checkout"
         if unversioned:
             checkout = checkout_root
-            copy_directory_excluding(target, checkout, excluded)
+            junctions = copy_directory_excluding(target, checkout, excluded)
         else:
-            copy_git_worktree_files(target, checkout_root, excluded)
+            _, junctions = copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
         if unversioned:
             arguments.append("--no-index")
@@ -2440,6 +2447,11 @@ def require_reviewed_patch_applied(
             raise SystemExit(
                 "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
             )
+        restore_directory_junctions(
+            target if unversioned else repository,
+            checkout if unversioned else checkout_root,
+            junctions,
+        )
         reverted_digest = (
             directory_content_digest(checkout)
             if unversioned
@@ -2452,11 +2464,16 @@ def require_reviewed_patch_applied(
         )
         if reverted_digest != remediation["base_content_digest"] and unversioned:
             checkout = Path(temporary) / "checkout-lf"
-            copy_directory_excluding(target, checkout, excluded)
+            junctions = copy_directory_excluding(target, checkout, excluded)
             applied_without_conversion = git_command(
-                checkout, "-c", "core.autocrlf=input", *arguments, text=True
+                checkout,
+                "-c",
+                "core.autocrlf=input",
+                *arguments,
+                text=True,
             )
             if applied_without_conversion.returncode == 0:
+                restore_directory_junctions(target, checkout, junctions)
                 reverted_digest = directory_content_digest(checkout)
         if reverted_digest != remediation["base_content_digest"]:
             raise SystemExit(
@@ -3322,12 +3339,10 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
-    if args.command == "read-severity-classification":
-        result = severity.read_classification(database_path(), args.scan_id)
-        print(json.dumps(result, allow_nan=False, sort_keys=True))
-        return
     if args.command == "inspect-linear-publication":
-        result = publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
+        result = publication.inspect_linear_publication(
+            _WORKBENCH_PUBLICATION_CONTEXT, read_json_object(Path(args.input_file))
+        )
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
@@ -3389,7 +3404,12 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "export-findings": partial(publication.export_findings, _WORKBENCH_PUBLICATION_CONTEXT),
         }
         if handler := handlers.get(args.command):
-            result = handler(connection, args)
+            payload = (
+                read_json_object(Path(args.input_file))
+                if args.command in {"prepare-linear-publication", "record-linear-publications"}
+                else args
+            )
+            result = handler(connection, payload)
         elif args.command == "get-workspace":
             result = workspace_state(
                 connection,
@@ -3461,8 +3481,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             )
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
-        elif args.command == "severity-classification":
-            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "local-dedupe":
             result = local_dedupe(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":

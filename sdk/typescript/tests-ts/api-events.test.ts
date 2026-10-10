@@ -1,6 +1,6 @@
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { once } from "node:events";
-import { mkdir, stat } from "node:fs/promises";
+import { chmod, mkdir, rm, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import {
   CodexSecurityError,
+  ContractValidationError,
   IncompleteScanError,
   ScanInterruptedError,
   type ScanAuthentication,
@@ -1146,3 +1147,26 @@ describe("one-shot scan events", () => {
     ]);
   });
 });
+
+test("missing required artifacts remain incomplete scans", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  await rm(join(scanDir, "report.md"));
+  await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+    name: IncompleteScanError.name,
+    message:
+      "Codex Security scan completed without required artifacts: report.md",
+  });
+});
+
+test.skipIf(process.platform === "win32")(
+  "preserves unsafe scan-root diagnostics instead of reporting missing files",
+  async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    await chmod(scanDir, 0o755);
+    await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+      name: ContractValidationError.name,
+      message: expect.stringContaining("chmod 700"),
+      cause: expect.any(Error),
+    });
+  },
+);

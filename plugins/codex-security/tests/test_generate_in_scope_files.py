@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import errno
+import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -729,6 +732,67 @@ def test_diff_inventory_rejects_a_narrower_scope(tmp_path: Path) -> None:
     assert output.read_text(encoding="utf-8") == "previous.py\n"
 
 
+@pytest.mark.parametrize(
+    ("mode", "undo_staged_change"),
+    [("revisions", False), ("local-patch", False), ("local-patch", True)],
+)
+def test_diff_inventory_includes_type_changed_files(
+    tmp_path: Path, mode: str, undo_staged_change: bool
+) -> None:
+    repository = make_repository(tmp_path)
+    source = repository / "app" / "changed.py"
+    try:
+        source.symlink_to("routes.py")
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    source.unlink()
+    source.write_text("changed = True\n")
+    if undo_staged_change:
+        git(repository, "add", ".")
+        source.unlink()
+        source.symlink_to("routes.py")
+    arguments = ["--diff-base", "HEAD", "--diff-mode", mode]
+    if mode == "revisions":
+        base = git(repository, "rev-parse", "HEAD")
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "replace symlink")
+        arguments = ["--diff-base", base, "--diff-head", "HEAD", "--diff-mode", mode]
+    output = tmp_path / "in_scope_files.txt"
+    result = run_inventory(repository, ".", output, arguments=arguments)
+    assert result.returncode == 0, result.stderr
+    assert (b"app/changed.py\n" in output.read_bytes()) is not undo_staged_change
+    rank_output = tmp_path / "rank.jsonl"
+    rank = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT.with_name("generate_rank_input.py")),
+            "make-diff-rank-input",
+            "--repo",
+            str(repository),
+            "--base",
+            arguments[1],
+            "--head",
+            "HEAD",
+            "--mode",
+            mode,
+            "--out",
+            str(rank_output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rank.returncode == 0, rank.stderr
+    assert (
+        any(
+            json.loads(line)["path"] == "app/changed.py"
+            for line in rank_output.read_text().splitlines()
+        )
+        is not undo_staged_change
+    )
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes")
 def test_diff_inventory_rejects_non_utf8_path_and_preserves_output(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
@@ -753,3 +817,28 @@ def test_diff_inventory_rejects_non_utf8_path_and_preserves_output(tmp_path: Pat
     assert result.returncode == 2
     assert "cannot be encoded as UTF-8 for the file inventory" in result.stderr
     assert output.read_text(encoding="utf-8") == "previous.py\n"
+
+
+def test_local_diff_inventory_skips_unreadable_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inventory = runpy.run_path(str(SCRIPT))
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    unreadable = write_file(repository, "app/unreadable.py")
+    write_file(repository, "app/readable.py")
+    output = tmp_path / "in_scope_files.txt"
+    original_open = Path.open
+
+    def open_file(path, *args, **kwargs):
+        if path == unreadable:
+            raise PermissionError(errno.EACCES, "Synthetic unreadable file", str(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    count = inventory["generate_diff_in_scope_files"](
+        repository, "HEAD", "HEAD", "local-patch", output
+    )
+    assert count == 1
+    assert output.read_text(encoding="utf-8") == "app/readable.py\n"

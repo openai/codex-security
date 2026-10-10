@@ -16,7 +16,7 @@ from workbench_target import (
     UnreadableLocalFile,
     UnsupportedLocalFileType,
     directory_content_digest,
-    git_output,
+    git_bytes,
     git_revision,
 )
 
@@ -177,11 +177,9 @@ def finding_workflow(
                     else git_revision(target)
                 ),
                 "refsDigest": hashlib.sha256(
-                    (
-                        ""
-                        if evidence or payload.get("gitDisabled")
-                        else (git_output(target, "show-ref") or "")
-                    ).encode()
+                    b""
+                    if evidence or payload.get("gitDisabled")
+                    else (git_bytes(target, "show-ref") or b"").strip()
                 ).hexdigest(),
                 "content": content,
                 **({"privateStatePaths": [str(path) for path in excluded]} if excluded else {}),

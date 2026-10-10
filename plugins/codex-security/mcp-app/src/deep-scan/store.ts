@@ -5,6 +5,7 @@ import { writeJsonAtomic } from "./artifacts.js";
 import {
   boundedDeepScanErrorMessage,
   DeepScanNonRetryableError,
+  DeepScanOwnershipChangedError,
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
@@ -488,8 +489,23 @@ export class WorkbenchDeepScanStore {
           : await this.runWorkbench(args, input);
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
-        if (scanId && isStaleCoordinatorGenerationError(error)) {
-          this.coordinatorLeases.delete(scanId);
+        const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;
+        if (lease && isStaleCoordinatorGenerationError(error)) {
+          // Diagnostics can contain paths or user text; only state establishes ownership.
+          const current = await this.get(
+            lease.input.scanId,
+            lease.input.threadId,
+          ).catch(() => undefined);
+          if (
+            current &&
+            (current.status !== "running" ||
+              (current.coordinatorGeneration !== undefined &&
+                lease.run.coordinatorGeneration !== undefined &&
+                current.coordinatorGeneration >
+                  lease.run.coordinatorGeneration))
+          ) {
+            throw new DeepScanOwnershipChangedError(current, error);
+          }
         }
         throw error;
       }
@@ -582,6 +598,8 @@ export function isTransientPersistenceError(error: unknown): boolean {
   }
 
   for (const record of persistenceErrorRecords(error)) {
+    // A committed workbench mutation can lose or truncate its JSON stdout.
+    if (record.name === "SyntaxError") return true;
     if (
       typeof record.code === "string" &&
       /^(?:SQLITE_BUSY(?:_[A-Z]+)?|SQLITE_LOCKED(?:_[A-Z]+)?|SQLITE_IOERR(?:_[A-Z]+)?|EAGAIN|EBUSY|EINTR|ETIMEDOUT|ETIME)$/i.test(
