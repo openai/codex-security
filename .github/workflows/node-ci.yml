@@ -200,7 +200,7 @@ jobs:
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
     needs: [validate-title, package]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 30 || 20 }}
     strategy:
       fail-fast: false
       matrix:
