@@ -23,21 +23,12 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
-import { createScanArtifactContext } from "./src/artifact-context.js";
-import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
   AsyncLock,
-  startOrJoinDeepScanCoordinator,
 } from "./src/deep-scan/registry.js";
-import {
-  captureDeepScanExecutionSettings,
-  loadDeepScanExecutionSettings,
-  restoredDeepScanWorkerSettings,
-  type DeepScanLegacySettingsContext,
-} from "./src/deep-scan/recovery-settings.js";
-import { createProviderProfile } from "../../../sdk/typescript/src/provider-profile.js";
-import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
+import { captureDeepScanExecutionSettings } from "./src/deep-scan/recovery-settings.js";
+import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveDeepWorkerParentSandbox,
@@ -1055,139 +1046,53 @@ export function createCodexSecurityServer(): McpServer {
             begun.ownerThreadId === threadId;
           if (immediate && !completingLocally && !recoverableSelection)
             return { begun, immediate, sdkOwned };
-          const started = await startOrJoinDeepScanCoordinator({
+          const started = await startDeepScanEngine({
             run: begun,
             registry: deepScanCoordinators,
-            options: {
-              store: deepScanStore,
-              prepareExecutor: async (run) =>
-                new CodexSdkWorkerExecutor({
-                  createProviderProfile,
-                  ...restoredDeepScanWorkerSettings(
-                    await loadDeepScanExecutionSettings(
-                      run.scanDir,
-                      run,
-                      async () => {
-                        const context = await runWorkbench([
-                          "get-scan",
-                          "--scan-id",
-                          run.scanId,
-                        ]);
-                        const recipe = context.recipe as
-                          | Pick<DeepScanLegacySettingsContext, "config">
-                          | undefined;
-                        const scan = context.scan as {
-                          executionAttribution?: {
-                            owner: DeepScanRunState["usageOwner"];
-                          };
-                        };
-                        return {
-                          config: recipe?.config,
-                          usageOwner: scan.executionAttribution?.owner,
-                        };
-                      },
-                    ),
-                    parentSandbox,
-                  ),
-                  artifactContext: {
-                    pluginRoot: PLUGIN_ROOT,
-                    scanRoot: run.scanDir,
-                    repoRoot: run.targetPath,
-                    scanId: run.scanId,
-                    scope: run.scope,
-                    pythonCommand: await resolvePythonCommand(),
-                  },
-                }),
-              executor: new CodexSdkWorkerExecutor({
-                ...modelSettings,
-                parentSandbox,
-                artifactContext: {
-                  pluginRoot: PLUGIN_ROOT,
-                  scanRoot: begun.scanDir,
-                  repoRoot: begun.targetPath,
-                  scanId: begun.scanId,
-                  scope: begun.scope,
-                  pythonCommand: await resolvePythonCommand(),
-                },
-              }),
-              pluginRoot: PLUGIN_ROOT,
-              log: logDeepScanEvent,
-              handoffClaimToken,
-              threadId,
-              onComplete: async (draft, signal, publication) => {
-                const context = await createScanArtifactContext(
-                  begun.scanId,
-                  runWorkbench,
-                  {
-                    requireRunning: true,
-                    requireClaim: true,
-                    handoffClaimToken,
-                    pluginRoot: PLUGIN_ROOT,
-                  },
-                );
-                await recordCodexSecurityScanDraftViaWorkbench(
-                  context,
-                  {
-                    ...draft,
-                    ...(handoffClaimToken === undefined
-                      ? {}
-                      : { handoffClaimToken }),
-                  },
-                  runWorkbench,
+            store: deepScanStore,
+            runWorkbench,
+            ...modelSettings,
+            parentSandbox,
+            pythonCommand: await resolvePythonCommand(),
+            pluginRoot: PLUGIN_ROOT,
+            log: logDeepScanEvent,
+            handoffClaimToken,
+            threadId,
+            onFinalized: async (run, signal) => {
+              // Active owners finish through the completion tool after this call;
+              // detached native scans still publish without another observer.
+              if (sdkOwned || !abortSignalFromExtra(extra)?.aborted) return;
+              try {
+                await runWorkbench(
+                  [
+                    "complete-scan",
+                    "--scan-id",
+                    run.scanId,
+                    "--thread-id",
+                    threadId,
+                    ...optionalArg("--claim-token", handoffClaimToken),
+                  ],
+                  undefined,
+                  false,
+                  false,
                   signal,
-                  publication,
                 );
-              },
-              onFinalized: async (run, signal) => {
-                // Active owners finish through the completion tool after this call;
-                // detached native scans still publish without another observer.
-                if (sdkOwned || !abortSignalFromExtra(extra)?.aborted) return;
-                try {
-                  await runWorkbench(
-                    [
-                      "complete-scan",
-                      "--scan-id",
-                      run.scanId,
-                      "--thread-id",
-                      threadId,
-                      ...optionalArg("--claim-token", handoffClaimToken),
-                    ],
-                    undefined,
-                    false,
-                    false,
-                    signal,
-                  );
-                } catch (error) {
-                  if (!signal.aborted) {
-                    await deepScanStore
-                      .releaseCoordinator(run.scanId)
-                      .catch((releaseError) => {
-                        logDeepScanEvent({
-                          event: "coordinator_release_failed",
-                          scanId: run.scanId,
-                          reason: boundedErrorData(releaseError).message,
-                        });
+              } catch (error) {
+                if (!signal.aborted) {
+                  await deepScanStore
+                    .releaseCoordinator(run.scanId)
+                    .catch((releaseError) => {
+                      logDeepScanEvent({
+                        event: "coordinator_release_failed",
+                        scanId: run.scanId,
+                        reason: boundedErrorData(releaseError).message,
                       });
-                  }
-                  throw new Error(deepScanInvocationFailureMessage(error), {
-                    cause: error,
-                  });
+                    });
                 }
-              },
-              onStopped: async (run) => {
-                await runWorkbench([
-                  "preserve-scan-results",
-                  "--scan-id",
-                  run.scanId,
-                  "--thread-id",
-                  threadId,
-                  ...optionalArg("--claim-token", handoffClaimToken),
-                  ...optionalArg(
-                    "--coordinator-generation",
-                    run.coordinatorGeneration?.toString(),
-                  ),
-                ]);
-              },
+                throw new Error(deepScanInvocationFailureMessage(error), {
+                  cause: error,
+                });
+              }
             },
           });
           return { begun, sdkOwned, ...started };
@@ -2330,13 +2235,18 @@ function logDeepScanEvent(event: {
   );
 }
 
-async function runWorkbench(
+interface WorkbenchOptions {
+  isolatedPython?: boolean;
+}
+
+export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
-  selectFinalization = false,
+  selectFinalization: boolean | WorkbenchOptions = false,
   withExecutionSettings = false,
   signal?: AbortSignal,
   releaseCoordinator = false,
+  isolatedPython = false,
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
@@ -2349,6 +2259,7 @@ async function runWorkbench(
       withExecutionSettings,
       signal,
       releaseCoordinator,
+      isolatedPython,
     );
   } catch (error) {
     const launchError = pythonCommand
@@ -2368,11 +2279,16 @@ async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   input?: string | Buffer,
-  selectFinalization = false,
+  selectFinalization: boolean | WorkbenchOptions = false,
   withExecutionSettings = false,
   signal?: AbortSignal,
   releaseCoordinator = false,
+  isolatedPython = false,
 ): Promise<JsonObject> {
+  if (typeof selectFinalization === "object") {
+    isolatedPython = selectFinalization.isolatedPython ?? isolatedPython;
+    selectFinalization = false;
+  }
   const internalInvocation = releaseCoordinator
     ? "release_coordinator=True"
     : selectFinalization
@@ -2416,7 +2332,12 @@ async function executeWorkbench(
     : 30_000;
   const execution = execFileAsync(
     pythonCommand,
-    ["-c", pythonSource, workbenchScriptPath()],
+    [
+      ...(isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      "-c",
+      pythonSource,
+      workbenchScriptPath(),
+    ],
     {
       signal,
       cwd: PLUGIN_ROOT,

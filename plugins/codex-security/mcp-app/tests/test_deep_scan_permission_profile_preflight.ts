@@ -35,6 +35,7 @@ const {
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
   readDeepScanRuntimeConfig,
+  prepareCliDeepScanSession,
 } = await importSource(
   path.join(
     import.meta.dirname,
@@ -84,6 +85,78 @@ await testSpawnErrorFailsClosed();
 await testMissingWorkerDirectoryRemainsRetryable();
 await testAbortKillsPreflightChild();
 await testAbortPreservesCallerReason();
+await testDirectScanSession();
+
+async function testDirectScanSession() {
+  const permissionProfile = {
+    type: "managed",
+    file_system: {
+      type: "restricted",
+      entries: [
+        { path: { type: "special", value: { kind: "root" } }, access: "read" },
+        {
+          path: {
+            type: "path",
+            path: path.resolve("synthetic", "private [home]"),
+          },
+          access: "deny",
+        },
+      ],
+    },
+    network: "restricted",
+  };
+  await withFakeCodex(
+    { parentPermissionProfile: permissionProfile },
+    async (fixture) => {
+      const result = await prepareCliDeepScanSession({
+        codexPath: fixture.codexPath,
+        commandArgs: ["--config", 'model_provider="synthetic_provider"'],
+        cwd: fixture.cwd,
+        configOverrides: ['model_reasoning_effort="high"'],
+        prompt: "Review the supplied synthetic repository.",
+        signal: new AbortController().signal,
+      });
+      assert.deepEqual(result, {
+        threadId: "new-scan-thread",
+        model: "synthetic-model",
+        reasoningEffort: "high",
+        permissionProfile,
+      });
+      const calls = await readJsonLines(fixture.callsPath);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["initialize", "initialized", "thread/start", "thread/inject_items"],
+      );
+      assert.deepEqual(calls[2].params, {
+        cwd: fixture.cwd,
+        threadSource: "security_scan",
+        ephemeral: false,
+      });
+      assert.equal(
+        calls[3].params.items[0].content[0].text,
+        "Review the supplied synthetic repository.",
+      );
+      const argv = await readJson(fixture.argvPath);
+      assert.equal(
+        argv[argv.indexOf("--config") + 1],
+        'model_provider="synthetic_provider"',
+      );
+      assert.equal(argv.includes("--profile"), false);
+    },
+  );
+  await withFakeCodex({ parentPermissionProfile: null }, async (fixture) => {
+    await assert.rejects(
+      prepareCliDeepScanSession({
+        codexPath: fixture.codexPath,
+        cwd: fixture.cwd,
+        configOverrides: [],
+        prompt: "Synthetic scan.",
+        signal: new AbortController().signal,
+      }),
+      /effective permissions/,
+    );
+  });
+}
 
 async function testAllowedProfileAndRawArgv() {
   await withFakeCodex(
@@ -1077,6 +1150,20 @@ function handle(message) {
   }
   if (message.method === "initialize") {
     send(message.id, { userAgent: "fixture", codexHome: "/fixture", platformFamily: "unix", platformOs: "macos" });
+    return;
+  }
+  if (message.method === "thread/start") {
+    send(message.id, {
+      thread: { id: 'new-scan-thread', path: scenario.callsPath + '.session.jsonl' },
+      model: 'synthetic-model', reasoningEffort: 'high',
+    });
+    return;
+  }
+  if (message.method === "thread/inject_items") {
+    writeFileSync(scenario.callsPath + '.session.jsonl', JSON.stringify({
+      type: 'turn_context', payload: scenario.parentPermissionProfile ? { permission_profile: scenario.parentPermissionProfile } : {},
+    }) + "\\n");
+    send(message.id, {});
     return;
   }
   if (message.method === "config/read") {
