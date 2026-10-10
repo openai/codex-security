@@ -145,7 +145,10 @@ type RepositoryMetadata = {
 
 type FindingInput = {
   records: InputRecord[];
-  repositories: Map<string, RepositoryMetadata & { platform: string | null }>;
+  repositories: Map<
+    string,
+    RepositoryMetadata & { platform: string | null; names?: string[] }
+  >;
   legacyRepositories?: FindingInput["repositories"];
 };
 
@@ -190,12 +193,20 @@ function sourceRepository(
 function sourceBranch(
   branch: Record<string, unknown> | undefined,
   repository: RepositoryMetadata,
+  inventoryNames: readonly string[] = [],
 ): string | null {
   const name = text(branch?.["name"]);
   if (!name) return null;
-  const prefix = repository.name ? repository.name + "/" : null;
-  if (prefix && name.startsWith(prefix))
-    return name.slice(prefix.length) || null;
+  const qualifiers = [
+    ...new Set([
+      ...(repository.name ? [repository.name] : []),
+      ...inventoryNames,
+    ]),
+  ].sort((left, right) => right.length - left.length);
+  for (const qualifier of qualifiers) {
+    const prefix = qualifier + "/";
+    if (name.startsWith(prefix)) return name.slice(prefix.length) || null;
+  }
 
   // URL-only metadata still identifies Wiz's repository-qualified branch name.
   // Supported GitHub destinations use case-insensitive repository qualifiers.
@@ -241,12 +252,11 @@ function repositoryFinding(
     throw new Error(
       "Only repository-branch secret findings can be published to a repository. Workload secrets require a resource-scoped import and are not supported.",
     );
-  const repository = sourceRepository(
+  const suppliedRepository =
     kind === "secret"
       ? object(object(resource?.["typedProperties"])?.["repository"])
-      : object(record["repository"]),
-    repositories,
-  );
+      : object(record["repository"]);
+  const repository = sourceRepository(suppliedRepository, repositories);
   const branch =
     kind === "secret"
       ? resource
@@ -318,7 +328,13 @@ function repositoryFinding(
       description: text(record["description"]) ?? text(rule?.["description"]),
       url: text(record["wizUrl"]) ?? text(record["portalUrl"]),
       locations: path ? [{ path, line: line ?? null }] : [],
-      branch: sourceBranch(branch, repository),
+      branch: sourceBranch(
+        branch,
+        repository,
+        text(suppliedRepository?.["name"])
+          ? []
+          : repositories.get(repository.id ?? "")?.names,
+      ),
       code_revision: null,
       source_scan_id: null,
       source_updated_at:
@@ -396,6 +412,12 @@ function records(payload: unknown): FindingInput {
         );
       repositories.set(entry.id, {
         ...entry,
+        names: [
+          ...new Set([
+            ...(previous?.names ?? []),
+            ...(entry.name ? [entry.name] : []),
+          ]),
+        ],
         // Equivalent inventory aliases must produce the same evidence when the
         // export reorders its rows. Keep a stable supplied URL and nonempty name.
         url: previous && previous.url < entry.url ? previous.url : entry.url,
@@ -448,7 +470,11 @@ function records(payload: unknown): FindingInput {
       repositories,
       ...([...repositories].some(([id, current]) => {
         const legacy = legacyRepositories.get(id)!;
-        return current.url !== legacy.url || current.name !== legacy.name;
+        return (
+          current.url !== legacy.url ||
+          current.name !== legacy.name ||
+          current.names?.some((name) => name !== legacy.name)
+        );
       })
         ? { legacyRepositories }
         : {}),
@@ -493,10 +519,9 @@ export async function readVendorFindingsForPublication(path: string): Promise<{
           repository: repository
             ? {
                 id: repository.id,
-                url: inventoryRepositoryUrlKey(
-                  repository.url,
-                  input.repositories.get(repository.id ?? "")?.platform,
-                ),
+                // Publication targets use Cloud's GitHub URL semantics. Input
+                // joins above still require provenance for custom-host folding.
+                url: repositoryUrlKey(repository.url).toLowerCase(),
               }
             : null,
         },

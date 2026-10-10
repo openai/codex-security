@@ -1337,6 +1337,104 @@ function inventoryNode(platform: string | undefined, url = enterpriseUrl) {
   };
 }
 
+test.each([false, true])(
+  "publication checkpoints survive optional inventory platform changes (%j)",
+  async (withHint) => {
+    const inventory = inventoryNode(
+      withHint ? "GITHUB" : undefined,
+      "https://github.example.test/Example/Project",
+    );
+    const payload = {
+      data: {
+        sastFindings: {
+          nodes: [{ ...sast, repository: { id: repository.id } }],
+        },
+        versionControlResources: { nodes: [inventory] },
+      },
+    };
+    const f = await cloudFixture(payload);
+    f.destination.url = enterpriseUrl;
+    const options = { ...f.options, repository: f.destination.id };
+    const original = await prepareExternalPublication(f.file, options, f.deps);
+    f.state.failReadback = true;
+    await expect(original.publish()).rejects.toBeInstanceOf(
+      ExternalPublicationError,
+    );
+    inventory.platform = withHint ? undefined : "GITHUB";
+    await writeFile(f.file, JSON.stringify(payload));
+    const retry = await prepareExternalPublication(f.file, options, f.deps);
+    expect(retry.preview.findings).toEqual(original.preview.findings);
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(original.preview.requests);
+    const newer = f.reports.get("sast:occurrence-1")!;
+    newer.version += 1;
+    newer.evidence.description = "Newer Cloud evidence";
+    f.state.failReadback = false;
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts).toHaveLength(1);
+    expect(newer.evidence.description).toBe("Newer Cloud evidence");
+  },
+);
+
+test.each(["project", "project/component"])(
+  "inventory aliases preserve branch qualifier %s in either row order",
+  async (alias) => {
+    const record = {
+      ...sast,
+      repository: { id: repository.id },
+      repositoryBranch: {
+        ...sast.repositoryBranch,
+        name: `${alias}/Feature/Parser`,
+      },
+    };
+    const nodes = ["example/project", "project", alias].map((name) => ({
+      ...inventoryNode("GITHUB", repositoryUrl),
+      repository: { ...repository, url: repositoryUrl, name },
+    }));
+    for (const selected of [nodes, [...nodes].reverse()]) {
+      const parsed = await parse({
+        data: {
+          sastFindings: { nodes: [record] },
+          versionControlResources: { nodes: selected },
+        },
+      });
+      expect(parsed.excluded).toEqual([]);
+      expect(parsed.findings[0]!.evidence.branch).toBe("Feature/Parser");
+      expect(parsed.findings[0]!.evidence.source_data).toEqual(record);
+    }
+  },
+);
+
+test("an explicit source repository name takes precedence over inventory aliases", async () => {
+  const record = {
+    ...sast,
+    repository: { id: repository.id, name: "project" },
+    repositoryBranch: {
+      ...sast.repositoryBranch,
+      name: "project/component/Feature",
+    },
+  };
+  const parsed = await parse({
+    data: {
+      sastFindings: { nodes: [record] },
+      versionControlResources: {
+        nodes: [
+          {
+            ...inventoryNode("GITHUB", repositoryUrl),
+            repository: {
+              ...repository,
+              url: repositoryUrl,
+              name: "project/component",
+            },
+          },
+        ],
+      },
+    },
+  });
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.evidence.branch).toBe("component/Feature");
+});
+
 for (const kind of ["sast", "secret", "iac"] as const) {
   test.each([false, true])(
     kind +
@@ -1540,13 +1638,29 @@ test.each(["raw", "normalized"])(
   },
 );
 
-test.each(["resume", "reset", "coverage", "rebind", "prepend", "excluded"])(
+test.each([
+  "resume",
+  "reset",
+  "coverage",
+  "rebind",
+  "prepend",
+  "excluded",
+  "qualifier",
+])(
   "inventory normalization upgrades saved immutable requests and receipts (%s)",
   async (scenario) => {
     const record = {
       ...sast,
       vendorMetadata: { z: 1, ä: 2 },
       repository: { id: repository.id },
+      ...(scenario === "qualifier"
+        ? {
+            repositoryBranch: {
+              ...sast.repositoryBranch,
+              name: "project/component/Feature",
+            },
+          }
+        : {}),
     };
     const selected =
       scenario === "coverage"
@@ -1568,15 +1682,24 @@ test.each(["resume", "reset", "coverage", "rebind", "prepend", "excluded"])(
         ...inventoryNode("GITHUB"),
         repository: {
           ...repository,
-          name: "Example/Project",
-          url: "https://github.com/Example/Project.git",
+          name:
+            scenario === "qualifier" ? "project/component" : "Example/Project",
+          url:
+            scenario === "qualifier"
+              ? repositoryUrl
+              : "https://github.com/Example/Project.git",
         },
       },
       {
         ...inventoryNode("GITHUB"),
         repository: {
           ...repository,
-          name: scenario === "coverage" ? "z".repeat(513) : repository.name,
+          name:
+            scenario === "coverage"
+              ? "z".repeat(513)
+              : scenario === "qualifier"
+                ? "project"
+                : repository.name,
           url: repositoryUrl,
         },
       },
