@@ -2006,3 +2006,44 @@ def test_transitive_comparison_keeps_dismissal_for_predecision_scans(history, re
     assert result["summary"]["reopened"] == 0
     assert result["summary"]["persisting"] == 1
     assert result["findings"][0]["triage"]["status"] == "closed"
+
+
+@pytest.mark.parametrize("matched", [False, True])
+@pytest.mark.parametrize("legacy_decision", [False, True])
+def test_explicit_reopen_outlives_earlier_clean_coverage(history, matched, legacy_decision):
+    state, root, repository = history
+    first = create_cli_scan(state, root, repository, identity_anchor="first")
+    occurrence = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    if matched:
+        second = create_cli_scan(state, root, repository, identity_anchor="second")
+        other = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"]["findings"][
+            0
+        ]["occurrenceId"]
+        save_scan_matches(state, first, second, confirmed_match(occurrence, other))
+    create_cli_scan(state, root, repository, finding=False)
+
+    def open_findings():
+        return run_workbench(
+            state, "list-global-findings", "--repository", str(repository), "--status", "open"
+        )["findings"]
+
+    assert open_findings() == []
+    run_workbench(state, "set-finding-triage", "--occurrence-id", occurrence, "--status", "open")
+    if legacy_decision:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute("DELETE FROM finding_decisions")
+    assert (
+        run_workbench(state, "get-finding", "--occurrence-id", occurrence)["scan"]["findings"][0][
+            "triage"
+        ]["status"]
+        == "open"
+    )
+    reopened = open_findings()
+    assert len(reopened) == 1
+    assert reopened[0]["occurrenceCount"] == 1 + int(matched)
+    assert run_workbench(state, "list-repositories")["repositories"][0]["openFindingsCount"] == 1
+    create_cli_scan(state, root, repository, finding=False)
+    assert open_findings() == []
+    assert run_workbench(state, "list-repositories")["repositories"][0]["openFindingsCount"] == 0

@@ -964,7 +964,11 @@ def list_unmatched_scan_pairs(
 
 
 def _same_registered_repository(
-    connection: sqlite3.Connection, before: sqlite3.Row, after: sqlite3.Row
+    connection: sqlite3.Connection,
+    before: sqlite3.Row,
+    after: sqlite3.Row,
+    *,
+    checkout_relationships: dict[tuple[str, ...], bool] | None = None,
 ) -> bool:
     paths = []
     verified_scans = []
@@ -1036,18 +1040,39 @@ def _same_registered_repository(
             ).fetchone()
             is not None
         )
-    return _same_repository(
+    # Ownership and admission epochs above remain scan-specific. Only reuse the
+    # relationship between the currently verified checkouts within this lookup.
+    relationship_key = (
+        tuple(
+            str(value)
+            for scan, path in zip(verified_scans, paths, strict=True)
+            for value in (path, scan["target_id"], scan["target_device"], scan["target_inode"])
+        )
+        if checkout_relationships is not None and before["target_id"] != after["target_id"]
+        else None
+    )
+    if (
+        checkout_relationships is not None
+        and relationship_key is not None
+        and relationship_key in checkout_relationships
+    ):
+        return checkout_relationships[relationship_key]
+    related = _same_repository(
         *verified_scans,
         before_target_path=paths[0],
         after_target_path=paths[1],
         require_ownership=True,
     )
+    if checkout_relationships is not None and relationship_key is not None:
+        checkout_relationships[relationship_key] = related
+    return related
 
 
 def saved_repository_target_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
     target_ids = {scan["target_id"]}
     pending = list(target_ids)
     checked_pairs = set()
+    checkout_relationships: dict[tuple[str, ...], bool] = {}
     while pending:
         target_id = pending.pop()
         for pair in connection.execute(
@@ -1070,7 +1095,9 @@ def saved_repository_target_ids(connection: sqlite3.Connection, scan: sqlite3.Ro
                 connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
                 for scan_id in scan_ids
             ]
-            if not _same_registered_repository(connection, *scans):
+            if not _same_registered_repository(
+                connection, *scans, checkout_relationships=checkout_relationships
+            ):
                 continue
             for related in scans:
                 if related["target_id"] not in target_ids:

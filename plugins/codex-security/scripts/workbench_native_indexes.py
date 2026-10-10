@@ -274,6 +274,10 @@ def _indexed_findings(
                 "decision_occurrence_id": decision["occurrence_id"]
                 if decision is not None
                 else None,
+                **{
+                    key: decision[key] if decision is not None else None
+                    for key in ("decision_status", "decision_scan_sequence", "decision_updated_at")
+                },
                 "known_since": scans[0][1],
                 "known_scan_ids": [scan_id for _, _, scan_id in scans],
                 "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),
@@ -352,8 +356,9 @@ def _indexed_active_findings(
             if scan["target_id"] is None:
                 history_paths.add(scan["target_path"])
             elif scan["target_id"] not in visited_targets:
-                visited_targets.add(scan["target_id"])
-                history_targets.update(scan_history.saved_repository_target_ids(connection, scan))
+                connected = scan_history.saved_repository_target_ids(connection, scan)
+                visited_targets.update(connected)
+                history_targets.update(connected)
         for _ in _active_findings(
             connection,
             read_coverage,
@@ -389,6 +394,14 @@ def _indexed_active_findings(
                 comparison["before_scan_id"]
             )
     query = settings.get("query", "")
+    indexed = list(
+        _indexed_findings(
+            connection,
+            allowed_scan_ids,
+            allow_cross_target_matches=True,
+            matching_scan_ids=matching_scan_ids,
+        )
+    )
     active = {
         row["occurrence_id"]: row
         for row in _active_findings(
@@ -396,16 +409,17 @@ def _indexed_active_findings(
             read_coverage,
             allowed_scan_ids=allowed_scan_ids,
             uncertain_scans=uncertain_scans,
+            reopened={
+                occurrence_id: (finding["decision_scan_sequence"], finding["decision_updated_at"])
+                for finding in indexed
+                if finding["decision_status"] == "open"
+                for occurrence_id in finding["occurrence_ids"]
+            },
             **settings,
         )
     }
     combined = []
-    for row in _indexed_findings(
-        connection,
-        allowed_scan_ids,
-        allow_cross_target_matches=True,
-        matching_scan_ids=matching_scan_ids,
-    ):
+    for row in indexed:
         matched_by_target: dict[str, list[dict[str, Any]]] = {}
         for occurrence_id in row["occurrence_ids"]:
             finding = active.pop(occurrence_id, None)
@@ -466,6 +480,7 @@ def _active_findings(
     query: str = "",
     include_resolved: bool = False,
     through_scan_sequence: int | None = None,
+    reopened: dict[str, tuple[int | None, str]] | None = None,
 ) -> Iterator[dict[str, Any]]:
     target_filters = []
     target_values = []
@@ -713,9 +728,16 @@ def _active_findings(
             yield finding
             continue
         resolved = False
+        reopening = (reopened or {}).get(row["occurrence_id"])
         for scan in completed_scans:
             if scan["scan_sequence"] <= row["scan_sequence"]:
                 break
+            if reopening is not None and (
+                scan["scan_sequence"] <= reopening[0]
+                if reopening[0] is not None
+                else timestamp_key(scan["started_at"]) <= timestamp_key(reopening[1])
+            ):
+                continue
             if scan["seal_manifest_digest"] is None:
                 continue
             if scan["mode"] == "diff":

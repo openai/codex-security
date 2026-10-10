@@ -507,3 +507,140 @@ def test_scan_start_chronology_keeps_latest_and_first_seen_queries_consistent(
     ]
     assert [scan["scanId"] for scan in history] == SCAN_IDS[1::-1]
     assert list(connection.iterdump()) == before
+
+
+def _linked_history_fixture(connection, targets):
+    import subprocess
+
+    def git(*arguments):
+        subprocess.run(["git", *arguments], check=True, capture_output=True)
+
+    git("init", "--quiet", str(targets[0]))
+    (targets[0] / "fixture.py").write_text("# Synthetic history fixture\n")
+    git("-C", str(targets[0]), "add", ".")
+    git(
+        "-C",
+        str(targets[0]),
+        "-c",
+        "user.name=Synthetic Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "--quiet",
+        "-m",
+        "Synthetic history",
+    )
+    git("-C", str(targets[0]), "worktree", "add", "--quiet", "--detach", str(targets[1]), "HEAD")
+    for index in range(2):
+        metadata = targets[index].stat()
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
+            (str(metadata.st_dev), str(metadata.st_ino), SCAN_IDS[index]),
+        )
+    return [
+        connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        for scan_id in SCAN_IDS[:2]
+    ]
+
+
+def _copy_history_scan(connection, template, index):
+    row = dict(template)
+    row["id"] = f"20000000-0000-4000-8000-{index:012d}"
+    row["scan_dir"] = f"{template['scan_dir']}-copy-{index}"
+    columns = ",".join(row)
+    connection.execute(
+        f"INSERT INTO scans ({columns}) VALUES ({','.join('?' for _ in row)})", tuple(row.values())
+    )
+    connection.execute(
+        "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
+        (row["id"], row["updated_at"]),
+    )
+    return connection.execute("SELECT * FROM scans WHERE id = ?", (row["id"],)).fetchone()
+
+
+def test_connected_history_git_probes_scale_with_checkouts_not_saved_pairs(
+    workbench_api, indexed_collections, monkeypatch
+):
+    connection, targets = indexed_collections
+    scans = _linked_history_fixture(connection, targets)
+    history = workbench_api["scan_history"]
+    original_git = history.git_output
+    probes = []
+
+    def counted_git(target, *arguments):
+        probes.append((target, arguments))
+        return original_git(target, *arguments)
+
+    monkeypatch.setattr(history, "git_output", counted_git)
+    connection.execute(
+        "INSERT INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
+        (scans[0]["id"], scans[1]["id"]),
+    )
+    expected = {scan["target_id"] for scan in scans}
+    assert history.saved_repository_target_ids(connection, scans[0]) == expected
+    one_relationship_probes = len(probes)
+    assert one_relationship_probes > 0
+    for index in range(22):
+        scans.append(_copy_history_scan(connection, scans[index % 2], index))
+    for index, before in enumerate(scans):
+        for after in scans[index + 1 :]:
+            if before["target_id"] != after["target_id"]:
+                connection.execute(
+                    "INSERT OR IGNORE INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
+                    (before["id"], after["id"]),
+                )
+    probes.clear()
+    assert history.saved_repository_target_ids(connection, scans[0]) == expected
+    # Both directions may be present, but additional saved pairs do not reprobe Git.
+    assert len(probes) <= 2 * one_relationship_probes
+
+
+def test_cached_checkout_relationship_still_checks_each_scan_owner_and_epoch(
+    workbench_api, indexed_collections
+):
+    connection, targets = indexed_collections
+    before, after = _linked_history_fixture(connection, targets)
+    history = workbench_api["scan_history"]
+    cache = {}
+    assert history._same_registered_repository(
+        connection, before, after, checkout_relationships=cache
+    )
+    stale = {**dict(after), "target_inode": str(int(after["target_inode"]) + 1)}
+    assert not history._same_registered_repository(
+        connection, before, stale, checkout_relationships=cache
+    )
+    _copy_history_scan(
+        connection, {**dict(before), "target_inode": str(int(before["target_inode"]) + 1)}, 99
+    )
+    assert not history._same_registered_repository(
+        connection, before, after, checkout_relationships=cache
+    )
+
+
+def test_indexed_history_expands_each_connected_target_group_once(
+    workbench_api, indexed_collections, monkeypatch
+):
+    connection, targets = indexed_collections
+    before, after = _linked_history_fixture(connection, targets)
+    connection.execute(
+        "INSERT INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
+        (before["id"], after["id"]),
+    )
+    history = workbench_api["scan_history"]
+    original = history.saved_repository_target_ids
+    traversals = []
+
+    def counted_traversal(connection, scan):
+        traversals.append(scan["target_id"])
+        return original(connection, scan)
+
+    monkeypatch.setattr(history, "saved_repository_target_ids", counted_traversal)
+    findings = list(
+        workbench_api["native_indexes"]._indexed_active_findings(
+            connection,
+            workbench_api["coverage_for_comparison"],
+            target_ids={before["target_id"], after["target_id"]},
+        )
+    )
+    assert findings
+    assert len(traversals) == 1
