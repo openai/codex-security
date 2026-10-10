@@ -89,6 +89,7 @@ type DashboardActivityKind = ScanActivity["kind"] | "status" | "warning";
 interface DashboardActivityLine {
   text: string;
   kind: DashboardActivityKind | "path" | "code";
+  contentStart?: number;
   links?: readonly DashboardActivityLink[];
   code?: readonly string[];
   bold?: readonly string[];
@@ -151,7 +152,7 @@ export class ScanDashboard {
     request: ScanBudget;
     input: string;
     error: string;
-    finish: (limit?: number) => void;
+    finish: (limit?: number, preserveInput?: boolean) => void;
   } | null = null;
   #timer: NodeJS.Timeout | null = null;
   #refreshPending = false;
@@ -163,6 +164,7 @@ export class ScanDashboard {
   #observingStreamErrors = false;
   readonly #onStreamError = (): void => {};
   #keyInput: PassThrough | null = null;
+  #ss3Parameters = false;
   #inputKeys: {
     keys: string[];
     continued: boolean;
@@ -205,6 +207,7 @@ export class ScanDashboard {
     this.#keyInput = input;
     if (input === null) return;
     let pending = 0;
+    this.#ss3Parameters = false;
     input.setEncoding("utf8");
     input.on("data", (text: string) => {
       if (this.#inputKeys !== null) {
@@ -221,26 +224,48 @@ export class ScanDashboard {
         key: { sequence: string; meta?: boolean; code?: string },
       ) => {
         pending -= key.sequence.length;
+        if (this.#ss3Parameters) {
+          if (/^[ -?]+$/u.test(key.sequence)) return;
+          this.#ss3Parameters = false;
+          if (/^[@-~]$/u.test(key.sequence)) return;
+        }
         const escapes =
           key.code === undefined
             ? undefined
             : key.sequence.match(/^\u001B+(?=\u001B)/u)?.[0];
-        const keys =
-          (key.meta && key.code === undefined) ||
-          key.sequence.includes("\u0003")
-            ? Array.from(key.sequence)
-            : escapes !== undefined
-              ? [...escapes, key.sequence.slice(escapes.length)]
-              : [key.sequence];
+        // Readline ends modified SS3 keys at the parameter separator.
+        const modifiedSs3 =
+          key.code !== undefined &&
+          /^\u001BO[0-?]+$/u.test(key.sequence.slice(escapes?.length ?? 0));
+        if (modifiedSs3) this.#ss3Parameters = true;
+        const keys = modifiedSs3
+          ? [...(escapes ?? ""), key.sequence.slice(escapes?.length ?? 0)]
+          : key.code !== undefined && key.sequence.endsWith("\u001B")
+            ? ["\u001B"]
+            : (key.meta && key.code === undefined) ||
+                key.sequence.includes("\u0003")
+              ? Array.from(key.sequence)
+              : escapes !== undefined
+                ? [...escapes, key.sequence.slice(escapes.length)]
+                : [key.sequence];
         const batch = this.#inputKeys;
         const continued = batch?.continued === true;
         if (batch !== null) batch.continued = false;
         if (batch === null) this.#handleKeys(keys);
         else if (
-          this.#budget === null &&
+          this.#budget !== null &&
+          batch.keys.length === 0 &&
           keys.length > 1 &&
-          keys.every((key) => key === "\u001B")
+          keys[0] === "\u001B" &&
+          continued
         ) {
+          // The buffered Escape belongs to the prior chunk's budget dismissal.
+          // Replay the complete remaining key, including a prefix from prior chunks.
+          this.#handleKeys(["\u001B"]);
+          this.#setKeyInput(new PassThrough());
+          batch.replay =
+            key.sequence.slice(1) + (pending ? batch.text.slice(-pending) : "");
+        } else if (keys.length > 1 && keys.every((key) => key === "\u001B")) {
           // Readline can consume a following key's Escape as a repeated Escape.
           // Keep that introducer with the remaining decoded text for replay.
           const remaining =
@@ -249,17 +274,6 @@ export class ScanDashboard {
           for (const escape of prefix.slice(0, -1)) batch.keys.push(escape);
           this.#setKeyInput(new PassThrough());
           batch.replay = remaining.slice(prefix.length - 1);
-        } else if (
-          this.#budget !== null &&
-          batch.keys.length === 0 &&
-          keys.length > 1 &&
-          keys[0] === "\u001B" &&
-          continued
-        ) {
-          // The buffered Escape belongs to the prior chunk's budget dismissal.
-          // Decode this chunk again after that transition, retaining its own keys.
-          this.#handleKeys(["\u001B"]);
-          batch.replay = true;
         } else batch.keys.push(...keys);
       },
     );
@@ -274,7 +288,7 @@ export class ScanDashboard {
           budget.finish();
           this.#options.onInterrupt?.();
         } else if (key === "\u001B") {
-          budget.finish();
+          budget.finish(undefined, true);
         } else if (key === "\r" || key === "\n") {
           const value = budget.input.trim();
           const limit = Number(value);
@@ -395,6 +409,7 @@ export class ScanDashboard {
 
   public stop(): void {
     if (this.#timer === null) return;
+    if (this.#refreshPending) this.#refresh();
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
     this.#budget?.finish();
@@ -560,10 +575,11 @@ export class ScanDashboard {
     this.#setKeyInput(new PassThrough());
     return new Promise((resolve) => {
       const abort = () => finish();
-      const finish = (limit?: number) => {
+      const finish = (limit?: number, preserveInput = false) => {
         request.signal.removeEventListener("abort", abort);
         this.#budget = null;
-        if (this.#timer !== null) this.#setKeyInput(new PassThrough());
+        if (this.#timer !== null && !preserveInput)
+          this.#setKeyInput(new PassThrough());
         this.#refresh();
         resolve(limit);
       };
@@ -787,6 +803,7 @@ export class ScanDashboard {
                     ? styleInlineCode(colored, line)
                     : colored,
                   line.links,
+                  line.contentStart,
                 );
           return `${ERASE_LINE}${formatted}`;
         })
@@ -794,7 +811,7 @@ export class ScanDashboard {
     );
   }
 
-  #componentInput(keys: string[]): void {
+  #componentInput(keys: readonly string[]): void {
     for (const key of keys) {
       if (key === "\u0003") {
         this.#options.onInterrupt?.();
@@ -1054,7 +1071,10 @@ export class ScanDashboard {
         }
 
         const source = worker === undefined ? "main" : `worker ${worker}`;
-        const prefix = `  [${formatLocalTime(recordedAt)}] ${source} · `;
+        const prefix = fitActivityPrefix(
+          `  [${formatLocalTime(recordedAt)}] ${source} · `,
+          width,
+        );
         const code: string[] = [];
         const bold: string[] = [];
         if (prose) {
@@ -1079,7 +1099,13 @@ export class ScanDashboard {
                 ),
               );
         for (const text of lines) {
-          cache.lines.push({ text, kind: "path", code, bold });
+          cache.lines.push({
+            text,
+            kind: "path",
+            code,
+            bold,
+            contentStart: prefix.length,
+          });
         }
       }
       return cache.lines;
@@ -1094,7 +1120,9 @@ export class ScanDashboard {
       prefix: string,
       value: string,
       kind: DashboardActivityLine["kind"],
+      generatedPrefix = "",
     ): void => {
+      prefix = fitActivityPrefix(prefix, width);
       if (kind !== "message" && kind !== "reasoning") {
         for (const text of wrapActivity(prefix, value, width)) {
           lines.push({ text, kind });
@@ -1134,7 +1162,16 @@ export class ScanDashboard {
           ? wrapCode(started ? continuation : prefix, description, width)
           : wrapActivity(started ? continuation : prefix, description, width);
         for (const text of wrapped) {
-          lines.push({ text, kind: fenced ? "code" : kind, links, code });
+          lines.push({
+            text,
+            kind: fenced ? "code" : kind,
+            links,
+            code,
+            contentStart: prefix.length + generatedPrefix.length,
+          });
+          generatedPrefix = generatedPrefix
+            .slice(text.length - prefix.length)
+            .trimStart();
           started = true;
         }
       }
@@ -1163,7 +1200,7 @@ export class ScanDashboard {
       const worker =
         entry.worker === undefined ? "" : `worker ${entry.worker} · `;
       const prefix = `  ${timestamp} ${icon} `;
-      append(prefix, `${worker}${entry.description}`, kind);
+      append(prefix, `${worker}${entry.description}`, kind, worker);
       for (const path of entry.paths) {
         append(" ".repeat(prefix.length), path, "path");
       }
@@ -1245,27 +1282,43 @@ function replaceVisibleText(
   value: string,
   search: string,
   replacement: string,
+  contentStart = 0,
 ): string {
   let replaced = false;
+  let offset = 0;
   return value
     .split(/(\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][\s\S]*?(?:\u0007|\u001B\\))/gu)
     .map((part, index) => {
-      if (index % 2 === 1 || replaced || !part.includes(search)) return part;
-      replaced = true;
-      return part.replace(search, () => replacement);
+      if (index % 2 === 1) return part;
+      const start = Math.max(0, contentStart - offset);
+      offset += part.length;
+      if (replaced || start >= part.length) return part;
+      return (
+        part.slice(0, start) +
+        part.slice(start).replace(search, () => {
+          replaced = true;
+          return replacement;
+        })
+      );
     })
     .join("");
 }
 
 function styleInlineCode(value: string, line: DashboardActivityLine): string {
   for (const text of line.bold ?? []) {
-    value = replaceVisibleText(value, text, `\u001B[1m${text}\u001B[22m`);
+    value = replaceVisibleText(
+      value,
+      text,
+      `\u001B[1m${text}\u001B[22m`,
+      line.contentStart,
+    );
   }
   for (const text of line.code ?? []) {
     value = replaceVisibleText(
       value,
       text,
       `\u001B[2m${text}\u001B[22m${line.kind === "message" ? "\u001B[1m" : ""}`,
+      line.contentStart,
     );
   }
   return value;
@@ -1274,6 +1327,7 @@ function styleInlineCode(value: string, line: DashboardActivityLine): string {
 function linkActivity(
   value: string,
   links: readonly DashboardActivityLink[] | undefined,
+  contentStart?: number,
 ): string {
   for (const { label, target } of links ?? []) {
     const safe = safeHyperlinkTarget(target);
@@ -1282,6 +1336,7 @@ function linkActivity(
         value,
         label,
         `\u001B]8;;${safe}\u0007${label}\u001B]8;;\u0007`,
+        contentStart,
       );
     }
   }
@@ -1327,8 +1382,12 @@ function formatLocalTime(timestamp: number): string {
     .join(":");
 }
 
+function fitActivityPrefix(prefix: string, width: number): string {
+  return width <= 2 ? "" : fitLine(prefix, width - 2);
+}
+
 function wrapActivity(prefix: string, value: string, width: number): string[] {
-  prefix = width <= 2 ? "" : fitLine(prefix, width - 2);
+  prefix = fitActivityPrefix(prefix, width);
   const available = Math.max(1, width - stringWidth(prefix));
   const continuation = " ".repeat(prefix.length);
   const lines: string[] = [];
@@ -1450,7 +1509,7 @@ function columnChunks(
 }
 
 function wrapCode(prefix: string, value: string, width: number): string[] {
-  prefix = width <= 2 ? "" : fitLine(prefix, width - 2);
+  prefix = fitActivityPrefix(prefix, width);
   const prefixWidth = stringWidth(prefix);
   const continuation = " ".repeat(prefixWidth);
   return columnChunks(

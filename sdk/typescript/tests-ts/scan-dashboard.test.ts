@@ -57,6 +57,219 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("flushes queued activity before stopping without rendering afterward", () => {
+    const stderr = capture(true);
+    const pending: (() => void)[] = [];
+    const dashboard = createDashboard(stderr.stream, {
+      clock: {
+        ...fakeClock(),
+        queueMicrotask: (callback) => pending.push(callback),
+      },
+    });
+    dashboard.start();
+    dashboard.note("First event");
+    dashboard.note("Final event");
+    dashboard.stop();
+    const stopped = stderr.text();
+    expect(stripVTControlCharacters(stopped)).toContain("Final event");
+    for (const callback of pending) callback();
+    expect(stderr.text()).toBe(stopped);
+  });
+
+  test("keeps whole and fragmented function keys out of worker selection", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(stderr.stream, { input });
+    dashboard.start();
+    input.emit("data", "d");
+    for (const key of ["", "\u001B", "\u001B\u001B"].flatMap((prefix) =>
+      ["\u001BO1;5P", "\u001B[1;2Q"].map((key) => prefix + key),
+    )) {
+      for (let split = 1; split <= key.length; split++) {
+        input.emit("data", key.slice(0, split));
+        input.emit("data", key.slice(split));
+        expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+      }
+    }
+    input.emit("data", "3");
+    expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
+    dashboard.stop();
+  });
+
+  test.each(["\u001BO", "\u001BO1;"])(
+    "discards incomplete input %j when the dashboard restarts",
+    (prefix) => {
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(stderr.stream, { input });
+      dashboard.start();
+      input.emit("data", "d");
+      input.emit("data", prefix);
+      dashboard.stop();
+      dashboard.start();
+      input.emit("data", "3");
+      expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
+      dashboard.stop();
+    },
+  );
+
+  test("keeps function-key fragments out of worker selection when dismissing a budget", async () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(stderr.stream, { input });
+    dashboard.start();
+    try {
+      input.emit("data", "d");
+      const answer = dashboard.requestBudgetIncrease({
+        maxCostUsd: 20,
+        cost: fakeResult([], "complete", {
+          input_tokens: 100,
+          output_tokens: 1,
+        }).cost!,
+        signal: new AbortController().signal,
+      });
+      input.emit("data", "\u001BO");
+      input.emit("data", "1;5P\u001B\u001B[A");
+      await expect(answer).resolves.toBeUndefined();
+      expect(lastFrame(stderr)).toContain("DETAILS");
+      expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+    } finally {
+      dashboard.stop();
+    }
+  });
+
+  test.each(["\u001BO", "\u001B[1;"])(
+    "honors Escape and Ctrl-C after incomplete input %j",
+    async (prefix) => {
+      for (const key of ["\u001B", "\u0003"]) {
+        const stderr = capture(true);
+        const input = new DashboardTestInput();
+        const interrupted = mock(() => {});
+        const dashboard = createDashboard(stderr.stream, {
+          input,
+          onInterrupt: interrupted,
+        });
+        dashboard.start();
+        const answer = dashboard.requestBudgetIncrease({
+          maxCostUsd: 20,
+          cost: fakeResult([], "complete", {
+            input_tokens: 100,
+            output_tokens: 1,
+          }).cost!,
+          signal: new AbortController().signal,
+        });
+        input.emit("data", prefix);
+        expect(lastFrame(stderr)).toContain("Raise total USD limit");
+        input.emit("data", key);
+        expect(lastFrame(stderr)).not.toContain("Raise total USD limit");
+        expect(interrupted).toHaveBeenCalledTimes(key === "\u0003" ? 1 : 0);
+        await expect(answer).resolves.toBeUndefined();
+        dashboard.stop();
+      }
+    },
+  );
+
+  test.each([
+    ["complete after Escape", ["\u001B", "\u001BO1;5P\u0003"], 1],
+    ["split after Escape", ["\u001B", "\u001BO1;", "5P"], 0],
+    ["coalesced prefix", ["\u001B\u001BO1;", "5P"], 0],
+    ["split final byte", ["\u001B", "\u001BO1;5", "P\u0003"], 1],
+    ["coalesced prefix then interrupt", ["\u001B\u001BO1;", "5P\u0003"], 1],
+    ["repeated Escape prefix", ["\u001B\u001B\u001BO1;", "5P\u0003"], 1],
+    ["coalesced CSI prefix", ["\u001B\u001B[1;", "2Q"], 0],
+    ["split CSI prefix", ["\u001B", "\u001B[1;", "2Q\u0003"], 1],
+    ["repeated CSI prefix", ["\u001B\u001B\u001B[1;", "2Q\u0003"], 1],
+  ] as const)(
+    "keeps modified function keys and following controls across budget dismissal: %s",
+    async (_name, chunks, interrupts) => {
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const interrupted = mock(() => {});
+      const dashboard = createDashboard(stderr.stream, {
+        input,
+        onInterrupt: interrupted,
+      });
+      dashboard.start();
+      try {
+        input.emit("data", "d");
+        const answer = dashboard.requestBudgetIncrease({
+          maxCostUsd: 20,
+          cost: fakeResult([], "complete", {
+            input_tokens: 100,
+            output_tokens: 1,
+          }).cost!,
+          signal: new AbortController().signal,
+        });
+        for (const chunk of chunks) input.emit("data", chunk);
+        expect(lastFrame(stderr)).not.toContain("Raise total USD limit");
+        await expect(answer).resolves.toBeUndefined();
+        expect(interrupted).toHaveBeenCalledTimes(interrupts);
+        expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+        input.emit("data", "3");
+        expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
+      } finally {
+        dashboard.stop();
+      }
+    },
+  );
+
+  test("styles numeric inline content without matching its timestamp", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, { color: true });
+    dashboard.start();
+    dashboard.record({
+      id: "numeric-markup",
+      kind: "message",
+      status: "completed",
+      description: "Inspect `1` and [09](https://example.test/report).",
+      paths: [],
+    });
+    expect(stderr.text()).toContain("\u001B[2m[09:41:00]\u001B[22m");
+    expect(stderr.text()).toContain("Inspect \u001B[2m1\u001B[22m");
+    expect(stderr.text()).toContain(
+      "and \u001B]8;;https://example.test/report\u000709\u001B]8;;\u0007.",
+    );
+    dashboard.stop();
+  });
+  test.each([21, 32, 120])(
+    "keeps worker labels outside inline markup at width %d",
+    (columns) => {
+      for (const kind of ["message", "reasoning"] as const) {
+        for (const markup of ["`1`", "[1](https://example.test/report)"]) {
+          const stderr = capture(true);
+          const dashboard = createDashboard(
+            { ...stderr.stream, columns, rows: 24 },
+            { color: true },
+          );
+          dashboard.start();
+          dashboard.record({
+            id: "worker-markup",
+            worker: 1,
+            kind,
+            status: "completed",
+            description: `See ${markup}.`,
+            paths: [],
+          });
+          const marked = stderr
+            .text()
+            .split("\u001B[H")
+            .at(-1)!
+            .replaceAll("\u001B[2m1\u001B[22m", "<code>1</code>")
+            .replaceAll(
+              "\u001B]8;;https://example.test/report\u00071\u001B]8;;\u0007",
+              "<link>1</link>",
+            );
+          const frame = stripVTControlCharacters(marked).replaceAll(
+            /\s+/gu,
+            " ",
+          );
+          const tag = markup.startsWith("`") ? "code" : "link";
+          expect(frame).toContain(`worker 1 · See <${tag}>1</${tag}>.`);
+          dashboard.stop();
+        }
+      }
+    },
+  );
   test.each([
     ["single line", () => "START" + "x".repeat(4 * 1024 * 1024) + "界END"],
     [
@@ -511,6 +724,12 @@ describe("live scan dashboard", () => {
       cost,
       signal: controller.signal,
     });
+    for (const chunk of ["\u001BO", "1;", "5P", "\u001B[1", ";5P"]) {
+      input.emit("data", chunk);
+      expect(stderr.text().split("\u001B[H").at(-1)).toContain(
+        "Raise total USD limit",
+      );
+    }
     for (const byte of Buffer.from("é🙂"))
       input.emit("data", Uint8Array.of(byte));
     expect(stderr.text()).toContain("é🙂_");
@@ -750,37 +969,46 @@ describe("live scan dashboard", () => {
     },
   );
 
-  test("discards a partial key when a budget request aborts externally", async () => {
-    jest.useFakeTimers();
-    const stderr = capture(true);
-    const input = new DashboardTestInput();
-    const dashboard = createDashboard(
-      { ...stderr.stream, rows: 14 },
-      { input },
-    );
-    const controller = new AbortController();
-    dashboard.start();
-    try {
-      for (let index = 0; index < 20; index++)
-        dashboard.note(`Activity ${index}`);
-      const answer = dashboard.requestBudgetIncrease({
-        maxCostUsd: 20,
-        cost: fakeResult([], "complete", {
-          input_tokens: 100,
-          output_tokens: 1,
-        }).cost!,
-        signal: controller.signal,
-      });
-      input.emit("data", "\u001B[");
-      controller.abort();
-      await expect(answer).resolves.toBeUndefined();
-      input.emit("data", "A");
-      expect(lastFrame(stderr)).not.toContain("above live");
-      expect(jest.getTimerCount()).toBe(0);
-    } finally {
-      dashboard.stop();
-    }
-  });
+  test.each([
+    ["navigation", "\u001B[", "A"],
+    ["worker selection", "\u001BO1;", "3"],
+  ])(
+    "discards a partial key before %s when a budget request aborts externally",
+    async (action, prefix, nextKey) => {
+      jest.useFakeTimers();
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(
+        { ...stderr.stream, rows: 14 },
+        { input },
+      );
+      const controller = new AbortController();
+      dashboard.start();
+      if (action === "worker selection") input.emit("data", "d");
+      try {
+        for (let index = 0; index < 20; index++)
+          dashboard.note(`Activity ${index}`);
+        const answer = dashboard.requestBudgetIncrease({
+          maxCostUsd: 20,
+          cost: fakeResult([], "complete", {
+            input_tokens: 100,
+            output_tokens: 1,
+          }).cost!,
+          signal: controller.signal,
+        });
+        input.emit("data", prefix);
+        controller.abort();
+        await expect(answer).resolves.toBeUndefined();
+        input.emit("data", nextKey);
+        if (action === "worker selection")
+          expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
+        else expect(lastFrame(stderr)).not.toContain("above live");
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        dashboard.stop();
+      }
+    },
+  );
 
   test("owns only its input listeners and drops pending Escape on stop and restart", async () => {
     jest.useFakeTimers();
@@ -1078,6 +1306,10 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("API only activity");
     expect(frame()).not.toContain("Web only activity");
     expect(frame()).toContain("$1.00");
+    for (const chunk of ["\u001BO", "1;5P"]) {
+      input.emit("data", chunk);
+      expect(frame()).toContain("API only activity");
+    }
     input.emit("data", "d");
     expect(frame()).toContain("API session detail");
     expect(frame()).not.toContain("Web session detail");
@@ -2372,3 +2604,57 @@ test("aligns component columns by terminal width and retains trailing cost", asy
   ).toBe(1);
   dashboard.stop();
 });
+
+test.each([16, 25, 120])(
+  "preserves markup after clipped prefixes at width %i",
+  (columns) => {
+    for (const worker of [undefined, 1]) {
+      for (const kind of ["message", "reasoning"] as const) {
+        for (const markup of ["`x`", "[x](https://example.test/report)"]) {
+          const stderr = capture(true);
+          const dashboard = createDashboard(
+            { ...stderr.stream, columns, rows: 60 },
+            { color: true },
+          );
+          dashboard.start();
+          dashboard.record({
+            id: "clipped-markup",
+            worker,
+            kind,
+            status: "completed",
+            description: markup,
+            paths: [],
+          });
+          const frame = stderr.text().split("\u001B[H").at(-1)!;
+          expect(frame).toContain(
+            markup.startsWith("`")
+              ? "\u001B[2mx\u001B[22m"
+              : "\u001B]8;;https://example.test/report\u0007x\u001B]8;;\u0007",
+          );
+          dashboard.stop();
+        }
+      }
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(
+        { ...stderr.stream, columns, rows: 60 },
+        { color: true, input },
+      );
+      dashboard.start();
+      input.emit("data", "d");
+      dashboard.recordDetails({
+        threadId: "synthetic-thread",
+        parentThreadId: null,
+        worker,
+        event: {
+          type: "event_msg",
+          payload: { type: "agent_message", message: "`x`" },
+        },
+      });
+      expect(stderr.text().split("\u001B[H").at(-1)!).toContain(
+        "\u001B[2mx\u001B[22m",
+      );
+      dashboard.stop();
+    }
+  },
+);
