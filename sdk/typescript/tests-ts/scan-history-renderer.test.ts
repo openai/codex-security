@@ -274,6 +274,17 @@ describe("scan history renderer", () => {
       findingsTruncated: true,
       artifacts: { markdownReport: "/demo/results/report.md" },
       recipe: {
+        target: { kind: "paths", paths: ["src"] },
+        deepScan: { workers: 2, subagents: 0 },
+        scanInputs: {
+          scanPromptSha256: "a".repeat(64),
+          knowledgeBase: {
+            sha256: "b".repeat(64),
+            documents: [
+              { name: "0-architecture.md.txt", sha256: "c".repeat(64) },
+            ],
+          },
+        },
         config: {
           model: "gpt-5.6-sol",
           model_reasoning_effort: "high",
@@ -293,6 +304,14 @@ describe("scan history renderer", () => {
       "FINDINGS  20 of 75",
       "PARENT SCAN  87654321",
       "CONFIGURATION",
+      "SCOPE",
+      '"paths":["src"]',
+      "DEEP SCAN",
+      '"workers":2',
+      `SCAN INSTRUCTIONS  sha256:${"a".repeat(64)}`,
+      `KNOWLEDGE SNAPSHOT  sha256:${"b".repeat(64)}`,
+      "0-architecture.md.txt",
+      `sha256:${"c".repeat(64)}`,
       "model=gpt-5.6-sol",
       'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
       'trusted_paths=["src","packages/core"]',

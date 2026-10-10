@@ -27,6 +27,8 @@ async function run() {
   const args = process.argv.slice(2);
   if (args.includes("app-server")) {
     await trace({ phase: "preflight", args });
+    const threadId = "package-sdk-owner";
+    const sessionPath = join(process.env.CODEX_HOME, `${threadId}.jsonl`);
     for await (const line of createInterface({ input: process.stdin })) {
       const message = JSON.parse(line);
       if (message.id === undefined) continue;
@@ -34,6 +36,41 @@ async function run() {
       switch (message.method) {
         case "initialize":
           result = { userAgent: "package-fixture" };
+          break;
+        case "thread/start":
+          assert.equal(message.params.threadSource, "security_scan");
+          assert.equal(message.params.ephemeral, false);
+          result = {
+            thread: { id: threadId, path: sessionPath },
+            model: "gpt-5.5",
+            reasoningEffort: "high",
+          };
+          break;
+        case "thread/inject_items":
+          assert.equal(message.params.threadId, threadId);
+          assert.equal(message.params.items[0].role, "user");
+          await writeFile(
+            sessionPath,
+            `${JSON.stringify({
+              type: "turn_context",
+              payload: {
+                permission_profile: {
+                  type: "managed",
+                  file_system: {
+                    type: "restricted",
+                    entries: [
+                      {
+                        path: { type: "special", value: { kind: "root" } },
+                        access: "read",
+                      },
+                    ],
+                  },
+                  network: "restricted",
+                },
+              },
+            })}\n`,
+          );
+          result = {};
           break;
         case "config/read":
           result = {

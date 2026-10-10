@@ -201,6 +201,7 @@
 - explain connected repository review workflows ([#1553](https://github.com/openai/codex-security/pull/1553))
 - move severity persistence to Node ([#1543](https://github.com/openai/codex-security/pull/1543))
 - run API-key and Bedrock Deep Scans directly ([#1555](https://github.com/openai/codex-security/pull/1555))
+- preserve original knowledge context when resuming ([#1556](https://github.com/openai/codex-security/pull/1556))
 
 <!-- release-section: highlights:end -->
 
@@ -214,5 +215,6 @@ Review migration steps for these breaking changes:
 - remove the local findings serve command ([#1340](https://github.com/openai/codex-security/pull/1340))
 - remove legacy message and plugin compatibility ([#1548](https://github.com/openai/codex-security/pull/1548))
 - move severity persistence to Node ([#1543](https://github.com/openai/codex-security/pull/1543))
+- preserve original knowledge context when resuming ([#1556](https://github.com/openai/codex-security/pull/1556))
 
 <!-- release-section: upgrades:end -->
