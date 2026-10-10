@@ -204,6 +204,7 @@
 - preserve original knowledge context when resuming ([#1556](https://github.com/openai/codex-security/pull/1556))
 - update Codex CLI and SDK to 0.162.1 ([#1563](https://github.com/openai/codex-security/pull/1563))
 - update native libc to 0.2.190 ([#1564](https://github.com/openai/codex-security/pull/1564))
+- update MCP SDK to 1.32.0 ([#1565](https://github.com/openai/codex-security/pull/1565))
 
 <!-- release-section: highlights:end -->
 
