@@ -203,6 +203,7 @@
 - run API-key and Bedrock Deep Scans directly ([#1555](https://github.com/openai/codex-security/pull/1555))
 - preserve original knowledge context when resuming ([#1556](https://github.com/openai/codex-security/pull/1556))
 - update Codex CLI and SDK to 0.162.1 ([#1563](https://github.com/openai/codex-security/pull/1563))
+- update native libc to 0.2.190 ([#1564](https://github.com/openai/codex-security/pull/1564))
 
 <!-- release-section: highlights:end -->
 
