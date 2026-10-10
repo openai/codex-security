@@ -38,7 +38,7 @@ export interface PrepareScanPublicationOptions {
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   expectedScanId?: string;
-  /** Publish only these finding IDs (for example dedupe's uniqueFindingIds). */
+  /** Publish only these finding IDs from the supplied scan; dedupe representatives may belong to other scans. */
   findingIds?: readonly string[];
   /** Use this assessment; otherwise use the scan's saved classification when present. */
   classification?: SeverityClassification | ScanSeverityClassification;
@@ -54,7 +54,6 @@ export interface PreparedPublicationIssue {
 
 export interface PreparedScanPublication {
   scanId: string;
-  uploadId: string;
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
@@ -142,7 +141,6 @@ export async function prepareScanPublication(
 
   return {
     scanId,
-    uploadId: scanId,
     scanDirectory: canonicalScanDirectory,
     ...(classification === undefined && options.findingIds === undefined
       ? {}
@@ -332,12 +330,7 @@ function renderCodeEvidence(
   return [
     `### ${evidence.label}`,
     "",
-    renderLocation(target, {
-      path: evidence.path,
-      startLine: evidence.startLine,
-      ...(evidence.endLine === undefined ? {} : { endLine: evidence.endLine }),
-      ...(evidence.role === undefined ? {} : { role: evidence.role }),
-    }),
+    renderLocation(target, evidence),
     "",
     fencedCode(evidence.code, evidence.language),
     "",

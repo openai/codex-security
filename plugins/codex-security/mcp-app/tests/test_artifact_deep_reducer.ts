@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { readJson, writeJson } from "./support/json.ts";
 import { sourceReferences } from "./support/source-references.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
@@ -16,7 +15,7 @@ const {
   getCodexSecurityDeepReducerInputs,
   recordCodexSecurityDeepReduction,
 } = await importSource(
-  fileURLToPath(new URL("../src/artifact-deep-reducer.ts", import.meta.url)),
+  path.join(import.meta.dirname, "../src/artifact-deep-reducer.ts"),
 );
 
 const validReduction = reduction([]);

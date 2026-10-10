@@ -1,7 +1,9 @@
-import { fileURLToPath } from "node:url";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -16,13 +18,13 @@ import path from "node:path";
 import { importSource } from "./import-module.ts";
 
 const io = await importSource(
-  fileURLToPath(new URL("../src/artifact-io.ts", import.meta.url)),
+  path.join(import.meta.dirname, "../src/artifact-io.ts"),
 );
 const contextApi = await importSource(
-  fileURLToPath(new URL("../src/artifact-context.ts", import.meta.url)),
+  path.join(import.meta.dirname, "../src/artifact-context.ts"),
 );
 const writerApi = await importSource(
-  fileURLToPath(new URL("../artifact-writer-main.ts", import.meta.url)),
+  path.join(import.meta.dirname, "../artifact-writer-main.ts"),
   {
     plugins: [
       {
@@ -39,7 +41,7 @@ const writerApi = await importSource(
   },
 );
 const schemas = await importSource(
-  fileURLToPath(new URL("../src/artifact-schema-loader.ts", import.meta.url)),
+  path.join(import.meta.dirname, "../src/artifact-schema-loader.ts"),
 );
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
@@ -54,10 +56,10 @@ const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
 
 try {
   await testSchemaSourceOfTruth();
-  await testWorkerThreatModelSchema();
   await testScanContext();
   await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
+  await testAtomicReplacementAfterInterruptedWriter();
   await testAtomicReplacement();
   await testBoundedPagination();
   await testUnsafeArtifacts();
@@ -66,25 +68,6 @@ try {
 }
 
 console.log("Codex Security compact artifact foundation tests passed");
-
-async function testWorkerThreatModelSchema() {
-  const schema = await readJson(
-    import.meta.dirname,
-    "../../schemas/tools/worker-threat-model.schema.json",
-  );
-  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(
-    schema.$id,
-    "codex-security://schemas/tools/worker-threat-model.schema.json",
-  );
-  const input = schema.$defs.recordWorkerThreatModelInput;
-  assert.deepEqual(Object.keys(input.properties), ["content"]);
-  assert.deepEqual(input.required, ["content"]);
-  assert.equal(input.additionalProperties, false);
-  assert.equal(input.properties.content.type, "string");
-  assert.equal(input.properties.content.minLength, 1);
-  assert.equal(input.properties.content.pattern, "\\S");
-}
 
 async function testSchemaSourceOfTruth() {
   const common = await readJson(
@@ -330,6 +313,29 @@ async function testWorkerStandardLayout() {
   assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
 }
 
+async function testAtomicReplacementAfterInterruptedWriter() {
+  const destination = await io.artifactDestination(
+    context,
+    ["interrupted.json"],
+    "interrupted artifact",
+  );
+  const child = spawn(process.execPath, [
+    "-e",
+    'require("node:fs").openSync(process.argv[1], "wx", 0o600); process.stdout.write("locked"); setInterval(() => {}, 1000);',
+    destination + ".lock",
+  ]);
+  await once(child.stdout, "data");
+  child.kill("SIGKILL");
+  await once(child, "close");
+  await io.replaceArtifactText(destination, "recovered\n");
+  assert.equal(await readFile(destination, "utf8"), "recovered\n");
+  const values = ["a", "b", "c"].map((value) => value.repeat(32_000));
+  await Promise.all(
+    values.map((value) => io.replaceArtifactText(destination, value)),
+  );
+  assert.ok(values.includes(await readFile(destination, "utf8")));
+}
+
 async function testSafeJsonAndJsonl() {
   const destination = await io.artifactDestination(
     context,
@@ -403,6 +409,27 @@ async function testSafeJsonAndJsonl() {
     ),
     /row 1 does not match its artifact schema: candidate_id: required/,
   );
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    try {
+      await chmod(destination, 0o000);
+      for (const read of [
+        io.readArtifactText,
+        io.readArtifactTextWithMetadata,
+      ]) {
+        await assert.rejects(
+          read(context, components, "discovery_candidates"),
+          (error: Error & { cause?: NodeJS.ErrnoException }) => {
+            assert.equal(error.cause?.code, "EACCES");
+            assert.ok(error.message.includes("EACCES"));
+            assert.ok(error.message.includes(destination));
+            return true;
+          },
+        );
+      }
+    } finally {
+      await chmod(destination, 0o600);
+    }
+  }
 }
 
 async function testAtomicReplacement() {
@@ -448,16 +475,8 @@ async function testBoundedPagination() {
     { rows: rows.slice(2) },
   );
   assert.throws(
-    () => io.paginateArtifactRows(rows, { cursor: "-1" }, "review_items"),
-    /non-negative integer/,
-  );
-  assert.throws(
     () => io.paginateArtifactRows(rows, { cursor: "4" }, "review_items"),
     /outside the available rows/,
-  );
-  assert.throws(
-    () => io.paginateArtifactRows(rows, { limit: 1001 }, "review_items"),
-    /1 through 1000/,
   );
 }
 

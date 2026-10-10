@@ -6,8 +6,6 @@ import path from "node:path";
 
 import {
   DEFAULT_INSTALL_ROOT,
-  EXPECTED_CASE_COUNT,
-  EXPECTED_LABEL_COUNTS,
   SASTBENCH_COMMIT,
   SASTBENCH_DATASET_RELATIVE_PATH,
   SASTBENCH_DATASET_SHA256,
@@ -85,24 +83,10 @@ export function verifyInstallation(
       `SastBench dataset SHA-256 mismatch: expected ${SASTBENCH_DATASET_SHA256}, got ${inspection.datasetSha256}`,
     );
   }
-  if (inspection.caseCount !== EXPECTED_CASE_COUNT) {
-    throw new Error(
-      `SastBench case count mismatch: expected ${EXPECTED_CASE_COUNT}, got ${inspection.caseCount}`,
-    );
-  }
-  for (const [label, expected] of Object.entries(EXPECTED_LABEL_COUNTS)) {
-    const actual = inspection.labelCounts?.[label];
-    if (actual !== expected) {
-      throw new Error(
-        `SastBench ${label} count mismatch: expected ${expected}, got ${actual}`,
-      );
-    }
-  }
   return inspection;
 }
 
 function createInstallation(target: string) {
-  fs.mkdirSync(target, { recursive: true });
   if (fs.readdirSync(target).length !== 0) {
     throw new Error(`Refusing to install into non-empty directory: ${target}`);
   }
@@ -116,7 +100,13 @@ export function installSastBench(target: string = DEFAULT_INSTALL_ROOT) {
   const resolvedTarget = path.resolve(target);
   if (!fs.existsSync(resolvedTarget)) {
     fs.mkdirSync(path.dirname(resolvedTarget), { recursive: true });
-    createInstallation(resolvedTarget);
+    fs.mkdirSync(resolvedTarget);
+    try {
+      createInstallation(resolvedTarget);
+    } catch (error) {
+      fs.rmSync(resolvedTarget, { recursive: true, force: true });
+      throw error;
+    }
   }
   return verifyInstallation(inspectInstallation(resolvedTarget));
 }

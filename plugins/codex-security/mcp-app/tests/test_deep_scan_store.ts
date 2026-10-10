@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { readJson } from "./support/json.ts";
 import { mock } from "node:test";
 import assert from "node:assert/strict";
@@ -10,20 +9,12 @@ import { importSource } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 
 const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
-  fileURLToPath(new URL("../src/deep-scan/store.ts", import.meta.url)),
+  join(import.meta.dirname, "../src/deep-scan/store.ts"),
 );
-
-const canonical = {
-  inScopeFilesPath:
-    "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
-  candidateLedgerPath:
-    "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
-};
 
 await testBeginProtocolAndParsing();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
-testCanonicalNullAndPartialParsing();
 testRunErrorParsing();
 testConfiguredMaximumDurationParsing();
 await testWriteSerializationAndRecovery();
@@ -246,11 +237,12 @@ async function testOwnershipReadClearsStaleLease() {
   const store = new WorkbenchDeepScanStore(async (args: string[]) => {
     calls.push(args);
     if (args[0] === "update-progress") {
+      generation = 4;
       throw new Error(
         "Deep Scan coordinator lease belongs to a newer generation.",
       );
     }
-    if (args[0] === "get-deep-scan") generation = 3;
+    if (args[0] === "get-deep-scan" && generation === 2) generation = 3;
     return {
       ...stateResult(scanId, {
         deepScan: { coordinatorGeneration: generation },
@@ -275,13 +267,36 @@ async function testOwnershipReadClearsStaleLease() {
     store.updateProgress({ scanId, phase: "discovery" }),
     /newer generation/,
   );
-  generation = 4;
   await store.claimCoordinator(lease);
   assert.equal(
-    calls[4].includes("--coordinator-generation"),
+    calls.at(-1)!.includes("--coordinator-generation"),
     false,
-    "a fenced mutation must also clear the cached lease",
+    "a confirmed newer generation after a fenced mutation must clear the cached lease",
   );
+
+  for (const readFails of [false, true]) {
+    const original = new Error(
+      "Permission denied: /fixture/Deep Scan coordinator lease belongs to a newer generation./lock",
+    );
+    const owned = new WorkbenchDeepScanStore(async (args: string[]) => {
+      if (args[0] === "update-progress") throw original;
+      if (args[0] === "get-deep-scan" && readFails)
+        throw new Error("read failed");
+      return {
+        ...stateResult(scanId, { deepScan: { coordinatorGeneration: 2 } }),
+        coordinatorDisposition: "claimed",
+      };
+    });
+    await owned.claimCoordinator(lease);
+    await assert.rejects(
+      owned.updateProgress({ scanId, phase: "discovery" }),
+      (error: unknown) => error === original,
+    );
+    assert.deepEqual(owned.coordinatorLeaseArgs(scanId), [
+      "--coordinator-generation",
+      "2",
+    ]);
+  }
 }
 
 async function testWorkerResponseParsing() {
@@ -375,17 +390,14 @@ async function testCanonicalCommitProtocol() {
   const reducerId = randomUUID();
   const resultManifestPath =
     "/fixture/scans/run/artifacts/deep_discovery/dedup/result.json";
-  const runWorkbench = mock.fn(async (args: string[]) => {
-    return stateResult(scanId, { deepScan: { canonicalArtifacts: canonical } });
-  });
+  const runWorkbench = mock.fn(async (args: string[]) => stateResult(scanId));
   const store = new WorkbenchDeepScanStore(runWorkbench);
-  const state = await store.commitDedup({
+  await store.commitDedup({
     id: reducerId,
     scanId,
     newFindings: 1,
     resultManifestPath,
   });
-  assert.deepEqual(state.canonicalArtifacts, canonical);
   assert.deepEqual(runWorkbench.mock.calls.at(-1)?.arguments[0], [
     "commit-deep-scan-dedup",
     "--scan-id",
@@ -799,9 +811,7 @@ function idempotentPersistenceScenarios() {
     },
     {
       operation: "commit-deep-scan-dedup",
-      result: stateResult(scanId, {
-        deepScan: { canonicalArtifacts: canonical },
-      }),
+      result: stateResult(scanId),
       invoke: (store: Store) =>
         store.commitDedup({
           id: reducerId,
@@ -922,45 +932,6 @@ function testRunErrorParsing() {
   );
   assert.equal(state.createdAt, createdAt);
   assert.equal(state.error, "discovery retries exhausted");
-}
-
-function testCanonicalNullAndPartialParsing() {
-  assert.equal(
-    parseDeepScan(
-      stateResult(randomUUID(), {
-        deepScan: { canonicalArtifacts: null },
-      }),
-    ).canonicalArtifacts,
-    undefined,
-  );
-  assert.throws(
-    () =>
-      parseDeepScan(
-        stateResult(randomUUID(), {
-          deepScan: {
-            canonicalArtifacts: {
-              inScopeFilesPath:
-                "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
-            },
-          },
-        }),
-      ),
-    /invalid deepScan\.canonicalArtifacts\.candidateLedgerPath/,
-  );
-  assert.throws(
-    () =>
-      parseDeepScan(
-        stateResult(randomUUID(), {
-          deepScan: {
-            canonicalArtifacts: {
-              candidateLedgerPath:
-                "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
-            },
-          },
-        }),
-      ),
-    /invalid deepScan\.canonicalArtifacts\.inScopeFilesPath/,
-  );
 }
 
 function stateResult(

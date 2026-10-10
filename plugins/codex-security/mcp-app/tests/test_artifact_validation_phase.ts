@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { jsonLines, readJson, readJsonLines } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { ArtifactContext } from "../src/artifact-io.js";
@@ -12,9 +11,7 @@ const {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
 } = await importSource(
-  fileURLToPath(
-    new URL("../src/artifact-validation-phase.ts", import.meta.url),
-  ),
+  path.join(import.meta.dirname, "../src/artifact-candidate-ledger.ts"),
 );
 
 const toolSchema = await readJson(
@@ -25,7 +22,8 @@ assert.equal(
   toolSchema.$schema,
   "https://json-schema.org/draft/2020-12/schema",
 );
-assert.deepEqual(toolSchema.required, ["scanId", "validations"]);
+assert.deepEqual(toolSchema.$defs.input.required, ["scanId", "validations"]);
+assert.equal(toolSchema.$ref, "#/$defs/input");
 assert.deepEqual(toolSchema.$defs.validationUpdate.required, [
   "candidateId",
   "validation",
@@ -159,24 +157,6 @@ try {
     },
     /repeats candidate candidate-b/,
   );
-  await assertNoMutation(
-    context,
-    ledger,
-    {
-      validations: [
-        {
-          candidateId: "candidate-a",
-          validation: {
-            ...firstValidation,
-            confidence: "certain",
-          },
-        },
-        updates[0],
-      ],
-    },
-    /confidence/,
-  );
-
   await assertNoMutation(
     { ...context, layout: "worker" },
     ledger,

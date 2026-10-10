@@ -8,7 +8,7 @@ Create one maintainer-owned private draft for one validated finding. Use the sel
 
 Require a sealed `git_revision`, its verified public canonical non-fork source repository, a default branch, and `ADMIN` viewer permission. Other target types cannot satisfy this contract. Verify the exact revision and every finding path through the main skill's source checks.
 
-Run metadata checks as `GH_HOST=github.com gh repo view github.com/{owner}/{repo}`. Validate `owner` and `repo` as separate path segments. Use authenticated `gh api --hostname github.com` with these headers on every request:
+Run metadata checks as `gh repo view https://github.com/{owner}/{repo}`. Validate `owner` and `repo` as separate path segments. Use authenticated `gh api --hostname github.com` with these headers on every request:
 
 ```text
 Accept: application/vnd.github+json

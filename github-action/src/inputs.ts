@@ -1,34 +1,13 @@
 export const INPUT_NAMES = [
   'repository', 'scope', 'paths', 'diff-base', 'mode',
-  'model', 'effort', 'max-cost', 'max-time-hours', 'fail-on-severity', 'verbose', 'dry-run',
+  'model', 'cyber-access-program', 'effort', 'max-cost', 'max-time-hours', 'fail-on-severity', 'verbose', 'dry-run',
   'summary', 'annotations',
   'upload-artifacts', 'artifact-name', 'retention-days',
 ] as const;
 
-export type Scope = 'repository' | 'diff';
-export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'informational' | 'unknown';
-export type Threshold = 'none' | 'critical' | 'high' | 'medium' | 'low';
-export interface Inputs {
-  repository: string;
-  scope: Scope;
-  paths: string[];
-  diffBase?: string;
-  mode: 'standard' | 'deep';
-  model: string;
-  effort: string;
-  maxCost?: number;
-  maxTimeHours?: number;
-  failOnSeverity: Threshold;
-  verbose: boolean;
-  dryRun: boolean;
-  summary: boolean;
-  annotations: boolean;
-  uploadArtifacts: boolean;
-  artifactName: string;
-  retentionDays: number;
-}
+export type Inputs = ReturnType<typeof parseInputs>;
 
-export function parseInputs(read: (name: string) => string, workspace: string): Inputs {
+export function parseInputs(read: (name: string) => string, workspace: string) {
   const str = (name: string, fallback = '') => read(name).trim() || fallback;
   const choice = <T extends string>(name: string, values: readonly T[], fallback: T): T => {
     const value = str(name, fallback);
@@ -63,8 +42,11 @@ export function parseInputs(read: (name: string) => string, workspace: string): 
   const maxTimeHours = num('max-time-hours', false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== undefined && mode !== 'deep') throw new Error('max-time-hours requires mode: deep.');
   const dryRun = bool('dry-run', false);
+  const cyberAccessProgram = str('cyber-access-program')
+    ? choice('cyber-access-program', ['standard', 'daybreak_blue', 'daybreak_red'], 'standard')
+    : undefined;
   return {
-    repository: str('repository', workspace), scope, paths, diffBase, mode,
+    repository: str('repository', workspace), scope, paths, diffBase, mode, cyberAccessProgram,
     model: str('model', 'gpt-5.6-sol'), effort: choice('effort', ['minimal','low','medium','high','xhigh','max'], 'xhigh'),
     maxCost: num('max-cost', false, Number.MIN_VALUE), maxTimeHours, failOnSeverity: choice('fail-on-severity', ['none','low','medium','high','critical'], 'none'),
     verbose: bool('verbose', true), dryRun,
@@ -87,6 +69,7 @@ export function scanArguments(inputs: Inputs, target: {repository: string; diffB
   // leading '-' and '~' as literal repository filenames.
   for (const path of inputs.paths) args.push(`--path=./${path}`);
   const options: Array<[string, string | number | undefined]> = [
+    ['--cyber-access-program', inputs.cyberAccessProgram],
     ['--diff', target.diffBase], ['--head', target.diffHead], ['--max-cost', inputs.maxCost],
     ['--max-time-hours', inputs.maxTimeHours],
   ];
