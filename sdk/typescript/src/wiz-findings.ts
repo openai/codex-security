@@ -394,6 +394,13 @@ function records(payload: unknown): FindingInput {
         );
       repositories.set(entry.id, {
         ...entry,
+        // Equivalent inventory aliases must produce the same evidence when the
+        // export reorders its rows. Keep a stable supplied URL and nonempty name.
+        url: previous && previous.url < entry.url ? previous.url : entry.url,
+        name:
+          previous?.name && (!entry.name || previous.name < entry.name)
+            ? previous.name
+            : entry.name,
         platform: entry.platform ?? previous?.platform ?? null,
       });
     }
