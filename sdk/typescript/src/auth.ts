@@ -5,7 +5,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import type { JsonObject } from "./config.js";
-import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
+import {
+  CodexSecurityError,
+  PluginBootstrapError,
+  errorMessage,
+} from "./errors.js";
 import {
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
@@ -108,7 +112,8 @@ export async function readCodexHomeConfig(
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw new CodexSecurityError(
-      "Could not read the configured Codex provider.",
+      `Could not read the configured Codex provider: ${errorMessage(error)}`,
+      { cause: error },
     );
   }
 }
@@ -182,7 +187,9 @@ export class CodexLoginHandle {
         };
         this.#settleInstructionWaiters(result);
         if (result.success) {
-          Promise.resolve(onSuccess()).then(() => resolve(result), reject);
+          Promise.resolve()
+            .then(onSuccess)
+            .then(() => resolve(result), reject);
         } else {
           resolve(result);
         }
@@ -229,8 +236,14 @@ export class CodexLoginHandle {
 
   public cancel(): void {
     this.#canceled = true;
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null)
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
+      // Descendants can retain inherited pipes after the login process exits.
+      // Cancellation must release those pipes so the close event can settle.
+      this.#child.stdin.destroy();
+      this.#child.stdout.destroy();
+      this.#child.stderr.destroy();
       return;
+    }
     this.#child.kill("SIGTERM");
     if (this.#forcedTermination !== undefined) return;
     this.#forcedTermination = setTimeout(() => {

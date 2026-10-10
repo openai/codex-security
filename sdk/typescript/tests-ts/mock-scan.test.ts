@@ -62,6 +62,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       mock: true,
       auth: "api-key",
       maxCostUsd: 0.01,
+      failureSeverity: "informational",
       onAuthentication: () => callbacks.push("authentication"),
       onScanStarted: () => callbacks.push("started"),
     });
@@ -144,6 +145,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       ),
     ).toBe(0);
     expect(onTurn.mock.results.at(-1)?.value).toBe(true);
+    expect(onTurn.mock.lastCall?.[1].failureSeverity).toBe("informational");
   } finally {
     await client.close();
   }
@@ -159,11 +161,13 @@ test("mock scans preserve output protection and archive existing completed resul
       }),
     ).rejects.toThrow();
     const outputDir = join(root, "results");
-    const first = await client.run(repository, {
+    const firstOptions = {
       mock: true,
       outputDir,
       target: ["example.ts"],
-    });
+      workflowId: "synthetic-archived-workflow",
+    };
+    const first = await client.run(repository, firstOptions);
     const original = await readFile(first.manifestPath, "utf8");
     await expect(
       client.run(repository, { mock: true, outputDir }),
@@ -183,6 +187,10 @@ test("mock scans preserve output protection and archive existing completed resul
     expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
     expect(first.coverage.mode).toBe("scoped_path");
     expect(first.coverage.includePaths).toEqual(["example.ts"]);
+    const resumed = await client.run(repository, firstOptions);
+    expect(resumed.manifest).toEqual(first.manifest);
+    expect(resumed.scanDir).toBe(archive);
+    expect(resumed.sarifPath).toBe(join(archive, "exports", "results.sarif"));
   } finally {
     await client.close();
   }

@@ -14,19 +14,6 @@ op = ">="
 value = 6
 v1_default = 6
 
-[capabilities.usable_worker_slots_8]
-kind = "multi_agent_capacity"
-op = ">="
-value = 8
-v1_default = 6
-
-[capabilities.agent_depth_2]
-kind = "config"
-path = "agents.max_depth"
-op = ">="
-value = 2
-default = 1
-
 [capabilities.goals_enabled]
 kind = "config"
 path = "features.goals"

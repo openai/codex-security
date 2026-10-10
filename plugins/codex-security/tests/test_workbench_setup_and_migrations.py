@@ -24,6 +24,7 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_scan,
     get_scan,
     initialize_git_repository,
     load_script,
@@ -87,7 +88,70 @@ EXPECTED_MIGRATIONS = [
     (44, "version local finding embedding inputs"),
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
+    (47, "snapshot deep scan discovery context"),
 ]
+
+
+@pytest.mark.parametrize(
+    "code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST]
+)
+def test_state_directory_failure_preserves_original_exception(
+    workbench_api, tmp_path, code, capsys
+):
+    error = OSError(code, os.strerror(code), str(tmp_path / "state"))
+    connect = workbench_api["connect"]
+    with (
+        mock.patch.dict(
+            connect.__globals__,
+            {
+                "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                "create_private_directory": mock.Mock(side_effect=error),
+            },
+        ),
+        pytest.raises(OSError) as failure,
+    ):
+        connect()
+    assert str(failure.value) == str(error)
+    assert failure.value is error
+    detail = capsys.readouterr().err
+    assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+    assert "SQLite journal files" in detail
+    assert "CODEX_SECURITY_STATE_DIR" in detail
+
+
+@pytest.mark.parametrize("during_open", [True, False])
+def test_state_open_or_migration_failure_preserves_original_exception(
+    workbench_api, tmp_path, during_open, capsys
+):
+    error = sqlite3.OperationalError("unable to open database file")
+    connect = workbench_api["connect"]
+    connection = sqlite3.connect(":memory:")
+    try:
+        with (
+            mock.patch.dict(
+                connect.__globals__,
+                {
+                    "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                    "apply_migrations": mock.Mock(side_effect=error),
+                },
+            ),
+            mock.patch.object(
+                sqlite3,
+                "connect",
+                side_effect=error if during_open else None,
+                return_value=connection,
+            ),
+            pytest.raises(sqlite3.OperationalError) as failure,
+        ):
+            connect()
+        assert failure.value is error
+        assert str(error) == "unable to open database file"
+        detail = capsys.readouterr().err
+        assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+        assert "SQLite journal files" in detail
+        assert "CODEX_SECURITY_STATE_DIR" in detail
+    finally:
+        connection.close()
 
 
 def create_historical_database(
@@ -451,11 +515,7 @@ def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path)
     assert started["results"]["progress"]["coverage"]["filesTotal"] == 1
 
 
-def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    dependency = tmp_path / "dependency"
-    initialize_git_repository(dependency)
-    target = tmp_path / "target"
+def initialize_git_repository_with_submodule(target: Path, dependency: Path) -> None:
     initialize_git_repository(target)
     subprocess.run(
         [
@@ -472,6 +532,14 @@ def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
         check=True,
     )
     subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+
+
+def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    dependency = tmp_path / "dependency"
+    initialize_git_repository(dependency)
+    target = tmp_path / "target"
+    initialize_git_repository_with_submodule(target, dependency)
     saved = create_saved_git_workspace(state_dir, target)
     (target / "vendor/dependency/README.md").write_text("dirty dependency\n")
 
@@ -486,22 +554,7 @@ def test_scan_start_allows_uninitialized_submodule(tmp_path: Path) -> None:
     dependency = tmp_path / "dependency"
     initialize_git_repository(dependency)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     subprocess.run(
         ["git", "submodule", "deinit", "-f", "-q", "--", "vendor/dependency"],
         cwd=target,
@@ -522,22 +575,7 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     (dependency / "README.md").write_text("second revision\n")
     subprocess.run(["git", "commit", "-qam", "Second revision"], cwd=dependency, check=True)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     submodule = target / "vendor/dependency"
     subprocess.run(["git", "checkout", "-q", revision_a], cwd=submodule, check=True)
     subprocess.run(
@@ -566,9 +604,7 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repository, text=True
     ).strip()
-    workspace_id = str(uuid.uuid4())
-    create_workspace(state_dir, workspace_id, "--target-path", str(target))
-    save_workspace(state_dir, workspace_id, str(target), ".", "standard")
+    workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     (repository / "outside.py").write_text("outside = 2\n")
     write_completed_contract(
@@ -628,11 +664,7 @@ def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: boo
 
 
 def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     scan_command(state_dir, "complete-scan", scan_id)
     database = state_dir / "workbench.sqlite3"
