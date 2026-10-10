@@ -200,6 +200,7 @@
 - keep scan identity visible in results and failures ([#1554](https://github.com/openai/codex-security/pull/1554))
 - explain connected repository review workflows ([#1553](https://github.com/openai/codex-security/pull/1553))
 - move severity persistence to Node ([#1543](https://github.com/openai/codex-security/pull/1543))
+- run API-key and Bedrock Deep Scans directly ([#1555](https://github.com/openai/codex-security/pull/1555))
 
 <!-- release-section: highlights:end -->
 
