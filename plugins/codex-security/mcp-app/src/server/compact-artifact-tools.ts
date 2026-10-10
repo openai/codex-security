@@ -336,9 +336,20 @@ function registerCompactTool<Input>(
     },
     async (input, requestContext) => {
       const value = await registration.handler(input, requestContext);
+      let structured = true;
+      const text = JSON.stringify(value, (key, item: unknown) => {
+        if (
+          !key.isWellFormed() ||
+          (typeof item === "string" && !item.isWellFormed())
+        )
+          structured = false;
+        return item;
+      });
+      // Codex's native JSON decoder rejects lone surrogates; the JSON text retains
+      // their exact escaped representation, including raw POSIX filename bytes.
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(value) }],
-        structuredContent: value as JsonRecord,
+        content: [{ type: "text" as const, text }],
+        ...(structured ? { structuredContent: value as JsonRecord } : {}),
       };
     },
   );
