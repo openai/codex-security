@@ -19,7 +19,7 @@ from workbench_target_state import (
     RepositoryScanScope,
     scan_repository_group,
 )
-from workbench_validation import bounded_output_text
+from workbench_validation import bounded_output_text, timestamp_key
 
 
 def list_global_findings(
@@ -244,7 +244,7 @@ def _indexed_findings(
             {generation_sql("scans")} AS repository_generation,
             targets.current_path AS target_path,
             scans.scope,
-            MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
+            scans.updated_at,
             triage.status AS decision_status,
             triage.close_reason,
             triage.updated_at AS decision_updated_at,
@@ -296,20 +296,26 @@ def _indexed_findings(
 
     findings = []
     for occurrences in grouped.values():
-        latest = max(occurrences, key=lambda row: (row["created_at"], row["occurrence_id"]))
+        latest = max(
+            occurrences,
+            key=lambda row: (timestamp_key(row["created_at"]), row["occurrence_id"]),
+        )
         decision = max(
             (row for row in occurrences if row["decision_status"] is not None),
-            key=lambda row: (row["decision_updated_at"], row["occurrence_id"]),
+            key=lambda row: (timestamp_key(row["decision_updated_at"]), row["occurrence_id"]),
             default=None,
         )
         status = decision["decision_status"] if decision is not None else "open"
         if (
             status == "closed"
             and decision["close_reason"] == "already_fixed"
-            and latest["created_at"] > decision["decision_updated_at"]
+            and timestamp_key(latest["created_at"]) > timestamp_key(decision["decision_updated_at"])
         ):
             status = "open"
-        scans = sorted({(row["scan_started_at"], row["scan_id"]) for row in occurrences})
+        scans = sorted(
+            {(row["scan_started_at"], row["scan_id"]) for row in occurrences},
+            key=lambda scan: (timestamp_key(scan[0]), scan[1]),
+        )
         component_latest_scan = max(
             (
                 latest_scan_by_repository[repository]
@@ -339,9 +345,14 @@ def _indexed_findings(
                 "matched_occurrence_ids": sorted({row["occurrence_id"] for row in occurrences}),
                 "occurrence_count": len(occurrences),
                 "status": status,
-                "updated_at": max(
-                    latest["updated_at"],
-                    decision["decision_updated_at"] if decision is not None else "",
+                "updated_at": (
+                    max(
+                        latest["updated_at"],
+                        decision["decision_updated_at"],
+                        key=lambda value: (timestamp_key(value), value),
+                    )
+                    if decision is not None
+                    else latest["updated_at"]
                 ),
             }
         )
@@ -351,7 +362,7 @@ def _indexed_findings(
         key=lambda finding: (
             finding["status"] == "open",
             -scan_history.SEVERITY_ORDER.get(finding["severity"], 5),
-            finding["created_at"],
+            timestamp_key(finding["created_at"]),
         ),
         reverse=True,
     )
@@ -367,11 +378,20 @@ def list_repositories(
     scans_by_id = {scan["scanId"]: scan for scan in scans}
     scan_count_by_target = dict(Counter(scan["targetId"] for scan in scans))
 
-    latest_scan_by_target: dict[str, dict[str, Any]] = {}
+    latest_rows: dict[str, sqlite3.Row] = {}
     for row in connection.execute(
-        "SELECT id, target_id FROM scans ORDER BY started_at DESC, id DESC"
+        "SELECT * FROM scans ORDER BY julianday(upper(started_at)) DESC, id DESC"
     ):
-        latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
+        previous = latest_rows.get(row["target_id"])
+        if previous is None or (
+            previous["status"] == row["status"] == "complete"
+            and scan_history._scan_completion_order(row)
+            > scan_history._scan_completion_order(previous)
+        ):
+            latest_rows[row["target_id"]] = row
+    latest_scan_by_target = {
+        target_id: scans_by_id[row["id"]] for target_id, row in latest_rows.items()
+    }
 
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
     query = args.query.strip().casefold() if args is not None and args.query else ""

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 from pathlib import Path
@@ -124,11 +123,7 @@ def require_integer(value: object, label: str, *, minimum: int) -> int:
 def require_positive_number(value: object, label: str) -> int | float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SystemExit(f"{label} must be a positive finite number no greater than 96.")
-    try:
-        finite = math.isfinite(value)
-    except OverflowError:
-        finite = False
-    if not finite or value <= 0 or value > MAX_TIME_HOURS:
+    if not 0 < value <= MAX_TIME_HOURS:
         raise SystemExit(f"{label} must be a positive finite number no greater than 96.")
     return value
 

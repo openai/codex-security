@@ -16,19 +16,28 @@ if ! versions="$(gh api --paginate "$endpoint/versions?per_page=100")"; then
     exit 1
 fi
 
-if ! already_published="$(
+if ! version_status="$(
     printf '%s\n' "$versions" |
-        jq --slurp --arg version "$version" --arg digest "$verified_digest" '
+        jq --raw-output --slurp --arg version "$version" --arg digest "$verified_digest" '
+            def stable_version:
+                select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) |
+                split(".") | map(tonumber);
             if length == 0 or any(.[]; type != "array") then
                 error("Container package versions must contain at least one JSON array.")
             else
                 [.[][] | select(any(.metadata.container.tags[]?; . == $version))] as $existing |
-                if ($existing | length) == 0 then false
-                elif ($digest | test("^sha256:[a-fA-F0-9]{64}$")) then
-                    [.[][] | select(any(.metadata.container.tags[]?; . == "latest"))] as $latest |
+                [.[][] | select(any(.metadata.container.tags[]?; . == "latest"))] as $latest |
+                any(.[][]; any(.metadata.container.tags[]?;
+                    stable_version > ($version | stable_version))) as $backfill |
+                if ($existing | length) > 0 and (
+                    ($digest | test("^sha256:[a-fA-F0-9]{64}$") | not) or
                     any($existing[]; .name != $digest) or
-                    ($latest | length) == 0 or any($latest[]; .name != $digest)
-                else true
+                    ($backfill | not) and (
+                        ($latest | length) == 0 or any($latest[]; .name != $digest)
+                    )
+                ) then "published"
+                elif $backfill then "backfill"
+                else "latest"
                 end
             end
         '
@@ -37,12 +46,19 @@ if ! already_published="$(
     exit 1
 fi
 
-case "$already_published" in
-    false)
+case "$version_status" in
+    latest|backfill)
+        if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            publish_latest=false
+            if [ "$version_status" = latest ]; then
+                publish_latest=true
+            fi
+            printf 'publish_latest=%s\n' "$publish_latest" >> "$GITHUB_OUTPUT"
+        fi
         exit 0
         ;;
-    true)
-        printf '%s\n' "::error::Container version $version already exists; retries require both that version and latest to match the verified digest." >&2
+    published)
+        printf '%s\n' "::error::Container version $version already exists; retries require a matching verified digest and, unless a newer stable version exists, a matching latest tag." >&2
         exit 1
         ;;
     *)

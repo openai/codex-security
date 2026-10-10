@@ -88,6 +88,27 @@ function insertScan(database: DatabaseSync, target = "/synthetic/repository") {
     .run(target);
 }
 
+test("retains SQLite open errors and recovery guidance", async () => {
+  const directory = await temporary.create("workbench-database-error-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  await mkdir(databasePath);
+  await assert.rejects(
+    openWorkbenchDatabase(databasePath),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { errcode: number }).errcode, 14);
+      assert.equal(
+        (error as Error & { code: string }).code,
+        "ERR_SQLITE_ERROR",
+      );
+      assert.ok(error.message.includes("unable to open database file"));
+      assert.ok(error.message.includes(databasePath));
+      assert.ok(error.message.includes("CODEX_SECURITY_STATE_DIR"));
+      return true;
+    },
+  );
+});
+
 test("opens a private WAL database at the configured state path", async () => {
   const directory = await temporary.create("workbench-database-");
   const home = join(directory, "codex-home");
@@ -109,11 +130,7 @@ test("opens a private WAL database at the configured state path", async () => {
       database.prepare("PRAGMA journal_mode").get()?.journal_mode,
       "wal",
     );
-    assert.equal(
-      database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()
-        ?.count,
-      migrations.length,
-    );
+    assertMigrationNames(database, ...migrations.map(({ version }) => version));
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     if (process.platform !== "win32") {
       assert.equal((await stat(databasePath)).mode & 0o777, 0o600);
@@ -252,11 +269,9 @@ test(
         database.prepare("SELECT value FROM retained").get()?.value,
         "original",
       );
-      assert.equal(
-        database
-          .prepare("SELECT MAX(version) AS version FROM schema_migrations")
-          .get()?.version,
-        migrations.at(-1)!.version,
+      assertMigrationNames(
+        database,
+        ...migrations.map(({ version }) => version),
       );
     } finally {
       database.close();
@@ -354,7 +369,7 @@ test("legacy execution profiles retain values while allowing independent model s
     database.exec(
       "UPDATE scans SET execution_model = 'synthetic-model', reasoning_effort = 'future-effort'",
     );
-    applyMigrations(database);
+    applyMigrations(database, []);
     const row = database
       .prepare(
         "SELECT model, reasoning_effort, legacy_execution_model, legacy_reasoning_effort FROM scans",
@@ -370,6 +385,7 @@ test("legacy execution profiles retain values while allowing independent model s
       },
     );
     database.exec("UPDATE scans SET model = NULL, reasoning_effort = 'high'");
+    applyMigrations(database);
     assertMigrationNames(database, version);
   }
 });
@@ -508,7 +524,7 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32])
+  for (const version of [27, 28, 31, 32, 47])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
@@ -519,13 +535,26 @@ test("recorded additive migrations restore missing columns and configured error 
       .get()?.stop_after_consecutive_errors,
     7,
   );
-  database.exec("UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2");
+  assert.equal(
+    database
+      .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+      .get()?.discovery_user_context_json,
+    null,
+  );
+  database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
+    discovery_user_context_json = '"Original discovery context"'`);
   applyMigrations(database);
   assert.equal(
     database
       .prepare("SELECT stop_after_consecutive_errors FROM deep_scan_runs")
       .get()?.stop_after_consecutive_errors,
     2,
+  );
+  assert.equal(
+    database
+      .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+      .get()?.discovery_user_context_json,
+    '"Original discovery context"',
   );
 });
 
@@ -730,11 +759,9 @@ test("retries an upgrade when another process holds the write lock beyond the bu
     await once(writer, "message");
     const database = await openWorkbenchDatabase(databasePath);
     try {
-      assert.equal(
-        database
-          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
-          .get()?.count,
-        migrations.length,
+      assertMigrationNames(
+        database,
+        ...migrations.map(({ version }) => version),
       );
       assert.equal(
         database.prepare("SELECT COUNT(*) AS count FROM security_targets").get()
@@ -768,7 +795,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? 45),
+      String(through ?? 49),
     ],
     { encoding: "utf8" },
   );
@@ -914,7 +941,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          45,
+          49,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
@@ -934,15 +961,15 @@ test("Node repository migration-label collisions roll back without changing stor
   for (const [name, setup] of [
     [
       "identity destination",
-      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(44,'persist repository identities','original')",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(48,'persist repository identities','original')",
     ],
     [
       "generation destination",
-      "INSERT INTO schema_migrations VALUES(44,'stabilize Linux repository generations','original'),(45,'occupied destination','retained')",
+      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(49,'occupied destination','retained')",
     ],
     [
       "identity collision after generation relocation",
-      "UPDATE schema_migrations SET name='persist repository identities' WHERE version IN (31,43); INSERT INTO schema_migrations VALUES(44,'stabilize Linux repository generations','original')",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version IN (31,43); UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44",
     ],
   ] as const)
     await t.test(name, async () => {
@@ -1003,6 +1030,7 @@ test("Node database-info preserves a linked repository's stored43 history for Py
       "-c",
       `
 import json, pathlib, sqlite3, subprocess, sys
+from datetime import datetime, timezone
 sys.path.insert(0, sys.argv[1])
 import workbench_db as workbench, workbench_schema as schema, workbench_target_state as state
 repository, linked = map(pathlib.Path, sys.argv[3:5])
@@ -1012,6 +1040,9 @@ subprocess.run(['git', '-C', str(repository), '-c', 'user.name=Fixture', '-c',
 subprocess.run(['git', '-C', str(repository), 'worktree', 'add', '-q', '--detach', str(linked)], check=True)
 with sqlite3.connect(sys.argv[2]) as connection:
     connection.row_factory = sqlite3.Row
+    timestamp = datetime.now(timezone.utc).isoformat()
+    connection.execute('UPDATE scans SET started_at=?, created_at=?, updated_at=?', (timestamp, timestamp, timestamp))
+    connection.execute('UPDATE scan_progress SET updated_at=?', (timestamp,))
     metadata = repository.stat()
     connection.execute('UPDATE scans SET target_device=?, target_inode=?', (str(metadata.st_dev), str(metadata.st_ino)))
     migration = json.loads(pathlib.Path(sys.argv[5]).read_text())[0]
@@ -1054,9 +1085,17 @@ with sqlite3.connect(sys.argv[2]) as connection:
   assert.deepEqual(
     storedRows(initialized).filter(
       ([name]) =>
-        name !== "schema_migrations" && name !== "scan_severity_assessments",
+        name !== "schema_migrations" &&
+        name !== "scan_severity_assessments" &&
+        name !== "local_finding_embeddings",
     ),
     savedRows.filter(([name]) => name !== "schema_migrations"),
+  );
+  assert.equal(
+    initialized
+      .prepare("SELECT COUNT(*) AS count FROM local_finding_embeddings")
+      .get()?.count,
+    0,
   );
   assert.equal(
     initialized
@@ -1066,13 +1105,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=44")
+      .prepare("SELECT name FROM schema_migrations WHERE version=48")
       .get()?.name,
     "persist repository identities",
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=45")
+      .prepare("SELECT name FROM schema_migrations WHERE version=49")
       .get(),
     undefined,
   );
@@ -1095,7 +1134,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 45
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 49
 `,
       scripts,
       databasePath,

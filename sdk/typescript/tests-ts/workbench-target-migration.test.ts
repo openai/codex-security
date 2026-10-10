@@ -464,7 +464,7 @@ describe("stable workbench target migration", () => {
         : 1,
       hasRepositoryIdentityColumn: true,
       hasRepositoryIdentityIndex: true,
-      identityVersion: 44,
+      identityVersion: 48,
       hasCurrentFindingsSchema: true,
       migrationName: "persist repository identities",
       publicationMigrations: {

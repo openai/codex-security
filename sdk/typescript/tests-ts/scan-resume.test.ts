@@ -1,4 +1,5 @@
 import { createCliTest } from "./support/cli-run.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
@@ -17,7 +18,8 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
-import type { ScanOptions } from "../src/api.js";
+import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
+import type { JsonObject } from "../src/config.js";
 import { runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { workflowDigest } from "../src/finding-workflow.js";
@@ -42,7 +44,7 @@ async function interruptedScan(
     | "auth"
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
-  > = {},
+  > & { config?: JsonObject } = {},
   resolvedDeep = false,
   modelProvider?: string,
 ) {
@@ -136,8 +138,7 @@ async function interruptedScan(
       ? {}
       : { OPENAI_API_KEY: "synthetic-resume-key" }),
   };
-  const command = (args: readonly string[], input?: string) =>
-    runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args, input);
+  const command = workbenchCommand(python, () => environment);
   const recipe = {
     repository,
     target: { kind: "repository", paths: [] },
@@ -409,6 +410,8 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
       }),
   });
   expect(stderr.text()).toContain("Synthetic transport disconnected");
+  expect(stderr.text()).toContain(`scans show ${f.scanId}`);
+  expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
   expect(code).not.toBe(0);
   expect(resumedThread).toBe(f.threadId);
   expect(
@@ -843,12 +846,7 @@ test.each(["chatgpt", "api-key"] as const)(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-launch-key",
     };
-    const command = (args: readonly string[], input?: string) =>
-      runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
-        args,
-        input,
-      );
+    const command = workbenchCommand(python, () => environment);
     const { stderr, runCli } = createCliTest(main);
 
     const code = await runCli(
@@ -917,7 +915,24 @@ test.each([
 ] as const)(
   "resume restores saved launch settings with %s auth (bulk: %p)",
   async (auth, bulk) => {
+    const profile =
+      auth === "chatgpt"
+        ? "review.v2"
+        : auth === "api-key"
+          ? "review mode"
+          : "分析";
+    const selected = {
+      model: `synthetic-${auth ?? "auto"}-model`,
+      model_reasoning_effort: "high",
+      features: { goals: false },
+    };
     const settings = {
+      config: scanPreflightCodexConfig({
+        model: "synthetic-root-model",
+        model_reasoning_effort: "low",
+        profile,
+        profiles: { [profile]: selected },
+      }),
       auth,
       cyberAccessProgram: "daybreak_blue" as const,
       safetyIdentifier:
@@ -943,6 +958,7 @@ test.each([
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
       resumeDependencies(f, (options) => {
+        expect(options.config).toMatchObject(selected);
         expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
           settings.safetyIdentifier,
         );

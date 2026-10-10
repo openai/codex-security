@@ -67,8 +67,9 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 ROW_NUMBER() OVER (
                     PARTITION BY findings.id, {decision_generation},
                         CASE WHEN {decision_generation} IS NULL THEN source_scans.target_id END
-                    ORDER BY COALESCE(triage.updated_at, source_scans.completed_at) DESC,
-                        source_scans.completed_at DESC,
+                    ORDER BY
+                        julianday(upper(COALESCE(triage.updated_at, source_scans.completed_at))) DESC,
+                        julianday(upper(source_scans.completed_at)) DESC,
                         source_scans.id DESC, occurrences.id DESC
                 ) AS decision_rank
             FROM finding_occurrences AS occurrences
@@ -94,7 +95,9 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             AND close_reason = 'false_positive'
             AND note IS NOT NULL
             AND trim(note) != ''
-        ORDER BY updated_at DESC, source_completed_at DESC, source_scan_id DESC, finding_id DESC
+        ORDER BY julianday(upper(updated_at)) DESC,
+            julianday(upper(source_completed_at)) DESC,
+            source_scan_id DESC, finding_id DESC
         """,
         (*decision_values, *source_values, scan["id"]),
     )

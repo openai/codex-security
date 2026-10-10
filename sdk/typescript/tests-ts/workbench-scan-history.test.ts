@@ -477,7 +477,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "    'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries),",
     "    'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']],",
     "    'batchedLinks': [[row['before_scan_id'], row['after_scan_id']] for row in batched],",
-    "    'batchedQueryCount': batched_queries, 'expectedBatchedQueryCount': 2 if limited else 1,",
+    "    'batchedQueryCount': batched_queries,",
     "    'emptyLinks': empty, 'emptyQueryCount': len(queries),",
     "}))",
   ].join("\n");
@@ -499,6 +499,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
       ["scan-1", "scan-2"],
       ["scan-2", "scan-0"],
     ],
+    batchedQueryCount: 1,
     emptyLinks: [],
     emptyQueryCount: 0,
     unavailable: {
@@ -524,9 +525,6 @@ test("loads each scan once and scopes saved links to uncached history", async ()
       ],
     },
   });
-  expect(observed["batchedQueryCount"]).toBe(
-    observed["expectedBatchedQueryCount"],
-  );
 });
 
 test("reconciles cached statuses without losing grouped coverage or uncertainty", async () => {
@@ -715,13 +713,9 @@ batched_queries = len(queries)
 if limited:
     connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
 
-class LegacyConnection:
-    def execute(self, *args):
-        return connection.execute(*args)
-
 queries.clear()
 legacy_rows = list(history._rows_for_ids(
-    LegacyConnection(), 'SELECT id FROM finding_occurrences WHERE id IN ({placeholders})',
+    connection, 'SELECT id FROM finding_occurrences WHERE id IN (SELECT value FROM json_each(?))',
     (f'left-{index}' for index in range(1001))
 ))
 print(json.dumps({
@@ -730,7 +724,6 @@ print(json.dumps({
     'reverse': reverse, 'remaining': sorted(remaining), 'unchanged': unchanged,
     'restoredAfterUnlink': restored,
     'batchedCount': len(batched), 'batchedQueries': batched_queries,
-    'expectedBatchedQueries': 6 if limited else 3,
     'legacyCount': len(legacy_rows), 'legacyQueries': len(queries)
 }))
 `;
@@ -749,10 +742,10 @@ print(json.dumps({
     unchanged: true,
     restoredAfterUnlink: true,
     batchedCount: 10,
+    batchedQueries: 3,
     legacyCount: 1001,
-    legacyQueries: 2,
+    legacyQueries: 1,
   });
-  expect(observed["batchedQueries"]).toBe(observed["expectedBatchedQueries"]);
 });
 
 test("includes recurring stable identities in confirmed finding history", async () => {
