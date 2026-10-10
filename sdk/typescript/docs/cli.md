@@ -590,6 +590,7 @@ For filesystem and approval behavior, see the
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                     |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                             |
 | `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`. |
+| `CODEX_SECURITY_CLOUD_WEB_URL`                                              | Cloud app URL for repository links when an alternate deployment serves its UI separately.                            |
 | `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                               |
 | `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                           |
 | `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                  |
@@ -832,6 +833,14 @@ empty configured URL stops the import before authentication or network requests.
 With the variable unset, the existing production endpoint remains the default.
 The older `CODEX_SECURITY_CLOUD_PUBLISH_URL` overrides only the final native scan
 publication endpoint; it does not route vendor imports.
+
+If that deployment serves its UI separately, set `CODEX_SECURITY_CLOUD_WEB_URL`
+to the full Cloud app URL shown in the browser. The import handoff supplies both
+deployment settings. The preview and result include a repository-specific
+`cloudUrl`, and terminal completion prints the link. This setting only controls
+the return link; all API requests still use `CODEX_SECURITY_CLOUD_BASE_URL`.
+For custom API destinations without a configured app URL, completion retains
+the manual navigation guidance rather than guessing a UI host or port.
 
 Preview the selection and destination:
 

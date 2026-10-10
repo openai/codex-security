@@ -878,9 +878,13 @@ test.each(["human", "json"])(
       const result = JSON.parse(cli.stdout.text());
       expect(result.status).toBe("partial");
       expect(result.counts.created).toBe(1);
-      expect(result).not.toHaveProperty("cloudUrl");
+      expect(result.cloudUrl).toBe(
+        `https://chatgpt.com/mcp-app/connector_openai_defense_factory/open_defense_factory#/repositories/${options.repository}/findings`,
+      );
     } else {
-      expect(cli.stdout.text()).toContain("Findings");
+      expect(cli.stdout.text()).toContain(
+        "View findings: https://chatgpt.com/mcp-app/",
+      );
       expect(cli.stdout.text()).not.toContain("/codex/cloud/security/findings");
     }
   },
@@ -2187,6 +2191,7 @@ test("Cloud deployment routing covers every request and isolates saved retries",
   f.state.brokenReadback = false;
   const result = await retry.publish();
   expect(result.cloudApiUrl).toBe(`${cloudBase}/external`);
+  expect(result.cloudUrl).toBeUndefined();
   expect(result.verified).toBe(1);
   expect(f.posts).toHaveLength(1);
   expect(requested.some((url) => url.includes("/repositories?"))).toBe(true);
@@ -2194,6 +2199,77 @@ test("Cloud deployment routing covers every request and isolates saved retries",
   expect(requested.some((url) => url.endsWith("/finding_imports"))).toBe(true);
   expect(requested.some((url) => url.includes("/source_reports/"))).toBe(true);
 });
+
+test("a separate Cloud app URL follows the resolved repository without changing API routing", async () => {
+  const f = await fixture();
+  const requested: string[] = [];
+  const environment = {
+    ...f.environment,
+    CODEX_SECURITY_CLOUD_BASE_URL:
+      "https://api.example.test/backend-api/aardvark",
+    CODEX_SECURITY_CLOUD_WEB_URL:
+      "http://localhost:4200/security?preview=true#/old",
+  };
+  const prepared = await prepareExternalPublication(
+    f.file,
+    { ...options, repository: f.destination().url },
+    {
+      ...f.deps,
+      environment,
+      fetch: (url, init) => {
+        requested.push(url);
+        return f.deps.fetch(url, init);
+      },
+    },
+  );
+  const link = `http://localhost:4200/security?preview=true#/repositories/${options.repository}/findings`;
+  expect(prepared.preview.cloudUrl).toBe(link);
+  expect((await prepared.publish()).cloudUrl).toBe(link);
+  expect(
+    requested.every((url) =>
+      url.startsWith(environment.CODEX_SECURITY_CLOUD_BASE_URL),
+    ),
+  ).toBe(true);
+
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      f.command
+        .filter((value) => !["--format", "json"].includes(value))
+        .concat("--yes"),
+      { ...f.cliDeps, environment },
+    ),
+  ).toBe(0);
+  expect(cli.stdout.text()).toContain(`View findings: ${link}`);
+});
+
+test.each([
+  "",
+  "/relative",
+  "file:///tmp/cloud",
+  "https://user:password@example.test",
+])(
+  "invalid Cloud app URL fails before authentication or network: %s",
+  async (url) => {
+    const f = await fixture();
+    let calls = 0;
+    await expect(
+      prepareExternalPublication(f.file, options, {
+        ...f.deps,
+        environment: { ...f.environment, CODEX_SECURITY_CLOUD_WEB_URL: url },
+        credentials: async () => {
+          calls++;
+          throw new Error("Unexpected auth");
+        },
+        fetch: async () => {
+          calls++;
+          throw new Error("Unexpected network");
+        },
+      }),
+    ).rejects.toThrow("CODEX_SECURITY_CLOUD_WEB_URL");
+    expect(calls).toBe(0);
+  },
+);
 
 test.each([
   "",

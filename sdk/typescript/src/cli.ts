@@ -574,7 +574,9 @@ function renderExternalPublicationSummary(
       ? []
       : [
           "Imported Wiz evidence remains not assessed by Codex.",
-          "Open the Codex Security Cloud app's Findings view and select this repository. Search indexing can lag an accepted import.",
+          result.cloudUrl
+            ? `View findings: ${diagnosticValue(result.cloudUrl)}\nSearch indexing can lag an accepted import.`
+            : "Open the Codex Security Cloud app's Findings view and select this repository. Search indexing can lag an accepted import.",
         ]),
     "",
   ].join("\n");
@@ -3227,6 +3229,10 @@ export async function main(
           errorOutput.write(
             `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
           );
+          if (preview.cloudUrl)
+            errorOutput.write(
+              `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
+            );
           for (const excluded of preview.excluded)
             errorOutput.write(
               `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,

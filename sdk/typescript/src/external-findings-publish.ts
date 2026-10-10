@@ -5,7 +5,11 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readCloudCredentials } from "./cloud-publish.js";
-import { cloudBaseUrl, DEFAULT_CLOUD_BASE_URL } from "./cloud-endpoint.js";
+import {
+  cloudBaseUrl,
+  cloudFindingsUrl,
+  DEFAULT_CLOUD_BASE_URL,
+} from "./cloud-endpoint.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   codexSecurityStateDirectory,
@@ -59,6 +63,7 @@ export interface ExternalPublicationProgress {
 /** Counts describe acknowledged receipts, even when later transport or readback fails. */
 export interface ExternalPublicationResult {
   cloudApiUrl: string;
+  cloudUrl?: string;
   status: "complete" | "partial" | "interrupted";
   read: number;
   ready: number;
@@ -91,6 +96,7 @@ interface SavedSubmission {
 
 export interface ExternalPublicationPreview extends VendorFindings {
   cloudApiUrl: string;
+  cloudUrl?: string;
   accountId: string;
   destination: ImportRepository;
   source: FindingImportRequest["source"];
@@ -249,6 +255,8 @@ export async function prepareExternalPublication(
   const environment = dependencies.environment ?? process.env;
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
+  // Validate the configured return destination before authentication or uploads.
+  cloudFindingsUrl(environment, options.repository);
   const credentials = await (
     dependencies.credentials ?? (() => readCloudCredentials(environment))
   )();
@@ -489,6 +497,7 @@ export async function prepareExternalPublication(
   const preview: ExternalPublicationPreview = {
     ...parsed,
     cloudApiUrl,
+    cloudUrl: cloudFindingsUrl(environment, destination.id),
     accountId: credentials.account_id,
     destination,
     source,
@@ -546,6 +555,7 @@ export async function prepareExternalPublication(
           }
           return {
             cloudApiUrl,
+            cloudUrl: preview.cloudUrl,
             status:
               parsed.excluded.length || counts.error ? "partial" : "complete",
             read: parsed.read,
