@@ -24,9 +24,7 @@ import {
   expandHome,
 } from "./runtime.js";
 import { VERSION } from "./version.js";
-
-const CLOUD_PUBLISH_URL =
-  "https://chatgpt.com/backend-api/aardvark/cli/findings";
+import { cloudBaseUrl } from "./cloud-endpoint.js";
 const CHATGPT_LOGIN_REQUIRED =
   "Cloud publication requires a ChatGPT login already available to Codex Security. Run a scan or sign in with ChatGPT using Codex file credential storage, then retry.";
 
@@ -193,12 +191,11 @@ async function publishCloudPayload(
       findings,
     };
   }
-  const credentials = await readCloudCredentials(
-    dependencies.environment ?? process.env,
-  );
+  const environment = dependencies.environment ?? process.env;
+  const credentials = await readCloudCredentials(environment);
   const publishUrl =
-    dependencies.environment?.["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
-    CLOUD_PUBLISH_URL;
+    environment["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
+    `${cloudBaseUrl(environment)}/cli/findings`;
   const timeout = AbortSignal.timeout(30_000);
   const signal = dependencies.signal
     ? AbortSignal.any([dependencies.signal, timeout])
@@ -269,7 +266,8 @@ async function publishCloudPayload(
   };
 }
 
-async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+/** @internal Shared sign-in for local Cloud publishers. */
+export async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
   const configuredHome = environment["CODEX_HOME"];
   let home = expandHome(
     configuredHome?.trim() ? configuredHome : "~/.codex",

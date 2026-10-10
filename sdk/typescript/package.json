@@ -64,6 +64,8 @@
     "format": "prettier --check --ignore-path .gitignore --ignore-path .prettierignore \"**/*.{cjs,mjs,js,ts,mts,tsx,json}\" \"../../.github/scripts/*.mts\" \"../../examples/custom-validation/*.mts\" \"../../plugins/codex-security/native/*.mts\" \"../../evals/{deep-reducer,secret-discovery}/*.mts\" \"../../evals/triage-finding/{assertions,scripts,sastbench/assertions,sastbench/scripts}/*.mts\" \"../../evals/triage-finding/types.ts\" \"../../evals/tsconfig.json\" && node scripts/check-markdown.mjs",
     "generate:models": "node scripts/generate-models.cjs",
     "generate:models:check": "node scripts/generate-models.cjs --check",
+    "generate:external-import-models": "node scripts/generate-external-import-models.cjs",
+    "generate:external-import-models:check": "node scripts/generate-external-import-models.cjs --check",
     "lint": "tsc --noEmit",
     "prepack": "node --run build:plugin && node --run build",
     "test": "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
@@ -71,7 +73,7 @@
     "test:mcp": "node --run build:plugin && pnpm --dir ../../plugins/codex-security/mcp-app run test:mcp",
     "test:mutation": "stryker run",
     "test:package": "node scripts/smoke-package.mjs",
-    "types": "node scripts/generate-deep-defaults.mjs --check && node scripts/generate-project-config-schema.mjs --check && pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
+    "types": "node scripts/generate-deep-defaults.mjs --check && node scripts/generate-project-config-schema.mjs --check && pnpm run generate:models:check && pnpm run generate:external-import-models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
     "@inquirer/prompts": "8.7.2",

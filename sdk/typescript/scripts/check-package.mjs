@@ -124,6 +124,7 @@ const required = [
   "package/dist/index.d.ts",
   "package/dist/cli.js",
   "package/schemas/project-config.schema.json",
+  "package/schemas/external-findings.schema.json",
   "package/_bundled_plugin/.codex-plugin/plugin.json",
 ];
 
@@ -152,7 +153,12 @@ const allowedFiles = new Set([
     "classify-severity",
     "classify-scan-severity",
     "severity-store",
+    "cloud-endpoint",
     "cloud-publish",
+    "external-findings-publish",
+    "external-import-contract",
+    "external-import-models",
+    "wiz-findings",
     "codex-prompt",
     "codex-sdk-environment",
     "component-plan",
