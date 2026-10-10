@@ -1157,6 +1157,14 @@ scan and custom-validation prompts when the original used them:
 codex-security scans rerun SCAN_ID --scan-prompt-file instructions.md
 ```
 
+A rerun creates a new scan. When the original has saved input identities, the
+rerun reports changes to the scan instructions or knowledge base. `scans show`
+includes the saved scope, runtime and Deep Scan settings, instruction digest,
+and knowledge snapshot/document digests. JSON includes these identities under
+`recipe.scanInputs`. The instruction digest covers the exact UTF-8 prompt text;
+document digests cover the extracted text workers receive. These identities
+describe supplied inputs, not proof that a model read or followed every passage.
+
 History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Keep it private,
 writable, and outside the target repository. Session logs may contain sensitive
@@ -1180,7 +1188,14 @@ and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
 
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
-settings/instructions. New records save the authentication mode, explicit safety
+settings/instructions. Knowledge-bearing scans save their extracted documents in
+the private `.scan-knowledge.json` continuation file beside the scan artifacts.
+Resume verifies and uses that snapshot even if the original files changed or were
+deleted. Preserve it with the scan directory; canonical reports do not embed its
+document text. Old individual scans without a saved knowledge snapshot require a
+new scan when they used a knowledge base. Old scans without a knowledge base and
+bulk campaigns with an already-bound snapshot retain their existing resume path.
+New records save the authentication mode, explicit safety
 identifier, and post-scan prompt; older records cannot reconstruct missing values.
 A failed connection leaves the scan available for another resume attempt.
 Compatible scans can resume after plugin updates; sealed results keep their
