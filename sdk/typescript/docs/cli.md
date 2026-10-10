@@ -799,12 +799,14 @@ Import selected Wiz package vulnerabilities, SAST findings, repository secrets,
 and IaC findings without creating a scan. Imported records retain vendor evidence
 and remain **not assessed by Codex**, including when Wiz marks them resolved or
 reports an AI verdict. Workload secrets, cloud configuration findings, and external
-network findings are not supported by this repository importer.
+network findings are not supported by this repository importer. Cloud destinations
+currently support connected GitHub and GitHub Enterprise repositories, including
+custom Enterprise hostnames. Named Wiz exports do not add other VCS destinations.
 
 Before the first import:
 
-1. Select an existing repository in Codex Security Cloud and copy its repository
-   URL (for example, a GitHub URL) or Cloud repository ID. The repository needs an
+1. Select an existing repository in Codex Security Cloud and copy its URL or
+   Cloud repository ID. The repository needs an
    authorized environment, but does not need a completed native scan.
 2. For **package vulnerabilities**, in Wiz **Vulnerability Findings**, filter to the intended repository and
    findings. Choose **Save as → Report**, select **Repository Branch** as the
