@@ -881,6 +881,20 @@ test.skipIf(process.platform === "win32")(
 for (const selector of ["latest", "workflow"] as const) {
   test(`bootstrap ${selector} ignores unrelated history enclosing trusted Python`, async () => {
     const f = await fixture(true);
+    const trustedRuntime = join(f.root, "trusted-python");
+    execFileSync(f.python, [
+      "-m",
+      "venv",
+      "--copies",
+      "--without-pip",
+      "--system-site-packages",
+      trustedRuntime,
+    ]);
+    const trustedPython = join(
+      trustedRuntime,
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "python.exe" : "python",
+    );
     const workflowId = "scoped-bootstrap";
     await deduplicateScanInternal(
       f.first.scanId,
@@ -895,21 +909,21 @@ for (const selector of ["latest", "workflow"] as const) {
         "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
       ).run(
         "unrelated-target",
-        dirname(f.python),
+        dirname(trustedPython),
         "Unrelated synthetic target",
         "2026-01-01T00:00:00Z",
         "2026-01-01T00:00:00Z",
       );
       db.query(
         "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL WHERE id = ?",
-      ).run(dirname(f.python), "unrelated-target", f.second.scanId);
+      ).run(dirname(trustedPython), "unrelated-target", f.second.scanId);
     } finally {
       db.close();
     }
     const workbench = await savedScanWorkbench(
       selector === "latest" ? "latest" : { workflowId },
       {
-        environment: { ...f.environment, PYTHON: f.python },
+        environment: { ...f.environment, PYTHON: trustedPython },
         pluginRoot: PLUGIN_ROOT,
         currentDirectory: f.repository,
       },
