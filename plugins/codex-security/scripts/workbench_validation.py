@@ -95,7 +95,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     coverage = usage.get("coverage")
     thread_count = usage.get("threadCount")
     if (
-        coverage not in {"complete", "partial", "unavailable"}
+        coverage not in ("complete", "partial", "unavailable")
         or usage.get("source") != "codex_rollout"
         or type(thread_count) is not int
         or thread_count < 0

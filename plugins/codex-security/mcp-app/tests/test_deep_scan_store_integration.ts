@@ -8,6 +8,7 @@ import { once } from "node:events";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { test } from "node:test";
 import { importModule } from "./import-module.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import {
@@ -23,11 +24,13 @@ const {
   WorkbenchDeepScanStore,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
+  recordCodexSecurityDeepReduction,
 } = await importModule({
   stdin: {
     contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
 export { createScanArtifactContext } from "./src/artifact-context.ts";
-export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";`,
+export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";
+export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";`,
     resolveDir: mcpAppRoot,
   },
 });
@@ -40,6 +43,367 @@ await testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalSeal();
 await testRecoveredPublicationRejectsLateFailure();
 await testNoopStoppedRefreshRetainsPublicationFailure();
 await testConcurrentParentDraftsPreserveBothCheckpoints();
+for (const retry of [false, true])
+  for (const workers of [1, 2])
+    await test(`ownerless canonical replay: retry=${retry}, workers=${workers}`, () =>
+      testOwnerlessCanonicalCandidateReplay(retry, workers));
+
+for (const retry of [false, true])
+  for (const replayLine of [1, 2])
+    await test(`exact parent replay: retry=${retry}, line=${replayLine}`, () =>
+      testExactParentMatchBeforeWorkerAlias(retry, replayLine));
+
+async function testExactParentMatchBeforeWorkerAlias(
+  retry: boolean,
+  replayLine: number,
+) {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-exact-parent-replay-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  try {
+    const store = new WorkbenchDeepScanStore(runWorkbench);
+    const run = await store.begin({
+      targetPath,
+      scope: ".",
+      threadId: "exact-parent-replay-owner",
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const worker = await createWorkerFixture(
+      run,
+      "workers/exact-replay",
+      "discovery",
+    );
+    const original = {
+      ruleId: "synthetic.missing-validation",
+      title: "Synthetic finding",
+      summary: "Original first-location observation.",
+      identity: { anchor: "shared-observation" },
+      severity: { level: "high", score: 8.1, scoringSystem: "CVSS:3.1" },
+      confidence: { level: "high", rationale: "Synthetic source evidence." },
+      taxonomy: { category: "input-validation", cwe: ["CWE-20"] },
+      locations: [{ path: "fixture.py", startLine: 1, endLine: 1 }],
+      remediation: "Validate the input.",
+      provenance: {
+        source: "local_plugin",
+        workerId: worker.id,
+        candidateId: "shared-candidate",
+      },
+    };
+    const legacy = {
+      ...structuredClone(original),
+      summary: "Accepted second-location observation.",
+      locations: [{ path: "fixture.py", startLine: 2, endLine: 2 }],
+    };
+    const coverage = {
+      completeness: "complete",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+    };
+    await store.updateWorker({ ...worker, status: "queued" });
+    await store.updateWorker({ ...worker, status: "running" });
+    await writeJsonLine(worker.resultPath, {
+      scanId: run.scanId,
+      complete: true,
+      findings: [original],
+      coverage,
+    });
+    await store.updateWorker({
+      ...worker,
+      status: "succeeded",
+      resultManifestPath: worker.resultPath,
+    });
+    const previous = await createWorkerFixture(run, "dedup/previous", "dedup");
+    await writeJsonLine(previous.resultPath, {
+      scanId: run.scanId,
+      complete: true,
+      findings: [legacy],
+    });
+    const reducer = await createWorkerFixture(
+      run,
+      "dedup/exact-replay",
+      "dedup",
+    );
+    const reduced = {
+      ...structuredClone(original),
+      summary: "Accepted reduced first-location finding.",
+      severity: { level: "low", score: 2.1, scoringSystem: "CVSS:3.1" },
+      provenance: {
+        ...original.provenance,
+        sourceFindingIds: [`${worker.id}:0`],
+      },
+    };
+    await recordCodexSecurityDeepReduction(
+      {
+        root: reducer.artifactDir,
+        repoRoot: targetPath,
+        scanId: run.scanId,
+        layout: "reducer",
+        deepReducer: {
+          scanRoot: run.scanDir,
+          claimedWorkers: [worker],
+          previousReducerResultPath: previous.resultPath,
+        },
+      },
+      {
+        scanId: run.scanId,
+        complete: true,
+        findings: [
+          {
+            ...legacy,
+            provenance: {
+              ...legacy.provenance,
+              sourceFindingIds: ["previous:0"],
+            },
+          },
+          reduced,
+        ],
+      },
+    );
+    const reduction = JSON.parse(await readFile(reducer.resultPath, "utf8"));
+    assert.deepEqual(
+      reduction.findings.map(
+        (finding: { provenance: { sourceFindingIds: string[] } }) =>
+          finding.provenance.sourceFindingIds,
+      ),
+      [["previous:0"], [`${worker.id}:0`]],
+    );
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      { ...reduction, coverage },
+      runWorkbench,
+    );
+    const accepted = (await readJson(run.scanDir, "findings.json")).findings;
+    assert.equal(accepted.length, 2);
+    assert.deepEqual(
+      accepted.map(
+        (finding: { locations: { startLine: number }[] }) =>
+          finding.locations[0].startLine,
+      ),
+      [2, 1],
+    );
+    const replay =
+      replayLine === 1
+        ? original
+        : {
+            ...structuredClone(legacy),
+            summary: "Stronger replay at the second location.",
+            severity: {
+              level: "critical",
+              score: 9.8,
+              scoringSystem: "CVSS:3.1",
+            },
+          };
+    await writeJsonLine(worker.resultPath, {
+      scanId: run.scanId,
+      complete: true,
+      findings: [replay],
+      coverage,
+    });
+    const scan = await stopWithPublicationRetry(
+      runWorkbench,
+      environment,
+      run.scanId,
+      retry,
+    );
+    assert.equal(scan.resultsRecoveryNeeded, false);
+    assert.equal(
+      scan.findingCount,
+      2,
+      "an exact second-location match must not replace the independent reduced finding",
+    );
+    const published = (await readJson(run.scanDir, "findings.json")).findings;
+    const first = published.find(
+      (finding: { locations: { startLine: number }[] }) =>
+        finding.locations[0].startLine === 1,
+    );
+    assert.equal(first.summary, reduced.summary);
+    const second = published.find(
+      (finding: { locations: { startLine: number }[] }) =>
+        finding.locations[0].startLine === 2,
+    );
+    assert.equal(
+      second.summary,
+      replayLine === 2 ? replay.summary : legacy.summary,
+    );
+    assert.equal(
+      second.provenance.previousFindings?.some(
+        (finding: { summary: string }) => finding.summary === reduced.summary,
+      ) ?? false,
+      false,
+    );
+    const publishedIds = scan.findings.map(
+      (finding: { findingId: string; identity: unknown }) => [
+        finding.findingId,
+        finding.identity,
+      ],
+    );
+    await runWorkbench([
+      "preserve-scan-results",
+      "--scan-id",
+      run.scanId,
+      "--thread-id",
+      "exact-parent-replay-owner",
+    ]);
+    assert.deepEqual(
+      (
+        await runWorkbench(["get-scan", "--scan-id", run.scanId])
+      ).scan.findings.map(
+        (finding: { findingId: string; identity: unknown }) => [
+          finding.findingId,
+          finding.identity,
+        ],
+      ),
+      publishedIds,
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function testOwnerlessCanonicalCandidateReplay(
+  retry: boolean,
+  workers: number,
+) {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-ownerless-replay-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  try {
+    const store = new WorkbenchDeepScanStore(runWorkbench);
+    const run = await store.begin({
+      targetPath,
+      scope: ".",
+      threadId: "ownerless-replay-owner",
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const originals = ["candidate-a", "candidate-b"].map((candidateId) => ({
+      ruleId: "synthetic.missing-validation",
+      title: "Synthetic finding",
+      summary: `Independent ${candidateId} evidence.`,
+      identity: { anchor: "shared-observation" },
+      severity: { level: "high", score: 8.1, scoringSystem: "CVSS:3.1" },
+      confidence: { level: "high", rationale: "Synthetic source evidence." },
+      taxonomy: { category: "input-validation", cwe: ["CWE-20"] },
+      locations: [{ path: "fixture.py", startLine: 1, endLine: 1 }],
+      remediation: "Validate the input.",
+      provenance: { source: "local_plugin", candidateId },
+    }));
+    for (let index = 0; index < workers; index++) {
+      const worker = await createWorkerFixture(
+        run,
+        `replay-${index}`,
+        "discovery",
+      );
+      await store.updateWorker({ ...worker, status: "queued" });
+      await store.updateWorker({ ...worker, status: "running" });
+      await writeJsonLine(worker.resultPath, {
+        scanId: run.scanId,
+        findings: [originals[1]],
+        coverage: {
+          completeness: "complete",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+      await store.updateWorker({
+        ...worker,
+        status: "succeeded",
+        resultManifestPath: worker.resultPath,
+      });
+    }
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      {
+        scanId: run.scanId,
+        complete: true,
+        findings: originals,
+        coverage: {
+          completeness: "complete",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      },
+      runWorkbench,
+    );
+    const accepted = (await readJson(run.scanDir, "findings.json")).findings;
+    assert.deepEqual(
+      accepted.map((finding: { identity: unknown }) => finding.identity),
+      [
+        { anchor: "shared-observation" },
+        { anchor: "shared-observation", instance: "saved-2" },
+      ],
+    );
+    assert.deepEqual(
+      accepted[1].provenance.preservedIdentity,
+      originals[1].identity,
+    );
+    assert.equal(accepted[1].provenance.workerId, undefined);
+    assert.equal(accepted[1].provenance.sourceFindings, undefined);
+
+    const scan = await stopWithPublicationRetry(
+      runWorkbench,
+      environment,
+      run.scanId,
+      retry,
+    );
+    assert.equal(scan.resultsRecoveryNeeded, false);
+    assert.equal(
+      scan.findingCount,
+      workers === 1 ? 2 : 4,
+      "only unique compatible ownership can reuse the canonical candidate position",
+    );
+    const published = (await readJson(run.scanDir, "findings.json")).findings;
+    for (const original of accepted) {
+      const retained = published.find(
+        (finding: { identity: unknown }) =>
+          JSON.stringify(finding.identity) ===
+          JSON.stringify(original.identity),
+      );
+      assert.equal(retained.summary, original.summary);
+      assert.equal(
+        retained.provenance.candidateId,
+        original.provenance.candidateId,
+      );
+    }
+    const identities = scan.findings.map(
+      (finding: { findingId: string; identity: unknown }) => [
+        finding.findingId,
+        finding.identity,
+      ],
+    );
+    await runWorkbench([
+      "preserve-scan-results",
+      "--scan-id",
+      run.scanId,
+      "--thread-id",
+      "ownerless-replay-owner",
+    ]);
+    assert.deepEqual(
+      (
+        await runWorkbench(["get-scan", "--scan-id", run.scanId])
+      ).scan.findings.map(
+        (finding: { findingId: string; identity: unknown }) => [
+          finding.findingId,
+          finding.identity,
+        ],
+      ),
+      identities,
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
 await testCoordinatorCommitResponseRecovery();
 await testCoordinatorCommitResponseRecovery("commit-deep-scan-dedup");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
@@ -212,6 +576,48 @@ function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
     });
     return JSON.parse(stdout);
   };
+}
+
+async function stopWithPublicationRetry(
+  runWorkbench: ReturnType<typeof createWorkbenchRunner>,
+  environment: NodeJS.ProcessEnv,
+  scanId: string,
+  retry: boolean,
+) {
+  const stopArgs = [
+    "fail-deep-scan",
+    "--scan-id",
+    scanId,
+    "--message",
+    "Stopped for test",
+  ];
+  if (retry) {
+    await execFileAsync(
+      process.env.PYTHON?.trim() || "python3",
+      [
+        "-c",
+        `import sys
+sys.path.insert(0, ${JSON.stringify(path.join(pluginRoot, "scripts"))})
+import workbench_db, workbench_saved_results
+def fail(*args, **kwargs):
+    raise OSError('injected publication failure')
+workbench_saved_results._write_prepared_scan_finalization = fail
+sys.argv = ["workbench_db.py", *sys.argv[1:]]
+raise SystemExit(workbench_db.main())`,
+        ...stopArgs,
+      ],
+      { cwd: pluginRoot, env: environment },
+    );
+    assert.equal(
+      (await runWorkbench(["get-scan", "--scan-id", scanId])).scan
+        .resultsRecoveryNeeded,
+      true,
+    );
+    await runWorkbench(["recover-scan-results", "--scan-id", scanId]);
+  } else {
+    await runWorkbench(stopArgs);
+  }
+  return (await runWorkbench(["get-scan", "--scan-id", scanId])).scan;
 }
 
 async function testFreeformFailureMessagesAgainstRealWorkbench() {

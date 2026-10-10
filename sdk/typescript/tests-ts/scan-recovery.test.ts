@@ -816,8 +816,8 @@ describe("malformed scan artifact recovery", () => {
     const unsafeLocation = structuredClone(valid);
     unsafeLocation.identity.anchor = "unsafe-location";
     unsafeLocation.locations[0]!.path = "../outside.py";
-    const missingIdentity = structuredClone(valid);
-    delete (missingIdentity as Partial<Finding>).identity;
+    const invalidIdentity = structuredClone(valid);
+    Object.assign(invalidIdentity, { identity: [] });
     const invalidEvidenceId = structuredClone(valid);
     invalidEvidenceId.identity.anchor = "invalid-evidence-id";
     invalidEvidenceId.codeEvidence = [
@@ -837,7 +837,7 @@ describe("malformed scan artifact recovery", () => {
     document.findings.push(
       missingSummary,
       unsafeLocation,
-      missingIdentity,
+      invalidIdentity,
       invalidEvidenceId,
       structuredClone(valid),
       null,

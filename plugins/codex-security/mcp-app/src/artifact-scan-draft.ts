@@ -72,6 +72,12 @@ export const scanDraftInputSchema = loadArtifactZodSchema(
   "scanDraftInput",
 ) as z.ZodType<ScanDraftInput>;
 
+const findingIdentitySchema = loadArtifactZodSchema(
+  schemaDocuments,
+  scanDraftDocument.$id,
+  "identity",
+);
+
 export const completedScanInputSchema = loadArtifactZodSchema(
   schemaDocuments,
   scanDraftDocument.$id,
@@ -140,7 +146,8 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       coverage,
       manifest: { scan: manifestScan },
     };
-    const checkpoint = finalDeepDraft ? reconciled : parsed;
+    const checkpoint =
+      preserved.checkpoint ?? (finalDeepDraft ? reconciled : parsed);
     const expectedDigest = preserved.previousDigest;
     let documentWarnings: string[] | undefined;
     const checkpointPath = await artifactDestination(
@@ -295,26 +302,33 @@ async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
   saveCheckpoint = true,
-): Promise<{ input: ScanDraftInput; previousDigest: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest: string;
+  checkpoint?: ScanDraftInput;
+}> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
-  if (saveCheckpoint && !requiresClosureValidation)
-    await saveScanDraftCheckpoint(context, input, false);
-  let result = structuredClone(input);
-  const previousState = await readPreviousScanDraft(context);
+  const preserveInputOnError = async (error: unknown): Promise<never> => {
+    if (saveCheckpoint && !requiresClosureValidation)
+      await saveScanDraftCheckpoint(context, input, false);
+    throw error;
+  };
+  const previousState =
+    await readPreviousScanDraft(context).catch(preserveInputOnError);
   const previous = previousState.input;
   if (previous && previous.scanId !== input.scanId)
-    throw new Error(
-      "scan checkpoint: saved result belongs to a different scan.",
+    return preserveInputOnError(
+      new Error("scan checkpoint: saved result belongs to a different scan."),
     );
   const current: SavedScanDraft[] = await readSavedCheckpoints(
     context,
     "current",
     currentCheckpointName,
-  );
+  ).catch(preserveInputOnError);
   const archived =
     context.layout === "worker"
-      ? await readArchivedWorkerCheckpoints(context)
+      ? await readArchivedWorkerCheckpoints(context).catch(preserveInputOnError)
       : [];
   if (previous) {
     current.unshift({ input: previous, modifiedMs: previousState.modifiedMs });
@@ -324,7 +338,50 @@ async function preserveScanDraft(
       right.modifiedMs - left.modifiedMs ||
       Number(right.head ?? false) - Number(left.head ?? false),
   );
-  const savedSources = [...current, ...archived];
+  let reconciled: ReturnType<typeof reconcileScanDraft>;
+  try {
+    reconciled = reconcileScanDraft(
+      input,
+      [...current, ...archived],
+      undefined,
+      context.mode === "deep" && context.layout !== "worker",
+    );
+  } catch (error) {
+    return preserveInputOnError(error);
+  }
+  if (saveCheckpoint && reconciled.acceptProgress) {
+    await saveScanDraftCheckpoint(context, input, false);
+    await saveScanDraftCheckpoint(context, reconciled.input);
+  }
+  return {
+    input: reconciled.input,
+    previousDigest: previousState.digest,
+    checkpoint: reconciled.acceptProgress ? undefined : reconciled.input,
+  };
+}
+
+function reconcileScanDraft(
+  input: ScanDraftInput,
+  savedSources: SavedScanDraft[],
+  requestedClosures = resolvedDeferred(input.coverage),
+  terminalReplacesHistory = false,
+): { input: ScanDraftInput; acceptProgress: boolean } {
+  let result = structuredClone(input);
+  const retainedFinal =
+    input.complete === false
+      ? savedSources.find(({ input }) => input.complete !== false)
+      : undefined;
+  const retainedScope = savedSources.find(
+    ({ input }) => input.scope !== undefined,
+  )?.input.scope;
+  const retainedThreatModel = savedSources.find(
+    ({ input }) => input.threatModel !== undefined,
+  )?.input.threatModel;
+  if (terminalReplacesHistory && retainedFinal) {
+    savedSources = savedSources.filter(
+      ({ modifiedMs }) => modifiedMs >= retainedFinal.modifiedMs,
+    );
+  }
   const sources = savedSources.map(({ input }) => input);
   // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(
@@ -390,27 +447,32 @@ async function preserveScanDraft(
   const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
   const keepsGenericWork = (row: JsonObject) =>
     ambiguousGenericEntry(row, ambiguousDeferredIds);
-  const retainedFinal =
-    input.complete === false
-      ? savedSources.find(({ input }) => input.complete !== false)
-      : undefined;
-  if (retainedFinal) result = structuredClone(retainedFinal.input);
-  const retainedScope = sources.find(
-    (source) => source.scope !== undefined,
-  )?.scope;
-  if (result.scope === undefined && retainedScope !== undefined) {
+  const retainedIndex = retainedFinal
+    ? savedSources.indexOf(retainedFinal)
+    : -1;
+  if (retainedFinal) {
+    // Deep parent terminals replace history; worker terminals can still omit saved work.
+    if (terminalReplacesHistory) result = structuredClone(retainedFinal.input);
+    else
+      // Saved closures are history, not commands against later reopenings.
+      result = reconcileScanDraft(
+        retainedFinal.input,
+        savedSources.slice(retainedIndex),
+        [],
+      ).input;
+  }
+  const metadata = retainedFinal?.input ?? result;
+  if (metadata.scope === undefined && retainedScope !== undefined) {
     result.scope = retainedScope;
   }
-  const retainedThreatModel = sources.find(
-    (source) => source.threatModel !== undefined,
-  )?.threatModel;
-  if (result.threatModel === undefined && retainedThreatModel !== undefined) {
+  if (metadata.threatModel === undefined && retainedThreatModel !== undefined) {
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
   const reopenedSurfaces = new Set<JsonObject>();
+  let acceptProgress = true;
   if (retainedFinal) {
-    const terminalOutcomeIds = completedCandidateIds(retainedFinal.input);
+    const terminalOutcomeIds = completedCandidateIds(result);
     for (const surface of result.coverage.surfaces as JsonObject[]) {
       if (
         terminalOutcomeIds.has((surface.candidateId ?? surface.id) as string) &&
@@ -421,7 +483,6 @@ async function preserveScanDraft(
     const closedIds = new Set(
       resolvedDeferred(result.coverage).map((row) => row.id as string),
     );
-    const retainedIndex = savedSources.indexOf(retainedFinal);
     const progressSources = savedSources
       .filter(
         (source, index) =>
@@ -433,7 +494,7 @@ async function preserveScanDraft(
       .map(({ input }) => input)
       .reverse();
     progressSources.push(input);
-    let acceptProgress = coverageHasOutstandingWork(result.coverage);
+    acceptProgress = coverageHasOutstandingWork(result.coverage);
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
       const reopenedIds = new Set(
@@ -480,7 +541,7 @@ async function preserveScanDraft(
   const resolvedCandidateIds = completedCandidateIds(result, sources);
   const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
     result,
-    resolvedDeferred(input.coverage),
+    requestedClosures,
     sources,
     savedSources,
     resolvedCandidateIds,
@@ -488,8 +549,6 @@ async function preserveScanDraft(
     retainedFinal?.input,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
-  if (saveCheckpoint && requiresClosureValidation)
-    await saveScanDraftCheckpoint(context, input, false);
 
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.coverage.deferred as JsonObject[];
@@ -566,7 +625,52 @@ async function preserveScanDraft(
       const matches = result.findings.filter((current) =>
         sameSavedFinding(current, finding),
       );
-      if (
+      const preservedIdentity = (finding.provenance as JsonObject)
+        .preservedIdentity;
+      const generatedIdentity = findingIdentitySchema.safeParse(
+        preservedIdentity,
+      ).success
+        ? preservedIdentity
+        : matches.some((current) => current.identity !== undefined)
+          ? undefined
+          : finding.identity;
+      const generated = identifyFindings(result.findings);
+      const inferredMatches = generatedIdentity
+        ? matches.filter((current) => {
+            if (current.identity !== undefined) return false;
+            if (containsSavedFinding(current, finding)) return true;
+            const owner = (current.provenance as JsonObject).workerId;
+            const previousOwner = (finding.provenance as JsonObject).workerId;
+            return (
+              scanFindingIdentity(
+                generated[result.findings.indexOf(current)]!,
+              ) ===
+                scanFindingIdentity({
+                  ...finding,
+                  identity: generatedIdentity,
+                }) &&
+              JSON.stringify(findingLocationKeys(current)) ===
+                JSON.stringify(findingLocationKeys(finding)) &&
+              (typeof owner === "string" && owner ? owner : undefined) ===
+                (typeof previousOwner === "string" && previousOwner
+                  ? previousOwner
+                  : undefined)
+            );
+          })
+        : [];
+      const inferredIdentities = inferredMatches.map((current) => {
+        const owner = (current.provenance as JsonObject).workerId;
+        return JSON.stringify([
+          scanFindingIdentity(generated[result.findings.indexOf(current)]!),
+          findingLocationKeys(current),
+          typeof owner === "string" && owner ? owner : undefined,
+          findingSiblingSource(current),
+        ]);
+      });
+      if (new Set(inferredIdentities).size === 1) {
+        for (const current of inferredMatches)
+          preserveFindingDetails(current, finding);
+      } else if (
         matches.length === 1 &&
         source.findings.filter((current) => sameSavedFinding(current, finding))
           .length === 1
@@ -644,8 +748,7 @@ async function preserveScanDraft(
   result.coverage.surfaces = normalizeSurfaces(
     result.coverage.surfaces as JsonObject[],
   );
-  if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
-  return { input: result, previousDigest: previousState.digest };
+  return { input: result, acceptProgress };
 }
 
 function completedCandidateIds(
@@ -959,7 +1062,10 @@ function reconcileDeferredSurfaces(
     )
       continue;
     if (inheritedSource) {
-      const latest = matches.find(({ surfaces }) => surfaces.length > 0)!;
+      const latest = matches.find(({ surfaces }) => surfaces.length > 0);
+      // Reconciliation can assign a unique ID to a legacy duplicate surface.
+      // Without an observation for that ID, retain its recovered coverage.
+      if (latest === undefined) continue;
       const latestObservation = observations.get(latest.source);
       const pendingAtSameTime =
         latestObservation &&
@@ -1225,7 +1331,11 @@ async function readPreviousScanDocuments(context: ArtifactContext) {
 async function preserveDeepThreatModel(
   context: ArtifactContext,
   input: ScanDraftInput,
-): Promise<{ input: ScanDraftInput; previousDigest?: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest?: string;
+  checkpoint?: ScanDraftInput;
+}> {
   if (input.threatModel !== undefined) return { input };
   const { contents, digest } = await readPreviousScanDocuments(context);
   const previous =
@@ -1432,7 +1542,8 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
   if (left.identity && right.identity)
     return scanFindingIdentity(left) === scanFindingIdentity(right);
   const leftCandidate = findingCandidateId(left);
-  if (leftCandidate && leftCandidate === findingCandidateId(right)) return true;
+  const rightCandidate = findingCandidateId(right);
+  if (leftCandidate && rightCandidate) return leftCandidate === rightCandidate;
   return (
     scanFindingIdentity({ ...left, identity: undefined }) ===
     scanFindingIdentity({ ...right, identity: undefined })
@@ -1450,9 +1561,6 @@ export function preserveFindingDetails(
   current: JsonObject,
   previous: JsonObject,
 ): void {
-  if (current.identity === undefined && previous.identity !== undefined) {
-    current.identity = structuredClone(previous.identity);
-  }
   const provenance = requireObject(
     current.provenance,
     "saved finding provenance",
@@ -1460,6 +1568,20 @@ export function preserveFindingDetails(
   const oldProvenance = isObject(previous.provenance)
     ? previous.provenance
     : {};
+  if (
+    current.identity === undefined &&
+    findingIdentitySchema.safeParse(previous.identity).success
+  ) {
+    current.identity = structuredClone(previous.identity);
+    if (
+      provenance.preservedIdentity === undefined &&
+      oldProvenance.preservedIdentity !== undefined
+    ) {
+      provenance.preservedIdentity = structuredClone(
+        oldProvenance.preservedIdentity,
+      );
+    }
+  }
   for (const field of [
     "sourceFindingIds",
     "sourceFindings",
@@ -1490,8 +1612,21 @@ function containsSavedFinding(
   previous: JsonObject,
 ): boolean {
   const original = withoutPreviousFindings(previous);
-  if (current.identity === undefined) delete original.identity;
-  return containsSavedValue(current, original);
+  if (
+    current.identity === undefined &&
+    findingIdentitySchema.safeParse(previous.identity).success
+  ) {
+    delete original.identity;
+    if (isObject(original.provenance))
+      delete original.provenance.preservedIdentity;
+  }
+  return (
+    containsSavedValue(current, original) ||
+    (Array.isArray((current.provenance as JsonObject)?.previousFindings) &&
+      ((current.provenance as JsonObject).previousFindings as unknown[]).some(
+        (finding) => containsSavedValue(finding, original),
+      ))
+  );
 }
 
 function containsSavedValue(current: unknown, previous: unknown): boolean {
@@ -2125,7 +2260,7 @@ function buildScope(
   };
 }
 
-function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
+function identifyFindings(findings: JsonObject[]): JsonObject[] {
   const anchorCounts = new Map<string, number>();
   const anchors = findings.map((finding, index) => {
     const candidateId = (finding.extensions as JsonObject | undefined)
@@ -2146,14 +2281,10 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     return anchor;
   });
 
-  const identified: JsonObject[] = findings.map((finding, index) => {
+  return findings.map((finding, index) => {
     if (finding.identity !== undefined) return { ...finding };
     const identity: JsonObject = { anchor: anchors[index] };
-    const extensions = finding.extensions as JsonObject | undefined;
-    const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
-      (value): value is string =>
-        typeof value === "string" && Boolean(value.trim()),
-    );
+    const siblingSource = findingSiblingSource(finding);
     const ruleScopedAnchor = `${finding.ruleId}\0${identity.anchor}`;
     if (
       siblingSource !== undefined ||
@@ -2169,16 +2300,123 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       identity,
     };
   });
-  if (mode !== "deep") return identified;
+}
 
-  // Keep both findings when workers reuse an ID.
+function findingSiblingSource(finding: JsonObject): string | undefined {
+  const extensions = finding.extensions as JsonObject | undefined;
+  return [extensions?.reportId, extensions?.ledgerRowId].find(
+    (value): value is string =>
+      typeof value === "string" && Boolean(value.trim()),
+  );
+}
+
+function findingLocationKeys(finding: JsonObject): string[] {
+  return (finding.locations as JsonObject[])
+    .map((location) =>
+      JSON.stringify([
+        location.path,
+        location.startLine,
+        location.endLine ?? location.startLine,
+      ]),
+    )
+    .sort();
+}
+
+function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
+  const identified = identifyFindings(findings);
+  const anchors = identified.map(
+    (finding) => (finding.identity as JsonObject).anchor,
+  );
+  // Keep generated siblings and independent worker findings when they reuse an ID.
   // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
-  const used = new Set<string>();
-  return identified.map((finding) => {
+  const candidateContentKeys = findings.map((finding, index) => {
+    const candidate = findingCandidateId(finding);
+    return mode !== "deep" &&
+      candidate &&
+      !["candidateId", "reportId", "ledgerRowId"].some(
+        (key) =>
+          typeof (finding.extensions as JsonObject | undefined)?.[key] ===
+          "string",
+      )
+      ? JSON.stringify([
+          finding.ruleId,
+          anchors[index],
+          candidate,
+          findingLocationKeys(finding),
+        ])
+      : undefined;
+  });
+  const candidateOwners = new Map<string, Set<string>>();
+  for (const [index, finding] of findings.entries()) {
+    const key = candidateContentKeys[index];
+    const owner = (finding.provenance as JsonObject).workerId;
+    if (key && typeof owner === "string" && owner.length > 0) {
+      const owners = candidateOwners.get(key) ?? new Set<string>();
+      owners.add(owner);
+      candidateOwners.set(key, owners);
+    }
+  }
+  const candidateKeys = candidateContentKeys.map((key, index) => {
+    if (!key) return undefined;
+    const owner = (findings[index]!.provenance as JsonObject).workerId;
+    const owners = candidateOwners.get(key);
+    // Missing ownership can match a known worker only when it is unambiguous.
+    return JSON.stringify([
+      key,
+      (typeof owner === "string" && owner.length > 0 ? owner : undefined) ??
+        (owners?.size === 1 ? [...owners][0] : undefined),
+    ]);
+  });
+  const used = new Map<string, string | undefined>();
+  if (mode !== "deep")
+    for (const [index, finding] of findings.entries())
+      if (finding.identity !== undefined)
+        used.set(scanFindingIdentity(finding), candidateKeys[index]);
+  const candidateIdentities = new Map<string, JsonObject | null>();
+  for (const [index, finding] of findings.entries()) {
+    const key = candidateKeys[index];
+    if (!key || finding.identity === undefined) continue;
+    const previous = candidateIdentities.get(key);
+    candidateIdentities.set(
+      key,
+      previous === null ||
+        (previous !== undefined &&
+          scanFindingIdentity(previous) !== scanFindingIdentity(finding))
+        ? null
+        : finding,
+    );
+  }
+  return identified.map((finding, index) => {
     const key = scanFindingIdentity(finding);
-    if (!used.has(key)) {
-      used.add(key);
+    const original = findings[index]!;
+    if (mode !== "deep" && original.identity !== undefined) return finding;
+    const candidateKey = candidateKeys[index];
+    const previous = candidateKey
+      ? candidateIdentities.get(candidateKey)
+      : undefined;
+    if (previous) {
+      const preservedIdentity = (previous.provenance as JsonObject)
+        .preservedIdentity;
+      return {
+        ...finding,
+        identity: { ...(previous.identity as JsonObject) },
+        provenance: {
+          ...(finding.provenance as JsonObject),
+          ...(preservedIdentity === undefined
+            ? {}
+            : { preservedIdentity: structuredClone(preservedIdentity) }),
+        },
+      };
+    }
+    if (
+      !used.has(key) ||
+      (mode !== "deep" &&
+        previous !== null &&
+        (!candidateKey || !used.get(key) || used.get(key) === candidateKey))
+    ) {
+      used.set(key, candidateKey ?? used.get(key));
+      if (candidateKey) candidateIdentities.set(candidateKey, finding);
       return finding;
     }
     const identity = finding.identity as JsonObject;
@@ -2201,7 +2439,8 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       preservedIdentity:
         provenance.preservedIdentity ?? structuredClone(identity),
     };
-    used.add(scanFindingIdentity(distinct));
+    used.set(scanFindingIdentity(distinct), candidateKey);
+    if (candidateKey) candidateIdentities.set(candidateKey, distinct);
     return distinct;
   });
 }
@@ -2477,6 +2716,6 @@ function semanticIdentifier(value: string, fallback: string): string {
     .replace(/[\u0300-\u036f]/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9._/-]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
+    .replace(/^[._/-]+|-+$/gu, "");
   return identifier || fallback;
 }

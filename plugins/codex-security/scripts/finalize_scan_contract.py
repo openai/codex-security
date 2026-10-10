@@ -2914,6 +2914,10 @@ PreparedScanFinalization = tuple[
 ]
 
 
+def _is_sealed_scan(scan: dict[str, Any]) -> bool:
+    return scan.get("sealedAt") is not None or scan.get("artifacts") not in (None, [])
+
+
 def _prepare_scan_finalization(
     scan_dir: Path,
     schema_dir: Path | None = None,
@@ -2935,7 +2939,7 @@ def _prepare_scan_finalization(
     scan = _require_dict(manifest, "scan", "manifest")
     if scan.get("sealedAt") is None and scan.get("artifacts") == []:
         del scan["artifacts"]
-    was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
+    was_sealed = _is_sealed_scan(scan)
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
