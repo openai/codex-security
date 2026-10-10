@@ -3865,6 +3865,16 @@ export async function runScanEvents(
         "Codex Security did not report a thread ID.",
       );
     }
+    // Managed scans reconcile saved checkpoints before admitting canonical artifacts.
+    if (options.workbenchValidated && options.onFinalize !== undefined) {
+      usage = (await options.onFinalize(usage)) ?? usage;
+    }
+    options.signal.throwIfAborted();
+    await requireScanArtifacts(
+      options.scanDir,
+      ["scan-manifest.json", "findings.json", "coverage.json"],
+      options.signal,
+    );
     const [manifest, findings, coverage] = await Promise.all(
       ["scan-manifest.json", "findings.json", "coverage.json"].map(
         async (name) =>
@@ -3892,7 +3902,7 @@ export async function runScanEvents(
         "Codex Security produced only an unfinished audit checkpoint.",
       );
     }
-    if (options.onFinalize !== undefined) {
+    if (!options.workbenchValidated && options.onFinalize !== undefined) {
       usage = (await options.onFinalize(usage)) ?? usage;
     }
     const result = await collectResult(
@@ -4282,23 +4292,11 @@ function addScanCosts(
   };
 }
 
-async function collectResult(
-  turnResult: TurnResultMetadata,
-  threadId: string,
+async function requireScanArtifacts(
   scanDir: string,
-  pluginRoot: string,
-  expectation: ScanExpectation,
+  required: readonly string[],
   signal: AbortSignal,
-  workbenchValidated = false,
-  pythonPath?: string,
-  protectedRoot?: string,
-): Promise<ScanResult> {
-  const required = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
+): Promise<void> {
   const missing: string[] = [];
   for (const name of required) {
     try {
@@ -4317,6 +4315,24 @@ async function collectResult(
       `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
     );
   }
+}
+
+async function collectResult(
+  turnResult: TurnResultMetadata,
+  threadId: string,
+  scanDir: string,
+  pluginRoot: string,
+  expectation: ScanExpectation,
+  signal: AbortSignal,
+  workbenchValidated = false,
+  pythonPath?: string,
+  protectedRoot?: string,
+): Promise<ScanResult> {
+  await requireScanArtifacts(
+    scanDir,
+    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    signal,
+  );
   const { manifest, findings, coverage } = await loadContract(scanDir, {
     pluginRoot,
     expectation,

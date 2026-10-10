@@ -23,6 +23,7 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
+import { saveThreatModelDocument } from "./threat-model-document.js";
 
 export interface ScanDraftInput {
   scanId: string;
@@ -33,7 +34,6 @@ export interface ScanDraftInput {
   findings: JsonObject[];
   coverage: JsonObject;
 }
-import { saveThreatModelDocument } from "./threat-model-document.js";
 
 export interface CompletedScanInput {
   scanId: string;
@@ -82,6 +82,8 @@ const canonicalScanDraftInputSchema = loadArtifactZodSchema(
     {
       ...scanDraftDocument,
       $defs: {
+        ...scanManifestDocument.$defs,
+        ...findingsDocument.$defs,
         ...scanDraftDocument.$defs,
         scanId: scanManifestDocument.properties.scan.properties.id,
         scope: {

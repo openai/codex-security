@@ -31,6 +31,7 @@ const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
 await writeFile(bundlePath, bundle.outputFiles[0]!.contents);
 const {
   createDeepScanArtifacts,
+  recordCodexSecurityScanDraftViaWorkbench,
   parseCanonicalScanDraft,
   parseScanDraft,
   validateDiscoveryArtifacts,
@@ -167,6 +168,42 @@ for (const scenario of cases) {
               ],
       },
     };
+    await recordCodexSecurityScanDraftViaWorkbench(
+      {
+        root: standardRoot,
+        repoRoot: repository,
+        layout: "scan",
+        scanId,
+        mode: "standard",
+        status: "running",
+        scope: ".",
+        targetContract: {
+          target: {
+            allowedKinds: ["directory_snapshot"],
+            targetId: "target_example",
+            displayName: "example",
+            requiredSnapshotDigest: `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`,
+          },
+          scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
+          diffTarget: null,
+        },
+      },
+      semantic,
+      async (args: string[]) => {
+        const draft = JSON.parse(
+          await readFile(args[args.indexOf("--draft-path") + 1]!, "utf8"),
+        );
+        await Promise.all(
+          [
+            ["manifest", "scan-manifest.json"],
+            ["findings", "findings.json"],
+            ["coverage", "coverage.json"],
+          ].map(([key, name]) =>
+            writeFile(join(standardRoot, name!), JSON.stringify(draft[key!])),
+          ),
+        );
+      },
+    );
     const submitted = mutateDraft(semantic, scenario.mutation);
     const findings = {
       scanId: submitted.scanId,
@@ -177,19 +214,11 @@ for (const scenario of cases) {
         fingerprints: { identity: "synthetic" },
       })),
     };
-    const coverage = submitted.coverage;
+    const coverage = JSON.parse(
+      await readFile(join(standardRoot, "coverage.json"), "utf8"),
+    );
+    Object.assign(coverage, submitted.coverage);
     await Promise.all([
-      writeFile(
-        join(standardRoot, "scan-manifest.json"),
-        JSON.stringify({
-          scan: {
-            id: scanId,
-            complete: semantic.complete,
-            scope: semantic.scope,
-            threatModel: semantic.threatModel,
-          },
-        }),
-      ),
       writeFile(join(standardRoot, "findings.json"), JSON.stringify(findings)),
       writeFile(join(standardRoot, "coverage.json"), JSON.stringify(coverage)),
     ]);
