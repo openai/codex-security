@@ -13,8 +13,11 @@ import { capture, dependencies, savedRecipe } from "../cli-fixtures.js";
 const root = await realpath(process.argv[2]!);
 const alias = join(root, "alias");
 const physical = join(root, "physical");
+const aliasHome = join(alias, "home");
+const physicalHome = join(physical, "home");
 await Promise.all([
-  mkdir(alias),
+  mkdir(aliasHome, { recursive: true }),
+  mkdir(physicalHome, { recursive: true }),
   mkdir(join(physical, "nested"), { recursive: true }),
 ]);
 await symlink(
@@ -22,8 +25,8 @@ await symlink(
   join(alias, "link"),
   process.platform === "win32" ? "junction" : "dir",
 );
-const rawHome = `${alias}${sep}link${sep}..`;
-const traversedHome = process.platform === "win32" ? alias : physical;
+const rawHome = `${alias}${sep}link${sep}..${sep}home`;
+const traversedHome = process.platform === "win32" ? aliasHome : physicalHome;
 const privateConfig = {
   model_providers: {
     synthetic: {
@@ -39,11 +42,15 @@ for (const [spelling, requestedHome, expectedHome] of [
   ["absolute", rawHome, traversedHome],
   [
     "relative",
-    `${relative(process.cwd(), alias)}${sep}link${sep}..`,
+    `${relative(process.cwd(), alias)}${sep}link${sep}..${sep}home`,
     traversedHome,
   ],
-  ["home-relative", `~${sep}alias${sep}link${sep}..`, alias],
-  ["missing-parent", `${root}${sep}missing${sep}..${sep}physical`, physical],
+  ["home-relative", `~${sep}alias${sep}link${sep}..${sep}home`, aliasHome],
+  [
+    "missing-parent",
+    `${root}${sep}missing${sep}..${sep}physical${sep}home`,
+    physicalHome,
+  ],
 ] as const) {
   const environment = {
     HOME: root,
