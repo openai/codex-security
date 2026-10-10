@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { restoreScanKnowledge } from "../src/scan-inputs.js";
+import { restoreProviderProfile } from "../src/provider-profile.js";
 import {
   appendFile,
   cp,
@@ -861,7 +862,8 @@ test.each([
       request_max_retries: 7,
       auth: {
         command: "synthetic-auth",
-        args: ["session"],
+        args: ["session", "synthetic-private-command-argument"],
+        env: { CLIENT_SECRET: "synthetic-private-command-environment" },
         refresh_interval_ms: 1000,
       },
     };
@@ -911,7 +913,20 @@ test.each([
       ...provider,
       auth: { ...provider.auth, cwd: h.home },
     };
-    expect(config["model_providers"]).toEqual({ synthetic: replayProvider });
+    expect(config).not.toHaveProperty("model_providers");
+    const providerProfile = (saved["recipe"] as JsonObject)["providerProfile"];
+    const restored = await restoreProviderProfile(
+      config,
+      providerProfile,
+      h.home,
+    );
+    expect(restored["model_providers"]).toEqual({
+      synthetic: {
+        ...replayProvider,
+        experimental_bearer_token: "synthetic-private-bearer",
+        http_headers: { Authorization: "Bearer synthetic-private-header" },
+      },
+    });
     expect(config["service_tier"]).toBe(expected);
     const contextLimits = {
       model_context_window: 128_000,
@@ -923,7 +938,7 @@ test.each([
       "model_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n",
     );
     expect(JSON.stringify(saved)).not.toContain("synthetic-private-");
-    await using resumed = h.makeClient(config);
+    await using resumed = h.makeClient(restored);
     const result = await resumed.run(h.repository, {
       ...options,
       signal: undefined,

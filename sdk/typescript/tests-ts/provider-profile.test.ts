@@ -19,6 +19,7 @@ import {
   createProfileCodex,
   createProviderProfile,
   providerPreflightCommand,
+  restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
 import { structuredCodexConfig } from "../src/config.js";
@@ -58,6 +59,44 @@ const startupProviders = {
   omitted: null,
   "synthetic.gateway": startupProvider,
 };
+
+test("saved provider profiles keep concurrent replay credentials private and separate", async () => {
+  const home = join(await temporaryDirectory(), "home");
+  await mkdir(home, { mode: 0o700 });
+  const providers = ["first", "second"].map((name) => ({
+    synthetic: {
+      name,
+      wire_api: "responses",
+      auth: {
+        command: "synthetic-auth",
+        env: { TOKEN: `synthetic-${name}-secret` },
+      },
+    },
+  }));
+  const profiles = await Promise.all(
+    providers.map((model_providers) =>
+      createProviderProfile(home, { model_providers }),
+    ),
+  );
+  expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
+  const restored = await Promise.all(
+    profiles.map((profile) =>
+      restoreProviderProfile(
+        { model_provider: "synthetic" },
+        profile.name,
+        home,
+      ),
+    ),
+  );
+  for (const [index, profile] of profiles.entries()) {
+    expect(restored[index]!["model_providers"]).toEqual(providers[index]);
+    if (process.platform !== "win32")
+      expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
+  }
+  await expect(restoreProviderProfile({}, "../outside", home)).rejects.toThrow(
+    "invalid provider profile",
+  );
+});
 
 test.each([
   [

@@ -412,6 +412,7 @@ export function classifyConnectionFailure(
   return "unknown";
 }
 
+/** @internal */
 export function notifyObserver<Name extends ScanObserverName>(
   options: Pick<ScanOptions & SecurityPolicyOptions, Name | "onObserverError">,
   observerName: Name,

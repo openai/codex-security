@@ -106,7 +106,10 @@ import {
 import { z } from "incur";
 import { readThreatModelPath } from "./artifact-export.js";
 import { isRecord } from "./record.js";
-import { providerPreflightCommand } from "./provider-profile.js";
+import {
+  createProviderProfile,
+  providerPreflightCommand,
+} from "./provider-profile.js";
 
 import {
   CODEX_AUTH_CONFIG_KEYS,
@@ -1777,7 +1780,7 @@ export class CodexSecurity {
           threadId: null,
         };
       }
-      const recipe = prepareSavedScanRecipe({
+      const recipe = await prepareSavedScanRecipe({
         expectation,
         session,
         options,
@@ -3102,7 +3105,7 @@ export class CodexSecurity {
       const authentication = await this.#authentication();
       this.#requireOpen();
       const result = await persistApiKey(
-        this.#codexCommand(),
+        await this.#providerPreflightCommand(),
         authentication.environment,
         apiKey,
         this.#abortController.signal,
@@ -3128,7 +3131,7 @@ export class CodexSecurity {
   async #startLogin(deviceCode: boolean): Promise<CodexLoginHandle> {
     const authentication = await this.#authentication();
     this.#requireOpen();
-    const command = await this.#codexCommand();
+    const command = await this.#providerPreflightCommand();
     this.#requireOpen();
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
@@ -3166,7 +3169,7 @@ export class CodexSecurity {
         this.#abortController.signal,
       );
       return await accountStatus(
-        this.#codexCommand(),
+        await this.#providerPreflightCommand(),
         authentication.environment,
         this.#abortController.signal,
       );
@@ -3181,7 +3184,7 @@ export class CodexSecurity {
         authentication.codexHome,
         async () => {
           await codexLogout(
-            this.#codexCommand(),
+            await this.#providerPreflightCommand(),
             authentication.environment,
             this.#abortController.signal,
           );
@@ -3493,7 +3496,7 @@ export class CodexSecurity {
           });
         }
         const status = await accountStatus(
-          source.command,
+          await providerPreflightCommand(source.command, source.configuration),
           environment,
           signal,
           runtime.preserveCodexHomeConfig ? effectiveConfig : undefined,
@@ -3594,6 +3597,13 @@ export class CodexSecurity {
     );
   }
 
+  async #providerPreflightCommand(config?: JsonObject): Promise<CodexCommand> {
+    return await providerPreflightCommand(
+      this.#codexCommand(),
+      config ?? (await mergedCodexConfig(this.config)),
+    );
+  }
+
   async #refreshPersistentRuntime(
     runtime: PreparedRuntime,
     source: ExecutionSource,
@@ -3611,7 +3621,10 @@ export class CodexSecurity {
       runtime.plugin.pluginRoot,
       {
         isolateSelection: true,
-        codexCommand: source.command,
+        codexCommand: await providerPreflightCommand(
+          source.command,
+          mergedConfig,
+        ),
         environment: withoutCodexHome(source.environment),
         signal,
       },
@@ -4235,7 +4248,7 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
 }
 
 /** Save the configuration and instructions needed to resume the same execution. */
-function prepareSavedScanRecipe({
+async function prepareSavedScanRecipe({
   expectation,
   session,
   options,
@@ -4261,12 +4274,13 @@ function prepareSavedScanRecipe({
   knowledgeBaseSha256?: string;
   scanKnowledge?: KnowledgeBaseSnapshot;
   deepScan?: Required<DeepScanOptions>;
-}): JsonObject {
+}): Promise<JsonObject> {
   const { runtime, preflightConfig, approvalPolicy } = session;
   const config: JsonObject = {
     ...preflightConfig,
     approval_policy: approvalPolicy,
   };
+  let providerProfile: string | undefined;
   if (!session.source.preserveProviderEnvironment) {
     const resolved = resolveCodexProfile(session.effectiveConfig);
     const modelProvider = scanModelProvider(resolved);
@@ -4281,12 +4295,13 @@ function prepareSavedScanRecipe({
       modelProvider !== "amazon-bedrock" &&
       isRecord(provider)
     ) {
-      // Private replay needs transport settings and command authentication, while
-      // literal credentials remain in the protected credential home or environment.
-      const savedProvider = structuredClone(provider);
-      for (const key of ["experimental_bearer_token", "http_headers"])
-        delete savedProvider[key];
-      config["model_providers"] = { [modelProvider]: savedProvider };
+      // Recipes are readable scan history. Keep replay credentials in the same
+      // denied home as live provider profiles, and retain this profile for replay.
+      providerProfile = (
+        await createProviderProfile(runtime.codexHome, {
+          model_providers: { [modelProvider]: provider as JsonObject },
+        })
+      ).name;
     }
   }
   const recipe = scanRecipe({
@@ -4303,6 +4318,8 @@ function prepareSavedScanRecipe({
     auth: options.auth,
     cyberAccessProgram: options.cyberAccessProgram,
   });
+  if (providerProfile !== undefined)
+    recipe["providerProfile"] = providerProfile;
   recipe["scanInputs"] = scanInputIdentity(options.scanPrompt, scanKnowledge);
   if (knowledgeBaseSha256 !== undefined)
     recipe["knowledgeBaseSha256"] = knowledgeBaseSha256;

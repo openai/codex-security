@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString, parseJson } from "./value.js";
+import { restoreProviderProfile } from "./provider-profile.js";
 
 import { loadDeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
 
@@ -6495,7 +6496,11 @@ async function prepareScanArgumentsFromRecipe(
           { recipe: { config } },
           deepScan.data?.subagents ?? DEFAULT_DEEP_SCAN_SETTINGS.subagents,
         )
-      : config;
+      : await restoreProviderProfile(
+          config,
+          recipe["providerProfile"],
+          codexSecurityCredentialHome(environment),
+        );
   return {
     repository,
     inheritedPermissions:

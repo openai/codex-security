@@ -4,6 +4,8 @@ import { workbenchCommand } from "./support/workbench-command.js";
 import { gitText } from "./support/shell.js";
 import { readSealedScanTurn } from "../src/scan-publication.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
+import { createProviderProfile } from "../src/provider-profile.js";
+import { nativeScanConfiguration } from "../src/execution-preparation.js";
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import {
@@ -83,6 +85,7 @@ async function interruptedScan(
     config?: JsonObject;
     model?: string;
     modelProvider?: string;
+    privateProvider?: JsonObject;
     scopedPaths?: string[];
   } = {},
   resolvedDeep = false,
@@ -98,6 +101,7 @@ async function interruptedScan(
     model = "gpt-5.6-sol",
     modelProvider,
     scopedPaths,
+    privateProvider,
     ...scanSettings
   } = settings;
   const root = await temporaryDirectory();
@@ -197,7 +201,16 @@ async function interruptedScan(
   await knowledge?.cleanup();
   const knowledgeSnapshot =
     !bulk && knowledgeState === "saved" ? knowledge?.snapshot : undefined;
+  const providerProfile =
+    privateProvider === undefined
+      ? undefined
+      : await createProviderProfile(codexHome, {
+          model_providers: { [modelProvider!]: privateProvider },
+        });
   const recipe = {
+    ...(providerProfile === undefined
+      ? {}
+      : { providerProfile: providerProfile.name }),
     ...(knowledge ? { knowledgeBaseSha256: knowledge.sha256 } : {}),
     repository,
     target: {
@@ -590,6 +603,56 @@ test("resume preserves its identity, launch recipe, accepted child and checkpoin
   expect(await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT))).toEqual(before);
   expect(await f.command(["get-scan", "--scan-id", f.childId!])).toEqual(child);
   expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(artifacts);
+});
+
+test("CLI and native replay restore custom provider credentials from the denied home", async () => {
+  const provider = {
+    name: "Synthetic replay provider",
+    wire_api: "responses",
+    auth: {
+      command: "synthetic-auth",
+      args: ["synthetic-private-argument"],
+      env: { CLIENT_SECRET: "synthetic-private-environment" },
+    },
+  };
+  const f = await interruptedScan("deep", false, {
+    modelProvider: "synthetic",
+    privateProvider: provider,
+  });
+  const saved = await f.command(["get-scan-recipe", "--scan-id", f.scanId]);
+  expect(JSON.stringify(saved)).not.toContain("synthetic-private-");
+  expect(f.recipe.config).not.toHaveProperty("model_providers");
+  const native = await nativeScanConfiguration(
+    f.environment,
+    { recipe: f.recipe },
+    1,
+  );
+  expect(native["model_providers"]).toEqual({ synthetic: provider });
+  const deps = dependencies({
+    environment: f.environment,
+    currentDirectory: f.root,
+  });
+  const { stderr, runCli } = createCliTest(main);
+  let launched = false;
+  const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+    ...deps,
+    runWorkbench: f.command,
+    createSecurity: (config) => {
+      expect(config.codexOverrides?.["model_providers"]).toEqual({
+        synthetic: provider,
+      });
+      return {
+        ...deps.createSecurity(config),
+        run: async () => {
+          launched = true;
+          throw new Error("synthetic replay boundary reached");
+        },
+      };
+    },
+  });
+  expect(launched, stderr.text()).toBe(true);
+  expect(code).toBe(2);
+  expect(stderr.text()).toContain("synthetic replay boundary reached");
 });
 
 test.each(["failed", "canceled", "changed", "replaced", "wrong-owner"])(

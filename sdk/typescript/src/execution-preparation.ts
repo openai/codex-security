@@ -9,6 +9,7 @@ import {
 } from "./auth.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import { resolveConfigPath } from "./config-path.js";
+import { restoreProviderProfile } from "./provider-profile.js";
 import { isRecord } from "./record.js";
 import {
   Codex,
@@ -45,6 +46,7 @@ import {
 } from "./execution-auth.js";
 import {
   codexSecurityStateDirectory,
+  codexSecurityCredentialHome,
   acquireCodexSecurityCredentialHomeLock,
   environmentWithGit,
   executablePathForSpawn,
@@ -575,7 +577,7 @@ export async function prepareAmbientRuntime(
 export async function nativeScanConfiguration(
   environment: NodeJS.ProcessEnv,
   input: {
-    recipe?: { config?: JsonObject };
+    recipe?: { config?: JsonObject; providerProfile?: unknown };
     model?: string;
     reasoningEffort?: string;
   },
@@ -595,7 +597,11 @@ export async function nativeScanConfiguration(
   const config = scanCompositionOverrides(
     deepMerge(
       resolveCodexProfile(deepMerge(ambient, selected as JsonObject)),
-      (input.recipe?.["config"] as JsonObject | undefined) ?? {},
+      await restoreProviderProfile(
+        input.recipe?.config ?? {},
+        input.recipe?.providerProfile,
+        codexSecurityCredentialHome(environment),
+      ),
     ),
     subagents,
   );

@@ -10,9 +10,22 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-test.each([false, true])(
-  "native startup receives managed provider metadata without credentials (profile: %j)",
-  async (profile) => {
+test.each(
+  [false, true].flatMap((profile) =>
+    [
+      "startup",
+      "refresh",
+      "scan-account",
+      "account",
+      "api-key",
+      "logout",
+      "browser",
+      "device",
+    ].map((operation) => ({ profile, operation })),
+  ),
+)(
+  "native $operation receives managed provider metadata without credentials (profile: $profile)",
+  async ({ profile, operation }) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const output = join(root, "scan");
@@ -42,10 +55,19 @@ for (let index = 0; index < original.length; index++) {
 const sandbox = args.indexOf("sandbox");
 // Exercise native configuration loading without requiring a kernel sandbox.
 if (sandbox >= 0) args.splice(sandbox, args.length - sandbox, "plugin", "list", "--json");
+const login = args.indexOf("login");
+const interactive = login >= 0 && !args.includes("status") && !args.includes("--with-api-key");
+// Use the real native config loader, then simulate only the network login step.
+if (interactive) args.splice(login, args.length - login, "plugin", "list", "--json");
 const child = spawnSync(${JSON.stringify(native.command)}, [
-  "-c", 'model_provider="required.gateway"', ...args,
+  "-c", 'model_provider="required.gateway"',
+  "-c", 'cli_auth_credentials_store="file"', ...args,
 ], { stdio: "inherit", env: process.env });
 if (child.error) throw child.error;
+if (child.status === 0 && interactive) {
+  console.log("https://login.example.test/device");
+  console.log("ABCD-EFGH");
+}
 process.exit(child.status ?? 1);
 `,
     );
@@ -76,7 +98,9 @@ process.exit(child.status ?? 1);
         environment: {
           CODEX_HOME: ambientHome,
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-startup-key",
+          ...(["startup", "refresh"].includes(operation)
+            ? { OPENAI_API_KEY: "synthetic-startup-key" }
+            : {}),
         },
         resolveCodexCommand: () => ({
           command: process.execPath,
@@ -91,9 +115,37 @@ process.exit(child.status ?? 1);
         },
       },
     );
-    await expect(client.run(repository)).rejects.toThrow(
-      "synthetic execution reached",
-    );
+    if (operation === "startup" || operation === "refresh") {
+      await expect(client.run(repository)).rejects.toThrow(
+        "synthetic execution reached",
+      );
+      if (operation === "refresh") {
+        await expect(client.run(repository)).rejects.toThrow(
+          "synthetic execution reached",
+        );
+      }
+    } else if (operation === "scan-account") {
+      await expect(client.run(repository)).rejects.toThrow(
+        "No credentials were found",
+      );
+    } else if (operation === "account") {
+      const status = await client.account();
+      expect(status.authenticated).toBe(false);
+      expect(status.details).toContain("Not logged in");
+      expect(status.details).not.toContain("Model provider");
+    } else if (operation === "api-key") {
+      await client.loginApiKey("synthetic-login-key");
+      expect((await client.account()).authenticated).toBe(true);
+    } else if (operation === "logout") {
+      await client.logout();
+    } else {
+      const handle = await (operation === "device"
+        ? client.loginChatGPTDeviceCode()
+        : client.loginChatGPT());
+      expect((await handle.wait()).success).toBe(true);
+      expect(handle.authUrl).toBe("https://login.example.test/device");
+      if (operation === "device") expect(handle.userCode).toBe("ABCD-EFGH");
+    }
     const launches: string[][] = (await readFile(capture, "utf8"))
       .trim()
       .split("\n")
@@ -101,10 +153,15 @@ process.exit(child.status ?? 1);
     const startup = launches.filter(
       (args) => args.includes("sandbox") || args.includes("plugin"),
     );
-    if (process.platform !== "win32")
-      expect(startup.some((args) => args.includes("sandbox"))).toBe(true);
-    expect(startup.some((args) => args.includes("marketplace"))).toBe(true);
-    for (const args of startup) {
+    if (["startup", "refresh", "scan-account"].includes(operation)) {
+      if (process.platform !== "win32")
+        expect(startup.some((args) => args.includes("sandbox"))).toBe(true);
+      expect(
+        startup.filter((args) => args.includes("marketplace")),
+      ).toHaveLength(operation === "refresh" ? 2 : 1);
+    }
+    expect(launches.length).toBeGreaterThan(0);
+    for (const args of launches) {
       const overrides = args.flatMap((arg, index) =>
         arg === "-c" || arg === "--config" ? [args[index + 1]!] : [],
       );

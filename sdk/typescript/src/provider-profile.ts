@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
+import { parse } from "smol-toml";
+import { CodexSecurityError } from "./errors.js";
 import {
   resolveCodexProfile,
   modelProviderConfigOverride,
@@ -16,6 +18,7 @@ import {
   bundledPluginRoot,
   executablePathForSpawn,
   requirePrivateCredentialHome,
+  requireSecureCredentialHome,
   resolveCodexCommand,
   type CodexCommand,
 } from "./runtime.js";
@@ -76,6 +79,35 @@ export async function createProviderProfile(
     model_providers: isRecord(providers) ? providers : {},
   });
   return { name, path, cleanup: () => rm(path, { force: true }) };
+}
+
+/** Restore a saved provider from the credential home, never from scan artifacts. */
+export async function restoreProviderProfile(
+  config: JsonObject,
+  profile: unknown,
+  codexHome: string,
+): Promise<JsonObject> {
+  if (profile === undefined) return config;
+  if (
+    typeof profile !== "string" ||
+    !/^codex_security_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+      profile,
+    )
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan contains an invalid provider profile.",
+    );
+  }
+  await requireSecureCredentialHome(codexHome);
+  const saved = parse(
+    await readFile(join(codexHome, `${profile}.config.toml`), "utf8"),
+  );
+  if (!isRecord(saved["model_providers"])) {
+    throw new CodexSecurityError(
+      "The saved provider profile contains no provider configuration.",
+    );
+  }
+  return { ...config, model_providers: saved["model_providers"] as JsonObject };
 }
 
 /** The pinned SDK lacks the native CLI's private profile-file option. */

@@ -31,6 +31,7 @@ export interface SavedScanRecipe {
   safetyIdentifier?: string;
   inheritedPermissions?: ScanPermissions;
   preserveProviderEnvironment?: boolean;
+  providerProfile?: string;
   config: JsonObject;
 }
 
