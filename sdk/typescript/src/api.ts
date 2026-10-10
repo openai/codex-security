@@ -3629,7 +3629,11 @@ export class CodexSecurity {
       this.#dependencies.environment,
     );
     const canonicalStateDirectory = await canonicalConfigPath(stateDirectory);
-    requireOutputOutsideRepositories(protectedRoots, canonicalStateDirectory);
+    requireOutputOutsideRepositories(
+      protectedRoots,
+      canonicalStateDirectory,
+      "state",
+    );
     return {
       repository: repo,
       target: normalized,

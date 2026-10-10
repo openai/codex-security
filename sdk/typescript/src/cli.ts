@@ -9528,11 +9528,13 @@ function protectedRootErrorMessage(
   const description =
     error.pathKind === "output"
       ? "Scan output directory"
-      : error.pathKind === "temporary"
-        ? "Temporary directory"
-        : "Isolated Codex runtime directory";
+      : error.pathKind === "state"
+        ? "Codex Security state directory"
+        : error.pathKind === "temporary"
+          ? "Temporary directory"
+          : "Isolated Codex runtime directory";
   const reason =
-    error.pathKind === "output"
+    error.pathKind === "output" || error.pathKind === "state"
       ? "Scan artifacts cannot be written inside the protected scan root."
       : "Temporary and runtime files cannot be created inside the protected scan root.";
   const suggestion = suggestedOutputDirectory(error.protectedRoot);
@@ -9541,13 +9543,15 @@ function protectedRootErrorMessage(
     `  Resolved path:  ${error.outputDirectory}`,
     `  Protected root: ${error.protectedRoot}`,
     `  Reason:         ${reason}`,
-    error.pathKind === "output"
-      ? suggestion === undefined
-        ? "Choose a private output directory outside the protected root."
-        : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
-      : suggestion === undefined
-        ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
-        : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`,
+    error.pathKind === "state"
+      ? "Set CODEX_SECURITY_STATE_DIR to a private directory outside the protected root."
+      : error.pathKind === "output"
+        ? suggestion === undefined
+          ? "Choose a private output directory outside the protected root."
+          : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
+        : suggestion === undefined
+          ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
+          : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`,
   ].join("\n");
 }
 
