@@ -554,7 +554,10 @@ export class ScanCostTracker {
     for (const [threadId, value] of usages) {
       if (value === null) continue;
       const session = usageSessions.get(threadId);
-      for (const [model, tokens] of session?.modelUsage ?? []) {
+      for (const [model, tokens] of reconcileModelUsage(
+        value,
+        session?.modelUsage,
+      ) ?? []) {
         if (model !== null) observedModel = true;
         modelUsage.set(
           model,
@@ -581,9 +584,10 @@ export class ScanCostTracker {
         (counter?.counterUsage?.total_tokens ?? -1) >
         (session?.usage?.total_tokens ?? -1);
       const liveTokens = live ? counter?.counterUsage : session?.usage;
-      const liveModels = live
-        ? counter?.counterModelUsage
-        : session?.modelUsage;
+      const liveModels = reconcileModelUsage(
+        value,
+        live ? counter?.counterModelUsage : session?.modelUsage,
+      );
       for (const [model, tokens] of liveModels ?? [])
         liveModelUsage.set(
           model,
@@ -1256,6 +1260,23 @@ function addTokenUsage(
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
     total_tokens: previous.total_tokens + next.total_tokens,
   };
+}
+
+function reconcileModelUsage(
+  usage: ScanTokenUsage,
+  models: ReadonlyMap<string | null, ScanTokenUsage> | undefined,
+): ReadonlyMap<string | null, ScanTokenUsage> | undefined {
+  if (models?.size !== 1) return models;
+  const [model, observed] = models.entries().next().value!;
+  if (
+    model === null ||
+    observed.input_tokens !== usage.input_tokens ||
+    observed.output_tokens !== usage.output_tokens
+  )
+    return models;
+  // A final receipt can classify existing input as cache reads or writes.
+  // When all tokens have one observed model, the classification belongs to it.
+  return new Map([[model, usage]]);
 }
 
 function subtractTokenUsage(

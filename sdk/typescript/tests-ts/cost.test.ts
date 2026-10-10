@@ -429,6 +429,153 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([false, true])(
+    "reconciles final cache categories for an observed model (missing child: %p)",
+    async (missingChild) => {
+      const home = await codexHome();
+      const usage = {
+        input_tokens: 1_000_000,
+        cached_input_tokens: 0,
+        output_tokens: 10_000,
+      };
+      const finalUsage = { ...usage, cache_write_input_tokens: 120_000 };
+      const parent = await writeSession(home, "scan-thread", usage);
+      const records = (await readFile(parent, "utf8")).trimEnd().split("\n");
+      records.splice(
+        1,
+        0,
+        JSON.stringify({
+          type: "turn_context",
+          payload: { model: "gpt-6-astra", turn_id: "scan-turn" },
+        }),
+      );
+      await writeFile(parent, `${records.join("\n")}\n`);
+      if (missingChild) {
+        await writeFile(
+          join(home, "sessions", "missing-worker.jsonl"),
+          `${JSON.stringify({
+            type: "session_meta",
+            payload: { id: "missing-worker", parent_thread_id: "scan-thread" },
+          })}\n`,
+        );
+      }
+      const initialCost = estimateScanCost("gpt-6-astra", usage)!;
+      const correctedCost = estimateScanCost("gpt-6-astra", finalUsage)!;
+      const budget =
+        (initialCost.estimatedUsd + correctedCost.estimatedUsd) / 2;
+      expect(initialCost.estimatedUsd).toBeLessThan(budget);
+      expect(correctedCost.estimatedUsd).toBeGreaterThan(budget);
+      const published: Readonly<ScanCost>[] = [];
+      const lowerBounds: Readonly<ScanCost>[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-6-astra",
+        maxCostUsd: budget,
+        onCost: (cost) => published.push(cost),
+        onCostLowerBound: (cost) => lowerBounds.push(cost),
+      });
+      try {
+        tracker.start("scan-thread");
+        await tracker.refresh();
+        const before = missingChild ? lowerBounds : published;
+        expect(before.at(-1)?.estimatedUsd).toBe(initialCost.estimatedUsd);
+        const completed = await tracker.stop(finalUsage);
+        const emitted = missingChild ? lowerBounds : published;
+        expect(emitted.at(-1)).toMatchObject({
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          cacheWriteInputTokens: finalUsage.cache_write_input_tokens,
+          estimatedUsd: correctedCost.estimatedUsd,
+        });
+        expect(emitted.at(-1)?.estimatedUsd).toBeGreaterThan(budget);
+        if (missingChild) {
+          expect(completed.cost).toBeNull();
+          expect(completed.usage).toBeNull();
+          expect(published).toHaveLength(0);
+        } else {
+          expect(completed.cost?.modelCosts).toHaveLength(1);
+          expect(completed.cost?.modelCosts?.[0]).toMatchObject({
+            model: "gpt-6-astra",
+            cacheWriteInputTokens: finalUsage.cache_write_input_tokens,
+            estimatedUsd: correctedCost.estimatedUsd,
+          });
+        }
+        const count = emitted.length;
+        expect(await tracker.refresh()).toEqual(completed);
+        expect(emitted).toHaveLength(count);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("does not assign a final cache correction across observed models", async () => {
+    const home = await codexHome();
+    const parent = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const records = (await readFile(parent, "utf8")).trimEnd().split("\n");
+    records.splice(
+      1,
+      0,
+      JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-5.6-sol", turn_id: "first-turn" },
+      }),
+    );
+    records.push(
+      JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-6-astra", turn_id: "second-turn" },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { input_tokens: 200, output_tokens: 20 } },
+        },
+      }),
+    );
+    await writeFile(parent, `${records.join("\n")}\n`);
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    try {
+      tracker.start("scan-thread");
+      const running = await tracker.refresh();
+      expect(running.cost?.modelCosts?.map((cost) => cost.model)).toEqual([
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+      ]);
+      const completed = await tracker.stop({
+        input_tokens: 200,
+        output_tokens: 20,
+        cache_write_input_tokens: 20,
+      });
+      expect(completed.cost).toBeNull();
+      expect(completed.usage).toMatchObject({
+        input_tokens: 200,
+        cache_write_input_tokens: 20,
+        modelUsage: [
+          {
+            model: "gpt-5.6-sol",
+            input_tokens: 100,
+            cache_write_input_tokens: 0,
+          },
+          {
+            model: "gpt-6-astra",
+            input_tokens: 100,
+            cache_write_input_tokens: 0,
+          },
+        ],
+      });
+    } finally {
+      await tracker.stop();
+    }
+  });
+
   test("retains reported write charges when another worker omits cache writes", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
