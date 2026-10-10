@@ -19,9 +19,7 @@ const { registerCompactArtifactTools } = await importSource(
   ),
   { loader: { ".md": "text" } },
 );
-const sdkRequire = createRequire(
-  new URL("../../../../sdk/typescript/package.json", import.meta.url),
-);
+const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
 const nativeCli = sdkRequire.resolve("@openai/codex/bin/codex.js");
 
 for (const raw of [false, true]) {
