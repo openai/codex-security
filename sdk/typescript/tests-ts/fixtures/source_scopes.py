@@ -991,7 +991,7 @@ def migration(_: Path) -> dict:
             ] == before
             assert (
                 connection.execute(
-                    "SELECT name FROM schema_migrations WHERE version=44"
+                    "SELECT name FROM schema_migrations WHERE version=48"
                 ).fetchone()[0]
                 == "persist authorized source excerpt scopes"
             )
