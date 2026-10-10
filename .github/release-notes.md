@@ -205,6 +205,7 @@
 - update Codex CLI and SDK to 0.162.1 ([#1563](https://github.com/openai/codex-security/pull/1563))
 - update native libc to 0.2.190 ([#1564](https://github.com/openai/codex-security/pull/1564))
 - update MCP SDK to 1.32.0 ([#1565](https://github.com/openai/codex-security/pull/1565))
+- bump taiki-e/install-action from 2.87.22 to 2.87.23 ([#1562](https://github.com/openai/codex-security/pull/1562))
 
 <!-- release-section: highlights:end -->
 
