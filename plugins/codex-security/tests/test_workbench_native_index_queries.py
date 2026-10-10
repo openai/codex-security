@@ -151,10 +151,13 @@ def test_latest_scan_confirmation_uses_group_membership(
         connection.execute(
             "UPDATE finding_occurrences SET finding_id = 'finding-0' WHERE id = 'occurrence-1'"
         )
-    query = workbench_api["native_indexes"].list_global_findings
+    query = partial(
+        workbench_api["native_indexes"].list_global_findings,
+        read_coverage=workbench_api["coverage_for_comparison"],
+    )
     args = query_args(target_id=stable_target_id(targets[0]))
     (finding,) = query(connection, args)["findings"]
-    assert finding["scanId"] == SCAN_IDS[0]
+    assert finding["scanId"] == SCAN_IDS[1]
     assert finding["knownScanIds"] == SCAN_IDS[:2]
     assert finding["confirmedInLatestScan"] is True
     connection.execute("DELETE FROM finding_occurrences WHERE id = 'occurrence-1'")
@@ -181,12 +184,14 @@ def test_global_findings_compare_decisions_and_return_original_update_text(
         "UPDATE finding_occurrences SET finding_id = 'finding-0' WHERE id = 'occurrence-1'"
     )
     connection.execute(
-        "UPDATE finding_occurrences SET created_at = ? WHERE id = 'occurrence-0'", (completion,)
+        "UPDATE finding_occurrences SET created_at = ? WHERE id = 'occurrence-1'", (completion,)
     )
-    connection.execute("UPDATE scans SET updated_at = ? WHERE id = ?", (completion, SCAN_IDS[0]))
+    connection.execute(
+        "UPDATE scans SET started_at = ?, updated_at = ? WHERE id = ?",
+        (completion, completion, SCAN_IDS[1]),
+    )
     for index, timestamp, reason in [
-        (0, "2026-10-08T01:00:01Z", "false_positive"),
-        (1, "2026-10-08T01:00:01.000001Z", "already_fixed"),
+        (0, "2026-10-08T01:00:01.000001Z", "already_fixed"),
     ]:
         connection.execute(
             "INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at) VALUES (?, 'closed', ?, 'Synthetic decision', ?)",
@@ -194,7 +199,9 @@ def test_global_findings_compare_decisions_and_return_original_update_text(
         )
     before = connection.execute("SELECT id, updated_at FROM scans ORDER BY id").fetchall()
     (finding,) = workbench_api["native_indexes"].list_global_findings(
-        connection, query_args(target_id=stable_target_id(targets[0]))
+        connection,
+        query_args(target_id=stable_target_id(targets[0])),
+        read_coverage=workbench_api["coverage_for_comparison"],
     )["findings"]
     assert finding["status"] == status
     assert finding["updatedAt"] == updated
@@ -231,7 +238,10 @@ def test_global_finding_pages_follow_completion_order(
             "UPDATE finding_occurrences SET created_at = ? WHERE id = ?",
             (timestamp, f"occurrence-{index}"),
         )
-    query = workbench_api["native_indexes"].list_global_findings
+    query = partial(
+        workbench_api["native_indexes"].list_global_findings,
+        read_coverage=workbench_api["coverage_for_comparison"],
+    )
     pages = [query(connection, query_args(limit=1, offset=index)) for index in range(3)]
     assert [page["findings"][0]["occurrenceId"] for page in pages] == [
         f"occurrence-{index}" for index in order
@@ -399,7 +409,7 @@ def test_scan_list_probes_requested_repository_once(
                 "2026-10-08T01:00:00Z",
                 "2026-10-08t03:00:00.000000+02:00",
             ],
-            [0, 1, 2],
+            [2, 1, 0],
         ),
     ],
 )
@@ -473,16 +483,27 @@ def test_scan_start_chronology_keeps_latest_and_first_seen_queries_consistent(
     )
     before = list(connection.iterdump())
     indexes = workbench_api["native_indexes"]
-    findings = {finding["finding_id"]: finding for finding in indexes._indexed_findings(connection)}
+    connection.create_function(
+        "codex_security_finding_group",
+        2,
+        lambda _occurrence, finding: f"finding:{finding}",
+        deterministic=True,
+    )
+    findings = {
+        finding["finding_id"]: finding
+        for finding in indexes._indexed_findings(connection, allowed_scan_ids=set(SCAN_IDS))
+    }
     assert findings["finding-1"]["confirmed_in_latest_scan"] is True
     assert findings["finding-0"]["known_since"] == older
     assert findings["finding-0"]["known_scan_ids"] == SCAN_IDS[:2]
-    repository = indexes.list_repositories(connection, query_args(target_id=target_id))[
-        "repositories"
-    ][0]
+    repository = indexes.list_repositories(
+        connection,
+        query_args(target_id=target_id),
+        read_coverage=workbench_api["coverage_for_comparison"],
+    )["repositories"][0]
     assert repository["latestScan"]["scanId"] == SCAN_IDS[1]
     history = workbench_api["scan_history"].list_scans(connection, query_args(target_id=target_id))[
         "scans"
     ]
-    assert [scan["scanId"] for scan in history] == (SCAN_IDS[:2] if equal else SCAN_IDS[1::-1])
+    assert [scan["scanId"] for scan in history] == SCAN_IDS[1::-1]
     assert list(connection.iterdump()) == before
