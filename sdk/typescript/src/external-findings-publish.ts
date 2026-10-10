@@ -166,6 +166,19 @@ function sameSubmission(
   );
 }
 
+function sameFindingSelection(
+  left: VendorFindings["findings"],
+  right: VendorFindings["findings"],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (finding, index) =>
+        finding.source_finding_id === right[index]!.source_finding_id,
+    )
+  );
+}
+
 async function writeAtomicJson(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
@@ -368,21 +381,22 @@ export async function prepareExternalPublication(
     )
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
-    const savedEvidence = canonicalJson(
-      content.requests.flatMap((batch) =>
-        batch.items.map(({ source_finding_id, evidence }) => ({
-          source_finding_id,
-          evidence,
-        })),
-      ),
+    const savedFindings = content.requests.flatMap((batch) =>
+      batch.items.map(({ source_finding_id, evidence }) => ({
+        source_finding_id,
+        evidence,
+      })),
     );
+    const savedEvidence = canonicalJson(savedFindings);
+    const expected = legacy ? legacyParsed.findings : parsed.findings;
     const matches =
-      !legacy && content.inputProjection !== undefined
-        ? content.inputProjection?.inputDigest === inputDigest &&
+      content.inputProjection !== undefined
+        ? sameFindingSelection(savedFindings, expected) &&
+          content.inputProjection?.inputDigest ===
+            hash("sha256", canonicalJson(expected)) &&
           content.inputProjection?.savedEvidenceDigest ===
             hash("sha256", savedEvidence)
-        : savedEvidence ===
-          canonicalJson(legacy ? legacyParsed.findings : parsed.findings);
+        : savedEvidence === canonicalJson(expected);
     if (!matches)
       throw new Error(
         "Saved import evidence does not match the selected input.",
@@ -410,56 +424,70 @@ export async function prepareExternalPublication(
       (left, right) => left.localeCompare(right),
     ),
   );
+  let recovered: SavedSubmission | undefined;
   if (legacyKey !== key) {
     const legacyPath = join(state, `${legacyKey}.pending.json`);
-    const legacy = await lstat(legacyPath).catch(
+    const captured = await readFile(legacyPath, "utf8").catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return undefined;
         throw error;
       },
     );
-    if (legacy) {
+    if (captured !== undefined) {
       // Preserve requests staged by the earlier locale-based filename format.
       // Hold both publication locks while moving the original checkpoint.
       await withImportLock(state, key, dependencies.signal, async () =>
         withImportLock(state, legacyKey, dependencies.signal, async () => {
-          const current = await lstat(pendingPath).catch(
+          const current = await readFile(pendingPath, "utf8").catch(
             (error: NodeJS.ErrnoException) => {
               if (error.code === "ENOENT") return undefined;
               throw error;
             },
           );
-          if (current) return;
+          if (current !== undefined) {
+            recovered = validateSaved(current);
+            return;
+          }
           const serialized = await readFile(legacyPath, "utf8").catch(
             (error: NodeJS.ErrnoException) => {
               if (error.code === "ENOENT") return undefined;
               throw error;
             },
           );
-          if (serialized === undefined) return;
-          const content = validateSaved(serialized, true);
+          // A competing resumer may have completed and removed both paths while
+          // this caller waited. Retain its observed immutable request and receipts.
+          const content = validateSaved(serialized ?? captured, true);
+          if (!sameFindingSelection(legacyParsed.findings, parsed.findings))
+            throw new CodexSecurityError(
+              "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",
+            );
           if (
             content.requests.some(
               (submission) =>
                 submission.repository.reset_marker !== destination.reset_marker,
             )
           ) {
-            await rm(legacyPath);
+            if (serialized !== undefined) await rm(legacyPath);
             throw new CloudImportError(
               409,
               "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
             );
           }
-          const savedEvidenceDigest = hash(
-            "sha256",
-            canonicalJson(legacyParsed.findings),
-          );
-          if (savedEvidenceDigest === inputDigest) {
+          const savedEvidenceDigest =
+            content.inputProjection?.savedEvidenceDigest ??
+            hash("sha256", canonicalJson(legacyParsed.findings));
+          const rebindProjection =
+            content.inputProjection !== undefined ||
+            savedEvidenceDigest !== inputDigest;
+          if (rebindProjection)
+            content.inputProjection = { inputDigest, savedEvidenceDigest };
+          recovered = content;
+          if (serialized === undefined) return;
+          if (!rebindProjection) {
             await rename(legacyPath, pendingPath);
           } else {
             // Bind the new input projection to the original immutable evidence,
             // so later inventory reordering still resumes these exact requests.
-            content.inputProjection = { inputDigest, savedEvidenceDigest };
             await writeAtomicJson(pendingPath, content);
             await rm(legacyPath);
           }
@@ -467,10 +495,15 @@ export async function prepareExternalPublication(
       );
     }
   }
-  let saved: SavedSubmission | undefined;
+  let saved: SavedSubmission | undefined = recovered;
   try {
     const serialized = await readFile(pendingPath, "utf8");
-    const content = validateSaved(serialized);
+    saved = validateSaved(serialized);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (saved) {
+    const content = saved;
     for (const submission of content.requests) {
       if (submission.repository.reset_marker !== destination.reset_marker) {
         // The old request is never sent after reset. A subsequent explicit
@@ -494,9 +527,6 @@ export async function prepareExternalPublication(
         );
       }
     }
-    saved = content;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   let requests = saved?.requests;
   if (!requests) {
