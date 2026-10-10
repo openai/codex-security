@@ -82,8 +82,10 @@ describe("live scan dashboard", () => {
     const dashboard = createDashboard(stderr.stream, { input });
     dashboard.start();
     input.emit("data", "d");
-    for (const key of ["\u001BO1;5P", "\u001B[1;2Q"]) {
-      for (let split = 2; split <= key.length; split++) {
+    for (const key of ["", "\u001B", "\u001B\u001B"].flatMap((prefix) =>
+      ["\u001BO1;5P", "\u001B[1;2Q"].map((key) => prefix + key),
+    )) {
+      for (let split = 1; split <= key.length; split++) {
         input.emit("data", key.slice(0, split));
         input.emit("data", key.slice(split));
         expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
@@ -106,6 +108,31 @@ describe("live scan dashboard", () => {
     input.emit("data", "3");
     expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
     dashboard.stop();
+  });
+
+  test("keeps function-key fragments out of worker selection when dismissing a budget", async () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(stderr.stream, { input });
+    dashboard.start();
+    try {
+      input.emit("data", "d");
+      const answer = dashboard.requestBudgetIncrease({
+        maxCostUsd: 20,
+        cost: fakeResult([], "complete", {
+          input_tokens: 100,
+          output_tokens: 1,
+        }).cost!,
+        signal: new AbortController().signal,
+      });
+      input.emit("data", "\u001BO");
+      input.emit("data", "1;5P\u001B\u001B[A");
+      await expect(answer).resolves.toBeUndefined();
+      expect(lastFrame(stderr)).toContain("DETAILS");
+      expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+    } finally {
+      dashboard.stop();
+    }
   });
 
   test.each(["\u001BO", "\u001B[1;"])(

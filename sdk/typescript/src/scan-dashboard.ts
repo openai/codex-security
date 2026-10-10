@@ -228,17 +228,18 @@ export class ScanDashboard {
           ss3Parameters = false;
           if (/^[@-~]$/u.test(key.sequence)) return;
         }
-        // Readline ends modified SS3 keys at the parameter separator.
-        if (key.code !== undefined && /^\u001BO[0-?]+$/u.test(key.sequence)) {
-          ss3Parameters = true;
-          return;
-        }
         const escapes =
           key.code === undefined
             ? undefined
             : key.sequence.match(/^\u001B+(?=\u001B)/u)?.[0];
-        const keys =
-          key.code !== undefined && key.sequence.endsWith("\u001B")
+        // Readline ends modified SS3 keys at the parameter separator.
+        const modifiedSs3 =
+          key.code !== undefined &&
+          /^\u001BO[0-?]+$/u.test(key.sequence.slice(escapes?.length ?? 0));
+        if (modifiedSs3) ss3Parameters = true;
+        const keys = modifiedSs3
+          ? Array.from(escapes ?? "")
+          : key.code !== undefined && key.sequence.endsWith("\u001B")
             ? ["\u001B"]
             : (key.meta && key.code === undefined) ||
                 key.sequence.includes("\u0003")
