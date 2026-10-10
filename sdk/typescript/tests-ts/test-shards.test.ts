@@ -255,3 +255,89 @@ test("isolated timeout", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("streams diagnostics before a blocked shard finishes and preserves large output", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-live-shard-output-");
+  const release = join(root, "release");
+  const marker = "synthetic shard is waiting";
+  const large = "synthetic-large-diagnostic-".repeat(12_000);
+  await mkdir(join(root, "scripts"));
+  await mkdir(join(root, "tests-ts"));
+  await copyFile(
+    new URL("../scripts/run-ci-tests.mts", import.meta.url),
+    join(root, "scripts", "run-ci-tests.mts"),
+  );
+  await writeFile(
+    join(root, "tests-ts", "probe.test.ts"),
+    `
+import { existsSync } from "node:fs";
+import { test } from "bun:test";
+test("synthetic blocked shard", async () => {
+  console.error(${JSON.stringify(marker)});
+  while (!existsSync(${JSON.stringify(release)})) await Bun.sleep(10);
+  console.error(${JSON.stringify(large)});
+});
+`,
+  );
+  const child = Bun.spawn({
+    cmd: [
+      node!,
+      "--experimental-strip-types",
+      join(root, "scripts", "run-ci-tests.mts"),
+      "1/1",
+    ],
+    env: {
+      ...process.env,
+      PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+    },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 30_000,
+    windowsHide: true,
+  });
+  const output = new Response(child.stdout).text();
+  const observed = Promise.withResolvers<void>();
+  let stderr = "";
+  const reading = (async () => {
+    const reader = child.stderr.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      stderr += decoder.decode(chunk.value, { stream: true });
+      if (stderr.includes(marker)) observed.resolve();
+    }
+  })();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      observed.promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error("Shard diagnostics were not relayed while running"),
+            ),
+          10_000,
+        );
+      }),
+    ]);
+    expect(child.exitCode).toBeNull();
+    await writeFile(release, "continue");
+    expect(await child.exited).toBe(0);
+    await reading;
+    expect(stderr).toContain(large);
+    expect(
+      await readFile(join(root, "reports", "junit-1.xml"), "utf8"),
+    ).toContain("synthetic blocked shard");
+  } finally {
+    clearTimeout(timer);
+    await writeFile(release, "cleanup");
+    await child.exited;
+    await Promise.all([reading, output]);
+    await rm(root, { recursive: true, force: true });
+  }
+});

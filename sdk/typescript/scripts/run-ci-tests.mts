@@ -1,9 +1,8 @@
 import { spawn } from "node:child_process";
-import { createReadStream } from "node:fs";
+import { once } from "node:events";
 import { mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
 
 const selection = /^([1-9]\d*)\/([1-9]\d*)$/.exec(process.argv[2] ?? "");
@@ -133,12 +132,35 @@ do {
 } while (bareOptional);
 // Bun's text coverage writer can abort on a backpressured stderr pipe before
 // writing JUnit/LCOV reports. Preserve its diagnostics in a regular file, then
-// relay them with Node's stream backpressure while keeping the test exit status.
+// relay them live with Node's stream backpressure while keeping the test exit status.
 const outputDirectory = await mkdtemp(
   join(tmpdir(), "codex-security-ci-output-"),
 );
 const outputPath = join(outputDirectory, "stderr.log");
 const output = await open(outputPath, "w");
+const reader = await open(outputPath, "r");
+const buffer = Buffer.allocUnsafe(64 * 1024);
+let offset = 0;
+let flushing: Promise<void> | undefined;
+const flush = (): Promise<void> => {
+  flushing ??= (async () => {
+    for (;;) {
+      const { bytesRead } = await reader.read(buffer, 0, buffer.length, offset);
+      if (bytesRead === 0) return;
+      offset += bytesRead;
+      if (!process.stderr.write(Buffer.from(buffer.subarray(0, bytesRead))))
+        await once(process.stderr, "drain");
+    }
+  })().finally(() => {
+    flushing = undefined;
+  });
+  return flushing;
+};
+// Keep diagnostics visible before an interrupted or timed-out child exits.
+const relay = setInterval(() => {
+  void flush().catch(console.error);
+}, 100);
+relay.unref();
 try {
   const child = spawn("bun", testArguments, {
     cwd: new URL("../", import.meta.url),
@@ -158,12 +180,10 @@ try {
     child.once("close", (code) => resolve(code ?? 1));
   });
 } finally {
+  clearInterval(relay);
+  await flushing;
+  await flush();
+  await reader.close();
   await output.close();
-  try {
-    await pipeline(createReadStream(outputPath), process.stderr, {
-      end: false,
-    });
-  } finally {
-    await rm(outputDirectory, { recursive: true, force: true });
-  }
+  await rm(outputDirectory, { recursive: true, force: true });
 }
