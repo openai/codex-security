@@ -22,11 +22,9 @@ import {
 import {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} from "../artifact-validation-phase.js";
-import {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} from "../artifact-attack-path.js";
+} from "../artifact-candidate-ledger.js";
 import {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
@@ -67,11 +65,20 @@ const modelOnlyMeta = {
   ui: { visibility: ["model"] as const },
 };
 
-/** Prepare diff inventories and read existing diff or Deep inventories. */
-export function registerReviewItemTools(
+function signalFromRequestContext(
+  requestContext: unknown,
+): AbortSignal | undefined {
+  if (typeof requestContext !== "object" || requestContext === null)
+    return undefined;
+  const signal = Reflect.get(requestContext, "signal");
+  return signal instanceof AbortSignal ? signal : undefined;
+}
+
+export function registerCompactArtifactTools(
   server: McpServer,
   options: CompactArtifactToolOptions,
 ): void {
+  /** Prepare diff inventories and read existing diff or Deep inventories. */
   registerCompactTool(server, {
     name: "prepare_codex_security_review_items",
     title: "Prepare Codex Security Review Items",
@@ -98,25 +105,17 @@ export function registerReviewItemTools(
       );
     },
   });
-}
 
-/** Record diff candidates and read existing diff or Deep candidates. */
-export function registerDiscoveryCandidateTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
-  const writerSchema = workbenchDiscoveryCandidatesInputSchema;
-  const readerSchema = workbenchListCodexSecurityCandidatesInputSchema;
-
+  /** Record diff candidates and read existing diff or Deep candidates. */
   registerCompactTool(server, {
     name: "record_codex_security_discovery_candidates",
     title: "Record Codex Security Discovery Candidates",
     description: "Normalize and replace the selected diff scan's candidates.",
-    inputSchema: writerSchema,
+    inputSchema: workbenchDiscoveryCandidatesInputSchema,
     readOnly: false,
     handler: async (input, requestContext) => {
       return recordCodexSecurityDiscoveryCandidates(
-        { candidates: input.candidates },
+        input,
         await phaseScanContext(input, options, requestContext, "diff"),
       );
     },
@@ -126,25 +125,17 @@ export function registerDiscoveryCandidateTools(
     name: "list_codex_security_candidates",
     title: "List Codex Security Candidates",
     description: "Read one page of diff or Deep scan discovery candidates.",
-    inputSchema: readerSchema,
+    inputSchema: workbenchListCodexSecurityCandidatesInputSchema,
     readOnly: true,
     handler: async (input, requestContext) => {
       return listCodexSecurityCandidates(
-        {
-          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-          ...(input.limit === undefined ? {} : { limit: input.limit }),
-        },
+        input,
         await phaseScanContext(input, options, requestContext),
       );
     },
   });
-}
 
-/** Record centralized validation results for a diff or Deep scan. */
-export function registerCandidateValidationTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
+  /** Record centralized validation results for a diff or Deep scan. */
   registerCompactTool(server, {
     name: "record_codex_security_candidate_validations",
     title: "Record Codex Security Candidate Validations",
@@ -154,17 +145,12 @@ export function registerCandidateValidationTools(
     handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateValidations(
         await phaseScanContext(input, options, requestContext),
-        { validations: input.validations },
+        input,
       );
     },
   });
-}
 
-/** Record centralized attack-path results for a diff or Deep scan. */
-export function registerCandidateAttackPathTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
+  /** Record centralized attack-path results for a diff or Deep scan. */
   registerCompactTool(server, {
     name: "record_candidate_attack_paths",
     title: "Record Codex Security Candidate Attack Paths",
@@ -174,17 +160,12 @@ export function registerCandidateAttackPathTools(
     handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateAttackPaths(
         await phaseScanContext(input, options, requestContext),
-        { attackPaths: input.attackPaths },
+        input,
       );
     },
   });
-}
 
-/** Register draft construction and read-only completed scan retrieval. */
-export function registerScanDraftTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
+  /** Register draft construction and read-only completed scan retrieval. */
   registerCompactTool(server, {
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
@@ -216,26 +197,6 @@ export function registerScanDraftTools(
       );
     },
   });
-}
-
-function signalFromRequestContext(
-  requestContext: unknown,
-): AbortSignal | undefined {
-  if (typeof requestContext !== "object" || requestContext === null)
-    return undefined;
-  const signal = Reflect.get(requestContext, "signal");
-  return signal instanceof AbortSignal ? signal : undefined;
-}
-
-export function registerCompactArtifactTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
-  registerReviewItemTools(server, options);
-  registerDiscoveryCandidateTools(server, options);
-  registerCandidateValidationTools(server, options);
-  registerCandidateAttackPathTools(server, options);
-  registerScanDraftTools(server, options);
   registerCompactTool(server, {
     name: "save_codex_security_artifact",
     title: "Save Codex Security Artifact",

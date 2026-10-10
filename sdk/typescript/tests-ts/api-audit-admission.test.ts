@@ -5,7 +5,6 @@ import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runScanEvents } from "../src/api.js";
-import type { ScanDraftInput } from "../src/accepted-audit.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
 import { completedEvents } from "./support/api-events.js";
 
@@ -32,12 +31,20 @@ const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
 await writeFile(bundlePath, bundle.outputFiles[0]!.contents);
 const {
   createDeepScanArtifacts,
-  recordCodexSecurityScanDraft,
   parseCanonicalScanDraft,
   parseScanDraft,
-  readDiscoveryAuditDraft,
+  validateDiscoveryArtifacts,
   DeepScanWorkerRunner,
 } = await import(pathToFileURL(bundlePath).href);
+
+interface DraftFixture {
+  scanId: string;
+  complete?: boolean;
+  scope?: Record<string, unknown>;
+  threatModel?: Record<string, unknown>;
+  findings: Record<string, unknown>[];
+  coverage: Record<string, unknown>;
+}
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
 type Mutation =
@@ -121,7 +128,7 @@ for (const scenario of cases) {
       mkdir(standardRoot, { mode: 0o700 }),
       mkdir(deepRoot, { mode: 0o700 }),
     ]);
-    const semantic: ScanDraftInput = {
+    const semantic: DraftFixture = {
       scanId,
       ...(scenario.complete === undefined
         ? {}
@@ -160,28 +167,6 @@ for (const scenario of cases) {
               ],
       },
     };
-    await recordCodexSecurityScanDraft(
-      {
-        root: standardRoot,
-        repoRoot: repository,
-        layout: "scan",
-        scanId,
-        mode: "standard",
-        status: "running",
-        scope: ".",
-        targetContract: {
-          target: {
-            allowedKinds: ["directory_snapshot"],
-            targetId: "target_example",
-            displayName: "example",
-            requiredSnapshotDigest: `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`,
-          },
-          scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
-          diffTarget: null,
-        },
-      },
-      semantic,
-    );
     const submitted = mutateDraft(semantic, scenario.mutation);
     const findings = {
       scanId: submitted.scanId,
@@ -192,11 +177,19 @@ for (const scenario of cases) {
         fingerprints: { identity: "synthetic" },
       })),
     };
-    const coverage = JSON.parse(
-      await readFile(join(standardRoot, "coverage.json"), "utf8"),
-    );
-    Object.assign(coverage, submitted.coverage);
+    const coverage = submitted.coverage;
     await Promise.all([
+      writeFile(
+        join(standardRoot, "scan-manifest.json"),
+        JSON.stringify({
+          scan: {
+            id: scanId,
+            complete: semantic.complete,
+            scope: semantic.scope,
+            threatModel: semantic.threatModel,
+          },
+        }),
+      ),
       writeFile(join(standardRoot, "findings.json"), JSON.stringify(findings)),
       writeFile(join(standardRoot, "coverage.json"), JSON.stringify(coverage)),
     ]);
@@ -261,7 +254,7 @@ for (const scenario of cases) {
       expect(standard.finalizations).toBe(1);
       expect(deepResult.status).toBe("succeeded");
       expect(acceptedPaths).toEqual([deepResult.worker.resultPath]);
-      const deepDraft: ScanDraftInput = await readDiscoveryAuditDraft(
+      const deepDraft: DraftFixture = await validateDiscoveryArtifacts(
         artifacts,
         deepResult.worker.resultPath,
         scanId,
@@ -491,13 +484,10 @@ async function observeStandardAdmission(
   };
 }
 
-function mutateDraft(
-  input: ScanDraftInput,
-  mutation?: Mutation,
-): ScanDraftInput {
+function mutateDraft(input: DraftFixture, mutation?: Mutation): DraftFixture {
   const draft = structuredClone(input);
   if (mutation === "missing-findings")
-    return { ...draft, findings: undefined } as unknown as ScanDraftInput;
+    return { ...draft, findings: undefined } as unknown as DraftFixture;
   if (mutation === "wrong-scan")
     draft.scanId = "553a0c18-dcdf-4a3b-8e39-2751a8187bce";
   if (mutation === "contradictory-coverage")

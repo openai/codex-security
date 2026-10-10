@@ -13,20 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-
-async function removeTemporaryDirectory(path: string): Promise<void> {
-  // Bun 1.3.14 ignores fs.rm's retry options.
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await rm(path, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10)
-        throw error;
-      await Bun.sleep(100 * (attempt + 1));
-    }
-  }
-}
+import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 
 test.skipIf(process.platform !== "win32")(
   "launches the PATH Node executable independently of command extensions and the caller directory",
@@ -207,6 +194,66 @@ process.exitCode = 23;
   },
 );
 
+test.skipIf(process.platform === "win32")(
+  "launches argument-only helpers with closed stdin",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-helper-closed-stdin-")),
+    );
+    try {
+      const scripts = join(root, "plugin with spaces", "scripts");
+      const mcp = join(root, "plugin with spaces", "mcp");
+      await mkdir(scripts, { recursive: true });
+      await mkdir(mcp);
+      const launcher = join(scripts, "launch_codex_security_mcp");
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+        launcher,
+      );
+      await chmod(launcher, 0o700);
+      await writeFile(
+        join(mcp, "helpers.mjs"),
+        `import { readFileSync } from "node:fs";
+const payload = Buffer.from(readFileSync(3, "ascii").trim(), "hex");
+console.log(JSON.stringify({ payload: payload.toString("hex") }));
+process.exitCode = 23;
+`,
+      );
+      const result = spawnSync(
+        "/bin/sh",
+        [
+          "-c",
+          'exec 0<&-; exec "$1" --helper probe "argument with spaces"',
+          "helper-test",
+          launcher,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_MCP_NODE_PATH: node },
+        },
+      );
+      expect(result.status, result.stderr || result.error?.message).toBe(23);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toEqual({
+        payload: Buffer.from(
+          [
+            process.env["HOME"] === undefined ? "" : "x",
+            process.env["HOME"] ?? "",
+            "probe",
+            "argument with spaces",
+            "",
+          ].join("\0"),
+        ).toString("hex"),
+      });
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
 for (const mode of ["managed", "PATH"] as const) {
   test.skipIf(process.platform !== "darwin")(
     `resolves security policy with ${mode} Node and filesystem writes denied`,
@@ -345,9 +392,16 @@ setInterval(() => {}, 1000);
   );
 }
 
-test.each(["server", "helper"] as const)(
-  "starts the packaged %s with managed Node and an empty PATH",
-  async (mode) => {
+test.each(
+  (["server", "helper"] as const).flatMap((mode) =>
+    ["none", "LOCALAPPDATA", "XDG_CACHE_HOME", "USERPROFILE"].map((cache) => ({
+      mode,
+      cache,
+    })),
+  ),
+)(
+  "starts the packaged $mode with managed Node before $cache cache and an empty PATH",
+  async ({ mode, cache }) => {
     const node = Bun.which("node");
     if (node === null)
       throw new Error("Node is required for the MCP smoke test.");
@@ -381,6 +435,32 @@ test.each(["server", "helper"] as const)(
           managedNode,
           `@echo used>"${marker}"\r\n@"${node}" %*\r\n`,
         );
+      }
+      if (cache !== "none") {
+        const cacheNode = join(
+          root,
+          ...(cache === "LOCALAPPDATA"
+            ? [
+                "OpenAI",
+                "Codex",
+                "runtimes",
+                "cua_node",
+                "fixture",
+                "bin",
+                "node.exe",
+              ]
+            : [
+                ...(cache === "USERPROFILE" ? [".cache"] : []),
+                "codex-runtimes",
+                "codex-primary-runtime",
+                "dependencies",
+                "node",
+                "bin",
+                "node.exe",
+              ]),
+        );
+        await mkdir(dirname(cacheNode), { recursive: true });
+        await copyFile(node, cacheNode);
       }
       const launcher = join(PLUGIN_ROOT, config.command);
       const windows = process.platform === "win32";

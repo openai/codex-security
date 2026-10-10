@@ -139,12 +139,8 @@ if (new Set(pluginPaths).size !== pluginPaths.length) {
 
 const allowedFiles = new Set([
   ...required,
-  "package/dist/server/dashboard/index.html",
-  "package/dist/server/dashboard/app.js",
-  "package/dist/server/dashboard/app.css",
-  "package/dist/server/dashboard/THIRD_PARTY_NOTICES.txt",
+  ...pluginPaths.map((file) => `package/_bundled_plugin/${file}`),
   ...[
-    "accepted-audit",
     "api",
     "artifact-export",
     "auth",
@@ -152,19 +148,18 @@ const allowedFiles = new Set([
     "cli",
     "cli-help",
     "cli-scan-logs-json",
+    "cli-signals",
     "classify-severity",
     "classify-scan-severity",
     "severity-store",
     "cloud-publish",
     "codex-prompt",
-    "codex-session",
     "codex-sdk-environment",
     "component-plan",
     "component-scan",
     "config",
     "config-path",
     "contract",
-    "contract-path",
     "cost",
     "cost-model",
     "custom-validation",
@@ -176,6 +171,7 @@ const allowedFiles = new Set([
     "project-config",
     "project-config-schema",
     "prompt-files",
+    "provider-profile",
     "scan-modes",
     "scan-settings",
     "errors",
@@ -198,6 +194,7 @@ const allowedFiles = new Set([
     "publish",
     "result",
     "record",
+    "request-metadata",
     "runtime",
     "scan-activity",
     "scan-comparison",
@@ -208,7 +205,6 @@ const allowedFiles = new Set([
     "security-policy-cli",
     "suggest-owners",
     "scan-sessions",
-    "server/index",
     "server/api",
     "deduplication/codex-review",
     "deduplication/checkpointed-review",
@@ -218,25 +214,23 @@ const allowedFiles = new Set([
     "finding-retrieval",
     "finding-workflow",
     "findings-client",
+    "findings-errors",
     "finding-dedupe-groups",
     "deduplication/deduplication-prompts",
     "deduplication/deduplication-reviewer",
+    "deduplication/diagnostics",
     "deduplication/scan",
+    "deduplication/local",
     "deduplication/finding-schema",
     "deduplication/records",
     "deduplication/records-protocol",
     "deduplication/review",
     "saved-scan",
+    "saved-scan-bootstrap",
     "server/embeddings",
-    "server/dashboard",
-    "server/dashboard-types",
     "server/errors",
-    "server/routes",
-    "server/server",
-    "server/serve",
     "server/sqlite-store",
     "server/storage",
-    "server/validation",
     "targets",
     "thread-source",
     "trusted-executable",
@@ -250,14 +244,6 @@ const allowedFiles = new Set([
     ),
   ),
 ]);
-for (const file of pluginPaths) {
-  const archivePath = `package/_bundled_plugin/${file}`;
-  allowedFiles.add(archivePath);
-  if (!files.has(archivePath)) {
-    throw new Error(`npm tarball is missing ${archivePath}.`);
-  }
-}
-
 for (const file of [...allowedFiles]) {
   if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
   const parts = file.split("/");

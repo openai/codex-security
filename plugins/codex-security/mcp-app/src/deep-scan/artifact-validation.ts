@@ -55,10 +55,12 @@ export async function validateDiscoveryArtifacts(
   resultPath: string,
   expectedScanId: string,
 ): Promise<ScanDraftInput> {
-  const result = await readDiscoveryAuditDraft(
-    artifacts,
-    resultPath,
+  await requireRegularFile(resultPath, artifacts.workersRoot);
+  const result = parseStoredScanDraft(
+    await readJsonObject(resultPath),
+    "Standard scan worker",
     expectedScanId,
+    parsePersistedScanDraft,
   );
   if (result.complete === false)
     throw new Error(
@@ -67,22 +69,7 @@ export async function validateDiscoveryArtifacts(
   return result;
 }
 
-export async function readDiscoveryAuditDraft(
-  artifacts: DeepScanArtifacts,
-  resultPath: string,
-  expectedScanId: string,
-): Promise<ScanDraftInput> {
-  await requireRegularFile(resultPath, artifacts.workersRoot);
-  const result = parseStoredScanDraft(
-    await readJsonObject(resultPath),
-    "Standard scan worker",
-    expectedScanId,
-    parsePersistedScanDraft,
-  );
-  return result;
-}
-
-/** Validate the complete aggregate and derive convergence from stable finding identities. */
+/** Validate the complete aggregate and derive convergence from retained source ancestry. */
 export async function validateReducerArtifacts(
   input: {
     artifacts: DeepScanArtifacts;
@@ -140,12 +127,18 @@ export async function validateReducerArtifacts(
     validateRetainedFindings(result, [], previous);
   }
   const previousFindingIds = new Set(
-    (previous?.findings ?? []).map(scanFindingIdentity),
+    input.sources
+      ? (previous?.findings ?? [])
+          .flatMap(retainedFindingSources)
+          .map((source) => source.id)
+      : (previous?.findings ?? []).map(scanFindingIdentity),
   );
   return {
     result,
-    newFindings: result.findings.filter(
-      (finding) => !previousFindingIds.has(scanFindingIdentity(finding)),
+    newFindings: result.findings.filter((finding) =>
+      input.sources
+        ? !findingSourceIds(finding).some((id) => previousFindingIds.has(id))
+        : !previousFindingIds.has(scanFindingIdentity(finding)),
     ).length,
   };
 }
@@ -174,22 +167,18 @@ export function reconcileDeepReduction(
     previous ?? undefined,
   );
   retainSourceFindings(result, { discoveries, previous });
-  const unmatched = new Set(result.findings);
-  for (const finding of previous?.findings ?? []) {
-    const previousRefs = findingSourceIds(finding);
-    const retained =
-      (previousRefs.length > 0
-        ? result.findings.find((current) =>
-            findingSourceIds(current).some((ref) => previousRefs.includes(ref)),
-          )
-        : undefined) ??
-      [...unmatched].find(
-        (current) =>
-          scanFindingIdentity(current) === scanFindingIdentity(finding),
-      );
+  for (const [index, finding] of (previous?.findings ?? []).entries()) {
+    const previousRefs = retainedFindingSources(finding, index).map(
+      (source) => source.id,
+    );
+    const retained = result.findings.find((current) =>
+      findingSourceIds(current).some((ref) => previousRefs.includes(ref)),
+    );
     if (retained) {
+      const sourceIds = findingSourceIds(retained);
       preserveFindingDetails(retained, finding);
-      unmatched.delete(retained);
+      (retained.provenance as Record<string, unknown>).sourceFindingIds =
+        sourceIds;
     }
   }
   retainSourceFindings(result, { discoveries, previous });
@@ -202,38 +191,36 @@ export function reconcileDeepReduction(
       ...discoveries.map((discovery) => discovery.result[field]),
       previous?.[field],
     ].filter((value): value is Record<string, unknown> => value !== undefined);
-    const distinctValues = sourceValues.filter(
-      (value, index) =>
-        sourceValues.findIndex((candidate) =>
-          isDeepStrictEqual(candidate, value),
-        ) === index,
-    );
-    if (distinctValues.length > 1) {
+    if (
+      sourceValues.some((value) => !isDeepStrictEqual(sourceValues[0], value))
+    ) {
       throw new Error(
         `Deep reduction has ambiguous ${label}; provide the reconciled ${field} explicitly.`,
       );
     }
-    if (distinctValues[0] !== undefined) {
-      result[field] = structuredClone(distinctValues[0]);
+    if (sourceValues[0] !== undefined) {
+      result[field] = structuredClone(sourceValues[0]);
     }
   }
   return result;
 }
 
 function findingSourceIds(finding: Record<string, unknown>): string[] {
-  const provenance = finding.provenance as Record<string, unknown>;
-  const ids = provenance.sourceFindingIds;
-  if (Array.isArray(ids))
-    return ids.filter((id): id is string => typeof id === "string");
-  const sources = provenance.sourceFindings;
-  if (!Array.isArray(sources)) return [];
-  return sources.flatMap((source) =>
-    typeof source === "object" &&
-    source !== null &&
-    typeof (source as { id?: unknown }).id === "string"
-      ? [(source as { id: string }).id]
-      : [],
-  );
+  const { sourceFindingIds, sourceFindings } = finding.provenance as {
+    sourceFindingIds?: string[];
+    sourceFindings?: { id: string }[];
+  };
+  return sourceFindingIds ?? sourceFindings?.map((source) => source.id) ?? [];
+}
+
+function retainedFindingSources(
+  finding: Record<string, unknown>,
+  index: number,
+) {
+  const originals = (finding.provenance as Record<string, unknown>)
+    .sourceFindings as
+    Array<{ id: string; finding: Record<string, unknown> }> | undefined;
+  return originals?.length ? originals : [{ id: `previous:${index}`, finding }];
 }
 
 function retainSourceFindings(
@@ -249,17 +236,10 @@ function retainSourceFindings(
       sources.set(`${discovery.workerId}:${index}`, original);
     }
   }
-  for (const [index, finding] of (inputs.previous?.findings ?? []).entries()) {
-    const provenance = finding.provenance as Finding;
-    const originals = provenance.sourceFindings as
-      Array<{ id: string; finding: Finding }> | undefined;
-    if (originals?.length) {
-      for (const original of originals)
-        sources.set(original.id, original.finding);
-    } else {
-      sources.set(`previous:${index}`, finding);
-    }
-  }
+  for (const original of (inputs.previous?.findings ?? []).flatMap(
+    retainedFindingSources,
+  ))
+    sources.set(original.id, original.finding);
   const claimed = new Set<string>();
   for (const finding of result.findings) {
     const provenance = finding.provenance as Finding;

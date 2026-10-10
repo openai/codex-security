@@ -17,3 +17,23 @@ export function workbenchCommand(
       input,
     );
 }
+
+export function scanRegistrationArguments(
+  repository: string,
+  scanDirectory: string,
+): string[] {
+  return [
+    "register-cli-scan",
+    "--repository",
+    repository,
+    "--scan-dir",
+    scanDirectory,
+    "--recipe-json",
+    JSON.stringify({
+      config: {},
+      mode: "standard",
+      repository,
+      target: { kind: "repository", paths: [] },
+    }),
+  ];
+}

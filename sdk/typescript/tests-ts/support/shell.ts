@@ -11,27 +11,50 @@ export function bashCommand(): string {
   return existsSync(gitBash) ? gitBash : "bash";
 }
 
+export function workflowBashCommand(): string {
+  return process.platform === "win32"
+    ? join(
+        process.env["ProgramFiles"] ?? "C:/Program Files",
+        "Git/bin/bash.exe",
+      )
+    : "bash";
+}
+
 export function runCommand(
   command: string,
   args: string[],
   {
     input,
+    timeout = 10_000,
     ...options
   }: {
     cwd?: string;
     env?: NodeJS.ProcessEnv;
     input?: string;
-    timeout: number;
-  },
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
+    timeout?: number;
+    windowsHide?: boolean;
+  } = {},
+): Promise<{
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  signal: NodeJS.Signals | null;
+  error: Error | null;
+}> {
   // Avoid Bun's premature synchronous timeouts while keeping pipe reads bounded.
   return new Promise((resolve, reject) => {
     const child = execFile(
       command,
       args,
-      { ...options, encoding: "utf8" },
-      (_error, stdout, stderr) => {
-        resolve({ status: child.exitCode, stdout, stderr });
+      { ...options, timeout, encoding: "utf8" },
+      (error, stdout, stderr) => {
+        resolve({
+          status: child.exitCode,
+          stdout,
+          stderr,
+          signal: child.signalCode,
+          error,
+        });
       },
     );
     child.stdin?.on("error", reject);
