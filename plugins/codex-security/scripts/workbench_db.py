@@ -1549,8 +1549,13 @@ def complete_scan_locked(
             prepared, projection_warnings=warnings
         )
     except ContractError as exc:
-        if wrote or (
+        # Only a coordinator-selected parent is fenced for output-write replay.
+        selected_deep_parent = scan["mode"] == "deep" and deep_scan.require_deep_scan_run(
+            connection, scan_id
+        )["manifest_path"] == str(scan_dir / ARTIFACTS["manifest"])
+        if (wrote and not selected_deep_parent) or (
             scan["mode"] == "deep"
+            and not wrote
             and not already_sealed
             and not isinstance(exc, RecoverableContractError)
         ):

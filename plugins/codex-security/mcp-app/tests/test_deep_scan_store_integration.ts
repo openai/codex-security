@@ -9,7 +9,10 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
-import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type {
+  DeepScanPublication,
+  ScanDraftInput,
+} from "../src/artifact-scan-draft.js";
 import {
   DeepScanCoordinator,
   FakeExecutor,
@@ -118,7 +121,11 @@ async function testCoordinatorCommitResponseRecovery(
       threadId,
       executor: new FakeExecutor(),
       heartbeatIntervalMs: 60_000,
-      onComplete: async (draft: ScanDraftInput, signal: AbortSignal) => {
+      onComplete: async (
+        draft: ScanDraftInput,
+        signal: AbortSignal,
+        publication: DeepScanPublication,
+      ) => {
         const context = await createScanArtifactContext(
           run.scanId,
           runWorkbench,
@@ -132,6 +139,7 @@ async function testCoordinatorCommitResponseRecovery(
           draft,
           runWorkbench,
           signal,
+          publication,
         );
       },
     });
@@ -277,6 +285,11 @@ async function testRecoveredPublicationRejectsLateFailure() {
         "Publication recovery remains pending.",
       ),
       runWorkbench,
+      undefined,
+      {
+        coordinatorGeneration: claim.run.coordinatorGeneration,
+        resultPath: null,
+      },
     );
     await runWorkbench([
       "cancel-scan",

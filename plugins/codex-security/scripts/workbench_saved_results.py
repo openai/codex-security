@@ -2386,6 +2386,66 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def _require_current_deep_publication(
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
+) -> None:
+    scan_id = scan["id"]
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
+    publication = draft.get("deepScanPublication")
+    if (
+        publication is None
+        and draft["manifest"]["scan"].get("complete") is False
+        and (run is None or run["status"] == "running")
+    ):
+        return
+    if run is None:
+        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
+    db.deep_scan.require_current_coordinator(
+        run,
+        argparse.Namespace(
+            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
+        ),
+    )
+    # Once finish selects the canonical parent, only completion may replay it.
+    if publication is None:
+        if run["status"] != "running" and run["manifest_path"] == str(
+            Path(scan["scan_dir"]) / "scan-manifest.json"
+        ):
+            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
+        return
+
+    # Match the durable reducer sequence used by coordinator recovery.
+    def reducer_order(worker: Any) -> tuple[int, str]:
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+        return (int(match[1]) if match else 0, worker["id"])
+
+    reducer = max(
+        (
+            worker
+            for worker in connection.execute(
+                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+            )
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=reducer_order,
+        default=None,
+    )
+    selected_result = reducer["result_manifest_path"] if reducer is not None else None
+    if publication["resultPath"] != selected_result:
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -2420,6 +2480,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        checkpoint = manifest["scan"]
+        checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -2436,18 +2498,36 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
+        checkpoint_only = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is None
+            and checkpoint.get("complete") is False
+            and connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? "
+                "AND status = 'running' AND manifest_path = ?",
+                (scan_id, str(scan_dir / "scan-manifest.json")),
+            ).fetchone()
+            is not None
+        )
+        if scan["mode"] == "deep" and not checkpoint_only:
+            _require_current_deep_publication(db, connection, scan, draft)
+        if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             write_scan_local_bytes(
                 scan_dir,
                 f"checkpoints/{checkpoint_digest}.json",
                 checkpoint_contents,
             )
+            if checkpoint_only:
+                return {"scanId": scan_id, "status": "draft_written"}
         checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         checkpoint_contents = _encoded(checkpoint)
         checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
             write_scan_local_bytes(scan_dir, checkpoint_relative, checkpoint_contents)
+        if checkpoint_only:
+            return {"scanId": scan_id, "status": "draft_written"}
         write_scan_local_bytes(
             scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint_name})
         )
@@ -2461,6 +2541,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+            # Select the accepted final publication before releasing the write lock.
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET manifest_path = ? "
+                    "WHERE scan_id = ? AND status = 'running'",
+                    (str(scan_dir / "scan-manifest.json"), scan_id),
+                )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.

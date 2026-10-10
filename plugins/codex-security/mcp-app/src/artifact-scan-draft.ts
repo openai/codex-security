@@ -57,6 +57,12 @@ interface PreparedScanDraft {
   coverage: JsonObject;
 }
 
+/** Host-selected Deep aggregate, separate from model-authored draft fields. */
+export interface DeepScanPublication {
+  coordinatorGeneration?: number;
+  resultPath: string | null;
+}
+
 interface SavedScanDraft {
   input: ScanDraftInput;
   modifiedMs: number;
@@ -84,6 +90,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   input: ScanDraftInput,
   runWorkbench: RunArtifactWorkbench,
   signal?: AbortSignal,
+  publication?: DeepScanPublication,
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
@@ -157,7 +164,12 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
       await Promise.all([
         replaceArtifactJson(checkpointPath, snapshot),
-        replaceArtifactJson(draftPath, draft),
+        replaceArtifactJson(draftPath, {
+          ...draft,
+          ...(publication === undefined
+            ? {}
+            : { deepScanPublication: publication }),
+        }),
       ]);
       const arguments_ = [
         "write-scan-draft",
