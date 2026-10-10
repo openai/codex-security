@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
+from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 
@@ -121,7 +121,8 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
     result = add_worker(workbench_db, scan)
     with workbench_db:
         workbench_db.execute(
-            "UPDATE deep_scan_runs SET coordinator_generation = ? WHERE scan_id = ?",
+            "UPDATE deep_scan_runs SET coordinator_generation = ?, status = 'running' "
+            "WHERE scan_id = ?",
             (generation or 1, scan.scan_id),
         )
         workbench_db.execute(
@@ -158,6 +159,65 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
     assert dict(workbench_db.execute("SELECT * FROM deep_scan_workers").fetchone()) == worker_before
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert findings[0]["title"] == "Accepted aggregate"
+
+
+def test_legacy_terminal_aggregate_survives_a_late_partial_draft_after_write_failure(
+    workbench_api, workbench_db, publication_scan, monkeypatch
+):
+    scan = publication_scan()
+    scan.coverage["completeness"] = "partial"
+    scan.coverage["deferred"] = [
+        {"id": "remaining-review", "reason": "The bounded scan retained unfinished review."}
+    ]
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+    finalizer_globals = workbench_api["_write_prepared_scan_finalization"].__globals__
+    write_bytes = finalizer_globals["write_scan_local_bytes"]
+
+    def fail_report(scan_dir, relative_path, payload, **kwargs):
+        if relative_path == "report.md":
+            raise finalizer_globals["ContractError"]("Synthetic report write interruption")
+        return write_bytes(scan_dir, relative_path, payload, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setitem(finalizer_globals, "write_scan_local_bytes", fail_report)
+        with pytest.raises(SystemExit, match="Synthetic report write interruption"):
+            complete(workbench_api, workbench_db, scan)
+
+    run = workbench_db.execute(
+        "SELECT status, coordinator_generation FROM deep_scan_runs WHERE scan_id = ?",
+        (scan.scan_id,),
+    ).fetchone()
+    assert tuple(run) == ("succeeded", 1)
+    assert (
+        workbench_db.execute(
+            "SELECT status, seal_manifest_digest FROM scans WHERE id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+        == "running"
+    )
+    saved = {
+        path: path.read_bytes()
+        for path in scan.scan_dir.rglob("*.json")
+        if "drafts" not in path.parts
+    }
+    late = stage_publication(
+        scan, generation=None, result_path=None, title="Late incomplete progress", complete=False
+    )
+    with pytest.raises(SystemExit, match="terminal|publication"):
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, late
+        )
+    assert {
+        path: path.read_bytes()
+        for path in scan.scan_dir.rglob("*.json")
+        if "drafts" not in path.parts
+    } == saved
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert [finding["title"] for finding in findings] == [scan.findings[0]["title"]]
+    assert (
+        json.loads((scan.scan_dir / "coverage.json").read_text())["deferred"]
+        == scan.coverage["deferred"]
+    )
 
 
 @pytest.mark.parametrize(

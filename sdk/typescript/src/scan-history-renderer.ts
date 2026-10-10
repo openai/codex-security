@@ -1,4 +1,5 @@
 import { basename, relative } from "node:path";
+import stringWidth from "string-width";
 import type { JsonObject } from "./config.js";
 
 export type HistoryCommand =
@@ -13,6 +14,9 @@ type RendererOptions = {
 };
 
 const STALE_SCAN_MILLISECONDS = 24 * 60 * 60 * 1_000;
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
+  granularity: "grapheme",
+});
 
 const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   resolved: { color: 32, icon: "✓" },
@@ -79,18 +83,32 @@ export function renderScanHistory(
   const wrap = (value: string, indent: number, prefix?: string): void => {
     const available = width - indent - 2;
     let line = "";
-    let first = true;
+    let lineWidth = 0;
     for (const word of clean(value).split(/\s+/)) {
-      if (line.length > 0 && line.length + word.length + 1 > available) {
-        lines.push(`${first && prefix ? prefix : " ".repeat(indent)}${line}`);
-        first = false;
-        line = word;
-      } else {
-        line = line.length > 0 ? `${line} ${word}` : word;
+      if (line.length > 0 && lineWidth + stringWidth(word) + 1 > available) {
+        lines.push(`${prefix || " ".repeat(indent)}${line}`);
+        prefix = undefined;
+        line = "";
+        lineWidth = 0;
+      }
+      if (line.length > 0) {
+        line += " ";
+        lineWidth += 1;
+      }
+      for (const { segment } of GRAPHEME_SEGMENTER.segment(word)) {
+        const segmentWidth = stringWidth(segment);
+        if (lineWidth + segmentWidth > available) {
+          lines.push(`${prefix || " ".repeat(indent)}${line}`);
+          prefix = undefined;
+          line = "";
+          lineWidth = 0;
+        }
+        line += segment;
+        lineWidth += segmentWidth;
       }
     }
     if (line.length > 0) {
-      lines.push(`${first && prefix ? prefix : " ".repeat(indent)}${line}`);
+      lines.push(`${prefix || " ".repeat(indent)}${line}`);
     }
   };
 

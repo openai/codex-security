@@ -23,15 +23,9 @@ export interface DeepScanConfig {
   maxTimeHours?: number;
 }
 
-export interface DeepScanCanonicalArtifacts {
-  inScopeFilesPath: string;
-  candidateLedgerPath: string;
-}
-
 export interface DeepScanRunState {
   scanId: string;
   status: DeepScanRunStatus;
-  phase?: "setup" | "discovery" | "reducing" | "terminal";
   coordinatorGeneration?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -43,7 +37,6 @@ export interface DeepScanRunState {
   dispatchedCount: number;
   noNewStreak: number;
   consecutiveErrors: number;
-  canonicalArtifacts?: DeepScanCanonicalArtifacts;
   manifestPath?: string;
   terminalReason?: DeepScanTerminalReason;
   error?: string;
@@ -136,18 +129,13 @@ export interface CodexWorkerResult {
   diagnostics?: CodexWorkerDiagnostic[];
 }
 
-/**
- * Sanitized SDK evidence that is safe to persist in SQLite and manifests.
- *
- * Never add raw command text, command output, prompts, or repository paths
- * here. The coordinator only needs stable classifications that explain why a
- * worker could not satisfy its artifact contract.
- */
+/** SDK failure diagnostics retained alongside artifact-validation failures. */
 export interface CodexWorkerDiagnostic {
   code:
     | "sandbox_namespace_exhausted"
     | "file_change_failed"
-    | "artifact_tool_failed";
+    | "artifact_tool_failed"
+    | "worker_error";
   message: string;
 }
 

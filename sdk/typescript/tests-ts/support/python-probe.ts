@@ -3,24 +3,6 @@ import {
   spawnSync,
   type SpawnSyncOptionsWithStringEncoding,
 } from "node:child_process";
-import { join } from "node:path";
-import { expect } from "bun:test";
-import { PLUGIN_ROOT } from "../plugin-root.js";
-
-export function runPythonJsonProbe(program: string, input: unknown): unknown {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  if (python === null) throw new Error("A Python interpreter is required.");
-
-  const result = runPython(python, [
-    "-c",
-    program,
-    join(PLUGIN_ROOT, "scripts"),
-    JSON.stringify(input),
-  ]);
-
-  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-  return JSON.parse(new TextDecoder().decode(result.stdout));
-}
 
 export function runPython(
   python: string,

@@ -55,6 +55,7 @@ type Scenario = readonly [
   ids: readonly [string, string],
   paths?: FixturePaths,
   recoveryOnly?: boolean,
+  reducerLabels?: readonly [string, string],
 ];
 type PublicationFixture = Awaited<ReturnType<typeof createFixture>>;
 
@@ -179,6 +180,22 @@ const scenarios: Scenario[] = [
   ["decreasing timestamps", [2, 1], [lowId, highId]],
   ["equal timestamps and ascending UUIDs", [1, 1], [lowId, highId]],
   [
+    "legacy reducer label",
+    [1, 1],
+    [highId, lowId],
+    undefined,
+    false,
+    ["dedup-0002-legacy", "dedup-0001"],
+  ],
+  [
+    "large reducer sequence",
+    [1, 1],
+    [highId, lowId],
+    undefined,
+    false,
+    ["dedup-9007199254740992", "dedup-9007199254740993"],
+  ],
+  [
     "scan root collision, live publication",
     [1, 1],
     [highId, lowId],
@@ -205,7 +222,14 @@ const scenarios: Scenario[] = [
     true,
   ],
 ];
-for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
+for (const [
+  label,
+  offsets,
+  ids,
+  paths,
+  recoveryOnly,
+  reducerLabels,
+] of scenarios) {
   test(`selected reducer survives recovery and public completion: ${label}`, async (t) => {
     const fixture = await createFixture(t, paths);
     const { run, store, call, runWorkbench, instant } = fixture;
@@ -223,7 +247,7 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
     });
     assert.equal(claimed.run.coordinatorGeneration, 2);
     assert.equal(claimed.run.config.stopAfterNoNew, 4);
-    const results = await commitReducers(fixture, offsets, ids);
+    const results = await commitReducers(fixture, offsets, ids, reducerLabels);
     const persisted = await store.get(run.scanId, owner);
     assert.equal(persisted.noNewStreak, 4);
     assert.ok(persisted.persistedWorkers);
@@ -276,6 +300,7 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
           signal,
           publication,
         );
+        await assertInterleavedProgressRetained(fixture);
       },
     });
     coordinator.start();
@@ -298,7 +323,10 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
     );
     const sealed = await snapshot(run);
     const manifest = JSON.parse(sealed.files["scan-manifest.json"]);
-    assert.equal(manifest.scan.threatModel.summary, "dedup-0002");
+    assert.equal(
+      manifest.scan.threatModel.summary,
+      reducerLabels?.[1] ?? "dedup-0002",
+    );
     assert.ok(manifest.scan.sealedAt);
     assert.deepEqual(JSON.parse(sealed.files["findings.json"]).findings, []);
     assert.deepEqual(JSON.parse(sealed.files["coverage.json"]).deferred, []);
@@ -328,79 +356,332 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
   });
 }
 
-test("partial drafts cannot replace a terminal aggregate awaiting completion replay", async (t) => {
-  const fixture = await createFixture(t);
-  const { run, store, call, runWorkbench, instant } = fixture;
-  const claimed = await store.claimCoordinator({
-    scanId: run.scanId,
-    threadId: owner,
+for (const [claimed, outputFailure] of [
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+]) {
+  test(`legacy discovery parent with claimed=${claimed} ${outputFailure ? "retains failure after an output write error" : "retains progress before first completion"}`, async (t) => {
+    const fixture = await createFixture(t);
+    const { run, store, call, runWorkbench } = fixture;
+    if (claimed) {
+      const claim = await store.claimCoordinator({
+        scanId: run.scanId,
+        threadId: owner,
+      });
+      assert.equal(claim.acquired, true);
+      assert.equal(claim.run.coordinatorGeneration, 2);
+    }
+    await commitReducers(fixture, [1, 2], [highId, lowId]);
+    const discovery = path.join(run.scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    await writeFile(path.join(discovery, "in_scope_files.txt"), "fixture.py\n");
+    await writeFile(path.join(discovery, "candidate_ledger.jsonl"), "");
+    const manifestPath = path.join(run.scanDir, "coordinator-manifest.json");
+    await writeFile(manifestPath, "{}\n");
+    const terminal = await store.finish({
+      scanId: run.scanId,
+      reason: "saturated",
+      manifestPath,
+      omittedWorkerIds: [],
+    });
+    assert.equal(terminal.status, "succeeded");
+    assert.equal(terminal.coordinatorGeneration, claimed ? 2 : 1);
+    assert.equal(terminal.manifestPath, manifestPath);
+    if (!outputFailure) {
+      assertSuccess(
+        await call(
+          "record_codex_security_scan_draft",
+          partial(run, "legacy-progress"),
+        ),
+      );
+      const progress = await checkpoints(run);
+      assert.ok(Object.keys(progress).length > 0);
+      assertToolError(
+        await call("complete_codex_security_scan", { scanId: run.scanId }),
+        /incomplete/,
+      );
+      assert.deepEqual(await checkpoints(run), progress);
+    }
+    assertSuccess(
+      await call("record_codex_security_scan_draft", {
+        scanId: run.scanId,
+        complete: true,
+        findings: [],
+        coverage,
+      }),
+    );
+    if (outputFailure) {
+      const report = path.join(run.scanDir, "report.html");
+      await mkdir(report);
+      assertToolError(
+        await call("complete_codex_security_scan", { scanId: run.scanId }),
+        /report\.html/,
+      );
+      await rm(report, { recursive: true });
+      const context = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+      assert.equal(
+        (context.scan as { progress: { status: string } }).progress.status,
+        "failed",
+      );
+      const interrupted = await snapshot(run);
+      assertToolError(
+        await call("record_codex_security_scan_draft", {
+          ...partial(run, "late-legacy-draft"),
+          complete: true,
+          threatModel: { summary: "Late replacement" },
+        }),
+      );
+      assert.deepEqual(await snapshot(run), interrupted);
+      assertToolError(
+        await call("complete_codex_security_scan", { scanId: run.scanId }),
+        /running/,
+      );
+    } else {
+      assertSuccess(
+        await call("complete_codex_security_scan", { scanId: run.scanId }),
+      );
+    }
   });
-  const context = await createScanArtifactContext(run.scanId, runWorkbench, {
-    requireRunning: true,
+}
+
+for (const complete of [false, true]) {
+  test(`legacy terminal aggregate rejects late public drafts with complete=${complete}`, async (t) => {
+    const fixture = await createFixture(t);
+    const { run, store, call, runWorkbench } = fixture;
+    await commitReducers(fixture, [1, 2], [highId, lowId]);
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    const draft: ScanDraftInput = {
+      scanId: run.scanId,
+      complete: true,
+      findings: [],
+      coverage,
+      threatModel: { summary: "Selected aggregate" },
+    };
+    await assert.rejects(
+      recordCodexSecurityScanDraftViaWorkbench(context, draft, async (args) => {
+        await runWorkbench(args);
+        throw new Error("Synthetic lost publication response");
+      }),
+      /lost publication response/,
+    );
+    const published = await snapshot(run);
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      draft,
+      runWorkbench,
+    );
+    assert.deepEqual(await snapshot(run), published);
+    await assertInterleavedProgressRetained(fixture);
+    const terminal = await store.finish({
+      scanId: run.scanId,
+      reason: "saturated",
+      manifestPath: path.join(run.scanDir, "scan-manifest.json"),
+      omittedWorkerIds: [],
+    });
+    assert.equal(terminal.status, "succeeded");
+    assert.equal(terminal.coordinatorGeneration, 1);
+    const report = path.join(run.scanDir, "report.html");
+    await mkdir(report);
+    assertToolError(
+      await call("complete_codex_security_scan", { scanId: run.scanId }),
+      /report\.html/,
+    );
+    await rm(report, { recursive: true });
+    const interrupted = await snapshot(run);
+    assertToolError(
+      await call("record_codex_security_scan_draft", {
+        ...partial(run, "late-progress"),
+        complete,
+        threatModel: { summary: "Late replacement" },
+      }),
+      /terminal|publication/,
+    );
+    assert.deepEqual(await snapshot(run), interrupted);
+    assertSuccess(
+      await call("complete_codex_security_scan", { scanId: run.scanId }),
+    );
+    const completed = await snapshot(run);
+    assert.deepEqual(
+      JSON.parse(completed.files["coverage.json"]),
+      JSON.parse(interrupted.files["coverage.json"]),
+    );
+    assert.equal(
+      JSON.parse(completed.files["scan-manifest.json"]).scan.threatModel
+        .summary,
+      "Selected aggregate",
+    );
+    assert.deepEqual(completed.checkpoints, interrupted.checkpoints);
   });
-  const elapsedSeconds = ((run.config.maxTimeHours ?? 1) + 1) * 3_600;
-  fixture.setTime(elapsedSeconds);
-  const deadline = Date.parse(instant) + elapsedSeconds * 1_000;
-  const coordinator = new DeepScanCoordinator({
-    run: claimed.run,
-    store,
-    pluginRoot,
-    executor: {
-      run() {
-        throw new Error("Expired coordinator must not start a worker.");
+}
+
+for (const claimed of [false, true]) {
+  test(`partial drafts retain a capped publication with claimed=${claimed}`, async (t) => {
+    const fixture = await createFixture(t);
+    const { run, store, call, runWorkbench, instant } = fixture;
+    const selectedRun = claimed
+      ? (await store.claimCoordinator({ scanId: run.scanId, threadId: owner }))
+          .run
+      : run;
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    const elapsedSeconds = ((run.config.maxTimeHours ?? 1) + 1) * 3_600;
+    fixture.setTime(elapsedSeconds);
+    const deadline = Date.parse(instant) + elapsedSeconds * 1_000;
+    const coordinator = new DeepScanCoordinator({
+      run: selectedRun,
+      store,
+      pluginRoot,
+      executor: {
+        run() {
+          throw new Error("Expired coordinator must not start a worker.");
+        },
       },
-    },
-    clock: { now: () => deadline, sleep: async () => {} },
-    onComplete: (draft, signal, publication) =>
+      clock: { now: () => deadline, sleep: async () => {} },
+      onComplete: async (draft, signal, publication) => {
+        await recordCodexSecurityScanDraftViaWorkbench(
+          context,
+          draft,
+          runWorkbench,
+          signal,
+          claimed ? publication : undefined,
+        );
+        await assertInterleavedProgressRetained(fixture);
+      },
+    });
+    coordinator.start();
+    const terminal = await coordinator.wait(undefined, 30_000);
+    assert.equal(
+      terminal?.status,
+      "succeeded",
+      terminal?.error ?? "Coordinator did not succeed",
+    );
+    assert.equal(terminal?.terminalReason, "capped");
+
+    const report = path.join(run.scanDir, "report.html");
+    await mkdir(report);
+    assertToolError(
+      await call("complete_codex_security_scan", { scanId: run.scanId }),
+      /report\.html/,
+    );
+    await rm(report, { recursive: true });
+    const interrupted = await snapshot(run);
+    assert.equal(
+      JSON.parse(interrupted.files["coverage.json"]).completeness,
+      "partial",
+    );
+    assertToolError(
+      await call(
+        "record_codex_security_scan_draft",
+        partial(run, "late-progress"),
+      ),
+      /coordinator lease|terminal/,
+    );
+    assert.deepEqual(await snapshot(run), interrupted);
+    assertSuccess(
+      await call("complete_codex_security_scan", { scanId: run.scanId }),
+    );
+    const completed = await snapshot(run);
+    assert.ok(JSON.parse(completed.files["scan-manifest.json"]).scan.sealedAt);
+    assert.deepEqual(
+      JSON.parse(completed.files["coverage.json"]),
+      JSON.parse(interrupted.files["coverage.json"]),
+    );
+    assert.deepEqual(completed.checkpoints, interrupted.checkpoints);
+    assert.equal((await store.get(run.scanId, owner)).terminalReason, "capped");
+  });
+}
+
+for (const status of ["failed", "interrupted"] as const) {
+  test(`selected publication retains ${status} and exact failure replay`, async (t) => {
+    const { run, store, runWorkbench } = await createFixture(t);
+    await store.claimCoordinator({ scanId: run.scanId, threadId: owner });
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    const draft: ScanDraftInput = {
+      scanId: run.scanId,
+      findings: [],
+      coverage,
+    };
+    const publication = { coordinatorGeneration: 2, resultPath: null };
+    await assert.rejects(
       recordCodexSecurityScanDraftViaWorkbench(
         context,
         draft,
-        runWorkbench,
-        signal,
+        async (args) => {
+          await runWorkbench(args);
+          throw new Error("Synthetic lost publication response");
+        },
+        undefined,
         publication,
-      ).then(() => {}),
+      ),
+      /lost publication response/,
+    );
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      draft,
+      runWorkbench,
+      undefined,
+      publication,
+    );
+    const message = "Synthetic failure after publication";
+    const failed = await store.fail(run.scanId, message, status);
+    assert.equal(failed.status, status);
+    assert.equal(
+      failed.manifestPath,
+      path.join(run.scanDir, "scan-manifest.json"),
+    );
+    assert.deepEqual(await store.fail(run.scanId, message, status), failed);
+    await assert.rejects(
+      store.fail(run.scanId, message + " changed", status),
+      /immutable/,
+    );
+    const differentManifest = path.join(run.scanDir, "different-manifest.json");
+    await writeFile(differentManifest, "{}\n");
+    await assert.rejects(
+      store.fail(run.scanId, message, status, differentManifest),
+      /immutable/,
+    );
   });
-  coordinator.start();
-  const terminal = await coordinator.wait(undefined, 30_000);
-  assert.equal(
-    terminal?.status,
-    "succeeded",
-    terminal?.error ?? "Coordinator did not succeed",
-  );
-  assert.equal(terminal?.terminalReason, "capped");
+}
 
-  const report = path.join(run.scanDir, "report.html");
-  await mkdir(report);
-  assertToolError(
-    await call("complete_codex_security_scan", { scanId: run.scanId }),
-    /report\.html/,
+async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
+  const { run, call } = fixture;
+  const before = await snapshot(run);
+  const progress = {
+    scanId: run.scanId,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      deferred: [
+        {
+          id: "interleaved-progress",
+          candidateId: "interleaved-progress",
+          reason: "Synthetic review remains pending.",
+          paths: ["fixture.py"],
+        },
+      ],
+    },
+    threatModel: { summary: "Unselected progress model" },
+  };
+  assertSuccess(await call("record_codex_security_scan_draft", progress));
+  const after = await snapshot(run);
+  assert.deepEqual(after.files, before.files);
+  for (const [name, contents] of Object.entries(before.checkpoints))
+    assert.equal(after.checkpoints[name], contents);
+  const added = Object.keys(after.checkpoints).filter(
+    (name) => !(name in before.checkpoints),
   );
-  await rm(report, { recursive: true });
-  const interrupted = await snapshot(run);
-  assert.equal(
-    JSON.parse(interrupted.files["coverage.json"]).completeness,
-    "partial",
-  );
-  assertToolError(
-    await call(
-      "record_codex_security_scan_draft",
-      partial(run, "late-progress"),
-    ),
-    /current coordinator lease/,
-  );
-  assert.deepEqual(await snapshot(run), interrupted);
-  assertSuccess(
-    await call("complete_codex_security_scan", { scanId: run.scanId }),
-  );
-  const completed = await snapshot(run);
-  assert.ok(JSON.parse(completed.files["scan-manifest.json"]).scan.sealedAt);
-  assert.deepEqual(
-    JSON.parse(completed.files["coverage.json"]),
-    JSON.parse(interrupted.files["coverage.json"]),
-  );
-  assert.deepEqual(completed.checkpoints, interrupted.checkpoints);
-  assert.equal((await store.get(run.scanId, owner)).terminalReason, "capped");
-});
+  assert.equal(added.length, 1);
+  assert.deepEqual(JSON.parse(after.checkpoints[added[0]]), progress);
+}
 
 async function createFixture(t: TestContext, paths: FixturePaths = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "deep-publication-"));
@@ -482,6 +763,7 @@ async function commitReducers(
   fixture: PublicationFixture,
   offsets: readonly [number, number],
   ids: readonly [string, string],
+  reducerLabels?: readonly [string, string],
 ) {
   const { run, store } = fixture;
   const results = [];
@@ -513,7 +795,8 @@ async function commitReducers(
       });
       workerIds.push(id);
     }
-    const label = `dedup-${String(batch + 1).padStart(4, "0")}`;
+    const label =
+      reducerLabels?.[batch] ?? `dedup-${String(batch + 1).padStart(4, "0")}`;
     const artifact = await workerArtifact(run, "dedup", label);
     const id = ids[batch];
     await store.claimDedup({ id, scanId: run.scanId, workerIds, ...artifact });
@@ -602,6 +885,7 @@ async function snapshot(run: DeepScanRunState) {
     "coverage.json",
     "report.md",
     "checkpoint-head.json",
+    "threatmodel.md",
   ]) {
     try {
       files[name] = await readFile(path.join(run.scanDir, name), "utf8");

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -43,6 +44,18 @@ function exportCsv(findings: Finding[]): string {
 }
 
 describe("findings import formats", () => {
+  test("round-trips an empty exported CSV", async () => {
+    expect(
+      await parseImportedFindings(exportCsv([]), "csv", PLUGIN_ROOT),
+    ).toEqual([]);
+    await expect(
+      parseImportedFindings("", "csv", PLUGIN_ROOT),
+    ).rejects.toThrow();
+    await expect(
+      parseImportedFindings("title,summary\n", "csv", PLUGIN_ROOT),
+    ).rejects.toThrow();
+  });
+
   test("retains distinct occurrences of a shared finding in CSV and JSON", async () => {
     const {
       findings: [finding],
@@ -60,13 +73,11 @@ describe("findings import formats", () => {
       ).toEqual(
         rows.map(({ findingId, occurrenceId }) => [findingId, occurrenceId]),
       );
-      expect(
-        new Set(
-          bindImportedFindings(parsed, format, "scan", "target").map(
-            (row) => row.occurrenceId,
-          ),
-        ).size,
-      ).toBe(2);
+      const bound = bindImportedFindings(parsed, format, "scan", "target");
+      expect(new Set(bound.map((row) => row.occurrenceId)).size).toBe(2);
+      if (format === "csv") {
+        expect(new Set(bound.map((row) => row.findingId)).size).toBe(2);
+      }
     }
     await expect(
       parseImportedFindings(
@@ -85,6 +96,9 @@ describe("findings import formats", () => {
       "'--no-verify' skips hooks",
       "''=literal",
       "'Literal",
+      "'=1+1",
+      "''-x",
+      "''literal",
       "ordinary λ",
       "=formula",
       "\u0085=formula",
@@ -247,9 +261,22 @@ describe("findings import formats", () => {
         parseImportedFindings(JSON.stringify(payload), "json", PLUGIN_ROOT),
       ).rejects.toThrow("Findings JSON");
     }
-    await expect(
-      parseImportedFindings("{", "json", PLUGIN_ROOT),
-    ).rejects.toThrow("could not be parsed");
+    for (const source of ["{", '{"findings": [],}']) {
+      let parseError: Error | undefined;
+      try {
+        JSON.parse(source);
+      } catch (error) {
+        parseError = error as Error;
+      }
+      expect(parseError).toBeInstanceOf(SyntaxError);
+      await expect(
+        parseImportedFindings(source, "json", PLUGIN_ROOT),
+      ).rejects.toMatchObject({
+        name: "CodexSecurityError",
+        message: `Findings JSON could not be parsed. ${parseError!.message}`,
+        cause: expect.objectContaining({ message: parseError!.message }),
+      });
+    }
     await expect(
       parseImportedFindings(
         JSON.stringify({
@@ -261,4 +288,3 @@ describe("findings import formats", () => {
     ).rejects.toThrow("duplicate occurrenceId");
   });
 });
-import { execFileSync } from "node:child_process";

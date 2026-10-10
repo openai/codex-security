@@ -167,3 +167,28 @@ def test_deep_setup_draft_before_orchestration(
     assert (checkpoint.get("complete") is not False) is complete
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert (scan_dir / "threatmodel.md").read_text().startswith(model["content"])
+    if initialized and complete:
+        selected = {
+            name: (scan_dir / name).read_bytes()
+            for name in (
+                "scan-manifest.json",
+                "findings.json",
+                "coverage.json",
+                "checkpoint-head.json",
+                "threatmodel.md",
+            )
+        }
+        checkpoints = set((scan_dir / "checkpoints").iterdir())
+        documents["manifest"]["scan"].update(
+            complete=False, threatModel={"summary": "Unselected progress"}
+        )
+        staged.write_text(json.dumps(documents))
+        assert run_workbench(state_dir, *args, environment=environment)["status"] == "draft_written"
+        assert all(
+            (scan_dir / name).read_bytes() == contents for name, contents in selected.items()
+        )
+        added = set((scan_dir / "checkpoints").iterdir()) - checkpoints
+        assert len(added) == 1
+        retained = json.loads(added.pop().read_text())
+        assert retained["complete"] is False
+        assert retained["threatModel"] == {"summary": "Unselected progress"}

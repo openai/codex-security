@@ -2388,8 +2388,9 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def _require_current_deep_publication(
-    db: Any, connection: Any, scan_id: str, draft: dict[str, Any]
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
 ) -> None:
+    scan_id = scan["id"]
     run = connection.execute(
         "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
@@ -2402,20 +2403,30 @@ def _require_current_deep_publication(
         return
     if run is None:
         run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
     db.deep_scan.require_current_coordinator(
         run,
         argparse.Namespace(
             coordinator_generation=publication.get("coordinatorGeneration") if publication else None
         ),
     )
-    # Generation-one runs predate host publication metadata. Keep their existing
-    # draft path; adopted coordinators must carry their generation and selection.
+    # Once finish selects the canonical parent, only completion may replay it.
     if publication is None:
+        if run["status"] != "running" and run["manifest_path"] == str(
+            Path(scan["scan_dir"]) / "scan-manifest.json"
+        ):
+            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
         return
 
     # Match the durable reducer sequence used by coordinator recovery.
     def reducer_order(worker: Any) -> tuple[int, str]:
-        match = re.search(r"dedup-(\d+)", Path(worker["prompt_path"]).parent.name)
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
         return (int(match[1]) if match else 0, worker["id"])
 
     reducer = max(
@@ -2459,14 +2470,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         accepted_input = copy.deepcopy(draft)
         accepted_checkpoint = None
-        if scan["mode"] == "deep":
-            _require_current_deep_publication(db, connection, scan_id, draft)
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
         # Save scan IDs without sealing the draft.
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        checkpoint = manifest["scan"]
+        checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -2484,6 +2495,19 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             accepted_checkpoint = checkpoint
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
+        checkpoint_only = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is None
+            and checkpoint.get("complete") is False
+            and connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? "
+                "AND status = 'running' AND manifest_path = ?",
+                (scan_id, str(scan_dir / "scan-manifest.json")),
+            ).fetchone()
+            is not None
+        )
+        if scan["mode"] == "deep" and not checkpoint_only:
+            _require_current_deep_publication(db, connection, scan, draft)
         acceptance_input = {**accepted_input, "checkpoint": accepted_checkpoint}
         acceptance_relative = Path(relative).with_suffix(".accepted.json").as_posix()
         acknowledge = (
@@ -2514,19 +2538,23 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit(
                 "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
             )
-        if args.checkpoint_path is not None:
+        if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             write_scan_local_bytes(
                 scan_dir,
                 f"checkpoints/{checkpoint_digest}.json",
                 checkpoint_contents,
             )
+            if checkpoint_only:
+                return {"scanId": scan_id, "status": "draft_written"}
         checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         checkpoint_contents = _encoded(checkpoint)
         checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
             write_scan_local_bytes(scan_dir, checkpoint_relative, checkpoint_contents)
+        if checkpoint_only:
+            return {"scanId": scan_id, "status": "draft_written"}
         write_scan_local_bytes(
             scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint_name})
         )
@@ -2540,6 +2568,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         }
         for filename, contents in documents.items():
             write_scan_local_bytes(scan_dir, filename, contents)
+        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+            # Select the accepted final publication before releasing the write lock.
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET manifest_path = ? "
+                    "WHERE scan_id = ? AND status = 'running'",
+                    (str(scan_dir / "scan-manifest.json"), scan_id),
+                )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
         if acknowledge:
             # Optional recovery evidence is written only after the publication succeeds.
@@ -2629,7 +2665,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     cost_json = db.parse_scan_cost(args.cost_json)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
         if scan["status"] == "failed":
@@ -2661,10 +2697,6 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     preserve_stopped_results_after_transition(db, connection, scan["id"])
     return db.scan_context(connection, scan["id"])
 
@@ -2678,7 +2710,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     thread_id = db.optional_text(args.thread_id, maximum=512)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
         workspace = db.require_workspace(connection, scan["workspace_id"])
@@ -2707,10 +2739,6 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     preserve_stopped_results_after_transition(db, connection, scan["id"])
     return db.workspace_state(connection, scan["workspace_id"])
 

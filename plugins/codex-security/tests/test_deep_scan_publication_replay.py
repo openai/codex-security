@@ -21,15 +21,16 @@ args = Namespace(**json.loads(sys.argv[3]))
 boundary = sys.argv[4]
 
 class CrashConnection(sqlite3.Connection):
-    def commit(self):
-        completing = self.execute(
+    def __exit__(self, exc_type, exc_value, traceback):
+        completing = exc_type is None and self.execute(
             "SELECT status FROM scans WHERE id = ?", (args.scan_id,)
         ).fetchone()[0] == "complete"
         if completing and boundary == "sqlite-before":
             os._exit(72)
-        super().commit()
+        result = super().__exit__(exc_type, exc_value, traceback)
         if completing and boundary == "sqlite-after":
             os._exit(73)
+        return result
 
 connection = sqlite3.connect(sys.argv[2], factory=CrashConnection)
 connection.row_factory = sqlite3.Row

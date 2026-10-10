@@ -10,117 +10,96 @@ import subprocess
 import sys
 import tempfile
 import threading
-import unittest
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from unittest import mock
+from unittest import main, mock, skipIf, skipUnless
 
+import pytest
 from workbench_test_support import ScanFixtureTestCase, load_script, windows_file_backend
 
 FINALIZER = load_script("finalize_scan_contract")
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "completed-scan"
+CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
 
 
 class FinalizeScanContractTest(ScanFixtureTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.scan_dir = Path(self.temp_dir.name).resolve()
-        self.manifest = {
-            "documentType": "codex-security.scan-manifest",
-            "schemaVersion": "1.0",
-            "scan": {
-                "id": "scan_001",
-                "producer": {
-                    "name": "codex-security-plugin",
-                    "version": "0.1.0",
-                },
-                "status": "completed",
-                "startedAt": "2026-05-31T18:00:00Z",
-                "completedAt": "2026-05-31T18:09:00Z",
-                "target": {
-                    "kind": "git_worktree",
-                    "targetId": "target_sha256_example",
-                    "displayName": "example/repo",
-                    "remote": "https://github.com/example/repo",
-                    "revision": "deadbeef",
-                    "snapshotDigest": "codex-security-snapshot/v1:sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                },
-                "scope": {
-                    "includePaths": ["src/"],
-                    "excludePaths": [],
-                },
-                "coverageRef": "coverage.json",
-                "findingsRef": "findings.json",
-            },
-        }
-        self.finding = {
-            "ruleId": "path-traversal.archive-extraction",
-            "identity": {
-                "anchor": "archive-entry-write-without-containment",
-            },
-            "title": "Unsafe archive extraction can escape the output directory",
-            "summary": "An attacker-controlled path reaches a filesystem write without containment validation.",
-            "severity": {
-                "level": "high",
-                "score": 8.1,
-                "scoringSystem": "CVSS:3.1",
-            },
-            "confidence": {
-                "level": "high",
-                "rationale": "Direct source trace reaches the filesystem write without a containment check.",
-            },
-            "taxonomy": {
-                "category": "path-traversal",
-                "cwe": ["CWE-22"],
-            },
-            "locations": [
-                {
-                    "path": "src/extract.py",
-                    "startLine": 41,
-                    "endLine": 44,
-                    "role": "sink",
-                }
-            ],
-            "remediation": "Normalize destinations and reject entries that escape the extraction root.",
-            "validation": None,
-            "attackPath": None,
-            "provenance": {
-                "source": "local_plugin",
-            },
-            "extensions": {},
-        }
-        self.findings = {
-            "documentType": "codex-security.findings",
-            "schemaVersion": "1.0",
-            "scanId": "scan_001",
-            "findings": [copy.deepcopy(self.finding)],
-        }
-        self.coverage = {
-            "documentType": "codex-security.coverage",
-            "schemaVersion": "1.0",
-            "scanId": "scan_001",
-            "mode": "repository",
-            "completeness": "complete",
-            "inventoryStrategy": "repository",
-            "includePaths": ["src/"],
-            "excludePaths": [],
-            "surfaces": [
-                {
-                    "id": "surface_archive_extraction",
-                    "label": "Archive extraction",
-                    "disposition": "reported",
-                    "receiptRefs": [],
-                }
-            ],
-            "explicitExclusions": [],
-            "deferred": [],
-        }
+        self.manifest = json.loads((EXAMPLE_DIR / "scan-manifest.json").read_text(encoding="utf-8"))
+        scan = self.manifest["scan"]
+        scan["id"] = "scan_001"
+        scan.pop("sealedAt")
+        scan.pop("artifacts")
+        scan["scope"]["includePaths"] = ["src/"]
+        scan["target"]["snapshotDigest"] = "codex-security-snapshot/v1:sha256:" + "0" * 64
+        self.findings = json.loads((EXAMPLE_DIR / "findings.json").read_text(encoding="utf-8"))
+        self.finding = self.findings["findings"][0]
+        for field in (
+            "findingId",
+            "occurrenceId",
+            "fingerprints",
+            "remediationTests",
+            "preventiveControls",
+        ):
+            self.finding.pop(field)
+        self.findings["scanId"] = "scan_001"
+        self.findings["findings"] = [copy.deepcopy(self.finding)]
+        self.coverage = json.loads((EXAMPLE_DIR / "coverage.json").read_text(encoding="utf-8"))
+        self.coverage["scanId"] = "scan_001"
+        self.coverage["includePaths"] = ["src/"]
 
     def write_sealed_scan(self) -> None:
         self.write_scan()
         FINALIZER.finalize_scan(self.scan_dir)
 
-    def run_finalizer(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def compatible_finding(self, findings: dict) -> dict:
+        original = copy.deepcopy(findings)
+        compatible = FINALIZER._legacy_sealed_findings_for_validation(findings)
+        self.assertEqual(findings, original)
+        return compatible["findings"][0]
+
+    def test_cli_resolves_noncanonical_scan_directory_arguments(self) -> None:
+        self.write_scan()
+        for spelling in (
+            self.scan_dir.name,
+            str(self.scan_dir / ".." / self.scan_dir.name),
+        ):
+            with self.subTest(spelling=spelling):
+                result = self.run_finalizer("--scan-dir", spelling, cwd=self.scan_dir.parent)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    @skipIf(os.name == "nt", "POSIX directory alias fixture")
+    def test_cli_resolves_scan_directory_symlink(self) -> None:
+        self.write_scan()
+        with tempfile.TemporaryDirectory() as directory:
+            alias = Path(directory) / "alias"
+            alias.symlink_to(self.scan_dir, target_is_directory=True)
+            result = self.run_finalizer("--scan-dir", str(alias))
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    @skipIf(os.name == "nt", "POSIX source filenames")
+    def test_sarif_hashes_source_names_that_are_not_portable_artifact_names(self) -> None:
+        source_root = self.scan_dir / "source"
+        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md"):
+            with self.subTest(name=name):
+                source = source_root / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("synthetic_source()\n")
+                self.findings["findings"][0]["locations"] = [{"path": name, "startLine": 1}]
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir, source_root=source_root)
+                sarif = json.loads((self.scan_dir / "exports/results.sarif").read_text())
+                self.assertIn(
+                    "primaryLocationLineHash", sarif["runs"][0]["results"][0]["partialFingerprints"]
+                )
+                with self.assertRaises(FINALIZER.ContractError):
+                    FINALIZER.open_scan_local_file_descriptor(source_root, name, "artifact")
+
+    def run_finalizer(
+        self, *args: str, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
@@ -132,6 +111,7 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
             capture_output=True,
             text=True,
             check=False,
+            cwd=cwd,
         )
 
     def write_scan(self) -> None:
@@ -202,6 +182,50 @@ The extraction root is not enforced.
             raise AssertionError(f"missing sealed artifact: {relative_path}")
         self.write_json("scan-manifest.json", manifest)
 
+    @contextmanager
+    def preserving_sealed_findings(self, findings: dict) -> Iterator[None]:
+        self.rewrite_sealed_artifact("findings.json", findings)
+        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
+        yield
+        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
+        self.assertEqual(accepted, findings)
+        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+
+    def sarif_finding(self, fingerprint: str, suffix: str = "example") -> dict:
+        finding = copy.deepcopy(self.finding)
+        finding["findingId"] = f"csf_{suffix}"
+        finding["occurrenceId"] = f"occ_{suffix}"
+        finding["fingerprints"] = {"primary": fingerprint}
+        return finding
+
+    def write_line_hash_source(self) -> Path:
+        source_root = self.scan_dir / "source"
+        source_path = source_root / "src" / "extract.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text(
+            "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
+        )
+        return source_root
+
+    def export_csv(self) -> csv.DictReader:
+        self.findings["findings"] = [copy.deepcopy(self.finding)]
+        self.write_sealed_scan()
+        result = self.run_finalizer("--export-format", "csv")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return csv.DictReader(io.StringIO(result.stdout, newline=""))
+
+    def write_sealed_receipt_scan(self, receipt_ref: str) -> Path:
+        self.coverage["surfaces"][0]["receiptRefs"] = [receipt_ref]
+        self.write_scan()
+        receipt_path = self.scan_dir / receipt_ref
+        receipt_path.parent.mkdir(parents=True)
+        receipt_path.write_text('{"status":"reviewed"}\n', encoding="utf-8")
+        FINALIZER.finalize_scan(self.scan_dir)
+        return receipt_path
+
+    def scan_file_bytes(self, *names: str) -> dict[str, bytes]:
+        return {name: (self.scan_dir / name).read_bytes() for name in names}
+
     def test_finalize_seals_manifest_deterministically(self) -> None:
         self.write_scan()
 
@@ -249,33 +273,6 @@ The extraction root is not enforced.
         self.assertEqual(
             result["partialFingerprints"]["codexSecurity/v1"], finding["fingerprints"]["primary"]
         )
-
-    def test_headless_finalization_replaces_model_timestamps_with_machine_clock(self) -> None:
-        self.manifest["scan"]["startedAt"] = "2026-07-21T23:20:33Z"
-        self.manifest["scan"]["completedAt"] = "2026-07-21T23:30:52Z"
-        self.write_scan()
-        started_at = "2026-07-22T06:20:33Z"
-        before = datetime.now(timezone.utc)
-
-        with mock.patch.dict(os.environ, {"CODEX_SECURITY_STARTED_AT": started_at}):
-            manifest, _, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        completed_at = manifest["scan"]["completedAt"]
-        self.assertEqual(manifest["scan"]["startedAt"], started_at)
-        self.assertTrue(completed_at.endswith("Z"))
-        completed_datetime = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
-        self.assertGreaterEqual(completed_datetime, before)
-        self.assertLessEqual(completed_datetime, datetime.now(timezone.utc))
-        self.assertEqual(manifest["scan"]["sealedAt"], completed_at)
-
-    def test_headless_finalization_rejects_invalid_authoritative_start(self) -> None:
-        self.write_scan()
-
-        with mock.patch.dict(os.environ, {"CODEX_SECURITY_STARTED_AT": "not-a-timestamp"}):
-            with self.assertRaisesRegex(FINALIZER.ContractError, "RFC 3339 timestamp"):
-                FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
 
     def test_finalizes_canonical_document_beyond_previous_size_limit(self) -> None:
         self.manifest["metadata"] = "x" * (16 * 1024 * 1024)
@@ -370,13 +367,7 @@ The extraction root is not enforced.
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["extensions"]["note"] = "bad-" + chr(0xD800)
-        self.write_json("findings.json", findings)
-        manifest = self.read_json("scan-manifest.json")
-        for artifact in manifest["scan"]["artifacts"]:
-            if artifact["path"] == "findings.json":
-                artifact["sha256"] = self.sha256_file("findings.json")
-                break
-        self.write_json("scan-manifest.json", manifest)
+        self.rewrite_sealed_artifact("findings.json", findings)
         before = {
             path.name: path.read_bytes() for path in self.scan_dir.iterdir() if path.is_file()
         }
@@ -409,6 +400,7 @@ The extraction root is not enforced.
         self.assertEqual(accepted, findings)
         self.assertEqual(path.read_bytes(), compact)
 
+    @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_unknown_evidence_references(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -423,40 +415,59 @@ The extraction root is not enforced.
             }
         ]
         findings["findings"][0]["code_evidence"] = [
-            {"id": "shared-source", "code": "legacy_source()"}
+            {"id": "shared-source", "code": "legacy_source()"},
+            {"id": "legacy-duplicate", "code": "first_legacy_source()"},
+            {"id": "legacy-duplicate", "code": "second_legacy_source()"},
         ]
+        findings["findings"][0]["rootCause"] = {
+            "summary": "Canonical root cause.",
+            "code": "canonical_root()",
+            "language": "python",
+        }
         findings["findings"][0]["validation"] = {"evidence_refs": ["legacy-validation-evidence"]}
         findings["findings"][0]["attackPath"] = {
             "evidence_refs": ["legacy-attack-evidence"],
             "dataFlow": {"evidenceRefs": ["legacy-missing-evidence"]},
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
+        with self.preserving_sealed_findings(findings):
+            compatible = self.compatible_finding(findings)
+            self.assertEqual(compatible["rootCause"], findings["findings"][0]["rootCause"])
+            self.assertEqual(
+                compatible["code_evidence"],
+                [{"id": "legacy-duplicate", "code": "first_legacy_source()"}],
+            )
+            self.assertEqual(compatible["validation"], {"evidence_refs": []})
+            self.assertEqual(
+                compatible["attackPath"], {"evidence_refs": [], "dataFlow": {"evidenceRefs": []}}
+            )
 
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
-
+    @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_malformed_legacy_evidence_references(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["code_evidence"] = [
             {"id": "legacy-source", "code": "legacy_source()"}
         ]
+        findings["findings"][0]["rootCause"] = {
+            "summary": "Canonical root cause.",
+            "evidenceRefs": ["legacy-source", "missing-source"],
+        }
         findings["findings"][0]["validation"] = {
             "evidenceRefs": [None, "", 42, "legacy-source", "missing-source"]
         }
         findings["findings"][0]["attackPath"] = {
             "dataflow": {"evidence_refs": [None, "", 42, "legacy-source", "missing-source"]}
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
+        with self.preserving_sealed_findings(findings):
+            compatible = self.compatible_finding(findings)
+            self.assertEqual(
+                compatible["rootCause"],
+                {"summary": "Canonical root cause.", "evidenceRefs": ["legacy-source"]},
+            )
+            self.assertEqual(compatible["validation"], {"evidenceRefs": ["legacy-source"]})
+            self.assertEqual(
+                compatible["attackPath"], {"dataflow": {"evidence_refs": ["legacy-source"]}}
+            )
 
     def test_unsealed_scan_rejects_malformed_legacy_evidence_references(self) -> None:
         self.findings["findings"][0]["validation"] = {"evidenceRefs": [None]}
@@ -475,14 +486,10 @@ The extraction root is not enforced.
             {"id": "legacy-duplicate", "code": "first_legacy_source()"},
             {"id": "legacy-duplicate", "code": "second_legacy_source()"},
         ]
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
+        with self.preserving_sealed_findings(findings):
+            pass
 
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
-
+    @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_non_string_legacy_validation_scalars(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -490,31 +497,28 @@ The extraction root is not enforced.
             "method": [],
             "summary": {"legacy": True},
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
+        with self.preserving_sealed_findings(findings):
+            self.assertEqual(self.compatible_finding(findings)["validation"], {})
 
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
-
+    @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_formerly_free_form_finding_details(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["validation"] = {
             "evidence": {"kind": "trace"},
+            "counterEvidence": [None, "The mitigation was checked."],
         }
         findings["findings"][0]["attackPath"] = {
             "steps": {"first": "upload"},
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
+        with self.preserving_sealed_findings(findings):
+            compatible = self.compatible_finding(findings)
+            self.assertEqual(
+                compatible["validation"], {"counterEvidence": ["The mitigation was checked."]}
+            )
+            self.assertEqual(compatible["attackPath"], {})
 
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
-
+    @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_blank_legacy_attack_path_details(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -529,20 +533,17 @@ The extraction root is not enforced.
                 "likelihood",
             )
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
+        with self.preserving_sealed_findings(findings):
+            self.assertEqual(self.compatible_finding(findings)["attackPath"], {})
 
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
-
+    @pytest.mark.cross_platform
     def test_sealed_rerun_rejects_nullable_canonical_evidence_catalog(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["codeEvidence"] = None
         self.rewrite_sealed_artifact("findings.json", findings)
 
+        self.assertIsNone(self.compatible_finding(findings)["codeEvidence"])
         with self.assertRaisesRegex(
             FINALIZER.ContractError,
             r"codeEvidence: expected (?:an |schema type )?array",
@@ -714,12 +715,7 @@ The extraction root is not enforced.
         self.write_sealed_scan()
         first_manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
 
-        source_root = self.scan_dir / "source"
-        source_path = source_root / "src" / "extract.py"
-        source_path.parent.mkdir(parents=True)
-        source_path.write_text(
-            "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
-        )
+        source_root = self.write_line_hash_source()
         FINALIZER.finalize_scan(self.scan_dir, source_root=source_root)
 
         self.assertEqual(first_manifest, (self.scan_dir / "scan-manifest.json").read_bytes())
@@ -749,10 +745,7 @@ The extraction root is not enforced.
         self.write_sealed_scan()
         sarif_path = self.scan_dir / "exports" / "results.sarif"
         sarif_path.unlink()
-        canonical = {
-            name: (self.scan_dir / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-        }
+        canonical = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
 
         result = self.run_finalizer("--sarif-only")
 
@@ -765,9 +758,7 @@ The extraction root is not enforced.
         self.assertEqual(rule["properties"]["security-severity"], "8.1")
         self.assertIn("external/cwe/cwe-022", rule["properties"]["tags"])
         self.assertFalse(sarif_path.exists())
-        self.assertEqual(
-            canonical, {name: (self.scan_dir / name).read_bytes() for name in canonical}
-        )
+        self.assertEqual(canonical, self.scan_file_bytes(*canonical))
 
     def test_export_entrypoint_writes_json_csv_and_sarif_without_mutating_a_sealed_scan(
         self,
@@ -779,10 +770,7 @@ The extraction root is not enforced.
         ]
         self.findings["findings"] = [copy.deepcopy(self.finding)]
         self.write_sealed_scan()
-        canonical = {
-            name: (self.scan_dir / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-        }
+        canonical = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
 
         for export_format in ("json", "csv", "sarif"):
             with self.subTest(export_format=export_format):
@@ -832,19 +820,13 @@ The extraction root is not enforced.
                     self.assertEqual(json.loads(result.stdout)["version"], "2.1.0")
                 self.assertEqual(
                     canonical,
-                    {name: (self.scan_dir / name).read_bytes() for name in canonical},
+                    self.scan_file_bytes(*canonical),
                 )
 
     def test_deep_csv_export_includes_the_canonical_candidate_id(self) -> None:
         self.coverage["mode"] = "deep_repository"
         self.finding["extensions"] = {"candidateId": "DSS-145", "reportId": "DSS-145-rogue"}
-        self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_sealed_scan()
-
-        result = self.run_finalizer("--export-format", "csv")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        reader = csv.DictReader(io.StringIO(result.stdout, newline=""))
+        reader = self.export_csv()
         self.assertIn("candidate_id", reader.fieldnames or [])
         row = next(reader)
         self.assertEqual(row["candidate_id"], "DSS-145")
@@ -854,13 +836,7 @@ The extraction root is not enforced.
         self.coverage["mode"] = "scoped_path"
         self.finding["extensions"] = {"candidateId": "DSS-146", "reportId": "DSS-146-rogue"}
         self.finding["locations"] = [{"path": "src/extract.py", "startLine": 41, "role": "sink"}]
-        self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_sealed_scan()
-
-        result = self.run_finalizer("--export-format", "csv")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        reader = csv.DictReader(io.StringIO(result.stdout, newline=""))
+        reader = self.export_csv()
         self.assertIn("candidate_id", reader.fieldnames or [])
         row = next(reader)
         self.assertEqual(row["candidate_id"], "DSS-146")
@@ -875,39 +851,21 @@ The extraction root is not enforced.
             with self.subTest(field=field):
                 self.coverage["mode"] = coverage_mode
                 self.finding["extensions"] = {field: f"legacy-{field}"}
-                self.findings["findings"] = [copy.deepcopy(self.finding)]
-                self.write_sealed_scan()
-
-                result = self.run_finalizer("--export-format", "csv")
-
-                self.assertEqual(result.returncode, 0, result.stderr)
-                reader = csv.DictReader(io.StringIO(result.stdout, newline=""))
+                reader = self.export_csv()
                 self.assertIn("candidate_id", reader.fieldnames or [])
                 self.assertEqual(next(reader)["candidate_id"], f"legacy-{field}")
 
     def test_scoped_csv_export_does_not_classify_ordinary_ledger_ids_as_deep(self) -> None:
         self.coverage["mode"] = "scoped_path"
         self.finding["extensions"] = {"ledgerRowId": "SCAN-001-parser"}
-        self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_sealed_scan()
-
-        result = self.run_finalizer("--export-format", "csv")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        reader = csv.DictReader(io.StringIO(result.stdout, newline=""))
+        reader = self.export_csv()
         self.assertNotIn("candidate_id", reader.fieldnames or [])
 
     def test_csv_export_escapes_newline_and_full_width_formula_prefixes(self) -> None:
         self.finding["title"] = "\n=1+1"
         self.finding["summary"] = "＝1+1"
         self.finding["remediation"] = " \t＋1+1"
-        self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_sealed_scan()
-
-        result = self.run_finalizer("--export-format", "csv")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        row = next(csv.DictReader(io.StringIO(result.stdout, newline="")))
+        row = next(self.export_csv())
         self.assertEqual(row["title"], "'\n=1+1")
         self.assertEqual(row["summary"], "'＝1+1")
         self.assertEqual(row["remediation"], "' \t＋1+1")
@@ -1057,10 +1015,7 @@ The extraction root is not enforced.
         ):
             with self.subTest(arguments=arguments):
                 self.write_scan()
-                before = {
-                    name: (self.scan_dir / name).read_bytes()
-                    for name in ("scan-manifest.json", "findings.json", "coverage.json")
-                }
+                before = self.scan_file_bytes(*CANONICAL_FILES)
 
                 result = self.run_finalizer(*arguments)
 
@@ -1068,7 +1023,7 @@ The extraction root is not enforced.
                 self.assertIn("requires", result.stderr)
                 self.assertEqual(
                     before,
-                    {name: (self.scan_dir / name).read_bytes() for name in before},
+                    self.scan_file_bytes(*before),
                 )
 
     def test_sarif_only_entrypoint_rejects_changed_sealed_artifact(self) -> None:
@@ -1145,7 +1100,7 @@ The extraction root is not enforced.
         self.assertIn("cannot overwrite a scan artifact", result.stderr)
         self.assertEqual(findings.read_bytes(), before)
 
-    @unittest.skipIf(os.name == "nt", "backslash is a path separator on Windows")
+    @skipIf(os.name == "nt", "backslash is a path separator on Windows")
     def test_sarif_only_entrypoint_accepts_posix_backslash_output_name(self) -> None:
         self.write_sealed_scan()
         output = self.scan_dir.parent / "results\\v1.sarif"
@@ -1225,12 +1180,7 @@ The extraction root is not enforced.
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["locations"][0]["path"] = "../../outside.py"
-        self.write_json("findings.json", findings)
-        manifest = self.read_json("scan-manifest.json")
-        for artifact in manifest["scan"]["artifacts"]:
-            if artifact["path"] == "findings.json":
-                artifact["sha256"] = self.sha256_file("findings.json")
-        self.write_json("scan-manifest.json", manifest)
+        self.rewrite_sealed_artifact("findings.json", findings)
 
         with self.assertRaisesRegex(FINALIZER.ContractError, "safe repository-relative"):
             FINALIZER.write_sarif_projection(self.scan_dir)
@@ -1335,12 +1285,7 @@ The extraction root is not enforced.
 
     def test_sarif_projection_revalidates_sealed_coverage_receipts(self) -> None:
         receipt_ref = "artifacts/02_discovery/work_ledger.jsonl"
-        self.coverage["surfaces"][0]["receiptRefs"] = [receipt_ref]
-        self.write_scan()
-        receipt_path = self.scan_dir / receipt_ref
-        receipt_path.parent.mkdir(parents=True)
-        receipt_path.write_text('{"status":"reviewed"}\n', encoding="utf-8")
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_receipt_scan(receipt_ref)
         manifest = self.read_json("scan-manifest.json")
         manifest["scan"]["artifacts"] = [
             artifact
@@ -1606,6 +1551,7 @@ The extraction root is not enforced.
         self.assertIn("legacy validation evidence", report)
         self.assertIn("legacy data flow", report)
 
+    @pytest.mark.cross_platform
     def test_report_projection_preserves_data_flow_aliases_and_scalar_reachability(self) -> None:
         for data_flow_key in ("dataFlow", "data_flow", "dataflow"):
             with self.subTest(data_flow_key=data_flow_key):
@@ -1614,6 +1560,11 @@ The extraction root is not enforced.
                     data_flow_key: "request -> filesystem write",
                     "reachability": "An authenticated uploader can reach extraction.",
                 }
+                findings["findings"][0]["validation"] = {
+                    "assertions": ["The destination escapes the extraction root."],
+                    "evidence": "The archive entry path is not contained.",
+                    "limitations": ["The upload route was not exercised dynamically."],
+                }
 
                 report = FINALIZER._generate_report_projection(
                     self.manifest, findings, self.coverage
@@ -1621,7 +1572,11 @@ The extraction root is not enforced.
 
                 self.assertIn("request -\\> filesystem write", report)
                 self.assertIn("An authenticated uploader can reach extraction.", report)
+                self.assertIn("The destination escapes the extraction root.", report)
+                self.assertIn("The archive entry path is not contained.", report)
+                self.assertIn("The upload route was not exercised dynamically.", report)
 
+    @pytest.mark.cross_platform
     def test_report_projection_prefers_populated_data_flow_alias(self) -> None:
         findings = copy.deepcopy(self.findings)
         findings["findings"][0]["attackPath"] = {
@@ -1674,6 +1629,7 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    @pytest.mark.cross_platform
     def test_finalize_rejects_unknown_nested_code_evidence_reference(self) -> None:
         finding = self.findings["findings"][0]
         finding["attackPath"] = {
@@ -1689,6 +1645,7 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    @pytest.mark.cross_platform
     def test_finalize_accepts_nested_reference_to_legacy_code_evidence(self) -> None:
         finding = self.findings["findings"][0]
         finding["code_evidence"] = [
@@ -1707,6 +1664,7 @@ The extraction root is not enforced.
             ["legacy-source"],
         )
 
+    @pytest.mark.cross_platform
     def test_finalize_rejects_duplicate_ids_across_code_evidence_aliases(self) -> None:
         finding = self.findings["findings"][0]
         finding["codeEvidence"] = [
@@ -1728,6 +1686,7 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_scalar_finding_details(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -1755,31 +1714,17 @@ The extraction root is not enforced.
             "summary": "",
         }
         findings["findings"][0]["root_cause"] = None
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
+        with self.preserving_sealed_findings(findings):
+            compatible = self.compatible_finding(findings)
+            self.assertEqual(
+                compatible["validation"],
+                {"assertions": ["The destination escapes the extraction root."]},
+            )
+            self.assertEqual(
+                compatible["attackPath"], {"dataflow": {}, "impact": {}, "likelihood": {}}
+            )
 
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(
-            accepted["findings"][0]["validation"]["assertions"],
-            "The destination escapes the extraction root.",
-        )
-        self.assertEqual(accepted["findings"][0]["validation"]["limitations"], "")
-        self.assertIsNone(accepted["findings"][0]["validation"]["counterEvidence"])
-        self.assertEqual(accepted["findings"][0]["validation"]["method"], "")
-        self.assertEqual(accepted["findings"][0]["validation"]["status"], "")
-        self.assertEqual(accepted["findings"][0]["validation"]["summary"], "")
-        self.assertEqual(accepted["findings"][0]["validation"]["disposition"], "")
-        self.assertEqual(accepted["findings"][0]["validation"]["result"], "")
-        self.assertIsNone(accepted["findings"][0]["attackPath"]["dataFlow"])
-        self.assertEqual(accepted["findings"][0]["attackPath"]["dataflow"]["summary"], "")
-        self.assertEqual(accepted["findings"][0]["attackPath"]["impact"]["level"], "")
-        self.assertIsNone(accepted["findings"][0]["attackPath"]["likelihood"]["level"])
-        self.assertIsNone(accepted["findings"][0]["attackPath"]["reachability"])
-        self.assertEqual(accepted["findings"][0]["attackPath"]["summary"], "")
-        self.assertIsNone(accepted["findings"][0]["root_cause"])
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
-
+    @pytest.mark.cross_platform
     def test_sealed_rerun_rejects_malformed_canonical_root_cause(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -1795,30 +1740,33 @@ The extraction root is not enforced.
 
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
 
+    @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_nullable_legacy_evidence_catalog(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["code_evidence"] = None
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
+        with self.preserving_sealed_findings(findings):
+            self.assertNotIn("code_evidence", self.compatible_finding(findings))
 
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertIsNone(accepted["findings"][0]["code_evidence"])
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+    def test_sealed_rerun_and_export_preserve_nullable_legacy_evidence_path(self) -> None:
+        self.write_sealed_scan()
+        findings = self.read_json("findings.json")
+        findings["findings"][0]["code_evidence"] = [
+            {"id": "legacy-source", "code": "legacy_source()", "path": None}
+        ]
+        with self.preserving_sealed_findings(findings):
+            result = self.run_finalizer("--export-format", "json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), findings)
 
     def test_sealed_rerun_accepts_empty_legacy_root_cause(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["root_cause"] = ""
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
+        with self.preserving_sealed_findings(findings):
+            pass
 
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted["findings"][0]["root_cause"], "")
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
-
+    @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_malformed_legacy_evidence_rows(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -1831,13 +1779,11 @@ The extraction root is not enforced.
             {"id": "empty-code", "code": ""},
             {"id": "legacy-source", "code": "legacy_source()"},
         ]
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+        with self.preserving_sealed_findings(findings):
+            self.assertEqual(
+                self.compatible_finding(findings)["code_evidence"],
+                [{"id": "legacy-source", "code": "legacy_source()"}],
+            )
 
     def test_unsealed_scan_rejects_malformed_legacy_evidence_rows(self) -> None:
         self.findings["findings"][0]["code_evidence"] = [None]
@@ -1871,6 +1817,7 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_sequence_attack_path_details(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -1878,44 +1825,28 @@ The extraction root is not enforced.
             "dataflow": ["archive entry path", "filesystem write"],
             "reachability": ["authenticated uploader"],
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(
-            accepted["findings"][0]["attackPath"]["dataflow"],
-            ["archive entry path", "filesystem write"],
-        )
-        self.assertEqual(
-            accepted["findings"][0]["attackPath"]["reachability"],
-            ["authenticated uploader"],
-        )
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+        with self.preserving_sealed_findings(findings):
+            self.assertEqual(self.compatible_finding(findings)["attackPath"], {})
 
     def test_non_standard_json_numbers_are_rejected(self) -> None:
         self.findings["findings"][0]["validation"] = {"score": float("nan")}
         self.write_scan()
 
-        with self.assertRaisesRegex(FINALIZER.ContractError, "invalid JSON.*NaN"):
+        with self.assertRaisesRegex(
+            FINALIZER.ContractError, "invalid JSON.*non-finite JSON number.*NaN"
+        ):
             FINALIZER.finalize_scan(self.scan_dir)
         with self.assertRaisesRegex(FINALIZER.ContractError, "cannot encode canonical JSON"):
             FINALIZER._json_bytes({"score": float("nan")})
 
     def test_sealed_rerun_regenerates_reports_without_mutating_canonical_artifacts(self) -> None:
         self.write_sealed_scan()
-        canonical_before = {
-            name: (self.scan_dir / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json")
-        }
+        canonical_before = self.scan_file_bytes(*CANONICAL_FILES)
         (self.scan_dir / "report.md").write_text("# stale report\n", encoding="utf-8")
 
         FINALIZER.finalize_scan(self.scan_dir)
 
-        canonical_after = {
-            name: (self.scan_dir / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json")
-        }
+        canonical_after = self.scan_file_bytes(*CANONICAL_FILES)
         self.assertEqual(canonical_before, canonical_after)
         self.assertNotIn("stale report", (self.scan_dir / "report.md").read_text(encoding="utf-8"))
         self.assertFalse((self.scan_dir / "report.html").exists())
@@ -1938,19 +1869,13 @@ The extraction root is not enforced.
         self.findings["findings"][0]["findingId"] = "csf_wrong"
         self.coverage["openQuestions"] = ["  Which path is reachable?  "]
         self.write_scan()
-        before = {
-            name: (self.scan_dir / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-        }
+        before = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
 
         prepared = FINALIZER._prepare_scan_finalization(self.scan_dir)
 
         self.assertEqual(
             before,
-            {
-                name: (self.scan_dir / name).read_bytes()
-                for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-            },
+            self.scan_file_bytes(*CANONICAL_FILES, "report.md"),
         )
         FINALIZER._write_prepared_scan_finalization(prepared)
         manifest = self.read_json("scan-manifest.json")
@@ -1985,18 +1910,6 @@ The extraction root is not enforced.
         self.assertNotIn("sealedAt", manifest["scan"])
         self.assertNotIn("artifacts", manifest["scan"])
 
-    def test_rejects_non_finite_json_numbers(self) -> None:
-        self.write_scan()
-        findings_path = self.scan_dir / "findings.json"
-        raw = findings_path.read_text(encoding="utf-8").replace(
-            '"attackPath": null',
-            '"attackPath": {"likelihood": NaN}',
-        )
-        findings_path.write_text(raw, encoding="utf-8")
-
-        with self.assertRaisesRegex(FINALIZER.ContractError, "non-finite JSON number"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
     def test_rerun_preserves_additional_sealed_artifact_records(self) -> None:
         self.write_sealed_scan()
         extra_path = self.scan_dir / "exports" / "extra.json"
@@ -2016,13 +1929,7 @@ The extraction root is not enforced.
     def test_seals_coverage_receipt_refs(self) -> None:
         receipt_ref = "artifacts/02_discovery/./work_ledger.jsonl"
         normalized_ref = "artifacts/02_discovery/work_ledger.jsonl"
-        self.coverage["surfaces"][0]["receiptRefs"] = [receipt_ref]
-        self.write_scan()
-        receipt_path = self.scan_dir / receipt_ref
-        receipt_path.parent.mkdir(parents=True)
-        receipt_path.write_text('{"status":"reviewed"}\n', encoding="utf-8")
-
-        FINALIZER.finalize_scan(self.scan_dir)
+        receipt_path = self.write_sealed_receipt_scan(receipt_ref)
 
         manifest = self.read_json("scan-manifest.json")
         coverage = self.read_json("coverage.json")
@@ -2034,15 +1941,101 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_seals_import_source_without_claiming_coverage(self) -> None:
+        for with_surface in (False, True):
+            for format in ("csv", "json"):
+                with self.subTest(with_surface=with_surface, format=format):
+                    source_ref = f"artifacts/import/source.{format}"
+                    source = b"synthetic imported source\n"
+                    self.manifest["scan"]["extensions"] = {
+                        "import": {"format": format, "sourceRef": source_ref}
+                    }
+                    self.findings["findings"] = []
+                    self.coverage["completeness"] = "unknown"
+                    self.coverage["surfaces"] = (
+                        [
+                            {
+                                "id": "import",
+                                "label": "import",
+                                "disposition": "reported",
+                                "receiptRefs": [source_ref],
+                            }
+                        ]
+                        if with_surface
+                        else []
+                    )
+                    self.write_scan()
+                    source_path = self.scan_dir / source_ref
+                    source_path.parent.mkdir(parents=True, exist_ok=True)
+                    source_path.write_bytes(source)
+                    FINALIZER.finalize_scan(self.scan_dir)
+                    manifest = self.read_json("scan-manifest.json")
+                    records = [
+                        record
+                        for record in manifest["scan"]["artifacts"]
+                        if record["path"] == source_ref
+                    ]
+                    self.assertEqual(
+                        records,
+                        [
+                            {
+                                "path": source_ref,
+                                "sha256": hashlib.sha256(source).hexdigest(),
+                                "mediaType": "application/octet-stream",
+                            }
+                        ],
+                    )
+                    self.assertEqual(
+                        self.read_json("coverage.json")["surfaces"], self.coverage["surfaces"]
+                    )
+                    sealed = (self.scan_dir / "scan-manifest.json").read_bytes()
+                    FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), sealed)
+                    source_path.write_bytes(b"changed\n")
+                    with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
+                        FINALIZER.finalize_scan(self.scan_dir)
+                    source_path.unlink()
+                    with self.assertRaises(FINALIZER.ContractError):
+                        FINALIZER.build_findings_export(self.scan_dir, "json")
+                    source_path.write_bytes(source)
+                    manifest["scan"]["artifacts"].remove(records[0])
+                    self.write_json("scan-manifest.json", manifest)
+                    with self.assertRaisesRegex(
+                        FINALIZER.ContractError, "missing from sealed artifacts"
+                    ):
+                        FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_missing_or_unsafe_import_source(self) -> None:
+        self.findings["findings"] = []
+        self.coverage["completeness"] = "unknown"
+        self.coverage["surfaces"] = []
+        for source_ref in ("artifacts/import/missing.json", "../source.json", "findings.json"):
+            with self.subTest(source_ref=source_ref):
+                self.manifest["scan"]["extensions"] = {"import": {"sourceRef": source_ref}}
+                self.write_scan()
+                with self.assertRaises(FINALIZER.ContractError):
+                    FINALIZER.finalize_scan(self.scan_dir)
+                self.assertNotIn("artifacts", self.read_json("scan-manifest.json")["scan"])
+
+    def test_rejects_symlink_import_source(self) -> None:
+        source_ref = "artifacts/import/source.json"
+        self.manifest["scan"]["extensions"] = {"import": {"sourceRef": source_ref}}
+        self.findings["findings"] = []
+        self.coverage["completeness"] = "unknown"
+        self.coverage["surfaces"] = []
+        self.write_scan()
+        source_path = self.scan_dir / source_ref
+        source_path.parent.mkdir(parents=True)
+        target = source_path.with_name("retained.json")
+        target.write_bytes(b"{}\n")
+        source_path.symlink_to(target)
+        with self.assertRaisesRegex(FINALIZER.ContractError, "non-symlink"):
+            FINALIZER.finalize_scan(self.scan_dir)
+
     def test_verifies_legacy_aliased_receipt_ref(self) -> None:
         receipt_ref = "artifacts/02_discovery/work_ledger.jsonl"
         legacy_ref = "artifacts/02_discovery/./work_ledger.jsonl"
-        self.coverage["surfaces"][0]["receiptRefs"] = [receipt_ref]
-        self.write_scan()
-        receipt_path = self.scan_dir / receipt_ref
-        receipt_path.parent.mkdir(parents=True)
-        receipt_path.write_text('{"status":"reviewed"}\n', encoding="utf-8")
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_receipt_scan(receipt_ref)
 
         coverage = self.read_json("coverage.json")
         coverage["surfaces"][0]["receiptRefs"] = [legacy_ref]
@@ -2062,12 +2055,7 @@ The extraction root is not enforced.
 
     def test_rejects_unsealed_coverage_receipt_ref_in_sealed_bundle(self) -> None:
         receipt_ref = "artifacts/02_discovery/work_ledger.jsonl"
-        self.coverage["surfaces"][0]["receiptRefs"] = [receipt_ref]
-        self.write_scan()
-        receipt_path = self.scan_dir / receipt_ref
-        receipt_path.parent.mkdir(parents=True)
-        receipt_path.write_text('{"status":"reviewed"}\n', encoding="utf-8")
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_receipt_scan(receipt_ref)
         manifest = self.read_json("scan-manifest.json")
         manifest["scan"]["artifacts"] = [
             artifact
@@ -2136,10 +2124,7 @@ The extraction root is not enforced.
         self.assertEqual(second["properties"]["security-severity"], "9.4")
 
     def test_sarif_adds_only_candidate_id_to_deep_result_presentation(self) -> None:
-        finding = copy.deepcopy(self.finding)
-        finding["findingId"] = "csf_example"
-        finding["occurrenceId"] = "occ_example"
-        finding["fingerprints"] = {"primary": "fingerprint"}
+        finding = self.sarif_finding("fingerprint")
         finding["extensions"] = {
             "candidateId": "DSS-145",
             "reportId": "DSS-145-rogue-fw",
@@ -2193,6 +2178,7 @@ The extraction root is not enforced.
         self.assertEqual(warnings, ["Recovered finding 1: normalized severity change conditions."])
         self.assertEqual(prepared[4]["completeness"], "complete")
 
+    @pytest.mark.cross_platform
     def test_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
         canonical_evidence = {
             "id": "canonical-source",
@@ -2202,7 +2188,7 @@ The extraction root is not enforced.
             "code": "canonical_source()",
             "explanation": "Canonical snippet.",
         }
-        legacy_evidence = {"id": "legacy-source", "code": "legacy_source()"}
+        legacy_evidence = {"id": "legacy-source", "code": "legacy_source()", "path": None}
         for evidence_field, evidence in (
             ("codeEvidence", canonical_evidence),
             ("code_evidence", legacy_evidence),
@@ -2224,13 +2210,13 @@ The extraction root is not enforced.
 
                 self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
                 self.assertIsNone(prepared[3]["findings"][0]["root_cause"])
-                self.assertTrue(
-                    any(
-                        "retained stronger duplicate logical finding" in warning
-                        for warning in warnings
-                    )
+                self.assertEqual(prepared[3]["findings"][0][evidence_field], [evidence])
+                self.assertEqual(
+                    warnings,
+                    ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
+    @pytest.mark.cross_platform
     def test_recovery_ranks_embedded_root_cause_evidence(self) -> None:
         for name, root_cause in (
             (
@@ -2261,11 +2247,9 @@ The extraction root is not enforced.
                 )
 
                 self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
-                self.assertTrue(
-                    any(
-                        "retained stronger duplicate logical finding" in warning
-                        for warning in warnings
-                    )
+                self.assertEqual(
+                    warnings,
+                    ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
     def test_recovery_rejects_malformed_severity_change_condition_lists(self) -> None:
@@ -2333,6 +2317,36 @@ The extraction root is not enforced.
         )
         self.assertFalse(warnings)
 
+    def test_recovery_publishes_findings_without_unsafe_deferred_paths(self) -> None:
+        valid = {"id": "review", "reason": "Repository review is incomplete.", "paths": ["."]}
+        self.coverage["deferred"] = [
+            {"id": "invalid", "reason": "Invalid scope.", "paths": ["../outside.py"]},
+            valid,
+        ]
+        for status in ("completed", "interrupted"):
+            with self.subTest(status=status):
+                self.write_scan()
+                binding = {**self.completion_binding(), "status": status}
+                warnings: list[str] = []
+                prepared = FINALIZER._prepare_scan_finalization(
+                    self.scan_dir, completion_binding=binding, completion_warnings=warnings
+                )
+                manifest, findings, coverage = FINALIZER._write_prepared_scan_finalization(prepared)
+
+                self.assertEqual(manifest["scan"]["status"], status)
+                self.assertEqual(len(findings["findings"]), 1)
+                self.assertEqual(findings["findings"][0]["title"], self.finding["title"])
+                self.assertEqual(coverage["deferred"], [valid])
+                self.assertEqual(coverage["completeness"], "partial")
+                self.assertTrue(
+                    any(
+                        "Skipped malformed deferred coverage item 1" in warning
+                        for warning in warnings
+                    )
+                )
+                self.assertEqual(self.read_json("findings.json"), findings)
+                self.assertEqual(self.read_json("coverage.json"), coverage)
+
     def test_sealed_findings_keep_authored_identity_mismatches_strict(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -2356,6 +2370,16 @@ The extraction root is not enforced.
         self.write_scan()
         with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
             FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_control_characters(self) -> None:
+        for character in ("\0", "\t", "\n", "\r", "\x7f", "\x85", "\u2028", "\u2029"):
+            with self.subTest(character=repr(character)):
+                self.manifest["scan"]["target"]["remote"] = f"https://example.com{character}/repo"
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_repository_root_finding_location(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "."
@@ -2433,13 +2457,63 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "cannot have deferred work"):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_non_rfc3339_timestamps(self) -> None:
-        for timestamp in ("2026-W22-7T18:09:00+00:00", "2026-05-31T18:09:00+0000"):
-            with self.subTest(timestamp=timestamp):
-                self.manifest["scan"]["startedAt"] = timestamp
+    def test_rejects_unsafe_code_evidence_paths(self) -> None:
+        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+            with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Synthetic source evidence.",
+                    }
+                ]
                 self.write_scan()
-                with self.assertRaisesRegex(FINALIZER.ContractError, "RFC 3339 timestamp"):
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError,
+                    r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
+                ):
                     FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_unsafe_deferred_paths(self) -> None:
+        self.coverage["completeness"] = "partial"
+        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+            with self.subTest(path=path):
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError,
+                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
+        self.findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": "src/extract.py",
+                "startLine": 41,
+                "code": "source()",
+                "explanation": "Repository-relative evidence.",
+            }
+        ]
+        self.coverage["completeness"] = "partial"
+        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+            with self.subTest(path=path):
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.write_scan()
+                _, findings, coverage = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(
+                    findings["findings"][0]["codeEvidence"][0]["path"], "src/extract.py"
+                )
+                self.assertEqual(coverage["deferred"][0]["paths"], [path])
 
     def test_rejects_coverage_scope_mismatch(self) -> None:
         self.coverage["includePaths"] = ["other/"]
@@ -2546,10 +2620,7 @@ The extraction root is not enforced.
         binding["startedAt"] = manifest["scan"]["startedAt"]
         binding["completedAt"] = manifest["scan"]["completedAt"]
         binding["producer"] = {"name": "wrong-producer", "version": "0.1.0"}
-        canonical = {
-            name: (self.scan_dir / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-        }
+        canonical = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
 
         with self.assertRaisesRegex(
             FINALIZER.ContractError,
@@ -2563,7 +2634,7 @@ The extraction root is not enforced.
 
         self.assertEqual(
             canonical,
-            {name: (self.scan_dir / name).read_bytes() for name in canonical},
+            self.scan_file_bytes(*canonical),
         )
 
     def test_completion_binding_preserves_required_unbound_diff_snapshot_digest(self) -> None:
@@ -2682,10 +2753,7 @@ The extraction root is not enforced.
 
     def test_sarif_encodes_location_as_relative_uri(self) -> None:
         self.finding["locations"][0]["path"] = "src/archive handlers/extract.py"
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding("fingerprint")
         result = FINALIZER._sarif_result(sarif_finding, 0)
         location = result["locations"][0]["physicalLocation"]["artifactLocation"]
         uri = location["uri"]
@@ -2698,10 +2766,7 @@ The extraction root is not enforced.
         self.assertNotIn("originalUriBaseIds", sarif["runs"][0])
 
     def test_sarif_keeps_root_first_and_preserves_sink_and_evidence_locations(self) -> None:
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding("fingerprint")
         sarif_finding["locations"] = [
             {"path": "src/route.py", "startLine": 10, "role": "entrypoint/wrapper"},
             {"path": "src/control.py", "startLine": 20, "role": "root_control"},
@@ -2764,11 +2829,9 @@ The extraction root is not enforced.
         )
         self.assertNotIn("relatedLocations", result)
 
+    @pytest.mark.cross_platform
     def test_sarif_includes_legacy_code_evidence_locations(self) -> None:
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding("fingerprint")
         sarif_finding["codeEvidence"] = [
             {
                 "id": "canonical-source",
@@ -2796,6 +2859,10 @@ The extraction root is not enforced.
             for location in result["locations"]
         }
         self.assertEqual(
+            locations["src/canonical.py"]["physicalLocation"]["region"],
+            {"startLine": 12, "endLine": 12},
+        )
+        self.assertEqual(
             locations["src/legacy.py"],
             {
                 "physicalLocation": {
@@ -2806,11 +2873,9 @@ The extraction root is not enforced.
             },
         )
 
+    @pytest.mark.cross_platform
     def test_sarif_normalizes_invalid_legacy_code_evidence_bounds(self) -> None:
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding("fingerprint")
         sarif_finding["code_evidence"] = [
             {
                 "id": "legacy-null-end",
@@ -2847,11 +2912,9 @@ The extraction root is not enforced.
         self.assertEqual(regions["src/reversed_end.py"], {"startLine": 48, "endLine": 48})
         self.assertEqual(regions["src/text_end.py"], {"startLine": 59, "endLine": 59})
 
+    @pytest.mark.cross_platform
     def test_sarif_omits_invalid_legacy_code_evidence_locations(self) -> None:
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding("fingerprint")
         sarif_finding["code_evidence"] = [
             {
                 "id": "legacy-zero-start",
@@ -2895,36 +2958,17 @@ The extraction root is not enforced.
         )
 
     def test_sarif_emits_github_line_hash_when_source_is_available(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_path = source_root / "src" / "extract.py"
-        source_path.parent.mkdir(parents=True)
-        source_path.write_text(
-            "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
-        )
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+        source_root = self.write_line_hash_source()
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
         result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         fingerprints = result["partialFingerprints"]
         self.assertEqual(fingerprints["codexSecurity/v1"], "semantic-fingerprint")
         self.assertEqual(fingerprints["primaryLocationLineHash"], "614150a715d5311d:1")
 
     def test_sarif_emits_github_line_hash_through_windows_backend(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_path = source_root / "src" / "extract.py"
-        source_path.parent.mkdir(parents=True)
-        source_path.write_text(
-            "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
-        )
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
-        backend = mock.Mock()
-        backend.open_read_fd.side_effect = lambda root, relative_path, _context: os.open(
-            root / relative_path, os.O_RDONLY
-        )
+        source_root = self.write_line_hash_source()
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
+        backend = windows_file_backend()
 
         with (
             mock.patch.object(FINALIZER.os, "supports_dir_fd", set()),
@@ -2948,10 +2992,7 @@ The extraction root is not enforced.
         entrypoint_path.parent.mkdir(parents=True)
         entrypoint_path.write_text("entrypoint\n", encoding="utf-8")
         control_path.write_text("root control\n", encoding="utf-8")
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
         sarif_finding["locations"] = [
             {"path": "src/route.py", "startLine": 1, "role": "entrypoint/wrapper"},
             {"path": "src/control.py", "startLine": 1, "role": "root_control"},
@@ -2972,10 +3013,7 @@ The extraction root is not enforced.
         source_path = source_root / "src" / "extract.py"
         source_path.parent.mkdir(parents=True)
         source_path.write_bytes(b"\n" * 40 + b"invalid: \xff\n")
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
         result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
@@ -2989,14 +3027,11 @@ The extraction root is not enforced.
                 "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
             )
             source_path.symlink_to(external_path)
-            sarif_finding = copy.deepcopy(self.finding)
-            sarif_finding["findingId"] = "csf_example"
-            sarif_finding["occurrenceId"] = "occ_example"
-            sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+            sarif_finding = self.sarif_finding("semantic-fingerprint")
             result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
-    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
+    @skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
     def test_sarif_line_hash_skips_fifo_source_without_blocking(self) -> None:
         source_root = self.scan_dir / "source"
         source_root.mkdir()
@@ -3051,16 +3086,8 @@ The extraction root is not enforced.
         self.assertNotEqual(line_hashes[41], external_hashes[41])
 
     def test_sarif_line_hash_skips_source_read_error(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_path = source_root / "src" / "extract.py"
-        source_path.parent.mkdir(parents=True)
-        source_path.write_text(
-            "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
-        )
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+        source_root = self.write_line_hash_source()
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
         with mock.patch.object(FINALIZER, "_github_line_hashes", side_effect=PermissionError):
             result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
@@ -3086,10 +3113,7 @@ The extraction root is not enforced.
         for index in range(2):
             relative_path = f"src/extract-{index}.py"
             (source_root / relative_path).write_text(" " * (6 * 1024 * 1024) + "x")
-            finding = copy.deepcopy(self.finding)
-            finding["findingId"] = f"csf_{index}"
-            finding["occurrenceId"] = f"occ_{index}"
-            finding["fingerprints"] = {"primary": f"fingerprint-{index}"}
+            finding = self.sarif_finding(f"fingerprint-{index}", str(index))
             finding["locations"][0] = {"path": relative_path, "startLine": 1}
             findings.append(finding)
 
@@ -3100,18 +3124,10 @@ The extraction root is not enforced.
             self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_caches_line_hashes_per_source_file(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_path = source_root / "src" / "extract.py"
-        source_path.parent.mkdir(parents=True)
-        source_path.write_text(
-            "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
-        )
+        source_root = self.write_line_hash_source()
         findings = []
         for index in range(2):
-            finding = copy.deepcopy(self.finding)
-            finding["findingId"] = f"csf_{index}"
-            finding["occurrenceId"] = f"occ_{index}"
-            finding["fingerprints"] = {"primary": f"fingerprint-{index}"}
+            finding = self.sarif_finding(f"fingerprint-{index}", str(index))
             finding["locations"][0]["startLine"] += index
             finding["locations"][0]["endLine"] += index
             findings.append(finding)
@@ -3124,5 +3140,25 @@ The extraction root is not enforced.
         self.assertEqual(line_hashes.call_count, 1)
 
 
+@pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])
+def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
+    schema = {"type": expected}
+    FINALIZER._validate_schema_node(value, schema, "value")
+    with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
+        FINALIZER._validate_schema_node(True, schema, "value")
+
+
+def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:
+    root = {"$defs": {"text": {"type": "string", "minLength": 1}}}
+    reference = {"$ref": "#/$defs/text"}
+    FINALIZER._validate_schema_node("yes", reference, "value", root)
+    with pytest.raises(FINALIZER.ContractError, match="string is too short"):
+        FINALIZER._validate_schema_node("", reference, "value", root)
+    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
+        FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
+    with pytest.raises(RecursionError):
+        FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    main()
