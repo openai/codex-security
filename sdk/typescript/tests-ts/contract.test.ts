@@ -14,11 +14,16 @@ import {
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import fc from "fast-check";
-import { ContractValidationError, loadContract } from "../src/index.js";
+import {
+  ContractValidationError,
+  loadContract,
+  ScanResult,
+} from "../src/index.js";
+import type { DeferredCoverage } from "../src/models.js";
 import { sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { runPython } from "./support/python-probe.js";
+import { runPython, runPythonJsonProbe } from "./support/python-probe.js";
 import { propertyOptions } from "./support/property.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
@@ -1567,3 +1572,121 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow("producer version");
   });
 });
+
+for (const sourceWorkerId of [
+  "",
+  " ",
+  "worker-a",
+  { worker: "synthetic-worker" },
+  ["synthetic-worker"],
+  null,
+]) {
+  test(`loads sealed v1 coverage with historical owner metadata ${JSON.stringify(sourceWorkerId)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["surfaces"][0]["sourceWorkerId"] = sourceWorkerId;
+    coverage["completeness"] = "partial";
+    coverage["deferred"] = [
+      {
+        id: "historical-review",
+        candidateId: "historical-candidate",
+        reason: "Historical saved review remains pending.",
+        sourceWorkerId,
+        surfaceIds: [coverage["surfaces"][0]["id"]],
+      },
+    ];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.coverage.surfaces[0]!["sourceWorkerId"]).toEqual(
+      sourceWorkerId,
+    );
+    expect(loaded.coverage.deferred[0]!["sourceWorkerId"]).toEqual(
+      sourceWorkerId,
+    );
+    const pythonPending = runPythonJsonProbe(
+      "import json,sys; sys.path.insert(0,sys.argv[1]); from candidate_identity import unresolved_candidates; value=json.loads(sys.argv[2]); print(json.dumps(unresolved_candidates(value['coverage'],value['findings'])))",
+      { coverage: loaded.coverage, findings: loaded.findings.findings },
+    ) as typeof loaded.coverage.deferred;
+    const result = new ScanResult({
+      ...loaded,
+      scanDir,
+      threadId: "saved-thread",
+      turnResult: {},
+    });
+    expect(result.unresolvedCandidates).toEqual(pythonPending);
+    expect(result.toJSON()).toMatchObject({
+      unresolvedCandidateCount: (pythonPending as unknown[]).length,
+    });
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}
+
+for (const candidate of [
+  null,
+  "Historical annotation.",
+  ["Historical trace."],
+  {},
+  { evidence: "Opaque historical evidence." },
+]) {
+  test(`loads sealed v1 deferred historical candidate extension ${JSON.stringify(candidate)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["completeness"] = "partial";
+    const deferred: DeferredCoverage = {
+      id: "historical-proof",
+      candidateId: "historical-candidate",
+      reason: "The historical proof gap remains.",
+      candidate,
+      surfaceIds: [coverage["surfaces"][0]["id"]],
+    };
+    coverage["deferred"] = [deferred];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.coverage.deferred[0]!["candidate"] as unknown).toEqual(
+      candidate,
+    );
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}
+
+for (const candidateId of [
+  null,
+  false,
+  0,
+  {},
+  ["historical"],
+  "",
+  " ",
+  "review/auth",
+]) {
+  test(`loads sealed coverage with generic candidateId metadata ${JSON.stringify(candidateId)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["surfaces"][0]["candidateId"] = candidateId;
+    coverage["completeness"] = "partial";
+    coverage["deferred"] = [
+      {
+        id: "historical-review",
+        candidateId,
+        reason: "Independent review remains.",
+      },
+    ];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.coverage.surfaces[0]!["candidateId"]).toEqual(candidateId);
+    expect(loaded.coverage.deferred[0]!["candidateId"]).toEqual(candidateId);
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}

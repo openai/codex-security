@@ -3103,12 +3103,21 @@ async function testResumedManifestPreservesCompletedReducer(
     maxDiscoveryRuns: 3,
   });
   const store = new FakeStore(fixture.run);
+  const pendingCandidate = {
+    candidateId: "pending-review",
+    reason: "Candidate validation remains pending.",
+    candidate: { evidence: "The fixture handler needs review." },
+  };
   store.dedupCommitResponseGate = Promise.withResolvers<void>();
   const original = createCoordinator(
     fixture,
     store,
     new FakeExecutor({
       blockDiscoveryAfterCalls: 2,
+      discoveryDeferred: [
+        pendingCandidate,
+        { reason: "General follow-up work." },
+      ],
     }),
     { run: store.run },
   );
@@ -3157,6 +3166,7 @@ async function testResumedManifestPreservesCompletedReducer(
     persistedWorkers: structuredClone([...store.workers.values()]),
     persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
   };
+  const publishedDrafts: ScanDraftInput[] = [];
   const acceptedWorkers = store.run.persistedWorkers!.filter(
     (worker) => worker.status === "succeeded",
   );
@@ -3173,12 +3183,29 @@ async function testResumedManifestPreservesCompletedReducer(
   const replacementExecutor = new FakeExecutor();
   const terminal = await runCoordinator(fixture, store, replacementExecutor, {
     run: store.run,
+    onComplete: async (draft) => {
+      publishedDrafts.push(structuredClone(draft));
+    },
   });
   assert.equal(terminal?.status, "succeeded");
   const manifest = await readJson(terminal.manifestPath);
   assert.equal(manifest.scan.scanId, fixture.run.scanId);
   assert.equal(store.dedupCommits.length, 1);
   assert.equal(store.dedupClaims.length, 1);
+  assert.deepEqual(
+    publishedDrafts.map((draft) => draft.coverage),
+    [
+      {
+        completeness: "partial",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: store.dedupClaims[0].workerIds.map((sourceWorkerId) => ({
+          ...pendingCandidate,
+          sourceWorkerId,
+        })),
+      },
+    ],
+  );
   assert.equal(
     replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
     0,

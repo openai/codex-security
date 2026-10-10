@@ -26,6 +26,7 @@ from urllib.parse import quote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
 import threat_model_projection
+from candidate_identity import finding_candidate_id
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -1210,6 +1211,7 @@ def _recover_unsealed_coverage(
         partial = True
 
     surface_ids: set[str] = set()
+    recovered_candidates: list[tuple[dict[str, Any], str]] = []
     for field, label in (
         ("surfaces", "coverage surface"),
         ("explicitExclusions", "coverage exclusion"),
@@ -1235,6 +1237,7 @@ def _recover_unsealed_coverage(
                     if surface_id in surface_ids:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
+                    warning_start = len(warnings)
                     surface_recovered = False
                     if not isinstance(disposition, str) or disposition not in DISPOSITIONS:
                         warnings.append(
@@ -1294,9 +1297,51 @@ def _recover_unsealed_coverage(
 
             if field == "surfaces":
                 surface_ids.add(surface_id)
+                if (
+                    surface_recovered
+                    and disposition in ("rejected", "not_applicable")
+                    and isinstance(item.get("candidateId"), str)
+                ):
+                    recovered_candidates.append((item, "\n".join(warnings[warning_start:])))
             recovered.append(item)
 
         coverage[field] = recovered
+
+    deferred_ids = {item["id"] for item in coverage["deferred"]}
+    closures = coverage.get("resolvedDeferred")
+    if isinstance(closures, list):
+        deferred_ids.update(
+            item["id"]
+            for item in closures
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        )
+    for surface, reason in recovered_candidates:
+        if any(
+            item.get("candidateId") == surface["candidateId"]
+            and item.get("sourceWorkerId") == surface.get("sourceWorkerId")
+            for item in coverage["deferred"]
+        ):
+            continue
+        identity = surface["id"]
+        suffix = 2
+        while identity in deferred_ids:
+            identity = f"{surface['id']}-{suffix}"
+            suffix += 1
+        deferred_ids.add(identity)
+        coverage["deferred"].append(
+            {
+                "id": identity,
+                "candidateId": surface["candidateId"],
+                "reason": reason,
+                "surfaceIds": [surface["id"]],
+                **{
+                    field: copy.deepcopy(surface[field])
+                    for field in ("sourceWorkerId", "candidate", "finding")
+                    if field in surface
+                    and (field == "sourceWorkerId" or isinstance(surface[field], dict))
+                },
+            }
+        )
 
     if discarded_findings:
         for surface in coverage["surfaces"]:
@@ -1628,11 +1673,9 @@ def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
     if "resolvedDeferred" not in coverage:
         return
     active = {
-        identity
+        row["id"]
         for row in coverage.get("deferred", [])
-        if isinstance(row, dict)
-        for identity in (row.get("id"), row.get("candidateId"))
-        if isinstance(identity, str)
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     resolved: set[str] = set()
     for index, closure in enumerate(_require_list(coverage, "resolvedDeferred", "coverage")):
@@ -2721,27 +2764,6 @@ def csv_cell(value: Any) -> Any:
     ):
         return f"'{value}"
     return value
-
-
-def finding_candidate_id(finding: dict[str, Any]) -> str | None:
-    provenance = finding.get("provenance")
-    if (
-        isinstance(provenance, dict)
-        and isinstance(value := provenance.get("candidateId"), str)
-        and value.strip()
-    ):
-        return value
-    extensions = finding.get("extensions")
-    if not isinstance(extensions, dict):
-        return None
-    return next(
-        (
-            value
-            for field in ("candidateId", "reportId", "ledgerRowId")
-            if isinstance(value := extensions.get(field), str) and value.strip()
-        ),
-        None,
-    )
 
 
 def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:

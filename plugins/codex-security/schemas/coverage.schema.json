@@ -39,20 +39,10 @@
       ]
     },
     "completeness": {
-      "enum": [
-        "complete",
-        "partial",
-        "unknown"
-      ]
+      "enum": ["complete", "partial", "unknown"]
     },
     "inventoryStrategy": {
-      "enum": [
-        "repository",
-        "scoped_path",
-        "diff",
-        "directory",
-        "custom"
-      ]
+      "enum": ["repository", "scoped_path", "diff", "directory", "custom"]
     },
     "includePaths": {
       "type": "array",
@@ -70,12 +60,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "id",
-          "label",
-          "disposition",
-          "receiptRefs"
-        ],
+        "required": ["id", "label", "disposition", "receiptRefs"],
         "properties": {
           "id": {
             "type": "string",
@@ -109,6 +94,10 @@
           "notes": {
             "type": "string",
             "minLength": 1
+          },
+          "candidateId": {
+            "description": "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+            "tsType": "unknown"
           }
         }
       }
@@ -117,10 +106,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "pattern",
-          "reason"
-        ],
+        "required": ["pattern", "reason"],
         "properties": {
           "pattern": {
             "type": "string",
@@ -137,10 +123,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "id",
-          "reason"
-        ],
+        "required": ["id", "reason"],
         "properties": {
           "id": {
             "type": "string",
@@ -163,6 +146,14 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "candidateId": {
+            "description": "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+            "tsType": "unknown"
+          },
+          "candidate": {
+            "description": "Saved candidate details and evidence awaiting a final decision.",
+            "tsType": "unknown"
           }
         }
       }
@@ -182,10 +173,7 @@
             "minLength": 1
           }
         },
-        "required": [
-          "id",
-          "reason"
-        ],
+        "required": ["id", "reason"],
         "additionalProperties": false
       }
     },
@@ -193,9 +181,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "question"
-        ],
+        "required": ["question"],
         "properties": {
           "question": {
             "type": "string",
@@ -217,9 +203,7 @@
             "const": "complete"
           }
         },
-        "required": [
-          "completeness"
-        ]
+        "required": ["completeness"]
       },
       "then": {
         "properties": {
@@ -231,9 +215,7 @@
           "surfaces": {
             "contains": {
               "type": "object",
-              "required": [
-                "disposition"
-              ],
+              "required": ["disposition"],
               "properties": {
                 "disposition": {
                   "const": "needs_follow_up"

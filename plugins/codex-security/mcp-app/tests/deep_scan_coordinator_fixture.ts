@@ -382,6 +382,7 @@ interface ExecutorOptions {
   malformedDiscoveryAttempts?: number;
   canonicalCandidateId?: string;
   discoveryCandidateId?: string;
+  discoveryDeferred?: Record<string, unknown>[];
   discoveryFailureMessage?: string;
   nonRetryableDiscoveryMessage?: string;
   dedupEvidenceByCall?: string[];
@@ -500,6 +501,12 @@ export class FakeExecutor {
             candidateId,
             context.workerLabel,
           );
+          if (this.options.discoveryDeferred?.length) {
+            draft.coverage.completeness = "partial";
+            draft.coverage.deferred = structuredClone(
+              this.options.discoveryDeferred,
+            );
+          }
           await writeJson(
             path.join(artifactContext.root, "result.json"),
             draft,
@@ -654,6 +661,25 @@ async function writeDedupArtifacts(
   if (options.canonicalCandidateId && draft.findings.length > 0) {
     draft.findings[0].provenance.candidateId = options.canonicalCandidateId;
   }
+  const unresolvedCandidates = [
+    ...(previousDraft?.unresolvedCandidates ?? []),
+    ...workerDrafts.flatMap(
+      (worker, index) =>
+        worker.coverage?.deferred
+          ?.filter(
+            (item: Record<string, unknown>) =>
+              typeof item.candidateId === "string",
+          )
+          .map((item: Record<string, unknown>) => ({
+            ...item,
+            sourceWorkerId: workerIds[index],
+          })) ?? [],
+    ),
+  ];
+  if (unresolvedCandidates.length > 0)
+    (
+      draft as typeof draft & { unresolvedCandidates: unknown[] }
+    ).unresolvedCandidates = unresolvedCandidates;
   delete (draft as { coverage?: unknown }).coverage;
   if (invalidResult) (draft as { findings: unknown }).findings = "invalid";
   if (options.dropLastFinding) draft.findings.pop();
@@ -705,7 +731,7 @@ export function standardScanDraft(
         },
       ],
       explicitExclusions: [],
-      deferred: [],
+      deferred: [] as Record<string, unknown>[],
     },
   };
 }

@@ -153,6 +153,7 @@ export function fakeResult(
     scanId: "scan",
     findings: severityLevels.map((level) => ({
       severity: { level },
+      provenance: { source: "local_plugin" },
     })) as FindingsDocument["findings"],
   } satisfies FindingsDocument;
   const coverage = {

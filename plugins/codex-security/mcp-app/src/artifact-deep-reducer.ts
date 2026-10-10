@@ -1,5 +1,6 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ZodType } from "zod/v4";
+import { recoverWorkerCandidateReceipts } from "./artifact-worker-receipts.js";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import reducerSchema from "../../schemas/tools/deep-reducer.schema.json";
 import scanDraftSchema from "../../schemas/tools/scan-draft.schema.json";
@@ -21,6 +22,7 @@ import {
   writeJsonAtomic,
 } from "./deep-scan/artifacts.js";
 import {
+  discoveryReductionInput,
   parseDeepReduction,
   parseStoredScanDraft,
   reconcileDeepReduction,
@@ -70,12 +72,22 @@ export async function getCodexSecurityDeepReducerInputs(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
-        for (const [index, finding] of result.findings.entries()) {
-          const provenance = finding.provenance as Record<string, unknown>;
-          provenance.sourceFindingIds = [`${worker.id}:${index}`];
-        }
-        const { coverage: _coverage, ...reduction } = result;
-        return { workerId: worker.id, result: reduction };
+        await recoverWorkerCandidateReceipts(result.coverage, {
+          root: dirname(worker.resultPath),
+          repoRoot: context.repoRoot,
+          layout: "worker",
+        });
+        result.findings = result.findings.map((finding, index) => ({
+          ...finding,
+          provenance: {
+            ...(finding.provenance as Record<string, unknown>),
+            sourceFindingIds: [`${worker.id}:${index}`],
+          },
+        }));
+        return {
+          workerId: worker.id,
+          result: discoveryReductionInput(result, worker.id),
+        };
       }),
     );
     const previous = await readPreviousReduction(bound);

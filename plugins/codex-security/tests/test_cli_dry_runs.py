@@ -22,6 +22,9 @@ def run_script(name: str, *args: str, isolated: bool = False) -> subprocess.Comp
 
 def test_all_scripts_support_help() -> None:
     for script in sorted(SCRIPT_DIR.glob("*.py")):
+        if script.name in {"candidate_identity.py", "workbench_budget_candidates.py"}:
+            # Shared libraries, not CLI entry points.
+            continue
         result = run_script(script.name, "--help")
         assert result.returncode == 0, f"{script.name}: {result.stderr}"
         assert "usage:" in result.stdout.lower(), script.name

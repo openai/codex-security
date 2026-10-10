@@ -107,6 +107,15 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["completeness"] == "partial"
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
+    assert (
+        next(item for item in coverage["deferred"] if item.get("candidateId") == "pending-query")[
+            "sourceWorkerId"
+        ]
+        == worker_id
+    )
+    assert stopped["progress"]["candidates"]["unresolved"] == 1
+    history = run_workbench(state_dir, "list-scans")["scans"]
+    assert "unresolved" not in history[0]["progress"]["candidates"]
     assert result_path.read_text() == "{incomplete"
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == termination
@@ -735,7 +744,10 @@ def test_malformed_current_finding_does_not_override_worker_rejection(tmp_path: 
     assert failed["findingCount"] == 0
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["surfaces"][0]["disposition"] == "rejected"
-    assert len(coverage["surfaces"][0]["previousFindings"]) == 1
+    history = coverage["surfaces"][0]["previousFindings"]
+    assert len(history) == 2
+    assert checkpoint["findings"][0] in history
+    assert current["findings"][0] in history
 
 
 def test_stopped_recovery_accepts_trailing_slash_scope(tmp_path: Path) -> None:
@@ -1527,7 +1539,16 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
     assert recovered.get("openQuestions", []) == []
 
 
-def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pending_candidate", [False, True])
+def test_canceled_reducer_checkpoint_supersedes_discovery_result(
+    tmp_path: Path, pending_candidate: bool
+) -> None:
+    _canceled_reducer_checkpoint_case(tmp_path, pending_candidate)
+
+
+def _canceled_reducer_checkpoint_case(
+    tmp_path: Path, pending_candidate: bool, saved_deferred: object = Ellipsis
+) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     baseline = standard_finding(tmp_path, scan_id, target)
@@ -1552,6 +1573,17 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     reduced = copy.deepcopy(discovery)
     reduced["findings"][0]["summary"] = "The reducer retained stronger merged evidence."
     reduced["coverage"]["surfaces"][0]["notes"] = "Reducer-validated merged evidence."
+    if pending_candidate:
+        reduced["unresolvedCandidates"] = [
+            {
+                "candidateId": "pending-reducer",
+                "sourceWorkerId": worker_id,
+                "candidate": {"title": "Review parser bounds"},
+                "reason": "The parser route still needs validation.",
+            }
+        ]
+    if saved_deferred is not Ellipsis:
+        reduced["coverage"]["deferred"] = saved_deferred
     reducer_result.write_text(json.dumps(reduced))
     checkpoints = reducer_result.parent / "checkpoints"
     checkpoints.mkdir()
@@ -1568,6 +1600,12 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert findings[0]["summary"] == reduced["findings"][0]["summary"]
     assert coverage["surfaces"][0]["notes"] == "Reducer-validated merged evidence."
+    if pending_candidate:
+        pending = [item for item in coverage["deferred"] if item.get("candidateId")]
+        assert len(pending) == 1
+        assert pending[0]["candidateId"] == "pending-reducer"
+        assert pending[0]["sourceWorkerId"] == worker_id
+        assert "| Unresolved candidates | 1 |" in (scan_dir / "report.md").read_text()
 
 
 def test_archived_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path) -> None:
@@ -2747,102 +2785,6 @@ def test_frozen_parent_retains_identical_latest_observation(
     assert original.stat().st_mtime_ns == 100
 
 
-@pytest.mark.parametrize(
-    "layout",
-    [
-        "incomplete_parent",
-        "terminal_parent",
-        "worker",
-        "worker_idless_terminal",
-        "worker_idless_progress",
-        "worker_idless_reopened",
-        "worker_idless_shared_pending",
-        "worker_idless_other_surface",
-        "reopened_parent",
-        "mixed_manifest",
-    ],
-)
-def test_recovery_applies_surface_update_with_generic_closure(
-    tmp_path: Path, generic_review_recovery, layout: str
-) -> None:
-    module, pending, closed, binding = generic_review_recovery
-    pending["coverage"]["deferred"][0]["surfaceIds"] = ["api"]
-    pending["coverage"]["surfaces"] = [
-        {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
-    ]
-    closed["coverage"]["surfaces"] = [
-        {"id": "api", "label": "API", "disposition": "no_issue_found", "receiptRefs": []}
-    ]
-    idless = layout.startswith("worker_idless")
-    if idless:
-        pending["coverage"]["deferred"][0].pop("surfaceIds")
-        for draft in (pending, closed):
-            draft["coverage"]["surfaces"][0].pop("id")
-            draft["coverage"]["surfaces"][0].pop("receiptRefs")
-    if layout in {"worker_idless_progress", "worker_idless_other_surface"}:
-        pending["complete"] = False
-    if layout == "worker_idless_shared_pending":
-        remaining = {"id": "other-review", "reason": "Another caller needs review."}
-        pending["coverage"]["deferred"].append(remaining)
-        closed["coverage"]["deferred"].append(remaining)
-        closed["coverage"]["completeness"] = "partial"
-    if layout in {"reopened_parent", "worker_idless_reopened"}:
-        pending, closed = closed, pending
-    output = tmp_path / "worker" if layout.startswith("worker") else tmp_path
-    output.mkdir(exist_ok=True)
-    workers = []
-    if layout.startswith("worker"):
-        (output / "result.json").write_text(json.dumps(pending))
-        os.utime(output / "result.json", ns=(100, 100))
-        workers = [saved_discovery_worker(output, "worker", 1)]
-    else:
-        pending["complete"] = layout in {"terminal_parent", "reopened_parent"}
-        write_saved_parent(tmp_path, pending, 100)
-    checkpoint = write_checkpoint(output / "checkpoints", pending)
-    os.utime(checkpoint, ns=(100, 100))
-    terminal_draft = copy.deepcopy(closed)
-    if layout == "mixed_manifest":
-        terminal_draft["coverage"]["surfaces"][0].pop("receiptRefs")
-    terminal = write_checkpoint(output / "checkpoints", terminal_draft)
-    os.utime(terminal, ns=(200, 200))
-    if layout == "worker_idless_other_surface":
-        other = copy.deepcopy(pending)
-        other["coverage"]["surfaces"] = [
-            {"label": "Other surface", "disposition": "needs_follow_up"}
-        ]
-        remaining = {"id": "other-review", "reason": "Independent review remains."}
-        other["coverage"]["deferred"] = [remaining]
-        checkpoint = write_checkpoint(output / "checkpoints", other)
-        os.utime(checkpoint, ns=(300, 300))
-    if layout == "mixed_manifest":
-        canonical = {**closed, "complete": False}
-        write_saved_parent(tmp_path, canonical, 300)
-    first = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
-    )
-    assert first is not None
-    if layout == "worker_idless_shared_pending":
-        assert any(row["disposition"] == "needs_follow_up" for row in first[2]["surfaces"])
-        assert remaining in first[2]["deferred"]
-    elif idless:
-        # Labels alone cannot replace saved surface evidence.
-        old_surface = pending["coverage"]["surfaces"][0]
-        assert any(
-            {key: value for key, value in row.items() if key not in {"id", "receiptRefs"}}
-            == old_surface
-            for row in first[2]["surfaces"]
-        )
-        if layout == "worker_idless_other_surface":
-            assert remaining in first[2]["deferred"]
-    else:
-        assert first[2]["surfaces"] == closed["coverage"]["surfaces"]
-    replay = replay_saved_results(
-        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
-    )
-    assert replay is not None
-    assert replay[2] == first[2]
-
-
 @pytest.mark.parametrize("outcome", ["rejected", "reported", "other_worker"])
 @pytest.mark.parametrize("candidate_identity", ["explicit", "id_only", "alias"])
 def test_reopened_candidate_respects_current_outcome(
@@ -3153,12 +3095,16 @@ def test_worker_head_candidate_outcome_respects_newer_pending(
         tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
     )
     assert first is not None
-    assert (candidate in first[2]["deferred"]) is (pending_time >= 300)
+    expected_candidate = {
+        **candidate,
+        **({"sourceWorkerId": "worker"} if "candidateId" in candidate else {}),
+    }
+    assert (expected_candidate in first[2]["deferred"]) is (pending_time >= 300)
     replay = replay_saved_results(
         module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
     )
     assert replay is not None
-    assert (candidate in replay[2]["deferred"]) is (pending_time >= 300)
+    assert (expected_candidate in replay[2]["deferred"]) is (pending_time >= 300)
 
 
 def test_frozen_parent_keeps_unrelated_candidate_outcome(
@@ -3314,12 +3260,12 @@ def test_selected_candidate_outcome_keeps_its_evidence(
     )
     assert result is not None
     assert candidate not in result[2]["deferred"]
-    assert result[2]["surfaces"] == [rejection, unrelated]
+    assert result[2]["surfaces"] == [{**rejection, "sourceWorkerId": "worker"}, unrelated]
     replay = replay_saved_results(
         module, result, tmp_path, pending["scanId"], binding, workers, stopped=stopped
     )
     assert replay is not None
-    assert replay[2]["surfaces"] == [rejection, unrelated]
+    assert replay[2]["surfaces"] == [{**rejection, "sourceWorkerId": "worker"}, unrelated]
     assert candidate not in replay[2]["deferred"]
     if outcome == "reported":
         for documents in (result, replay):
@@ -3357,9 +3303,175 @@ def test_interrupted_worker_reopening_preserves_candidate_identity(
         tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
     )
     assert result is not None
-    assert all(row in result[2]["deferred"] for row in pending["coverage"]["deferred"])
+    expected_pending = copy.deepcopy(pending["coverage"]["deferred"])
+    if candidate_identity != "id_only":
+        for row in expected_pending:
+            row["sourceWorkerId"] = "worker"
+    assert all(row in result[2]["deferred"] for row in expected_pending)
     replay = replay_saved_results(
         module, result, tmp_path, pending["scanId"], binding, workers, stopped=True
     )
     assert replay is not None
-    assert all(row in replay[2]["deferred"] for row in pending["coverage"]["deferred"])
+    assert all(row in replay[2]["deferred"] for row in expected_pending)
+
+
+@pytest.mark.parametrize("deferred", [None, 1, {"legacy": "annotation"}, []])
+def test_stopped_reducer_projects_candidates_around_nonarray_saved_deferred(
+    tmp_path: Path, deferred: object
+) -> None:
+    _canceled_reducer_checkpoint_case(tmp_path, True, deferred)
+
+
+@pytest.mark.parametrize("valid_label", [False, True])
+def test_stopped_parent_validates_terminal_before_removing_saved_gap(
+    tmp_path: Path, valid_label: bool
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    manifest = json.loads((contract / "scan-manifest.json").read_text())
+    manifest["scan"]["complete"] = False
+    coverage = json.loads((contract / "coverage.json").read_text())
+    coverage["completeness"] = "partial"
+    surface = {
+        "id": "saved-terminal",
+        "candidateId": "saved-candidate",
+        "disposition": "rejected",
+        "receiptRefs": [],
+    }
+    if valid_label:
+        surface["label"] = "Valid authored terminal review"
+    coverage["surfaces"] = [surface]
+    pending = {
+        "id": "saved-gap",
+        "candidateId": "saved-candidate",
+        "reason": "Original saved proof gap.",
+    }
+    coverage["deferred"] = [pending, {"id": "other-review", "reason": "Independent review."}]
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    (scan_dir / "findings.json").write_text(json.dumps({"scanId": scan_id, "findings": []}))
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    fail_deep_scan(state, codex_home, scan_id, message="Synthetic interruption.")
+    saved = json.loads((scan_dir / "coverage.json").read_text())
+    assert (pending in saved["deferred"]) is not valid_label
+    assert any(row.get("id") == "other-review" for row in saved["deferred"])
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("reopened", [False, True])
+@pytest.mark.parametrize("decision", ["pending", "rejected"])
+def test_stopped_deep_preserves_published_candidate_state(
+    tmp_path: Path, reopened: bool, decision: str
+) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    finding["provenance"].update(candidateId="review-candidate", candidateReopened=reopened)
+    candidate = {
+        "id": "review-candidate",
+        "candidateId": "review-candidate",
+        "reason": "New evidence requires further review.",
+    }
+    coverage = saved_coverage(deferred=[candidate])
+    if decision == "rejected":
+        coverage["surfaces"] = [
+            {
+                "id": "review-decision",
+                "candidateId": candidate["candidateId"],
+                "label": "Reviewed candidate",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ]
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(
+        json.dumps(
+            {
+                "manifest": {"scan": {"complete": False}},
+                "findings": {"findings": [finding]},
+                "coverage": coverage,
+            }
+        )
+    )
+    run_workbench(state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    originals = {file: file.read_bytes() for file in (scan_dir / "checkpoints").glob("*.json")}
+    fail_deep_scan(state_dir, codex_home, scan_id)
+    expected_pending = reopened and decision == "pending"
+
+    def assert_candidate_state() -> None:
+        scan = get_scan(state_dir, scan_id)["scan"]
+        assert scan["progress"]["candidates"]["unresolved"] == int(expected_pending)
+        saved_coverage = json.loads((scan_dir / "coverage.json").read_text())
+        assert (
+            any(
+                item.get("candidateId") == candidate["candidateId"]
+                for item in saved_coverage["deferred"]
+            )
+            is expected_pending
+        )
+        if expected_pending:
+            saved_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+            assert len(saved_findings) == 1
+            assert saved_findings[0]["provenance"]["candidateReopened"] is True
+        assert all(file.read_bytes() == original for file, original in originals.items())
+
+    assert_candidate_state()
+    sealed = (scan_dir / "scan-manifest.json").read_bytes()
+    run_workbench(
+        state_dir,
+        "recover-scan-results",
+        "--scan-id",
+        scan_id,
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    assert_candidate_state()
+    assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
+
+
+@pytest.mark.parametrize("imported_owner", [None, "imported", {"legacy": "imported"}])
+@pytest.mark.parametrize("existing_pending", [False, True])
+def test_public_worker_receipt_recovery_uses_actual_owner(
+    tmp_path: Path, imported_owner: object, existing_pending: bool
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    draft = json.loads(result_path.read_text())
+    draft.update(complete=True, findings=[])
+    candidate = {"evidence": "Synthetic candidate evidence."}
+    surface = {
+        "id": "candidate-decision",
+        "candidateId": "candidate-a",
+        "label": "Candidate A",
+        "disposition": "rejected",
+        "receiptRefs": ["artifacts/proof/missing.txt"],
+        "candidate": candidate,
+    }
+    if imported_owner is not None:
+        surface["sourceWorkerId"] = imported_owner
+    generic = {"id": "general-review", "reason": "Independent unfinished review."}
+    pending = {"candidateId": "candidate-a", "reason": "Saved candidate proof gap."}
+    draft["coverage"] = {
+        "completeness": "partial",
+        "surfaces": [surface],
+        "explicitExclusions": [],
+        "deferred": [generic, pending] if existing_pending else [generic],
+    }
+    result_path.write_text(json.dumps(draft))
+    original = result_path.read_bytes()
+    fail_deep_scan(state, codex_home, scan_id, message="Synthetic interruption.")
+    scan = get_scan(state, scan_id)["scan"]
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert scan["progress"]["candidates"]["unresolved"] == 1
+    assert generic in coverage["deferred"]
+    candidates = [row for row in coverage["deferred"] if row.get("candidateId") == "candidate-a"]
+    assert len(candidates) == 1
+    assert candidates[0]["sourceWorkerId"] == worker_id
+    assert candidate == candidates[0].get("candidate") or candidate in candidates[0].get(
+        "originalCandidates", []
+    )
+    assert any("Skipped malformed coverage receipt" in warning for warning in scan["warnings"])
+    assert result_path.read_bytes() == original

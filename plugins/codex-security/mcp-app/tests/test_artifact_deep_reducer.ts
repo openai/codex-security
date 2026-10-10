@@ -3,6 +3,8 @@ import { sourceReferences } from "./support/source-references.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import assert from "node:assert/strict";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
@@ -196,6 +198,9 @@ try {
   const outcome = await recordCodexSecurityDeepReduction(context, merged);
   const mergedWithSources = {
     ...merged,
+    unresolvedCandidates: [
+      { ...rejectedCoverage.deferred[0], sourceWorkerId: first.id },
+    ],
     findings: [
       retainedFinding(shared, [
         { id: "worker-001:0", finding: shared },
@@ -505,9 +510,18 @@ function reduction(findings: Record<string, unknown>[], extra = {}) {
 }
 
 function withSourceRefs(worker: Awaited<ReturnType<typeof createWorker>>) {
-  const { coverage: _coverage, ...result } = worker.result;
+  const { coverage, ...result } = worker.result;
+  const unresolvedCandidates = coverage.deferred
+    .filter(
+      (item: Record<string, unknown>) => typeof item.candidateId === "string",
+    )
+    .map((item: Record<string, unknown>) => ({
+      ...item,
+      sourceWorkerId: worker.id,
+    }));
   return {
     ...result,
+    ...(unresolvedCandidates.length > 0 ? { unresolvedCandidates } : {}),
     findings: worker.result.findings.map(sourceReferences(worker)),
   };
 }
@@ -524,4 +538,390 @@ function retainedFinding(
       sourceFindings,
     },
   };
+}
+
+for (const kind of ["correct", "imported", "merged", "previous"]) {
+  const importedOwner = kind !== "correct";
+  const merged = kind === "merged";
+  test(`live two-worker reduction binds retained source ownership ${kind}`, async () => {
+    const root = await temporaryDirectory("deep-live-source-owner-", true);
+    try {
+      const { recordCodexSecurityWorkerScanDraft } = await importSource(
+        fileURLToPath(
+          new URL("../src/artifact-scan-draft.ts", import.meta.url),
+        ),
+      );
+      const { unresolvedCandidates } = await importSource(
+        fileURLToPath(
+          new URL(
+            "../../../../sdk/typescript/src/candidates.ts",
+            import.meta.url,
+          ),
+        ),
+      );
+      const firstFinding = {
+        ...finding("shared-candidate", "src/shared.ts"),
+        provenance: { source: "local_plugin", candidateId: "candidate-shared" },
+      };
+      const pending = {
+        id: "pending-review",
+        candidateId: "candidate-shared",
+        reason: "Independent second worker proof gap.",
+        paths: ["src/shared.ts"],
+      };
+      const workersRoot = path.join(
+        root,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+      );
+      const claimed = [];
+      const originals = new Map<string, string>();
+      for (const [index, findings] of [
+        [0, [firstFinding]],
+        [1, merged ? [firstFinding] : []],
+      ] as const) {
+        const output = path.join(
+          workersRoot,
+          `discovery-000${index + 1}`,
+          "output",
+        );
+        await mkdir(output, { recursive: true });
+        const source = workerDraft([...findings], {
+          complete: true,
+          ...(index === 1 && !merged
+            ? {
+                coverage: {
+                  completeness: "partial",
+                  surfaces: [],
+                  explicitExclusions: [],
+                  deferred: [pending],
+                },
+              }
+            : {}),
+        });
+        await recordCodexSecurityWorkerScanDraft(
+          { root: output, repoRoot: root, layout: "worker", scanId },
+          source,
+        );
+        const resultPath = path.join(output, "result.json");
+        claimed.push({
+          id: index === 0 ? "worker-a" : "worker-b",
+          attempt: 1,
+          resultPath,
+        });
+        originals.set(resultPath, await readFile(resultPath, "utf8"));
+      }
+      const output = path.join(
+        root,
+        "artifacts",
+        "deep_discovery",
+        "dedup",
+        "dedup-0001",
+        "output",
+      );
+      await mkdir(output, { recursive: true });
+      const aggregate = {
+        ...firstFinding,
+        provenance: {
+          ...firstFinding.provenance,
+          sourceWorkerId: importedOwner ? "worker-b" : "worker-a",
+          sourceFindingIds: merged
+            ? ["worker-a:0", "worker-b:0"]
+            : ["worker-a:0"],
+        },
+      };
+      let previousReducerResultPath: string | undefined;
+      if (kind === "previous") {
+        const previousRoot = path.join(path.dirname(output), "previous");
+        await mkdir(previousRoot, { recursive: true });
+        const previousContext = {
+          root: previousRoot,
+          repoRoot: root,
+          layout: "reducer",
+          scanId,
+          deepReducer: { scanRoot: root, claimedWorkers: [claimed[0]!] },
+        };
+        const previousInputs =
+          await getCodexSecurityDeepReducerInputs(previousContext);
+        await recordCodexSecurityDeepReduction(previousContext, {
+          scanId,
+          findings: previousInputs.discoveries[0].result.findings,
+        });
+        previousReducerResultPath = path.join(previousRoot, "result.json");
+        originals.set(
+          previousReducerResultPath,
+          await readFile(previousReducerResultPath, "utf8"),
+        );
+      }
+      await recordCodexSecurityDeepReduction(
+        {
+          root: output,
+          repoRoot: root,
+          layout: "reducer",
+          scanId,
+          deepReducer: {
+            scanRoot: root,
+            claimedWorkers: kind === "previous" ? [claimed[1]!] : claimed,
+            ...(previousReducerResultPath ? { previousReducerResultPath } : {}),
+          },
+        },
+        { scanId, findings: [aggregate] },
+      );
+      const saved = await readJson(path.join(output, "result.json"));
+      if (merged) {
+        assert.equal(saved.unresolvedCandidates, undefined);
+        assert.equal(
+          saved.findings[0].provenance.sourceWorkerId,
+          "worker-b",
+          "two source owners preserve authored merged ownership",
+        );
+        assert.deepEqual(saved.findings[0].provenance.sourceFindingIds, [
+          "worker-a:0",
+          "worker-b:0",
+        ]);
+        for (const [file, bytes] of originals)
+          assert.equal(await readFile(file, "utf8"), bytes);
+        return;
+      }
+      assert.equal(saved.unresolvedCandidates.length, 1);
+      assert.equal(saved.unresolvedCandidates[0].sourceWorkerId, "worker-b");
+      assert.equal(
+        unresolvedCandidates(
+          {
+            surfaces: [],
+            explicitExclusions: [],
+            deferred: saved.unresolvedCandidates,
+          },
+          saved.findings,
+        ).length,
+        1,
+        "worker A confirmation does not resolve worker B proof gap",
+      );
+      assert.equal(saved.findings[0].provenance.sourceWorkerId, "worker-a");
+      assert.deepEqual(saved.findings[0].provenance.sourceFindingIds, [
+        "worker-a:0",
+      ]);
+      if (importedOwner)
+        assert.equal(
+          saved.findings[0].provenance.previousFindings.some(
+            (row: { provenance: { sourceWorkerId?: string } }) =>
+              row.provenance.sourceWorkerId === "worker-b",
+          ),
+          true,
+          "imported provenance remains evidence",
+        );
+      for (const [file, bytes] of originals)
+        assert.equal(await readFile(file, "utf8"), bytes);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const receipt of [
+  "missing",
+  "valid",
+  "empty",
+  "none",
+  "other-worker",
+] as const) {
+  for (const savedGap of [false, true]) {
+    test(`worker terminal candidate receipt ${receipt}, saved gap=${savedGap}`, async () => {
+      const root = await temporaryDirectory(
+        "deep-worker-candidate-receipt-",
+        true,
+      );
+      try {
+        const candidateId = "receipt-candidate";
+        const pending = {
+          candidateId,
+          reason: "Original proof gap remains saved.",
+          candidate: { evidence: "Original candidate evidence." },
+        };
+        const workersRoot = path.join(
+          root,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+        );
+        const worker = await createWorker({
+          workersRoot,
+          label: "worker-receipt",
+          id: "worker-receipt",
+          result: workerDraft([], {
+            coverage: {
+              completeness: "partial",
+              explicitExclusions: [],
+              surfaces: [
+                {
+                  id: "decision",
+                  label: "Synthetic review",
+                  candidateId,
+                  candidate: pending.candidate,
+                  disposition: "rejected",
+                  receiptRefs:
+                    receipt === "none" ? [] : ["artifacts/review.txt"],
+                },
+              ],
+              deferred: savedGap ? [pending] : [],
+            },
+          }),
+        });
+        if (["valid", "empty", "other-worker"].includes(receipt)) {
+          const receiptRoot =
+            receipt === "other-worker"
+              ? path.join(workersRoot, "another-worker", "output")
+              : path.dirname(worker.resultPath);
+          await mkdir(path.join(receiptRoot, "artifacts"), { recursive: true });
+          await writeFile(
+            path.join(receiptRoot, "artifacts", "review.txt"),
+            receipt === "empty" ? "" : "Synthetic review receipt.\n",
+          );
+        }
+        const workerBytes = await readFile(worker.resultPath, "utf8");
+        const output = path.join(
+          root,
+          "artifacts",
+          "deep_discovery",
+          "dedup",
+          "reducer",
+          "output",
+        );
+        await mkdir(output, { recursive: true });
+        const context = {
+          root: output,
+          repoRoot: root,
+          scanId,
+          layout: "reducer",
+          deepReducer: { scanRoot: root, claimedWorkers: [worker] },
+        };
+        const inputs = await getCodexSecurityDeepReducerInputs(context);
+        const expectedPending =
+          receipt === "missing" || receipt === "other-worker";
+        assert.equal(
+          inputs.discoveries[0].result.unresolvedCandidates?.length ?? 0,
+          expectedPending ? 1 : 0,
+        );
+        await recordCodexSecurityDeepReduction(context, {
+          scanId,
+          findings: [],
+        });
+        const saved = await readJson(path.join(output, "result.json"));
+        assert.equal(
+          saved.unresolvedCandidates?.length ?? 0,
+          expectedPending ? 1 : 0,
+        );
+        if (expectedPending) {
+          assert.equal(saved.unresolvedCandidates[0].candidateId, candidateId);
+          assert.equal(saved.unresolvedCandidates[0].sourceWorkerId, worker.id);
+          assert.deepEqual(
+            saved.unresolvedCandidates[0].candidate,
+            pending.candidate,
+          );
+          if (savedGap)
+            assert.equal(saved.unresolvedCandidates[0].reason, pending.reason);
+        }
+        const { deepReductionScanDraft } = await importSource(
+          fileURLToPath(
+            new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+          ),
+        );
+        const publication = deepReductionScanDraft(saved);
+        assert.equal(
+          publication.coverage.completeness,
+          expectedPending ? "partial" : "complete",
+        );
+        assert.equal(await readFile(worker.resultPath, "utf8"), workerBytes);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const origin of [
+  "legacy-owned",
+  "legacy-unowned",
+  "worker-named-previous",
+] as const) {
+  test(`keeps legacy aggregate ownership through repeated public reductions: ${origin}`, async (t) => {
+    const root = await temporaryDirectory("deep-legacy-source-owner-", true);
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const workersRoot = path.join(root, "artifacts/deep_discovery/workers");
+    const dedupRoot = path.join(root, "artifacts/deep_discovery/dedup");
+    await mkdir(dedupRoot, { recursive: true });
+    const owner =
+      origin === "legacy-unowned"
+        ? undefined
+        : origin === "worker-named-previous"
+          ? "previous"
+          : "worker-a";
+    const savedFinding = {
+      ...finding("shared", "src/handler.ts"),
+      provenance: {
+        source: "local_plugin",
+        candidateId: "candidate-shared",
+        ...(owner === undefined ? {} : { sourceWorkerId: owner }),
+      },
+    };
+    let previousPath = path.join(dedupRoot, "legacy-result.json");
+    await writeJson(previousPath, reduction([savedFinding]));
+    if (origin === "worker-named-previous") {
+      const worker = await createWorker({
+        workersRoot,
+        label: "previous",
+        id: "previous",
+        result: workerDraft([savedFinding]),
+      });
+      const output = path.join(dedupRoot, "initial");
+      await mkdir(output);
+      const context = {
+        root: output,
+        repoRoot: root,
+        layout: "reducer",
+        scanId,
+        deepReducer: { scanRoot: root, claimedWorkers: [worker] },
+      };
+      const inputs = await getCodexSecurityDeepReducerInputs(context);
+      await recordCodexSecurityDeepReduction(
+        context,
+        reduction(inputs.discoveries[0].result.findings),
+      );
+      previousPath = path.join(output, "result.json");
+    }
+    for (const workerId of ["worker-b", "worker-c"]) {
+      const previousBytes = await readFile(previousPath, "utf8");
+      const worker = await createWorker({
+        workersRoot,
+        label: workerId,
+        id: workerId,
+        result: workerDraft([]),
+      });
+      const output = path.join(dedupRoot, workerId);
+      await mkdir(output);
+      const context = {
+        root: output,
+        repoRoot: root,
+        layout: "reducer",
+        scanId,
+        deepReducer: {
+          scanRoot: root,
+          claimedWorkers: [worker],
+          previousReducerResultPath: previousPath,
+        },
+      };
+      const inputs = await getCodexSecurityDeepReducerInputs(context);
+      const submitted = structuredClone(inputs.previous);
+      submitted.findings[0].provenance.sourceFindingIds ??= ["previous:0"];
+      await recordCodexSecurityDeepReduction(context, submitted);
+      assert.equal(await readFile(previousPath, "utf8"), previousBytes);
+      previousPath = path.join(output, "result.json");
+      const saved = await readJson(previousPath);
+      assert.equal(saved.findings[0].provenance.sourceWorkerId, owner);
+      assert.deepEqual(saved.findings[0].provenance.sourceFindingIds, [
+        "previous:0",
+      ]);
+    }
+  });
 }

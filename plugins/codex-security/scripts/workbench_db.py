@@ -50,7 +50,6 @@ from finalize_scan_contract import (
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
     finalize_scan,
-    finding_candidate_id,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
@@ -1203,12 +1202,13 @@ def complete_budget_exhausted_scan(
                 f"Deep Scan reached its cost limit after an estimated "
                 f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
             )
-        budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        receipt_warnings = budget_exhausted_draft(scan, scan_dir, candidates, warning)
         warnings = json.loads(scan["completion_warnings_json"])
-        if warning not in warnings:
+        additions = [message for message in [warning, *receipt_warnings] if message not in warnings]
+        if additions:
             connection.execute(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
-                (json.dumps([*warnings, warning]), scan_id),
+                (json.dumps([*warnings, *additions]), scan_id),
             )
             connection.commit()
         return complete_scan_locked(connection, scan_id, None, cost_json)
@@ -1291,7 +1291,7 @@ def budget_exhausted_draft(
     scan_dir: Path,
     candidates: list[dict[str, Any]],
     warning: str,
-) -> None:
+) -> list[str]:
     documents: dict[str, dict[str, Any]] = {}
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         path = artifact_path(scan_dir, name, required=False)
@@ -1342,66 +1342,42 @@ def budget_exhausted_draft(
             "deferred": [],
         }
 
-    findings_by_candidate = {
-        candidate_id
+    recovered_findings = [
+        (
+            finding,
+            saved_results.recoverable_findings(
+                scan_dir, scan["id"], {"targetId": scan["target_id"]}, [finding]
+            ),
+        )
         for finding in findings["findings"]
-        if isinstance(finding, dict)
-        and isinstance(candidate_id := finding_candidate_id(finding), str)
-    }
-    existing_deferred = {
-        item.get("candidateId", item.get("id"))
-        for item in coverage["deferred"]
-        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
-    }
-    existing_surfaces = {
-        item.get("id")
-        for item in coverage["surfaces"]
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    for candidate in candidates:
-        candidate_id = candidate["candidate_id"]
-        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
+    ]
+    valid_findings = [finding for _, rows in recovered_findings for finding in rows]
+    receipt_warnings: list[str] = []
+    receipt_reopened: set[tuple[str | None, str]] = set()
+    recovered = saved_results.recover_candidate_receipts(
+        {"coverage": coverage}, scan_dir, receipt_warnings, reopened=receipt_reopened
+    )
+    assert recovered is not None
+    coverage = recovered["coverage"]
+    dismissed = saved_results.preserve_budget_candidates(
+        coverage, valid_findings, candidates, receipt_reopened=receipt_reopened
+    )
+    retained_findings = []
+    for original, rows in recovered_findings:
+        keys = {saved_results.finding_candidate_key(finding) for finding in rows}
+        if not keys or not keys <= dismissed:
+            # Keep invalid records for the existing finalizer's recovery and warnings.
+            retained_findings.append(original)
             continue
-        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
-        surface_id = f"candidate-{candidate_id}"
-        validation = candidate.get("validation")
-        validation = validation.get("disposition") if isinstance(validation, dict) else None
-        attack = candidate.get("attack_path")
-        attack = attack.get("decision") if isinstance(attack, dict) else None
-        disposition = (
-            "needs_follow_up"
-            if validation == "deferred" or attack == "deferred"
-            else "not_applicable"
-            if validation == "not_applicable"
-            else "rejected"
-            if validation == "suppressed" or attack == "ignore"
-            else "needs_follow_up"
-        )
-        if surface_id not in existing_surfaces:
-            coverage["surfaces"].append(
-                {
-                    "id": surface_id,
-                    "label": candidate["summary"],
-                    "disposition": disposition,
-                    "notes": candidate["evidence"],
-                    "receiptRefs": [],
-                }
-            )
-            existing_surfaces.add(surface_id)
-        if disposition != "needs_follow_up":
-            continue
-        coverage["deferred"].append(
-            {
-                "id": candidate_id,
-                "candidateId": candidate_id,
-                "reason": (
-                    "Validation was deferred because the scan reached its cost limit: "
-                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
-                ),
-                "paths": paths,
-                "surfaceIds": [surface_id],
-            }
-        )
+        for field in ("surfaces", "explicitExclusions"):
+            for row in coverage[field]:
+                if (
+                    isinstance(row, dict)
+                    and row.get("disposition") in ("rejected", "not_applicable")
+                    and saved_results.coverage_candidate_key(row) in keys
+                ):
+                    saved_results.archive_candidate_payloads(row, [{"finding": original}])
+    findings["findings"] = retained_findings
     if not any(
         isinstance(item, dict)
         and isinstance(reason := item.get("reason"), str)
@@ -1433,6 +1409,8 @@ def budget_exhausted_draft(
             )
         except (ContractError, OSError, TypeError, ValueError) as exc:
             raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+
+    return receipt_warnings
 
 
 def complete_scan_locked(
@@ -2757,7 +2735,10 @@ def scan_result(
         else None
     )
     progress_result = {
-        "candidates": {"reportable": progress["reportable_findings_count"]},
+        "candidates": {
+            "reportable": progress["reportable_findings_count"],
+            "unresolved": scan_history.saved_unresolved_candidate_count(scan),
+        },
         "coverage": {
             "closedRows": progress["review_items_completed"],
             "filesTotal": progress["scope_file_count"],

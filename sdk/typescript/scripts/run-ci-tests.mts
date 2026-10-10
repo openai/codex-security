@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
-import { mkdir, readdir } from "node:fs/promises";
+import { once } from "node:events";
+import { mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 const selection = /^([1-9]\d*)\/([1-9]\d*)$/.exec(process.argv[2] ?? "");
@@ -127,16 +130,60 @@ do {
     parsingArguments[bareOptional.index] = `--${bareOptional.name}=`;
   }
 } while (bareOptional);
-const child = spawn("bun", testArguments, {
-  cwd: new URL("../", import.meta.url),
-  env: {
-    ...process.env,
-    CODEX_SECURITY_TEST_TIMEOUT_MS: parsed.values.timeout as string | undefined,
-  },
-  stdio: "inherit",
-  windowsHide: true,
-});
-child.once("error", console.error);
-child.once("close", (code) => {
-  process.exitCode = code ?? 1;
-});
+// Bun's text coverage writer can abort on a backpressured stderr pipe before
+// writing JUnit/LCOV reports. Preserve its diagnostics in a regular file, then
+// relay them live with Node's stream backpressure while keeping the test exit status.
+const outputDirectory = await mkdtemp(
+  join(tmpdir(), "codex-security-ci-output-"),
+);
+const outputPath = join(outputDirectory, "stderr.log");
+const output = await open(outputPath, "w");
+const reader = await open(outputPath, "r");
+const buffer = Buffer.allocUnsafe(64 * 1024);
+let offset = 0;
+let flushing: Promise<void> | undefined;
+const flush = (): Promise<void> => {
+  flushing ??= (async () => {
+    for (;;) {
+      const { bytesRead } = await reader.read(buffer, 0, buffer.length, offset);
+      if (bytesRead === 0) return;
+      offset += bytesRead;
+      if (!process.stderr.write(Buffer.from(buffer.subarray(0, bytesRead))))
+        await once(process.stderr, "drain");
+    }
+  })().finally(() => {
+    flushing = undefined;
+  });
+  return flushing;
+};
+// Keep diagnostics visible before an interrupted or timed-out child exits.
+const relay = setInterval(() => {
+  void flush().catch(console.error);
+}, 100);
+relay.unref();
+try {
+  const child = spawn("bun", testArguments, {
+    cwd: new URL("../", import.meta.url),
+    env: {
+      ...process.env,
+      CODEX_SECURITY_TEST_TIMEOUT_MS: parsed.values.timeout as
+        string | undefined,
+    },
+    stdio: ["inherit", "inherit", output.fd],
+    windowsHide: true,
+  });
+  process.exitCode = await new Promise<number>((resolve) => {
+    child.once("error", (error) => {
+      console.error(error);
+      resolve(1);
+    });
+    child.once("close", (code) => resolve(code ?? 1));
+  });
+} finally {
+  clearInterval(relay);
+  await flushing;
+  await flush();
+  await reader.close();
+  await output.close();
+  await rm(outputDirectory, { recursive: true, force: true });
+}

@@ -70,7 +70,7 @@ function createDocuments(sources: DeepReductionSources) {
   const discoveries = sources.discoveries.map((discovery) => ({
     workerId: discovery.workerId,
     result: {
-      ...discovery.result,
+      ...semanticReduction(discovery.result),
       findings: discovery.result.findings.map((finding, index) => {
         findings.set(`source:${discovery.workerId}:${index}`, finding);
         return projectFinding(finding);
@@ -79,7 +79,7 @@ function createDocuments(sources: DeepReductionSources) {
   }));
   const previous = sources.previous
     ? {
-        ...sources.previous,
+        ...semanticReduction(sources.previous),
         findings: sources.previous.findings.map((finding, index) => {
           findings.set(`previous:${index}`, finding);
           const originals = (finding.provenance as Record<string, unknown>)
@@ -103,6 +103,11 @@ function createDocuments(sources: DeepReductionSources) {
     inputs: JSON.stringify({ discoveries, previous }),
     findings,
   };
+}
+
+function semanticReduction(input: DeepReductionInput): DeepReductionInput {
+  const { unresolvedCandidates: _pending, ...semantic } = input;
+  return semantic;
 }
 
 function projectFinding(finding: Finding, refs?: string[]): Finding {

@@ -153,6 +153,8 @@ directory must be private to you (`chmod 700`).
 | `findings.findings`               | Findings from this scan.                                         |
 | `reportPath`                      | Path to the Markdown report.                                     |
 | `coverage`                        | What the scan assessed and any coverage gaps.                    |
+| `unresolvedCandidateCount`        | Saved candidate identities requiring follow-up.                  |
+| `unresolvedCandidates`            | Saved candidate evidence and reasons for follow-up.              |
 | `repositoryFindings`              | This scan's findings plus earlier open findings, when available. |
 | `sarifPath`                       | SARIF export path, or `null`.                                    |
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |

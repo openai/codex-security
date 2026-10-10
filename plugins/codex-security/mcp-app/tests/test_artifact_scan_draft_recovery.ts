@@ -1,5 +1,6 @@
 import { readJson, writeJson } from "./support/json.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import { importSource } from "./import-module.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { hash } from "node:crypto";
@@ -772,7 +773,11 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         (row: Record<string, unknown>) => row.id !== named.id,
       );
       assert.ok(independent);
-      assert.deepEqual(independent, { ...raw, id: independent.id });
+      assert.deepEqual(independent, {
+        ...raw,
+        id: independent.id,
+        ...(payload === "generic" ? {} : { candidateId: independent.id }),
+      });
       const outcome =
         payload === "generic"
           ? { resolvedDeferred: [close(named.id)] }
@@ -1012,11 +1017,11 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           f.write(input),
         );
       await f.write(f.draft({ deferred: [pending] }));
+      const checkpointRoot = path.join(f.root, "checkpoints");
       await fail(closing);
       await f.write(f.draft({}, true));
       assert.deepEqual((await f.read()).deferred, []);
       assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
-      const checkpointRoot = path.join(f.root, "checkpoints");
       const originalClosures: [string, number, Buffer, boolean][] = [];
       for (const name of await readdir(checkpointRoot)) {
         const file = path.join(checkpointRoot, name);
@@ -1472,7 +1477,10 @@ for (const payload of ["generic", "candidate"] as const) {
     assert.ok(saved.deferred.length > 0);
     for (const { id, ...row } of saved.deferred) {
       assert.notEqual(id, named.id);
-      assert.deepEqual(row, raw);
+      assert.deepEqual(row, {
+        ...raw,
+        ...(payload === "candidate" ? { candidateId: id } : {}),
+      });
     }
   });
 }
@@ -1579,25 +1587,27 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   });
 
   for (const reverse of [false, true]) {
-    test(`${layout}: reject cross-row candidate identity ownership, reverse=${reverse}`, async (t) => {
+    test(`${layout}: canonical task IDs stay distinct from candidate aliases, reverse=${reverse}`, async (t) => {
       const f = await fixture(t, layout);
       const deferred = [
         { id: "candidate-a", ...generic },
         { id: "candidate-task", candidateId: "candidate-a", ...generic },
       ];
       if (reverse) deferred.reverse();
+      await f.write(f.draft({ deferred }));
+      assert.deepEqual((await f.read()).deferred, deferred);
       await assert.rejects(
-        f.write(f.draft({ deferred })),
+        f.write(
+          f.draft({
+            deferred: [
+              { id: "candidate-a", ...generic },
+              { id: "candidate-a", candidateId: "candidate-a", ...generic },
+            ],
+          }),
+        ),
         /coverage\.deferred repeats candidate-a/,
       );
-      assert.deepEqual(await readdir(f.root), []);
-      await f.write(
-        f.draft({
-          deferred: [
-            { id: "candidate-a", candidateId: "candidate-a", ...generic },
-          ],
-        }),
-      );
+      assert.deepEqual((await f.read()).deferred, deferred);
       await f.write(
         f.draft(
           {
@@ -1612,6 +1622,12 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           },
           true,
         ),
+      );
+      assert.deepEqual((await f.read()).deferred, [
+        { id: "candidate-a", ...generic },
+      ]);
+      await f.write(
+        f.draft({ resolvedDeferred: [close("candidate-a")] }, true),
       );
       assert.deepEqual((await f.read()).deferred, []);
     });
@@ -1703,11 +1719,251 @@ for (const layout of ["standard", "diff", "worker"] as const) {
               outcome,
             );
         }
-        await assert.rejects(
-          f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true)),
-          /ambiguous saved deferred work/,
-        );
+        if (alias === "id") {
+          await assert.rejects(
+            f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true)),
+            /ambiguous saved deferred work/,
+          );
+        } else {
+          // Distinct canonical task IDs remain closable beside candidate aliases.
+          for (const input of [
+            f.draft({ resolvedDeferred: [close(task.id)] }, true),
+            f.draft({}, true),
+          ]) {
+            const result = await f.write(input);
+            assert.deepEqual(result.coverage.deferred, []);
+            assert.deepEqual(
+              result.coverage.resolvedDeferred
+                .map((row: { id: string }) => row.id)
+                .sort(),
+              [other.id, task.id].sort(),
+            );
+          }
+        }
       });
     }
   }
+}
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const authoredId of [false, true]) {
+    for (const authoredReceipts of [false, true]) {
+      test(`${layout}: resumed surface keeps the base implicit identity, authoredId=${authoredId}, authoredReceipts=${authoredReceipts}`, async (t) => {
+        const f = await fixture(t, layout);
+        const surface = {
+          ...(authoredId ? { id: "authored-surface" } : {}),
+          label: "Synthetic saved API review",
+          disposition: "needs_follow_up",
+          notes: "The saved review remains pending.",
+          ...(authoredReceipts ? { receiptRefs: [] } : {}),
+        };
+        // The base draft writer hashes the authored row before defaulting receipts.
+        const authored = draftApi.scanDraftInputSchema.parse(
+          f.draft({ surfaces: [surface] }),
+        ).coverage.surfaces[0];
+        const id = authoredId
+          ? "authored-surface"
+          : `surface-${hash("sha256", JSON.stringify(authored)).slice(0, 16)}`;
+        await f.write(
+          f.draft({ surfaces: [{ ...surface, id, receiptRefs: [] }] }),
+        );
+        const saved = await f.read();
+        const original = structuredClone(surface);
+        for (let replay = 0; replay < 2; replay++) {
+          const resumed = await f.write(f.draft({ surfaces: [surface] }));
+          assert.deepEqual(resumed.coverage.surfaces, saved.surfaces);
+          assert.deepEqual((await f.read()).surfaces, saved.surfaces);
+        }
+        assert.deepEqual(surface, original);
+      });
+    }
+  }
+}
+
+const { createScanArtifactContext } = await importSource(
+  "../src/artifact-context.ts",
+  { absWorkingDir: import.meta.dirname },
+);
+
+for (const outcome of [
+  "pending",
+  "reported",
+  "rejected",
+  "not_applicable",
+] as const) {
+  test(`accepted pending Deep replacement survives cancellation: ${outcome}`, async (t) => {
+    const f = await fixture(t, "deep");
+    const parent = path.dirname(f.root);
+    const target = path.join(parent, "target");
+    const home = path.join(parent, "home");
+    const state = path.join(parent, "state");
+    await mkdir(path.join(target, "src"), { recursive: true });
+    await writeFile(path.join(target, "src/example.py"), "synthetic source\n");
+    await mkdir(path.join(home, "codex-security"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFile(
+      path.join(home, "codex-security/config.toml"),
+      "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
+    );
+    const runWorkbench = async (arguments_: string[]) => {
+      const { stdout } = await execFileAsync(
+        process.env.PYTHON?.trim() || "python3",
+        [
+          path.join(import.meta.dirname, "../../scripts/workbench_db.py"),
+          ...arguments_,
+        ],
+        {
+          env: {
+            ...process.env,
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: state,
+          },
+        },
+      );
+      return JSON.parse(stdout);
+    };
+    const begun = await runWorkbench([
+      "begin-deep-scan",
+      "--thread-id",
+      "synthetic-parent-thread",
+      "--target-path",
+      target,
+      "--scope",
+      ".",
+      "--scan-root",
+      path.join(parent, "scans"),
+      "--available-parallelism",
+      "16",
+    ]);
+    const scanId = begun.deepScan.scanId;
+    // Resolve context once, before publication: there is no recovery between the drafts.
+    const context = await createScanArtifactContext(scanId, runWorkbench);
+    const savedFinding = findingFor("candidate-reopened");
+    const pending = {
+      id: "pending-review",
+      candidateId: "candidate-reopened",
+      reason: "A newer accepted proof gap still needs review.",
+      paths: ["src/example.py"],
+      candidate: { evidence: "The new review evidence must remain available." },
+    };
+    const draft = (
+      findings: unknown[],
+      deferred: unknown[] = [],
+      surfaces: unknown[] = [],
+    ) => ({
+      scanId,
+      handoffClaimToken: context.handoffClaimToken,
+      complete: true,
+      findings,
+      coverage: {
+        completeness: deferred.length ? "partial" : "complete",
+        surfaces,
+        explicitExclusions: [],
+        deferred,
+      },
+    });
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      draft([savedFinding]),
+      runWorkbench,
+    );
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      draft([], [pending]),
+      runWorkbench,
+    );
+    if (outcome === "reported") {
+      await recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        draft([savedFinding]),
+        runWorkbench,
+      );
+    } else if (outcome !== "pending") {
+      await mkdir(path.join(context.root, "artifacts"), { recursive: true });
+      await writeFile(
+        path.join(context.root, "artifacts/current-review.md"),
+        "Synthetic completed review.\n",
+      );
+      await recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        draft(
+          [],
+          [],
+          [
+            {
+              id: "current-decision",
+              candidateId: pending.candidateId,
+              label: "Current candidate review",
+              disposition: outcome,
+              notes: "The current review resolved this candidate.",
+              receiptRefs: ["artifacts/current-review.md"],
+            },
+          ],
+        ),
+        runWorkbench,
+      );
+    }
+    const checkpointRoot = path.join(context.root, "checkpoints");
+    const originals = new Map(
+      await Promise.all(
+        (await readdir(checkpointRoot)).map(
+          async (name) =>
+            [name, await readFile(path.join(checkpointRoot, name))] as const,
+        ),
+      ),
+    );
+    await runWorkbench([
+      "cancel-scan",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      "synthetic-parent-thread",
+    ]);
+    for (let replay = 0; replay < 2; replay++) {
+      const { scan } = await runWorkbench(["get-scan", "--scan-id", scanId]);
+      assert.equal(scan.progress.status, "canceled");
+      assert.equal(
+        scan.progress.candidates.unresolved,
+        outcome === "pending" ? 1 : 0,
+      );
+      const coverage = await readJson(context.root, "coverage.json");
+      const findings = await readJson(context.root, "findings.json");
+      const report = await readFile(
+        path.join(context.root, "report.md"),
+        "utf8",
+      );
+      if (outcome === "pending") {
+        assert.ok(
+          coverage.deferred.some((row: unknown) =>
+            isDeepStrictEqual(row, pending),
+          ),
+        );
+        assert.ok(
+          findings.findings.some(
+            (row: { summary: string }) => row.summary === savedFinding.summary,
+          ),
+        );
+        assert.ok(report.includes(pending.reason));
+      } else {
+        assert.deepEqual(
+          coverage.deferred.filter(
+            (row: { candidateId?: string }) =>
+              row.candidateId === pending.candidateId,
+          ),
+          [],
+        );
+        assert.ok(
+          coverage.deferred.some(
+            (row: { id?: string }) => row.id === "scan-stopped",
+          ),
+        );
+        assert.ok(!report.includes(pending.reason));
+      }
+    }
+    for (const [name, bytes] of originals) {
+      assert.deepEqual(await readFile(path.join(checkpointRoot, name)), bytes);
+    }
+  });
 }

@@ -26,6 +26,69 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
+  test("reports saved unresolved candidates separately from reportable findings", async () => {
+    const result = fakeResult(["high"]);
+    result.coverage.completeness = "partial";
+    result.coverage.deferred = [
+      {
+        id: "pending",
+        candidateId: "candidate-1",
+        reason: "Evidence is incomplete.",
+      },
+      { id: "review", reason: "Remaining review work." },
+    ];
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(["scan", "--json"], dependencies({ result }))).toBe(2);
+    expect(stderr.text()).toContain("FINDINGS  1 (1 high) + 1 candidate\n");
+    expect(stderr.text()).not.toContain("CANDIDATES");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      unresolvedCandidateCount: 1,
+      unresolvedCandidates: [{ candidateId: "candidate-1" }],
+    });
+  });
+
+  test.each([
+    {
+      confirmed: [true, false],
+      candidates: 3,
+      summary:
+        "2 (1 confirmed this scan; 1 previously found; 2 high) + 3 candidates",
+    },
+    {
+      confirmed: [true, false],
+      candidates: 0,
+      summary: "2 (1 confirmed this scan; 1 previously found; 2 high)",
+    },
+    { confirmed: [], candidates: 3, summary: "0 + 3 candidates" },
+    { confirmed: [], candidates: 0, summary: "0" },
+  ])(
+    "preserves the findings summary with $summary",
+    async ({ confirmed, candidates, summary }) => {
+      const result = fakeResult([]);
+      Object.assign(result, {
+        repositoryFindings: confirmed.map((confirmedInLatestScan) => ({
+          severity: { level: "high" },
+          confirmedInLatestScan,
+        })),
+      });
+      result.coverage.completeness = "partial";
+      result.coverage.deferred = Array.from(
+        { length: candidates },
+        (_, index) => ({
+          id: `pending-${index}`,
+          candidateId: `candidate-${index}`,
+          reason: "Evidence is incomplete.",
+        }),
+      );
+      const stderr = captureCli(main, "stderr");
+      expect(await stderr.run(["scan"], dependencies({ result }))).toBe(2);
+      expect(stderr.text()).toContain(
+        `  FINDINGS  ${summary}\n  COVERAGE  partial\n`,
+      );
+      expect(stderr.text()).not.toContain("CANDIDATES");
+    },
+  );
+
   test("findings list matches directory identity when realpath preserves alias spelling", async () => {
     const root = await temporaryDirectory("finding-repository-identity-");
     const originalRealpath = fs.realpath;

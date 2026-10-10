@@ -317,6 +317,10 @@ export interface CoverageDocument {
     receiptRefs: string[];
     riskArea?: string;
     notes?: string;
+    /**
+     * A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.
+     */
+    candidateId?: unknown;
     [k: string]: unknown;
   }[];
   explicitExclusions: {
@@ -329,6 +333,14 @@ export interface CoverageDocument {
     reason: string;
     paths?: string[];
     surfaceIds?: string[];
+    /**
+     * A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.
+     */
+    candidateId?: unknown;
+    /**
+     * Saved candidate details and evidence awaiting a final decision.
+     */
+    candidate?: unknown;
     [k: string]: unknown;
   }[];
   /**

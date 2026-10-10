@@ -792,6 +792,7 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
         )
 
 
+@pytest.mark.parametrize("decision_owner", ["same", "unowned", "other"])
 @pytest.mark.parametrize("evidence", ["deferred", "reported"])
 @pytest.mark.parametrize(
     ("destination", "head_time"),
@@ -809,6 +810,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     evidence: str,
     head_time: int,
     destination: str,
+    decision_owner: str,
 ) -> None:
     from test_workbench_saved_source_order import call_workbench
 
@@ -888,6 +890,10 @@ def test_parent_head_selection_matches_frozen_publication_retry(
                 "finding": initial["findings"]["findings"][0],
             }
         ]
+    if evidence == "reported" and decision_owner != "unowned":
+        terminal["coverage"]["surfaces"][0]["sourceWorkerId"] = (
+            worker_id if decision_owner == "same" else "independent-worker"
+        )
     staged.write_text(json.dumps(terminal))
     write_bytes = saved.write_scan_local_bytes
 
@@ -932,8 +938,9 @@ def test_parent_head_selection_matches_frozen_publication_retry(
         if evidence == "deferred":
             assert (parent_work in coverage["deferred"]) is (head_time <= 100)
         else:
-            assert len(findings["findings"]) == (1 if head_time <= 100 else 0)
-            if head_time <= 100:
+            retained = head_time <= 100 or decision_owner != "same"
+            assert len(findings["findings"]) == int(retained)
+            if retained:
                 for field in (
                     "findingId",
                     "occurrenceId",

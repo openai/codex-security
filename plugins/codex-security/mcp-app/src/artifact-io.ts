@@ -58,9 +58,17 @@ export async function readArtifactText(
   components: readonly string[],
   label: string,
 ): Promise<string> {
+  return (await readArtifactBytes(context, components, label)).toString("utf8");
+}
+
+export async function readArtifactBytes(
+  context: ArtifactContext,
+  components: readonly string[],
+  label: string,
+): Promise<Buffer> {
   const canonical = await artifactSourcePath(context, components, label);
   try {
-    return await fs.readFile(canonical, "utf8");
+    return await fs.readFile(canonical);
   } catch (error) {
     throw new Error(
       `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
@@ -247,6 +255,20 @@ export async function artifactDestination(
 export async function replaceArtifactText(
   path: string,
   content: string,
+): Promise<void> {
+  await replaceArtifactContents(path, content);
+}
+
+export async function replaceArtifactBytes(
+  path: string,
+  content: Uint8Array,
+): Promise<void> {
+  await replaceArtifactContents(path, content);
+}
+
+async function replaceArtifactContents(
+  path: string,
+  content: string | Uint8Array,
 ): Promise<void> {
   const temporary = join(dirname(path), "." + randomUUID() + ".tmp");
   try {
