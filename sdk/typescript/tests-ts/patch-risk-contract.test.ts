@@ -917,3 +917,43 @@ describe("patch risk assessment contract", () => {
     expect(validateText("", PLUGIN_ROOT, ["--", "-h"]).status).toBe(1);
   });
 });
+
+for (const [label, search, replacement, expected] of [
+  [
+    "top-level",
+    '"recommendation":"merge"',
+    '"recommendation":"block","recommendation":"merge"',
+    1,
+  ],
+  [
+    "escaped key",
+    '"recommendation":"merge"',
+    '"recommendation":"block","recommendati\\u006fn":"merge"',
+    1,
+  ],
+  [
+    "nested",
+    '"impact":{"rating":"moderate"',
+    '"impact":{"rating":"low","rating":"moderate"',
+    1,
+  ],
+  [
+    "distinct nested owners",
+    '"recommendation":"merge"',
+    '"recommendation":"merge"',
+    0,
+  ],
+  [
+    "string content",
+    '"rationale":"A bounded caller can fail."',
+    '"rationale":"recommendation: block, recommendation: merge"',
+    0,
+  ],
+] as const) {
+  test(`assessment duplicate-key compatibility: ${label}`, () => {
+    const text = JSON.stringify(assessment()).replace(search, replacement);
+    const result = validateText(text);
+    expect(result.status, result.stderr).toBe(expected);
+    if (expected) expect(result.stderr).toContain("duplicate JSON object key:");
+  });
+}

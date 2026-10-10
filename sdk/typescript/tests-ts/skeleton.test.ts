@@ -261,14 +261,18 @@ describe("TypeScript package skeleton", () => {
     expect(nativeCoverageStep.if).toBe("runner.os != 'Linux'");
     expect(nativeCoverageStep.run).toContain(".//testcase/skipped");
     expect(nativeCoverageStep).not.toHaveProperty("continue-on-error");
-    for (const name of [
-      "Install plugin dependencies",
-      "Set up Node.js for triage evals",
-      "Set up triage eval dependencies and host runtime",
-    ]) {
-      expect(job.steps!.find((step) => step.name === name)?.if).toBe(
+    for (const [name, condition] of [
+      ["Install plugin dependencies", "matrix.os == 'ubuntu-latest'"],
+      [
+        "Set up Node.js for triage evals",
         "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
-      );
+      ],
+      [
+        "Set up triage eval dependencies and host runtime",
+        "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
+      ],
+    ]) {
+      expect(job.steps!.find((step) => step.name === name)?.if).toBe(condition);
     }
     expect(jobs["required-test"]?.needs).toContain("plugin-source");
     expect(jobs["windows"]?.needs).toContain("plugin-source");

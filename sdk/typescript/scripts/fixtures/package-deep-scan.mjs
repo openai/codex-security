@@ -341,6 +341,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
     assert.equal(completed.manifest.scan.id, scanId);
     assert.equal(completed.manifest.scan.status, "completed");
     assert.ok(completed.manifest.scan.sealedAt);
+    await assertDraft(join(scanDir, "scan-manifest.json"));
   } finally {
     await rpc.close();
   }
@@ -426,6 +427,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     assert.ok(result.manifest.scan.sealedAt);
     assert.equal(result.manifest.scan.id, scanId);
     assert.deepEqual(result.findings.findings, []);
+    assertCoverage(result.coverage);
     assert.ok(
       (await readFile(join(f.directory, "output", "report.md"), "utf8"))
         .length > 0,
@@ -443,6 +445,25 @@ async function assertDraft(path) {
   );
   assert.deepEqual(findings.findings, []);
   assert.ok(document.scan.target);
+  assertCoverage(
+    JSON.parse(await readFile(join(dirname(path), "coverage.json"), "utf8")),
+  );
+}
+
+function assertCoverage(coverage) {
+  assert.deepEqual(coverage.deferred, []);
+  assert.equal(coverage.resolvedDeferred.length, 2);
+  assert.deepEqual(
+    coverage.resolvedDeferred.map((closure) => closure.id).sort(),
+    coverage.reviews
+      .map(
+        (review) =>
+          `${review.workerId}-attempt-${review.attempt}-resolved-review-task`,
+      )
+      .sort(),
+  );
+  for (const closure of coverage.resolvedDeferred)
+    assert.equal(closure.reason, "Source review completed.");
 }
 
 async function readExecutions(f) {

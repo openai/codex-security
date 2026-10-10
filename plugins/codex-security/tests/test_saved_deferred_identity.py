@@ -9,11 +9,13 @@ import pytest
 from test_workbench_saved_source_order import call_workbench
 from test_workbench_standard_deep_results import (
     accepted_standard_worker,
+    committed_standard_reducer,
     deep_scan_fixture,
     write_saved_parent,
 )
 from workbench_test_support import (
     preserve_scan_results,
+    run_workbench,
     saved_discovery_worker,
     saved_draft,
     write_checkpoint,
@@ -592,3 +594,204 @@ def test_legacy_summary_stays_pending_after_an_explicit_closure(
             {key: value for key, value in row.items() if key != "id"} == summary for row in pending
         )
     assert replay[2] == first[2]
+
+
+@pytest.mark.parametrize("selected_reopened", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_parent_rejection_keeps_a_newer_selected_reopened_candidate(
+    tmp_path, monkeypatch, saved_results, selected_reopened, retry
+):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    identity = "caller-review"
+    generic = {"id": identity, "reason": "Review API callers.", "paths": ["api.py"]}
+    rejected_surface = {
+        "id": "outcome",
+        "label": "Caller",
+        "candidateId": identity,
+        "disposition": "rejected",
+        "receiptRefs": [],
+    }
+    rejected = saved_draft(
+        scan_id,
+        surfaces=[rejected_surface],
+        closures=[{"id": identity, "reason": "Earlier review completed."}],
+        complete=True,
+    )
+    candidate = {
+        **generic,
+        "candidateId": identity,
+        "candidate": {"title": "New caller evidence"},
+        "reason": "Validate the reopened caller.",
+        "surfaceIds": ["api"],
+    }
+    pending_surface = {
+        "id": "api",
+        "label": "API",
+        "candidateId": identity,
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    reopened = saved_draft(scan_id, deferred=[candidate], surfaces=[pending_surface], complete=True)
+    drafts = [saved_draft(scan_id, deferred=[generic]), rejected]
+    if selected_reopened:
+        drafts.append(reopened)
+    checkpoints = [write_checkpoint(result_path.parent / "checkpoints", draft) for draft in drafts]
+    for index, checkpoint in enumerate(checkpoints, 1):
+        os.utime(checkpoint, ns=(index * 100, index * 100))
+    result_path.write_text(json.dumps(rejected))
+    committed_standard_reducer(state, codex_home, scan_dir, scan_id, worker_id, result_path)
+    os.utime(result_path, ns=(200, 200))
+    head = result_path.parent / "checkpoint-head.json"
+    selected = 2 if selected_reopened else 1
+    head.write_text(json.dumps({"checkpoint": checkpoints[selected].name}))
+    os.utime(head, ns=((selected + 1) * 100, (selected + 1) * 100))
+    parent = saved_draft(
+        scan_id,
+        surfaces=[
+            {
+                **rejected_surface,
+                "id": "projected-outcome",
+                "candidateId": "projected-candidate",
+                "provenance": {
+                    "workerId": worker_id,
+                    "attempt": 1,
+                    "candidateId": identity,
+                    "sourceId": "outcome",
+                },
+            }
+        ],
+        complete=True,
+    )
+    parent["coverage"]["reviews"] = [
+        {"workerId": worker_id, "attempt": 1, "completeness": "complete"}
+    ]
+    write_saved_parent(scan_dir, parent, 200)
+    originals = {path: path.read_bytes() for path in [result_path, *checkpoints]}
+    if retry:
+        coverage, replay = cancel_and_preserve(
+            monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
+        )
+    else:
+        run_workbench(
+            state, "cancel-scan", "--scan-id", scan_id, environment={"CODEX_HOME": str(codex_home)}
+        )
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        run_workbench(
+            state,
+            "preserve-scan-results",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+        replay = json.loads((scan_dir / "coverage.json").read_text())
+    for saved in [coverage, replay]:
+        pending = [row for row in saved["deferred"] if row.get("reason") == candidate["reason"]]
+        assert len(pending) == (1 if selected_reopened else 0)
+        surfaces = [row for row in saved["surfaces"] if row.get("disposition") == "needs_follow_up"]
+        assert bool(surfaces) is selected_reopened
+    assert coverage == replay
+    assert all(path.read_bytes() == content for path, content in originals.items())
+
+
+@pytest.mark.parametrize("kind", ["candidate", "generic", "id_only_candidate", "id_only_finding"])
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_projected_parent_pending_tracks_selected_completion(
+    tmp_path, monkeypatch, saved_results, kind, closed, retry
+):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    identity = "caller-review"
+    task = {"id": identity, "reason": "Validate the selected caller.", "paths": ["api.py"]}
+    if kind == "candidate":
+        task["candidateId"] = identity
+    elif kind.startswith("id_only_"):
+        task[kind.removeprefix("id_only_")] = {"title": "Caller validation."}
+    pending_surface = {
+        "id": "api",
+        "label": "API",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    if kind != "generic":
+        pending_surface["candidateId"] = identity
+    initial = saved_draft(scan_id, deferred=[task], surfaces=[pending_surface], complete=True)
+    if kind != "generic":
+        terminal = saved_draft(
+            scan_id, surfaces=[{**pending_surface, "disposition": "rejected"}], complete=True
+        )
+    else:
+        terminal = saved_draft(
+            scan_id,
+            closures=[{"id": identity, "reason": "Selected review completed."}],
+            complete=True,
+        )
+    result_path.write_text(json.dumps(initial))
+    reducer_input = scan_dir / "reducer-input.json"
+    reducer_input.write_text(json.dumps(saved_draft(scan_id, complete=True)))
+    committed_standard_reducer(state, codex_home, scan_dir, scan_id, worker_id, reducer_input)
+    os.utime(result_path, ns=(200, 200))
+    selected = write_checkpoint(result_path.parent / "checkpoints", terminal if closed else initial)
+    os.utime(selected, ns=(300, 300))
+    head = result_path.parent / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(300, 300))
+    provenance = {"workerId": worker_id, "attempt": 1, "sourceId": identity}
+    if kind == "candidate":
+        provenance["candidateId"] = identity
+    projected = {**task, "id": "projected-task", "provenance": provenance}
+    if kind == "candidate":
+        projected["candidateId"] = "projected-candidate"
+    surface = {
+        **pending_surface,
+        "id": "projected-surface",
+        "provenance": {**provenance, "sourceId": "api"},
+    }
+    if kind == "candidate":
+        surface["candidateId"] = "projected-candidate"
+    if kind.startswith("id_only_"):
+        projected["id"] = f"{worker_id}-attempt-1-deferred-1"
+        surface["id"] = f"{worker_id}-attempt-1-surface-1"
+        surface["provenance"]["candidateId"] = identity
+    independent = {"id": identity, "reason": "Independent parent review."}
+    parent = saved_draft(
+        scan_id, deferred=[projected, independent], surfaces=[surface], complete=True
+    )
+    parent["coverage"]["reviews"] = [
+        {"workerId": worker_id, "attempt": 1, "completeness": "partial"}
+    ]
+    write_saved_parent(scan_dir, parent, 200)
+    originals = {path: path.read_bytes() for path in [result_path, selected]}
+    if retry:
+        coverage, replay = cancel_and_preserve(
+            monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
+        )
+    else:
+        run_workbench(
+            state, "cancel-scan", "--scan-id", scan_id, environment={"CODEX_HOME": str(codex_home)}
+        )
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        run_workbench(
+            state,
+            "preserve-scan-results",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+        replay = json.loads((scan_dir / "coverage.json").read_text())
+    for saved in [coverage, replay]:
+        pending = [row for row in saved["deferred"] if row.get("reason") == task["reason"]]
+        assert bool(pending) is not closed
+        assert independent in saved["deferred"]
+        if kind != "generic":
+            assert (
+                any(row.get("disposition") == "needs_follow_up" for row in saved["surfaces"])
+                is not closed
+            )
+    assert coverage == replay
+    assert all(path.read_bytes() == content for path, content in originals.items())

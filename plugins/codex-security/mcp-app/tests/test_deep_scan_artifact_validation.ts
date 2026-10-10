@@ -6,14 +6,18 @@ import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 
-const { validateDiscoveryArtifacts, validateReducerArtifacts } =
-  await importSource(
-    path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-  );
+const {
+  validateDiscoveryArtifacts,
+  validateReducerArtifacts,
+  projectDiscoveryCoverage,
+} = await importSource(
+  path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+);
 
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
 try {
+  testArchivedCoverageOrigins();
   await testDiscoveryValidation(root);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
@@ -212,9 +216,20 @@ async function testReducerValidation(root: string) {
       ],
       previous: null,
     };
-  const validateSnapshot = (reducerId = "dedup-0001", snapshot = sources) =>
+  const validateSnapshot = (
+    reducerId = "dedup-0001",
+    snapshot = sources,
+    persistSourceCoverage = false,
+  ) =>
     validateReducerArtifacts(
-      { artifacts, artifactDir, resultPath, reducerId, sources: snapshot },
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId,
+        sources: snapshot,
+        persistSourceCoverage,
+      },
       scanId,
     );
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
@@ -222,11 +237,19 @@ async function testReducerValidation(root: string) {
   await writeFile(first.resultPath, "{source changed after dispatch");
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
-  const admitted = await readJson(resultPath);
+  const admitted = JSON.parse(await readFile(resultPath, "utf8"));
+  const { sourceCoverage, ...legacySnapshot } = validatedSnapshot.result;
+  assert.equal(sourceCoverage.completeness, "unknown");
   assert.deepEqual(
-    validatedSnapshot.result,
+    legacySnapshot,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "v1 preserves host coverage in memory while retaining the legacy persisted shape",
+  );
+  const versionedSnapshot = await validateSnapshot("dedup-0001", sources, true);
+  assert.deepEqual(
+    versionedSnapshot.result,
+    JSON.parse(await readFile(resultPath, "utf8")),
+    "v2 persists the full host projection",
   );
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
@@ -692,4 +715,78 @@ async function createWorker(scanDir: string, id: string, result: unknown) {
   const resultPath = path.join(output, "result.json");
   await writeResult(resultPath, result);
   return { artifacts, id, resultPath };
+}
+
+function testArchivedCoverageOrigins() {
+  const imported = {
+    workerId: "synthetic-imported-worker",
+    attempt: 99,
+    description: "Retained source context.",
+  };
+  const prior = {
+    completeness: "partial",
+    surfaces: [
+      {
+        id: "prior",
+        label: "Prior evidence",
+        disposition: "needs_follow_up",
+        receiptRefs: [
+          "artifacts/deep_discovery/workers/discovery-0001/attempts/attempt-01/artifacts/prior.txt",
+        ],
+        provenance: imported,
+      },
+    ],
+    explicitExclusions: [
+      {
+        pattern: "vendor/**",
+        reason: "Earlier exclusion",
+        provenance: imported,
+      },
+    ],
+    deferred: [
+      {
+        id: "prior-task",
+        reason: "Earlier proof gap",
+        surfaceIds: ["prior"],
+        provenance: imported,
+      },
+    ],
+    openQuestions: ["Earlier deployment question"],
+  };
+  const current = {
+    id: "current",
+    label: "Current evidence",
+    disposition: "no_issue_found",
+    receiptRefs: ["artifacts/current.txt"],
+    provenance: imported,
+  };
+  const coverage = { ...prior, surfaces: [current, ...prior.surfaces] };
+  const projected = projectDiscoveryCoverage(
+    coverage,
+    { id: "synthetic-worker", attempt: 2 },
+    "artifacts/deep_discovery/workers/discovery-0001/output",
+    [{ coverage: prior, attempt: 1 }],
+  );
+  assert.equal(projected.surfaces[0].provenance.attempt, 2);
+  for (const field of [
+    "surfaces",
+    "explicitExclusions",
+    "deferred",
+    "openQuestions",
+  ]) {
+    const rows =
+      field === "surfaces" ? projected[field].slice(1) : projected[field];
+    for (const row of rows) {
+      assert.equal(row.provenance.workerId, "synthetic-worker");
+      assert.equal(row.provenance.attempt, 1);
+    }
+  }
+  assert.deepEqual(projected.deferred[0].surfaceIds, [
+    projected.surfaces[1].id,
+  ]);
+  assert.deepEqual(projected.reviews, [
+    { workerId: "synthetic-worker", attempt: 2, completeness: "partial" },
+    { workerId: "synthetic-worker", attempt: 1, completeness: "partial" },
+  ]);
+  assert.equal(coverage.surfaces[1].provenance.attempt, 99);
 }

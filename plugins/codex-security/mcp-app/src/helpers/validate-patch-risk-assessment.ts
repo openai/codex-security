@@ -8,7 +8,7 @@ import {
   readFile,
 } from "./helper-files";
 import { decodePosixBytes } from "./posix-path";
-import { object, parseJson } from "./json";
+import { escapeControls, object, parseJson } from "./json";
 
 interface Assessment {
   recommendation: "merge" | "revise" | "no_op" | "block" | "hold_for_evidence";
@@ -143,7 +143,33 @@ function readAssessment(path: string): unknown {
       ? decodePosixBytes(contents)
       : decodeUtf8(contents).replace(/\r\n?/gu, "\n");
   try {
-    return parseJson(text);
+    const value = parseJson(text);
+    const objects: (Set<string> | undefined)[] = [];
+    let keyExpected = false;
+    for (const [token] of text.matchAll(/"(?:\\.|[^"\\])*"|[{}[\],:]/gu)) {
+      const keys = objects.at(-1);
+      if (token === "{") {
+        objects.push(new Set());
+        keyExpected = true;
+      } else if (token === "[") {
+        objects.push(undefined);
+        keyExpected = false;
+      } else if (token === "}" || token === "]") {
+        objects.pop();
+        keyExpected = false;
+      } else if (token === ",") keyExpected = keys !== undefined;
+      else if (token === ":") keyExpected = false;
+      else if (keys && keyExpected) {
+        const key: string = JSON.parse(token);
+        if (keys.has(key))
+          throw new SyntaxError(
+            `duplicate JSON object key: ${escapeControls(key)}`,
+          );
+        keys.add(key);
+        keyExpected = false;
+      }
+    }
+    return value;
   } catch (error) {
     if (error instanceof SyntaxError)
       throw new Error(`cannot read assessment: ${error.message}`);

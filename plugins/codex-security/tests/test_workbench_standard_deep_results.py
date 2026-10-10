@@ -2316,6 +2316,9 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
             {
                 "id": worker_id,
                 "kind": "discovery",
+                "status": "running",
+                "attempt": 1,
+                "merge_state": "none",
                 "artifact_dir": str(output),
                 "result_manifest_path": None,
             }

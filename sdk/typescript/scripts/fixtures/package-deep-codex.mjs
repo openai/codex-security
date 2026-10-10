@@ -161,10 +161,21 @@ async function run() {
         await server.call("record_codex_security_scan_draft", {
           ...draft,
           complete: false,
+          coverage: {
+            ...draft.coverage,
+            completeness: "partial",
+            deferred: [{ id: "review-task", reason: "Finish source review." }],
+          },
         });
         await server.call("record_codex_security_scan_draft", {
           ...draft,
           complete: true,
+          coverage: {
+            ...draft.coverage,
+            resolvedDeferred: [
+              { id: "review-task", reason: "Source review completed." },
+            ],
+          },
         });
       }
     } else {

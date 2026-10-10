@@ -25,6 +25,7 @@ export interface DeepScanConfig {
 
 export interface DeepScanRunState {
   scanId: string;
+  workflowVersion?: string;
   status: DeepScanRunStatus;
   coordinatorGeneration?: number;
   createdAt?: string;

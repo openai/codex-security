@@ -132,6 +132,7 @@ try {
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
+    await testReducerCoveragePersistenceBinding();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
     await testRetryNotificationDoesNotInterruptTurn();
@@ -2470,6 +2471,68 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
       "mcp_servers.cs_artifacts.required": true,
       "mcp_servers.cs_artifacts.tool_timeout_sec": 86400,
     });
+  });
+}
+
+async function testReducerCoveragePersistenceBinding() {
+  return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+    await writeFile(promptPath, "fixture reducer prompt\n");
+    for (const resume of [false, true]) {
+      for (const persistSourceCoverage of [false, true]) {
+        const deepReducer = {
+          scanRoot: path.join(fixture.root, "scans"),
+          claimedWorkers: [
+            {
+              id: "worker-1",
+              resultPath: path.join(fixture.root, "worker", "result.json"),
+              attempt: 2,
+            },
+          ],
+          persistSourceCoverage,
+        };
+        await new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+          artifactContext: {
+            pluginRoot: fixture.root,
+            scanRoot: deepReducer.scanRoot,
+            repoRoot: fixture.root,
+            scanId: "fixture-scan-id",
+          },
+        }).run({
+          kind: "dedup",
+          promptPath,
+          workingDirectory,
+          subagents: 0,
+          signal: new AbortController().signal,
+          ...(resume
+            ? {
+                resumeThreadId: "fixture-existing-thread",
+                continuationPrompt: "continue the reducer\n",
+              }
+            : {}),
+          artifactContext: {
+            root: workingDirectory,
+            layout: "reducer",
+            deepReducer,
+          },
+        });
+        const invocation = await readJson(fixture.markerPath);
+        const encoded = nativeConfigOverrides(invocation.argv)
+          .map((value) => parseToml(value))
+          .map((config) => {
+            const servers = config.mcp_servers as
+              Record<string, { env?: Record<string, string> }> | undefined;
+            return servers?.cs_artifacts?.env
+              ?.CODEX_SECURITY_REDUCER_CONTEXT_JSON;
+          })
+          .findLast((value) => value !== undefined);
+        assert.ok(
+          encoded,
+          "the launched reducer receives its host-bound artifact context",
+        );
+        assert.deepEqual(JSON.parse(encoded), deepReducer);
+      }
+    }
   });
 }
 

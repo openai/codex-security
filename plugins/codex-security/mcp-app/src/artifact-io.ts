@@ -7,12 +7,14 @@ import { dirname, isAbsolute, join, sep } from "node:path";
 export interface DeepReducerWorkerContext {
   id: string;
   resultPath: string;
+  attempt?: number;
 }
 
 export interface DeepReducerContext {
   scanRoot: string;
   claimedWorkers: DeepReducerWorkerContext[];
   previousReducerResultPath?: string;
+  persistSourceCoverage?: boolean;
 }
 
 /**
@@ -58,9 +60,17 @@ export async function readArtifactText(
   components: readonly string[],
   label: string,
 ): Promise<string> {
+  return (await readArtifactBytes(context, components, label)).toString("utf8");
+}
+
+export async function readArtifactBytes(
+  context: ArtifactContext,
+  components: readonly string[],
+  label: string,
+): Promise<Buffer> {
   const canonical = await artifactSourcePath(context, components, label);
   try {
-    return await fs.readFile(canonical, "utf8");
+    return await fs.readFile(canonical);
   } catch (error) {
     throw new Error(
       `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,

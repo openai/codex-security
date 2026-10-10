@@ -35,6 +35,7 @@ import {
 const {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
+  parseScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
   saveScanDraftCheckpoint,
@@ -93,6 +94,31 @@ try {
     findings: [finding],
     coverage,
   };
+  for (const provenance of [
+    { candidateId: ["candidate-1"] },
+    { candidateId: { value: "candidate-1" } },
+    { workerId: ["worker-1"], candidateId: "candidate-1" },
+    { workerId: { value: "worker-1" }, candidateId: "candidate-1" },
+  ]) {
+    const draft = {
+      ...input,
+      coverage: {
+        ...coverage,
+        completeness: "partial",
+        deferred: [
+          {
+            id: "remaining-review",
+            reason: "Another surface remains.",
+            provenance,
+          },
+        ],
+      },
+    };
+    assert.deepEqual(
+      parseScanDraft(draft).coverage.deferred,
+      draft.coverage.deferred,
+    );
+  }
 
   const findingInput = (changes: Record<string, unknown>) => ({
     ...input,

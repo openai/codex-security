@@ -471,6 +471,9 @@ def _target_scope_lines(target: dict[str, Any]) -> list[str]:
 
 def _surface_notes(surface: dict[str, Any]) -> str:
     notes = surface.get("notes", "No additional canonical notes were recorded.")
+    source = _coverage_source(surface)
+    if source:
+        notes = f"{source}. {notes}"
     receipt_refs = surface.get("receiptRefs", [])
     if not isinstance(receipt_refs, list) or not receipt_refs:
         return _cell(notes)
@@ -478,6 +481,16 @@ def _surface_notes(surface: dict[str, Any]) -> str:
     if not evidence:
         return _cell(notes)
     return _cell(f"{notes} Evidence: {evidence}")
+
+
+def _coverage_source(item: dict[str, Any]) -> str:
+    provenance = item.get("provenance", {})
+    if not isinstance(provenance, dict) or not provenance.get("workerId"):
+        return ""
+    source = f"Review {provenance['workerId']}"
+    if provenance.get("attempt") is not None:
+        source += f", attempt {provenance['attempt']}"
+    return source
 
 
 def _remediation_section(finding: dict[str, Any]) -> list[str]:
@@ -973,6 +986,22 @@ def build_report_markdown(
                 f"[Open the structural hardening portfolio]({hardening_portfolio_path})",
             ]
         )
+    reviews = coverage.get("reviews", [])
+    if isinstance(reviews, list) and reviews:
+        lines.extend(
+            [
+                "",
+                "## Source Review Coverage",
+                "",
+                "| Review | Attempt | Coverage |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for review in reviews:
+            if isinstance(review, dict):
+                lines.append(
+                    f"| {_cell(review.get('workerId'))} | {_cell(str(review.get('attempt', 'unknown')))} | {_cell(review.get('completeness'))} |"
+                )
     surfaces = coverage.get("surfaces", [])
     if surfaces:
         lines.extend(
@@ -1010,6 +1039,7 @@ def build_report_markdown(
         questions.extend(
             {
                 "question": item.get("reason", "Deferred review requires follow-up."),
+                "provenance": item.get("provenance", {}),
                 "followUpPrompt": " ".join(
                     (
                         f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
@@ -1031,6 +1061,9 @@ def build_report_markdown(
             if not isinstance(question, dict):
                 continue
             lines.append(f"- {_text(question.get('question'), 'Unspecified open question.')}")
+            source = _coverage_source(question)
+            if source:
+                lines.append(f"  - {_text(source, '')}.")
             prompt = _text(question.get("followUpPrompt"), "")
             if prompt:
                 lines.append(f"  - Follow-up prompt: {prompt}")
