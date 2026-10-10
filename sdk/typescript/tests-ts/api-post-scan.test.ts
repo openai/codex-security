@@ -236,6 +236,41 @@ const ordinaryRestorationCases: ReadonlyArray<
 ];
 
 describe("completed scan follow-up instructions", () => {
+  test("retains the selected Python when a follow-up cannot discover an ambient interpreter", async () => {
+    const original = runtime.resolvePluginPython;
+    const selected = spyOn(runtime, "resolvePluginPython").mockImplementation(
+      (options) => {
+        if (options?.configuredPath === undefined)
+          throw new Error("Synthetic ambient Python unavailable");
+        return original(options);
+      },
+    );
+    let fixture: Awaited<ReturnType<typeof startPostScan>> | undefined;
+    try {
+      fixture = await startPostScan({
+        artifact: "threatmodel.md",
+        initialContents: "# Saved model\n",
+        threatModel: { summary: "Saved component boundaries." },
+        mutate: async () => {},
+        followUpEvents: () => completedEvents(),
+      });
+      const result = await fixture.scan;
+      expect(fixture.turns).toBe(2);
+      expect(result.threatModelPath).toBe(fixture.artifactPath);
+      expect(result.threatModel).toEqual({
+        summary: "Saved component boundaries.",
+      });
+      for (const [options] of selected.mock.calls)
+        expect(options).toMatchObject({
+          configuredPath: fixture.python,
+          protectedRoot: fixture.repository,
+        });
+    } finally {
+      await fixture?.client.close();
+      selected.mockRestore();
+    }
+  });
+
   test.each(["removed", "rewritten", "updated model", "unchanged"])(
     "refreshes the model path after a successful follow-up leaves the document %s",
     async (change) => {

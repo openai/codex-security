@@ -197,6 +197,7 @@ export async function prepareNativeScan(
     ...input.savedDeepScanSettings,
     ...(recipe.deepScan as JsonObject | undefined),
     auth: recipe.auth,
+    cyberAccessProgram: recipe.cyberAccessProgram,
     knowledgeBasePaths:
       recipe.knowledgeBasePaths ??
       (environment.CODEX_SECURITY_KNOWLEDGE_BASE
@@ -223,6 +224,16 @@ export async function prepareNativeScan(
     input,
     deep.settings.subagents,
   );
+  const security = config["codex_security"];
+  if (
+    input.recipe === undefined &&
+    isRecord(security) &&
+    typeof security["cyber_access_program"] === "string"
+  ) {
+    options.cyberAccessProgram = security[
+      "cyber_access_program"
+    ] as ScanOptions["cyberAccessProgram"];
+  }
   const ambientExecution = await prepareAmbientExecution(
     {
       environment,

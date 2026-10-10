@@ -28,7 +28,8 @@ import { parse as parseToml } from "smol-toml";
 
 import { fileURLToPath } from "node:url";
 
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as runtimeModule from "../src/runtime.js";
 
 import { main } from "../src/cli.js";
 
@@ -1621,6 +1622,7 @@ test("sealed legacy results retain their saved accounting", async () => {
 
 test.each([
   "managed",
+  "selected-python",
   "native",
   "wrong-claim",
   "wrong-target",
@@ -1646,9 +1648,18 @@ test.each([
         tokenUsageEvent({ input_tokens: 1000, output_tokens: 10 }),
       ) + "\n",
     );
+    if (scenario === "selected-python") {
+      const saved = JSON.parse(
+        await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+      );
+      saved.aggregate.threatModel = {
+        summary: "Saved selected-interpreter model.",
+      };
+      await f.saveCheckpoint(saved);
+    }
     await finishDiscovery(f);
     await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
-    const native = scenario !== "managed";
+    const native = scenario !== "managed" && scenario !== "selected-python";
     const owner = "synthetic-native-owner";
     const claim = randomUUID();
     if (native) {
@@ -1689,6 +1700,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       "findings.json",
       "coverage.json",
       "report.md",
+      ...(scenario === "selected-python" ? ["threatmodel.md"] : []),
       DEEP_SCAN_CHECKPOINT,
     ];
     const artifacts = await Promise.all(
@@ -1696,8 +1708,19 @@ with sqlite3.connect(sys.argv[1]) as connection:
     );
     const commands: string[] = [];
     let authentications = 0;
+    const originalPython = runtimeModule.resolvePluginPython;
+    const selectedPython =
+      scenario === "selected-python"
+        ? spyOn(runtimeModule, "resolvePluginPython").mockImplementation(
+            (options) => {
+              if (options?.configuredPath === undefined)
+                throw new Error("Synthetic ambient Python unavailable");
+              return originalPython(options);
+            },
+          )
+        : undefined;
     const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
+      { pluginPath: PLUGIN_ROOT, pythonPath: f.python },
       {
         environment: f.environment,
         ...(native
@@ -1746,8 +1769,22 @@ with sqlite3.connect(sys.argv[1]) as connection:
           authentications++;
         },
       });
-      if (scenario === "managed" || scenario === "native") {
+      if (
+        scenario === "managed" ||
+        scenario === "native" ||
+        scenario === "selected-python"
+      ) {
         const result = await pending;
+        if (scenario === "selected-python") {
+          expect(result.threatModelPath).toBe(
+            join(f.scanDir, "threatmodel.md"),
+          );
+          for (const [options] of selectedPython!.mock.calls)
+            expect(options).toMatchObject({
+              configuredPath: f.python,
+              protectedRoot: f.repository,
+            });
+        }
         expect(result.cost).toEqual(expectedCost);
         expect(result.threadId).toBe(f.threadId);
         expect(result.repositoryFindings).toEqual([]);
@@ -1774,6 +1811,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       ).toEqual(artifacts);
     } finally {
       await client.close();
+      selectedPython?.mockRestore();
     }
   },
 );

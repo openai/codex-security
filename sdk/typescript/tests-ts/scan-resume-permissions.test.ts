@@ -16,6 +16,7 @@ import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
+import { createProfileCodex } from "../src/provider-profile.js";
 import type { JsonObject } from "../src/config.js";
 import {
   runWorkbench,
@@ -58,10 +59,13 @@ test("saved ordinary passes retain native permissions and attribution at the res
   await writeFile(
     preload,
     `
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+const args = process.argv.slice(1);
+const profile = args[args.indexOf("--profile") + 1];
 appendFileSync(${JSON.stringify(captures)}, JSON.stringify({
-  args: process.argv.slice(1),
+  args,
+  profileConfig: readFileSync(join(process.env.CODEX_HOME, profile + ".config.toml"), "utf8"),
   selected: process.env.SYNTHETIC_SCAN_SETTING,
   safetyIdentifier: process.env.CODEX_SAFETY_IDENTIFIER,
   providerKey: process.env.SYNTHETIC_PROVIDER_KEY,
@@ -122,15 +126,19 @@ await new Promise(() => {});
           }
           return result;
         },
-        createCodex: (options) =>
-          new Codex({
+        createCodex: async (options) => {
+          const configured = {
             ...options,
             codexPathOverride: nodeExecutable,
             env: {
               ...options.env,
               NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
             },
-          }),
+          };
+          return options.nativeProfile === undefined
+            ? new Codex(configured)
+            : await createProfileCodex(configured, options.nativeProfile);
+        },
       },
       { surface: "sdk" },
     );
@@ -214,6 +222,7 @@ await new Promise(() => {});
       (line) =>
         JSON.parse(line) as {
           args: string[];
+          profileConfig: string;
           selected: string;
           safetyIdentifier: string;
           providerKey: string;
@@ -245,7 +254,11 @@ await new Promise(() => {});
         (key) => value.startsWith(`${key}=`) || value.startsWith(`${key}.`),
       ),
     );
-    expect(parseToml(settings.join("\n"))).toMatchObject(savedSettings);
+    expect({
+      ...parseToml(launch.profileConfig),
+      ...parseToml(settings.join("\n")),
+    }).toMatchObject(savedSettings);
+    expect(launch.args.join("\n")).not.toContain("saved-provider-header");
   }
   expect(launches[1]!.args).toContain("resume");
   expect(launches[1]!.args).toContain(threadId);

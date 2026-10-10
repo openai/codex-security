@@ -78,6 +78,7 @@ describe("CodexSecurity orchestration", () => {
         },
       };
       let captured: CodexOptions | undefined;
+      let providerConfig: unknown;
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
         {
@@ -102,8 +103,18 @@ describe("CodexSecurity orchestration", () => {
             : {}),
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          createCodex: (options) => {
+          createCodex: async (options) => {
             captured = options;
+            expect(options.nativeProfile).toBeDefined();
+            providerConfig = parseToml(
+              await readFile(
+                join(
+                  options.env!["CODEX_HOME"]!,
+                  `${options.nativeProfile}.config.toml`,
+                ),
+                "utf8",
+              ),
+            );
             return {
               startThread: () => ({
                 id: null,
@@ -133,18 +144,23 @@ describe("CodexSecurity orchestration", () => {
           ...overrides.model_providers["synthetic.provider"],
           auth: { ...auth, cwd: profile ? join(home, "helpers") : home },
         };
-        expect(parseToml(captured!.configOverrides![0]!)).toEqual({
+        expect(providerConfig).toEqual({
           model_providers: { "synthetic.provider": provider },
         });
-        if (profile) {
-          expect(captured?.config?.["profile"]).toBe("review");
-          expect(captured?.config?.["profiles"]).toEqual({
-            review: { model_provider: "synthetic.provider" },
-          });
-        } else {
+        expect(captured!.config).not.toHaveProperty("model_providers");
+        expect(captured!.configOverrides!.join("\n")).not.toContain(
+          "synthetic-auth",
+        );
+        expect(captured!.config).toMatchObject({
+          model_provider: "synthetic.provider",
+        });
+        expect(captured!.config).not.toHaveProperty("profile");
+        expect(captured!.config).not.toHaveProperty("profiles");
+        if (!profile) {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
           );
+          expect(saved["model_provider"]).toBe("synthetic.provider");
           expect(saved["model_providers"]).toEqual({
             "synthetic.provider": provider,
           });
@@ -236,7 +252,7 @@ describe("CodexSecurity orchestration", () => {
                         "plugins",
                         "codex-security",
                         "codex-home",
-                      )]: "read",
+                      )]: { ".": "deny" },
                     },
                   },
                 },
@@ -257,7 +273,7 @@ describe("CodexSecurity orchestration", () => {
                 allow_login_shell: false,
                 model_reasoning_summary: "detailed",
                 show_raw_agent_reasoning: true,
-                windows: { sandbox: "unelevated" },
+                windows: { sandbox: "elevated" },
                 mcp_servers: {
                   private: {
                     command: "echo",
@@ -267,6 +283,10 @@ describe("CodexSecurity orchestration", () => {
                 shell_environment_policy: {
                   set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
                 },
+              });
+              expect(
+                parseToml(options.configOverrides!.join("\n")),
+              ).toMatchObject({
                 responses_api_metadata: {
                   request_trace: "preserve-configured-metadata",
                   codex_security_surface: "sdk",

@@ -88,7 +88,7 @@ import {
   writeSemanticScanDraft,
   type CompletedScanTurn,
 } from "./scan-publication.js";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { type CodexOptions, type ThreadOptions } from "@openai/codex-sdk";
@@ -1532,6 +1532,8 @@ export class CodexSecurity {
                 scanId: registered.scanId,
                 scanDir,
                 pluginRoot,
+                pythonPath: python,
+                protectedRoot,
                 expectation,
                 signal,
                 workbench: (args) => workbench(readOptions, args),
@@ -2516,6 +2518,8 @@ export class CodexSecurity {
               signal,
               scanDir,
               pluginRoot: runtime.plugin.installedRoot,
+              pythonPath: session.python,
+              protectedRoot,
               expectation,
               model,
               onThreadStarted: recordPostScanThread,
@@ -3220,9 +3224,7 @@ export class CodexSecurity {
         authentication.method === "stored_credentials" &&
         this.#runtimeCredentialSource === "api_key"
       ) {
-        const ambientHome =
-          environmentValue(source.environment, "CODEX_HOME") ??
-          join(homedir(), ".codex");
+        const ambientHome = scanCodexHome(source.environment);
         runtime.credentialsAvailable = await initialCredentialsAvailable(
           scanEnvironment,
           ambientHome,
@@ -3241,7 +3243,7 @@ export class CodexSecurity {
         authentication.method === "stored_credentials"
       ) {
         const status = await accountStatus(
-          source.command,
+          await providerPreflightCommand(source.command, source.configuration),
           environment,
           signal,
           runtime.preserveCodexHomeConfig ? effectiveConfig : undefined,
@@ -3393,7 +3395,10 @@ export class CodexSecurity {
     runtime.plugin =
       this.#dependencies.preparedPlugin ??
       (await bootstrapPlugin(runtime.codexHome, runtime.plugin.pluginRoot, {
-        codexCommand: source.command,
+        codexCommand: await providerPreflightCommand(
+          source.command,
+          mergedConfig,
+        ),
         environment: withoutCodexHome(source.environment),
         signal,
       }));
@@ -3871,28 +3876,27 @@ export class CodexSecurity {
           bootstrapWorkspace,
           signal,
         ));
-      const nodeAmbientHome = join(homedir(), ".codex");
-      const configuredAmbientHome = environmentValue(
-        processEnvironment,
-        "CODEX_HOME",
-      );
-      const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
+      const ambientHome = scanCodexHome(processEnvironment);
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
         sharedCredentialCodexConfig(requestedConfig, codexHome),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
+      const startupCommand = await providerPreflightCommand(
+        source.command,
+        requestedConfig,
+      );
       throwIfAborted(signal);
       await (this.#dependencies.probeCodexSandbox ?? probeCodexSandbox)(
-        source.command,
+        startupCommand,
         { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },
         signal,
       );
       const plugin =
         this.#dependencies.preparedPlugin ??
         (await bootstrapPlugin(codexHome, pluginRoot, {
-          codexCommand: source.command,
+          codexCommand: startupCommand,
           environment: withoutCodexHome(processEnvironment),
           signal,
         }));

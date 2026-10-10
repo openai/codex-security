@@ -78,8 +78,7 @@ test.each(["ordinary", "permission", "cost tracking"] as const)(
         "fail-scan",
         "--scan-id",
         "scan_example_001",
-        "--message",
-        failure.message,
+        `--message=${failure.message}`,
       ]);
     } finally {
       await client.close();

@@ -2394,7 +2394,11 @@ def test_stopped_composition_retains_child_context_and_export(
         "content": "# Synthetic model\n\nQueue producers cross the trust boundary.\n",
         "origin": "generated",
     }
-    scope = {"summary": "Queue processing", "assumptions": ["Producer input is untrusted."]}
+    scope = {
+        "summary": "Queue processing",
+        "assumptions": ["Producer input is untrusted."],
+        "sourceScans": {"sourceOwned": "opaque context"},
+    }
     manifest_path = child_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if with_model:
@@ -2477,3 +2481,58 @@ def test_stopped_composition_retains_child_context_and_export(
     if with_model:
         assert replayed[0]["scan"]["threatModel"] == saved["threatModel"]
     assert {path: (child_dir / path).read_bytes() for path in original_child} == original_child
+
+
+@pytest.mark.parametrize(
+    "parent_sources",
+    [{"sourceOwned": "parent context"}, "parent context", [{"scope": "prior context"}]],
+)
+@pytest.mark.parametrize("parent_summary", [False, True])
+def test_stopped_composition_preserves_opaque_parent_scope(
+    tmp_path, parent_sources, parent_summary
+):
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
+    parent = register(state, target, tmp_path / "parent", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    manifest = json.loads((child_dir / "scan-manifest.json").read_text())
+    manifest["scan"]["scope"]["summary"] = "Child context"
+    (child_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    value = checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+        ],
+    )
+    value["aggregate"] = {
+        "scanId": parent["scanId"],
+        "findings": [],
+        "coverage": {"completeness": "partial"},
+        "scope": {
+            **({"summary": "Parent context"} if parent_summary else {}),
+            "sourceScans": parent_sources,
+        },
+    }
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        parent["scanId"],
+        "--artifact-path",
+        CHECKPOINT,
+        input_text=json.dumps(value),
+    )
+    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
+    stopped = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert stopped["findingCount"] == 1
+    saved = json.loads((parent_dir / "scan-manifest.json").read_text())["scan"]
+    assert saved["scope"]["summary"] == ("Parent context" if parent_summary else "Child context")
+    assert saved["scope"]["sourceScans"] == (
+        [*parent_sources, {"scanId": child["scanId"], "scope": {"summary": "Child context"}}]
+        if isinstance(parent_sources, list)
+        else parent_sources
+    )

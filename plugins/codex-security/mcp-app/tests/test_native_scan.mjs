@@ -793,7 +793,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
 });
 
 test(
-  "native discovery and merge workers inherit safe executable paths on fresh and resumed launches",
+  "native discovery and merge workers inherit safe paths and selected cyber programs on fresh and resumed launches",
   {
     skip:
       process.platform === "win32"
@@ -847,8 +847,13 @@ test(
         PATH: [repositoryBin, root, selectedTools].join(delimiter),
       });
       delete process.env.CODEX_CLI_PATH;
-      delete process.env.CODEX_SECURITY_CONFIG_PATH;
       delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+      const selectedConfig = join(root, "selected.toml");
+      await writeFile(
+        selectedConfig,
+        '[codex_security]\ncyber_access_program = "daybreak_blue"\n',
+      );
+      process.env.CODEX_SECURITY_CONFIG_PATH = selectedConfig;
       await writeFile(
         executable,
         `#!${process.execPath}
@@ -867,8 +872,15 @@ if (process.argv.includes("app-server")) {
 `,
         { mode: 0o700 },
       );
-      for (const role of ["discovery", "merge"]) {
-        const cwd = join(root, role);
+      for (const [role, programSource] of [
+        ["discovery", "recipe"],
+        ["discovery", "config"],
+        ["merge", "recipe"],
+        ["merge", "config"],
+      ]) {
+        const selectedProgram =
+          programSource === "recipe" ? "daybreak_red" : "daybreak_blue";
+        const cwd = join(root, `${role}-${programSource}`);
         await mkdir(cwd);
         const config = scanRuntimeCodexConfig(
           { approval_policy: "on-request" },
@@ -884,7 +896,14 @@ if (process.argv.includes("app-server")) {
         const native = await prepareNativeScan({
           ...input(),
           scan: { ...input().scan, targetPath: target },
-          recipe: { auth: "api-key" },
+          ...(programSource === "recipe"
+            ? {
+                recipe: {
+                  auth: "api-key",
+                  cyberAccessProgram: selectedProgram,
+                },
+              }
+            : {}),
         });
         const selectedEnvironment = native.client.dependencies.environment;
         assert.equal(selectedEnvironment.CODEX_CLI_PATH, executable);
@@ -929,6 +948,7 @@ if (process.argv.includes("app-server")) {
           const events = await collectNativeEvents(
             thread,
             "Synthetic worker path verification.",
+            { cyberAccessProgram: native.options.cyberAccessProgram },
           );
           assert.equal(events.at(-1).type, "turn.completed");
           assert.equal(thread.id, "synthetic-worker-thread");
@@ -938,6 +958,10 @@ if (process.argv.includes("app-server")) {
           );
           const executed = observed.find((entry) => entry.kind === "exec");
           assert.equal(executed.executable, executable);
+          assert.equal(
+            executed.argv[executed.argv.indexOf("--cyber-access-program") + 1],
+            selectedProgram,
+          );
           assert.equal(preflight.cwd, cwd);
           assert.equal(executed.argv[executed.argv.indexOf("--cd") + 1], cwd);
           assert.equal(executed.argv.includes("resume"), resumed);

@@ -2210,17 +2210,21 @@ def save_composed_checkpoint(
         )
         merge_coverage(aggregate.setdefault("coverage", {}), draft["coverage"])
         if draft.get("scope") or draft.get("threatModel"):
-            scope = aggregate.setdefault("scope", copy.deepcopy(draft.get("scope", {})))
-            scope.setdefault("sourceScans", []).append(
-                {
-                    "scanId": child["id"],
-                    **{
-                        key: copy.deepcopy(draft[key])
-                        for key in ("scope", "threatModel")
-                        if key in draft
-                    },
-                }
-            )
+            scope = aggregate.setdefault("scope", {})
+            for key, value in draft.get("scope", {}).items():
+                if key != "sourceScans":
+                    scope.setdefault(key, copy.deepcopy(value))
+            context = {
+                "scanId": child["id"],
+                **{
+                    key: copy.deepcopy(draft[key])
+                    for key in ("scope", "threatModel")
+                    if key in draft
+                },
+            }
+            source_scans = scope.setdefault("sourceScans", [])
+            if isinstance(source_scans, list) and context not in source_scans:
+                source_scans.append(context)
         if "threatModel" in draft:
             aggregate.setdefault("threatModel", copy.deepcopy(draft["threatModel"]))
     aggregate["scanId"] = scan["id"]

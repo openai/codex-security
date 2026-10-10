@@ -99,7 +99,7 @@ const stoppedScanProbe = [
   "    connection = workbench_db.connect()",
   "    original_write = workbench_db.saved_results._write_prepared_scan_finalization",
   "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared, **kwargs: (_ for _ in ()).throw(OSError('synthetic cancellation publication failure'))",
-  "    workbench_db.cancel_scan_locked(connection, argparse.Namespace(scan_id=scan_id, thread_id=None))",
+  "    workbench_db.saved_results.cancel_scan_locked(workbench_db, connection, argparse.Namespace(scan_id=scan_id, thread_id=None))",
   "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
   "    connection.close()",
   "    run('preserve-scan-results', '--scan-id', scan_id, '--thread-id', 'stopped-result-owner')",
@@ -131,12 +131,12 @@ const stoppedScanProbe = [
   "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared, **kwargs: (_ for _ in ()).throw(OSError('synthetic publication failure'))",
   "    first_failed = False",
   "    try:",
-  "        workbench_db.preserve_scan_results_locked(connection, scan_id)",
+  "        workbench_db.saved_results.preserve_scan_results_locked(workbench_db, connection, scan_id)",
   "    except OSError:",
   "        first_failed = True",
   "    frozen_after_failure = connection.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
-  "    retry_published = workbench_db.preserve_scan_results_locked(connection, scan_id)",
+  "    retry_published = workbench_db.saved_results.preserve_scan_results_locked(workbench_db, connection, scan_id)",
   "    frozen_after_success = connection.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    final_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    final_findings = json.loads((scan_dir / 'findings.json').read_text(encoding='utf-8'))['findings']",
@@ -282,10 +282,15 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     findingCount: 1,
   });
   const frozenSources = Object.entries(recovered.frozenAfterSuccess);
-  expect(frozenSources).toHaveLength(1);
-  const [checkpointPath, checkpointDigest] = frozenSources[0]!;
-  expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
-  expect(checkpointPath).toBe(`checkpoints/${checkpointDigest}.json`);
+  expect(frozenSources.map(([path]) => path.split("/")[0]).sort()).toEqual([
+    "checkpoint-heads",
+    "checkpoints",
+    "source-order",
+  ]);
+  for (const [checkpointPath, checkpointDigest] of frozenSources) {
+    expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(checkpointPath.split("/")[1]).toBe(`${checkpointDigest}.json`);
+  }
 }, 30_000);
 
 test("preserves distinct instances from one ordinary scan candidate", () => {
