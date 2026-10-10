@@ -1021,3 +1021,59 @@ test.each([undefined, "toon", "yaml", "md"])(
     expect(f.posts).toEqual([]);
   },
 );
+
+for (const kind of ["sast", "secret", "iac"] as const) {
+  test.each([
+    [repositoryUrl, "example/project/feature/parser", "feature/parser"],
+    [
+      "https://GitHub.com/Example/Project.git/",
+      "EXAMPLE/PROJECT/Feature/Parser/More",
+      "Feature/Parser/More",
+    ],
+    [repositoryUrl, "Feature/Parser", "Feature/Parser"],
+    [repositoryUrl, "fix/example/project/Parser", "fix/example/project/Parser"],
+    [repositoryUrl, "example/project", "example/project"],
+    ["https://github.com/", "example/project/feature/parser", null],
+  ])(
+    kind + " URL-only repository metadata preserves the branch from %s: %s",
+    async (url, branch, expected) => {
+      const repository = { url };
+      const record =
+        kind === "sast"
+          ? {
+              ...sast,
+              repository,
+              repositoryBranch: { id: "wiz-branch", name: branch },
+            }
+          : kind === "secret"
+            ? {
+                ...secret,
+                resource: {
+                  ...secret.resource,
+                  name: branch,
+                  typedProperties: { repository },
+                },
+              }
+            : {
+                ...iac,
+                repository,
+                branch: { id: "wiz-branch", name: branch },
+              };
+      const root =
+        kind === "sast"
+          ? "sastFindings"
+          : kind === "secret"
+            ? "secretInstances"
+            : "iacFindings";
+      const parsed = await parse(envelope(root, [record], false));
+      expect(parsed.excluded).toEqual([]);
+      expect(parsed.findings[0]!.evidence.branch).toBe(expected);
+      expect(parsed.findings[0]!.evidence.details!.repository).toEqual({
+        url,
+        name: null,
+        id: null,
+      });
+      expect(parsed.findings[0]!.evidence.source_data).toEqual(record);
+    },
+  );
+}

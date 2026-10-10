@@ -177,13 +177,28 @@ function sourceRepository(
 
 function sourceBranch(
   branch: Record<string, unknown> | undefined,
-  repositoryName: string | null,
+  repository: RepositoryMetadata,
 ): string | null {
   const name = text(branch?.["name"]);
-  const prefix = repositoryName ? `${repositoryName}/` : null;
-  return name && prefix && name.startsWith(prefix)
-    ? name.slice(prefix.length) || null
-    : name;
+  if (!name) return null;
+  const prefix = repository.name ? repository.name + "/" : null;
+  if (prefix && name.startsWith(prefix))
+    return name.slice(prefix.length) || null;
+
+  // URL-only metadata still identifies Wiz's repository-qualified branch name.
+  // Compare only the qualifier, preserving the branch suffix's case and slashes.
+  const repositoryKey = repositoryUrlKey(repository.url);
+  const url = /^(https?:\/\/[^/?#]+)\/([^?#]+)$/iu.exec(repositoryKey);
+  if (!url) return repository.name ? name : null;
+  const prefixParts = url[2]!.split("/").length;
+  const parts = name.split("/");
+  if (
+    parts.length > prefixParts &&
+    repositoryUrlKey(url[1] + "/" + parts.slice(0, prefixParts).join("/")) ===
+      repositoryKey
+  )
+    return parts.slice(prefixParts).join("/") || null;
+  return name;
 }
 
 function updatedAt(value: unknown, field: string): number | null {
@@ -289,7 +304,7 @@ function repositoryFinding(
       description: text(record["description"]) ?? text(rule?.["description"]),
       url: text(record["wizUrl"]) ?? text(record["portalUrl"]),
       locations: path ? [{ path, line: line ?? null }] : [],
-      branch: sourceBranch(branch, repository.name),
+      branch: sourceBranch(branch, repository),
       code_revision: null,
       source_scan_id: null,
       source_updated_at:
