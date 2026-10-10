@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 from test_accepted_publication_references import accept_reducer
@@ -27,6 +28,37 @@ def publish_selected(api, connection, scan):
     assert {key: recorded[key] for key in selection} == selection
     assert len(recorded["publicationSha256"]) == 64
     return accepted, recorded
+
+
+def test_publication_uses_the_staged_draft_checked_for_selection(
+    workbench_api, workbench_db, publication_scan, monkeypatch
+):
+    scan = publication_scan()
+    _, accepted, coverage = accept_reducer(workbench_db, scan)
+    scan.coverage = coverage
+    saved_selection(workbench_db, scan, accepted)
+    staged = stage_publication(
+        scan, generation=3, result_path=accepted, title=scan.findings[0]["title"]
+    )
+    saved = workbench_api["saved_results"]
+    require_publication = saved._require_current_deep_publication
+
+    def replace_after_selection_check(*args):
+        require_publication(*args)
+        staged_path = Path(staged.draft_path)
+        replacement = json.loads(staged_path.read_bytes())
+        replacement["findings"]["findings"][0]["title"] = "Substituted staged finding"
+        replacement_path = staged_path.with_suffix(".replacement")
+        replacement_path.write_text(json.dumps(replacement))
+        replacement_path.replace(staged_path)
+
+    monkeypatch.setattr(saved, "_require_current_deep_publication", replace_after_selection_check)
+    saved.write_scan_draft(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged)
+    workbench_api["complete_scan"](
+        workbench_db, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
+    )
+    published = json.loads((scan.scan_dir / "findings.json").read_bytes())
+    assert published["findings"][0]["title"] == scan.findings[0]["title"]
 
 
 def substitute(scan, accepted, defect):
