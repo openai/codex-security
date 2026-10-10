@@ -322,7 +322,22 @@ await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
       const plugin = fileURLToPath(
         new URL("../../../plugins/codex-security/", import.meta.url),
       );
-      const source = join(root, "plugin");
+      const source = join(root, "plugins", "codex-security");
+      const sdkSource = fileURLToPath(new URL("..", import.meta.url));
+      const sdkFixture = join(root, "sdk", "typescript");
+      await cp(join(sdkSource, "src"), join(sdkFixture, "src"), {
+        recursive: true,
+      });
+      await writeFixture(
+        sdkFixture,
+        "package.json",
+        await readFile(join(sdkSource, "package.json"), "utf8"),
+      );
+      await symlink(
+        join(sdkSource, "node_modules"),
+        join(sdkFixture, "node_modules"),
+        "junction",
+      );
       await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
         recursive: true,
         filter: (path) =>
@@ -337,6 +352,8 @@ await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
         "reserved_artifact_paths.json",
         "codex_profile.mjs",
         "codex_profile.d.mts",
+        "codex_session.mjs",
+        "codex_session.d.mts",
       ]) {
         await writeFixture(
           source,

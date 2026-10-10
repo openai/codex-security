@@ -175,6 +175,7 @@ try {
     { ...context, scanId: undefined },
     ledger,
     {
+      scanId: context.scanId,
       validations: updates,
     },
     /scan-bound artifact context/,

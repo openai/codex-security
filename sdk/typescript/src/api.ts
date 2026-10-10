@@ -243,6 +243,7 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
+  requirePrivateCredentialHome,
   expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
@@ -325,6 +326,12 @@ export interface ScanOptions extends ScanSettings {
   ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  /** @internal Authoritative registration receipt for CLI scan navigation. */
+  onScanRegistered?: (scan: {
+    scanId: string;
+    scanDir: string;
+    startedAt?: string;
+  }) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onScanStarted?: () => void;
@@ -402,6 +409,7 @@ export type ScanObserverName =
   | "onCost"
   | "onOutputArchived"
   | "onOutputDirReady"
+  | "onScanRegistered"
   | "onScanStarted"
   | "onTrustedAccessStatus"
   | "onReconnect"
@@ -1850,6 +1858,18 @@ export class CodexSecurity {
         activeScan = { id: scanId, options: workbenchOptions };
       }
       await options.onRegisteredScan?.(registration);
+      notifyObserver(
+        "onScanRegistered",
+        options.onScanRegistered,
+        options.onObserverError,
+        {
+          scanId,
+          scanDir,
+          ...(typeof registration["startedAt"] === "string"
+            ? { startedAt: registration["startedAt"] }
+            : {}),
+        },
+      );
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
         deepProgressTracker = new DeepScanProgressTracker({
@@ -2556,7 +2576,7 @@ export class CodexSecurity {
                 }
                 const { codex } = await this.#createSessionCodex(
                   session,
-                  "scan-matching",
+                  "compare",
                   runtimePaths,
                   matcherConfig,
                   configOverrides,
@@ -3526,6 +3546,18 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      notifyObserver(
+        "onScanRegistered",
+        options.onScanRegistered,
+        options.onObserverError,
+        {
+          scanId,
+          scanDir,
+          ...(typeof registration["startedAt"] === "string"
+            ? { startedAt: registration["startedAt"] }
+            : {}),
+        },
+      );
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           "onOutputArchived",
@@ -3798,6 +3830,10 @@ export class CodexSecurity {
       bootstrapWorkspace = await createIsolatedHome(
         temporaryRoot,
         validateLocation,
+      );
+      await requirePrivateCredentialHome(
+        await lstat(bootstrapWorkspace),
+        bootstrapWorkspace,
       );
       const pluginRoot =
         this.#dependencies.preparedPlugin?.pluginRoot ??

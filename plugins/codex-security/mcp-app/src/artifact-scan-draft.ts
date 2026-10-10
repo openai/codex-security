@@ -534,7 +534,7 @@ async function preserveScanDraft(
         return (
           (keepsGenericWork(surface) ||
             typeof candidateId !== "string" ||
-            !resolvedIds.has(candidateId)) &&
+            !currentCandidateIds.has(candidateId)) &&
           !coverageEntryPresent(
             result.coverage.surfaces,
             surface,
@@ -1082,6 +1082,7 @@ function resolvedDeferred(coverage: JsonObject): JsonObject[] {
 function genericDeferred(row: JsonObject): boolean {
   return (
     typeof row.candidateId !== "string" &&
+    row.candidateScoped !== true &&
     !("candidate" in row) &&
     !("finding" in row)
   );

@@ -23,6 +23,8 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
+import { applicationRoot } from "./build-server.ts";
+import { importModule } from "./import-module.ts";
 import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const pluginRoot = path.dirname(applicationRoot);

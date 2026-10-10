@@ -420,7 +420,7 @@ describe("malformed scan artifact recovery", () => {
             "sys.path.insert(0, sys.argv[1])",
             "import workbench_target as target",
             "source = Path(sys.argv[2])",
-            "checkout = target.copy_git_worktree_files(source, Path(sys.argv[3]), ())",
+            "checkout, _ = target.copy_git_worktree_files(source, Path(sys.argv[3]), ())",
             "git_dir = Path(target.git_output(source, 'rev-parse', '--absolute-git-dir'))",
             "assert target.worktree_content_digest_for_context(checkout, '.', git_dir=git_dir, work_tree=checkout) == target.worktree_content_digest(source)",
           ].join("\n"),

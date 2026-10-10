@@ -1171,9 +1171,15 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         "features",
       ]) {
         assert.deepEqual(
-          parseToml(
-            configArguments.find((argument) => argument.startsWith(`${name}=`)),
-          )[name],
+          JSON.parse(
+            JSON.stringify(
+              parseToml(
+                configArguments.find((argument) =>
+                  argument.startsWith(`${name}=`),
+                ),
+              )[name],
+            ),
+          ),
           executionConfig[name],
         );
       }

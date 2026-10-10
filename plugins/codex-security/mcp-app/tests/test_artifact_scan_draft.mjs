@@ -1264,10 +1264,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       assert.notEqual(staged.manifest.scan.complete, false);
       assert.deepEqual(
         staged.findings.findings.map((entry) => entry.provenance.candidateId),
-        [
-          finding.provenance.candidateId,
-          interruptedFinding.provenance.candidateId,
-        ],
+        [finding.provenance.candidateId],
       );
       assert.deepEqual(
         staged.coverage.surfaces.map(({ id, disposition }) => ({
@@ -1588,10 +1585,11 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       label: "Archive extraction",
       disposition: "reported",
       notes: "Reviewed.",
-      id: "surface_archive-extraction",
+      id: writtenCoverage.surfaces[0].id,
       receiptRefs: [],
     },
   ]);
+  assert.match(writtenCoverage.surfaces[0].id, /^surface-[0-9a-f]{16}$/);
   assert.deepEqual(writtenCoverage.extensions, coverage.extensions);
 
   await recordCodexSecurityScanDraft(context, semanticInput);

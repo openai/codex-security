@@ -1,8 +1,5 @@
 {
-  "externalOwnedExact": [
-    ".codex-plugin/plugin.json",
-    "OWNERS"
-  ],
+  "externalOwnedExact": [".codex-plugin/plugin.json", "OWNERS"],
   "shippedExact": [
     ".app.json",
     ".mcp.json",
@@ -63,6 +60,7 @@
     "schemas/tools/scan-draft.schema.json",
     "scripts/config_preflight.py",
     "scripts/codex_profile.mjs",
+    "scripts/codex_session.mjs",
     "scripts/deep_scan_config.py",
     "scripts/deep_scan_defaults.json",
     "scripts/filesystem_identity.py",
@@ -102,7 +100,6 @@
     "scripts/workbench_scan_start.py",
     "scripts/workbench_scan_usage.py",
     "scripts/workbench_schema.py",
-    "scripts/workbench_severity.py",
     "scripts/workbench_source_excerpt.py",
     "scripts/workbench_target.py",
     "scripts/workbench_target_state.py",

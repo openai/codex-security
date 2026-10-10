@@ -464,6 +464,8 @@ test("CLI merge failure retains accepted ordinary scans and the original thread"
     },
   );
   expect(stderr.text()).toContain("Synthetic transport disconnected");
+  expect(stderr.text()).toContain(`scans show ${f.scanId}`);
+  expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
   expect(code).not.toBe(0);
   expect(resumedThread).toBe(f.threadId);
   expect(

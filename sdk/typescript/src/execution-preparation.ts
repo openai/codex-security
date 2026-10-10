@@ -299,8 +299,8 @@ export async function createExecutionCodex(
       : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
     ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
     configOverrides: [
-      ...configOverrides,
       `responses_api_metadata=${inlineToml(metadata)}`,
+      ...configOverrides,
     ],
     env: sdkEnvironment,
     config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,

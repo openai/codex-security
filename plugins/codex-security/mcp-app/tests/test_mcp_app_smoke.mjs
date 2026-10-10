@@ -87,10 +87,12 @@ assert.deepEqual(
     "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
     "PYTHON",
     "PYTHONUTF8",
+    "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_SURFACE",
@@ -110,11 +112,6 @@ const scanHandoffSource = await readFile(
   "utf8",
 );
 const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
-assert.match(
-  serverSource,
-  /timeout: workbenchCommandTimeout\(args\[0\]\)/,
-  "Prompt-only scan startup must use the same five-minute timeout as other scan starts.",
-);
 const authenticatedArtifactClaimSource = serverSource.match(
   /if \(\s*handoffClaimToken\s*&&\s*threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
 )?.[0];

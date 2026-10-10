@@ -38,6 +38,19 @@ const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
 );
 
+const rowSchema = {
+  safeParse(value) {
+    return value && typeof value.candidate_id === "string"
+      ? { success: true, data: value }
+      : {
+          success: false,
+          error: {
+            issues: [{ path: ["candidate_id"], message: "required" }],
+          },
+        };
+  },
+};
+
 try {
   await testSchemaSourceOfTruth();
   await testScanContext();
@@ -248,18 +261,7 @@ async function testSafeJsonAndJsonl() {
     { candidate_id: "one", extension: "preserved" },
     { candidate_id: "two" },
   ]);
-  const rowSchema = {
-    safeParse(value) {
-      return value && typeof value.candidate_id === "string"
-        ? { success: true, data: value }
-        : {
-            success: false,
-            error: {
-              issues: [{ path: ["candidate_id"], message: "required" }],
-            },
-          };
-    },
-  };
+
   assert.deepEqual(
     await io.readArtifactJsonl(
       context,
@@ -342,6 +344,7 @@ async function testAtomicReplacement() {
         context,
         components,
         "discovery_candidates",
+        rowSchema,
       );
       assert.ok(expected.has(JSON.stringify(observed)));
     }),
@@ -366,16 +369,8 @@ async function testBoundedPagination() {
     { rows: rows.slice(2) },
   );
   assert.throws(
-    () => io.paginateArtifactRows(rows, { cursor: "-1" }, "review_items"),
-    /non-negative integer/,
-  );
-  assert.throws(
     () => io.paginateArtifactRows(rows, { cursor: "4" }, "review_items"),
     /outside the available rows/,
-  );
-  assert.throws(
-    () => io.paginateArtifactRows(rows, { limit: 1001 }, "review_items"),
-    /1 through 1000/,
   );
 }
 

@@ -7,6 +7,7 @@ import {
   chmod,
   cp,
   mkdtemp,
+  mkdir,
   readFile,
   rm,
   symlink,
@@ -15,8 +16,7 @@ import {
 
 import { tmpdir } from "node:os";
 
-import { join } from "node:path";
-
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 
 import {
@@ -29,18 +29,11 @@ import {
   classifySeverity,
   type ClassifySeverityOptions,
 } from "../src/classify-severity.js";
-
 import { loadContract } from "../src/contract.js";
-
 import type { JsonObject } from "../src/config.js";
-
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
-
 import { prepareScanPublication } from "../src/publication.js";
-
 import { publishScanInternal } from "../src/publish.js";
-
-import { resolvePluginPython } from "../src/runtime.js";
 
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -146,10 +139,14 @@ function classifier(
 
 async function query(environment: NodeJS.ProcessEnv, sql: string) {
   const result = spawnSync(
-    await resolvePluginPython({ environment }),
+    Bun.which("node")!,
     [
-      "-c",
-      "import json,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.row_factory=sqlite3.Row; print(json.dumps([dict(r) for r in c.execute(sys.argv[2]) ])); c.commit()",
+      "--input-type=module",
+      "--eval",
+      `import { DatabaseSync } from "node:sqlite";
+const database = new DatabaseSync(process.argv[1]);
+try { console.log(JSON.stringify(database.prepare(process.argv[2]).all())); }
+finally { database.close(); }`,
       join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
       sql,
     ],
@@ -158,6 +155,88 @@ async function query(environment: NodeJS.ProcessEnv, sql: string) {
   expect(result.status, result.stderr).toBe(0);
   return JSON.parse(result.stdout) as Record<string, unknown>[];
 }
+
+test("classification and saved assessments run with Node and no Python", async () => {
+  const { environment, root, scanDirectory, scanId, findings } =
+    await fixture();
+  const withoutPython = {
+    ...environment,
+    PATH: dirname(Bun.which("node")!),
+    PYTHON: join(root, "missing-python"),
+  };
+  const { scanId: _scanId, ...classification } =
+    await classifyScanDirectorySeverity(scanDirectory, {
+      environment: withoutPython,
+    });
+  expect(
+    await readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      withoutPython,
+    ),
+  ).toEqual(classification);
+});
+
+test("saved assessments retain embedded NULs in imported scan IDs", async () => {
+  const { environment, scanDirectory, scanId, findings } =
+    await fixture("imported\0scan");
+  const { scanId: classifiedScanId, ...classification } =
+    await classifyScanDirectorySeverity(scanDirectory, { environment });
+  expect(classifiedScanId).toBe(scanId);
+  expect(
+    await readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      environment,
+    ),
+  ).toEqual(classification);
+});
+
+test("severity helpers skip Node executables in the caller's enclosing checkout", async () => {
+  const { root, environment, scanDirectory } = await fixture();
+  const repository = join(root, "repository");
+  const bin = join(repository, "bin");
+  const cwd = join(repository, "nested");
+  await mkdir(bin, { recursive: true });
+  await mkdir(cwd);
+  await mkdir(join(repository, ".git"));
+  const marker = join(root, "untrusted-node-ran");
+  const node = join(bin, process.platform === "win32" ? "node.exe" : "node");
+  await writeFile(
+    node,
+    process.platform === "win32"
+      ? "synthetic invalid executable"
+      : '#!/bin/sh\nprintf called > "$NODE_MARKER"\nexit 91\n',
+    { mode: 0o700 },
+  );
+  const entryPoint = new URL(
+    "../src/classify-scan-severity.ts",
+    import.meta.url,
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--eval",
+      `import { classifyScanDirectorySeverity } from ${JSON.stringify(entryPoint.href)};
+await classifyScanDirectorySeverity(${JSON.stringify(scanDirectory)}, { environment: process.env });`,
+    ],
+    {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...environment,
+        PATH: [bin, dirname(Bun.which("node")!)].join(delimiter),
+        NODE_MARKER: marker,
+      },
+    },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
 
 function recordingClassifier() {
   const calls: string[] = [];
@@ -342,7 +421,7 @@ test.each(["same", "different"])(
   },
 );
 
-test("migration leaves unindexed legacy assessments incomplete until reclassified", async () => {
+test("migration preserves exact-owned legacy assessments without occurrence indexes", async () => {
   const first = await fixture();
   const second = await fixture("scan_example_002");
   const environment = first.environment;
@@ -355,7 +434,7 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
     "INSERT INTO finding_severity_assessments SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger FROM scan_severity_assessments",
   );
   await query(environment, "DROP TABLE scan_severity_assessments");
-  await query(environment, "DELETE FROM schema_migrations WHERE version = 42");
+  await query(environment, "DELETE FROM schema_migrations WHERE version = 43");
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -368,19 +447,19 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
   expect(
     await query(
       environment,
-      "SELECT version FROM schema_migrations WHERE version = 42",
+      "SELECT version FROM schema_migrations WHERE version = 43",
     ),
   ).toEqual([]);
   await classifyScanDirectorySeverity(second.scanDirectory, { environment });
-  await expect(
-    readScanSeverityClassification(
+  expect(
+    await readScanSeverityClassification(
       first.scanDirectory,
       scanId,
       first.findings,
       undefined,
       environment,
     ),
-  ).rejects.toThrow("incomplete");
+  ).toEqual(classification);
   expect(
     (await classifyScanDirectorySeverity(first.scanDirectory, { environment }))
       .assessments,
@@ -388,9 +467,9 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
   expect(
     await query(
       environment,
-      "SELECT version FROM schema_migrations WHERE version = 42",
+      "SELECT version FROM schema_migrations WHERE version = 43",
     ),
-  ).toEqual([{ version: 42 }]);
+  ).toEqual([{ version: 43 }]);
 });
 
 test("changed rubric, context, or evidence invalidates matching checkpoints", async () => {
@@ -694,7 +773,7 @@ test("migrates existing databases without changing findings and reads older stat
   await query(environment, "DROP TABLE scan_severity_classifications");
   await query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (41, 42)",
+    "DELETE FROM schema_migrations WHERE version IN (41, 43)",
   );
   expect(
     (

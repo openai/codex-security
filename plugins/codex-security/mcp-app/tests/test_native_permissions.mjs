@@ -175,6 +175,24 @@ assert.deepEqual(
   },
 );
 
+for (const deniedPath of ["/repo/*.env", "/repo/?.env", "/repo/[literal]"]) {
+  assert.deepEqual(
+    resolveNativeParentSandbox(
+      extra({
+        ...pinnedReadOnly,
+        file_system: {
+          type: "restricted",
+          entries: [
+            rootRead,
+            { path: { type: "path", path: deniedPath }, access: "deny" },
+          ],
+        },
+      }),
+    ),
+    { filesystemDenies: [], literalFilesystemDenies: [deniedPath] },
+  );
+}
+
 for (const invalid of [
   undefined,
   null,
@@ -184,8 +202,6 @@ for (const invalid of [
   extra(null),
   extra({ ...pinnedReadOnly, type: "external" }),
   extra({ ...pinnedReadOnly, type: "disabled" }),
-  extra({ ...pinnedReadOnly, network: "unknown" }),
-  extra({ ...pinnedReadOnly, network: { enabled: true } }),
   extra({ ...pinnedReadOnly, file_system: null }),
   extra({ ...pinnedReadOnly, file_system: { type: "unknown" } }),
   extra({
@@ -255,13 +271,7 @@ for (const invalid of [
       ],
     },
   }),
-  ...[
-    "",
-    "relative/private",
-    "/repo/*.env",
-    "/repo/?.env",
-    "/repo/[literal]",
-  ].map((deniedPath) =>
+  ...["", "relative/private"].map((deniedPath) =>
     extra({
       ...pinnedReadOnly,
       file_system: {

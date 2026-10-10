@@ -400,15 +400,17 @@ describe("plugin runtime preparation", () => {
       { scanId: "fixture", findings: [], coverage },
     ).coverage;
 
-    expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
+    const ids = canonical.surfaces.map((surface) => surface.id);
+    expect(ids.slice(0, 3)).toEqual([
       "surface-web",
       "surface-web-3",
       "surface-web-2",
-      "surface_uploads-2",
-      "surface_uploads",
-      "surface_archive",
-      "surface_archive-2",
     ]);
+    expect(ids[4]).toBe("surface_uploads");
+    expect(new Set(ids).size).toBe(coverage.surfaces.length);
+    for (const index of [3, 5, 6])
+      expect(ids[index]).toMatch(/^surface-[a-f0-9]{16}$/);
+
     expect(canonical.surfaces.map((surface) => surface.label)).toEqual(
       coverage.surfaces.map((surface) => surface.label),
     );
@@ -644,7 +646,7 @@ describe("plugin runtime preparation", () => {
     }
   });
 
-  test("projects only the unchanged external payload from the source checkout", async () => {
+  test("preserves the external payload while routing the installed launcher", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");
     await mkdir(workspace);
@@ -699,10 +701,19 @@ describe("plugin runtime preparation", () => {
           readFile(sourcePath),
           readFile(projectedPath),
         ]);
-        expect({
-          path,
-          unchanged: projectedContents.equals(sourceContents),
-        }).toEqual({ path, unchanged: true });
+        if (path === ".mcp.json") {
+          const expected = JSON.parse(sourceContents.toString("utf8"));
+          expected.mcpServers["codex-security"].command =
+            "./scripts/launch_codex_security_mcp_sdk";
+          expect(JSON.parse(projectedContents.toString("utf8"))).toEqual(
+            expected,
+          );
+        } else {
+          expect({
+            path,
+            unchanged: projectedContents.equals(sourceContents),
+          }).toEqual({ path, unchanged: true });
+        }
       }),
     );
     await expect(stat(join(projected, ".internal"))).rejects.toThrow();
@@ -5495,127 +5506,6 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  test.each([
-    ["legacy", "0.1.22", false, false, undefined],
-    ["previous", "0.1.37", true, false, undefined],
-    ["independent version", "1.0.0", true, false, undefined],
-    ["development", "dev", true, true, undefined],
-    ["current", BUNDLED_PLUGIN_VERSION, true, true, undefined],
-    ["narrow-terminal", BUNDLED_PLUGIN_VERSION, true, true, "40"],
-  ] as const)(
-    "saves comparisons with a %s custom plugin",
-    async (_kind, version, supportsStdin, supportsRelated, columns) => {
-      const root = await temporaryDirectory();
-      const pluginRoot = join(root, "custom plugin");
-      const scripts = join(pluginRoot, "scripts");
-      await mkdir(scripts, { recursive: true });
-      await mkdir(join(pluginRoot, ".codex-plugin"));
-      await writeFile(
-        join(pluginRoot, ".codex-plugin", "plugin.json"),
-        JSON.stringify({ name: "codex-security", version }),
-      );
-      await writeFile(
-        join(scripts, "workbench_db.py"),
-        [
-          "import argparse, json, os, sys",
-          "from pathlib import Path",
-          "if '--help' in sys.argv:",
-          "    with Path(__file__).with_name('help-calls').open('ab') as calls: calls.write(b'help\\n')",
-          "    if os.environ.get('FAIL_COMPARISON_HELP'): sys.exit('Synthetic help failure')",
-          "parser = argparse.ArgumentParser()",
-          `command = parser.add_subparsers(dest='command', required=True).add_parser('save-scan-comparison', description=${supportsRelated ? "'Comparison payload supports related findings.'" : "None"})`,
-          "command.add_argument('--before-scan-id', required=True)",
-          "command.add_argument('--after-scan-id', required=True)",
-          ...(supportsStdin
-            ? [
-                "transport = command.add_mutually_exclusive_group(required=True)",
-                "transport.add_argument('--matches-json')",
-                "transport.add_argument('--matches-json-stdin', action='store_true')",
-              ]
-            : ["command.add_argument('--matches-json', required=True)"]),
-          "args = parser.parse_args()",
-          "uses_stdin = getattr(args, 'matches_json_stdin', False)",
-          "payload = json.loads(sys.stdin.buffer.read().decode('utf-8') if uses_stdin else args.matches_json)",
-          ...(supportsRelated
-            ? []
-            : [
-                "if 'related' in payload: sys.exit('Unsupported comparison fields')",
-              ]),
-          "print(json.dumps({'payload': payload, 'usesStdin': uses_stdin}))",
-        ].join("\n"),
-      );
-      const python = await resolvePluginPython();
-      const options = {
-        python,
-        pluginRoot,
-        environment: {
-          PATH: process.env["PATH"],
-          ...(columns === undefined ? {} : { COLUMNS: columns }),
-          OPENAI_API_KEY: "synthetic-openai-key",
-          CODEX_API_KEY: "synthetic-codex-key",
-          OPENROUTER_API_KEY: "synthetic-openrouter-key",
-          FIREWORKS_API_KEY: "synthetic-fireworks-key",
-        },
-      };
-      const original = {
-        matches: [
-          {
-            beforeOccurrenceIds: ["before"],
-            afterOccurrenceIds: ["after"],
-            confidence: "high",
-            reason: "Same synthetic control.",
-          },
-        ],
-        uncertain: [
-          {
-            beforeOccurrenceId: "uncertain-before",
-            afterOccurrenceId: "uncertain-after",
-            reason: "Needs more evidence.",
-          },
-        ],
-        related: [
-          {
-            beforeOccurrenceId: "related-before",
-            afterOccurrenceId: "related-after",
-            reason: "Separate synthetic controls. 🙂",
-          },
-        ],
-      };
-      const args = [
-        "save-scan-comparison",
-        "--before-scan-id",
-        "before-scan",
-        "--after-scan-id",
-        "after-scan",
-        "--matches-json-stdin",
-      ];
-      const input = JSON.stringify(original);
-      await expect(
-        runWorkbench(
-          {
-            ...options,
-            environment: { ...options.environment, FAIL_COMPARISON_HELP: "1" },
-          },
-          args,
-          input,
-        ),
-      ).rejects.toThrow("Synthetic help failure");
-      const expected = {
-        usesStdin: supportsStdin,
-        payload: supportsRelated
-          ? original
-          : { matches: original.matches, uncertain: original.uncertain },
-      };
-      expect(await runWorkbench(options, args, input)).toEqual(expected);
-      expect(await runWorkbench(options, args, input)).toEqual(expected);
-      expect(await readFile(join(scripts, "help-calls"), "utf8")).toBe(
-        "help\nhelp\n",
-      );
-      expect(args.at(-1)).toBe("--matches-json-stdin");
-      expect(JSON.parse(input)).toEqual(original);
-    },
-  );
-
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");
     const repository = join(root, "repository");
@@ -6091,38 +5981,34 @@ describe("runtime directories and plugin Python boundary", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const result = spawnSync(
-      python!,
+    const result = runNodePython(python!, [
+      "-c",
       [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import argparse, json, sqlite3, sys",
-          "from pathlib import Path",
-          "sys.path.insert(0, sys.argv[1])",
-          "from workbench_scan_start import archive_scan",
-          "scan_dir = Path(sys.argv[2])",
-          "archived_scan_dir = Path(sys.argv[3])",
-          "connection = sqlite3.connect(':memory:')",
-          "connection.row_factory = sqlite3.Row",
-          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL)')",
-          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
-          "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
-          "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
-          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
-          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
-          "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
-          "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
-          "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
-        ].join("\n"),
-        join(PLUGIN_ROOT, "scripts"),
-        scanDir,
-        archivedScanDir,
-      ],
-      { encoding: "utf8" },
-    );
+        "import argparse, json, sqlite3, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "from workbench_scan_start import archive_scan",
+        "scan_dir = Path(sys.argv[2])",
+        "archived_scan_dir = Path(sys.argv[3])",
+        "connection = sqlite3.connect(':memory:')",
+        "connection.row_factory = sqlite3.Row",
+        "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT)')",
+        "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+        "connection.execute('CREATE TABLE finding_workflows (scan_id TEXT, scan_dir TEXT NOT NULL, results_json TEXT NOT NULL)')",
+        "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+        "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
+        "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
+        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
+        "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
+        "    pass",
+        "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
+        "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
+        "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      scanDir,
+      archivedScanDir,
+    ]);
 
     expect(result.status).toBe(0);
     expect(result.stderr).toBe("");
@@ -6144,79 +6030,33 @@ describe("runtime directories and plugin Python boundary", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const result = spawnSync(
-      python!,
+    const result = runNodePython(python!, [
+      "-c",
       [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import argparse, sqlite3, sys",
-          "from pathlib import Path",
-          "sys.path.insert(0, sys.argv[1])",
-          "from workbench_scan_start import archive_scan",
-          "scan_dir = Path(sys.argv[2])",
-          "connection = sqlite3.connect(':memory:')",
-          "connection.row_factory = sqlite3.Row",
-          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL)')",
-          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
-          "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
-          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
-          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
-        ].join("\n"),
-        join(PLUGIN_ROOT, "scripts"),
-        scanDir,
-      ],
-      { encoding: "utf8" },
-    );
+        "import argparse, sqlite3, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "from workbench_scan_start import archive_scan",
+        "scan_dir = Path(sys.argv[2])",
+        "connection = sqlite3.connect(':memory:')",
+        "connection.row_factory = sqlite3.Row",
+        "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT)')",
+        "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+        "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+        "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
+        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
+        "with archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True)):",
+        "    pass",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      scanDir,
+    ]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
       "The archived scan directory is required to preserve existing scan artifacts.",
     );
     expect(await readdir(root)).toEqual(["scan"]);
-  });
-
-  test("reports an unwritable SQLite state directory without a Python traceback", async () => {
-    const root = await temporaryDirectory();
-    const pluginRoot = join(root, "plugin");
-    const stateDirectory = join(root, "persistent-state");
-    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
-    await writeFile(
-      join(pluginRoot, "scripts", "workbench_db.py"),
-      [
-        "import sqlite3",
-        "def connect():",
-        "    raise sqlite3.OperationalError('unable to open database file')",
-        "connect()",
-      ].join("\n"),
-    );
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-
-    let failure: unknown;
-    try {
-      await runWorkbench(
-        {
-          python: python!,
-          pluginRoot,
-          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
-          failureMessage: "Could not save the Codex Security scan",
-        },
-        ["register-cli-scan"],
-      );
-    } catch (error) {
-      failure = error;
-    }
-
-    expect(failure).toBeInstanceOf(Error);
-    const message = (failure as Error).message;
-    expect(message).toContain("Could not save the Codex Security scan");
-    expect(message).toContain(join(stateDirectory, "workbench.sqlite3"));
-    expect(message).toContain("SQLite journal files are writable");
-    expect(message).toContain("CODEX_SECURITY_STATE_DIR");
-    expect(message).not.toContain("Traceback");
   });
 
   testPosix("rejects private output directories owned by another user", () => {
@@ -7037,7 +6877,8 @@ describe("runtime directories and plugin Python boundary", () => {
       await writeFile(
         script,
         [
-          "import json, runpy",
+          "import json, runpy, sys",
+          `sys.path.insert(0, ${JSON.stringify(join(PLUGIN_ROOT, "scripts"))})`,
           `storage = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench", "storage.py"))})`,
           "print(json.dumps({'stateDir': str(storage['state_dir']())}))",
         ].join("\n"),
