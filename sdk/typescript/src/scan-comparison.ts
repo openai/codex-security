@@ -542,7 +542,9 @@ async function startPreparedReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
   runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
 ): Promise<{ thread: ReturnType<ReadOnlyCodex["startThread"]> }> {
-  const suppliedConfig = options.config?.codexOverrides ?? {};
+  const suppliedConfig = resolveCodexProfile(
+    options.config?.codexOverrides ?? {},
+  );
   const config = {
     ...suppliedConfig,
     mcp_servers: disabledMcpConfiguration(suppliedConfig, []),

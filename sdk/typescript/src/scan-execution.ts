@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
@@ -35,6 +36,41 @@ export class ScanTransportClosedError extends Error {}
 
 /** A required worker permission cannot be preserved by the selected runtime. */
 export class ScanPermissionError extends Error {}
+
+/** Another process is still executing this saved scan. */
+class ScanAlreadyRunningError extends Error {}
+
+/** Native joins wait for the owner before reading sealed state or resuming it. */
+export async function waitForScanExecution(
+  stateDirectory: string,
+  scanDirectory: string,
+  pluginRoot: string,
+  signal?: AbortSignal,
+): Promise<() => void> {
+  for (;;) {
+    signal?.throwIfAborted();
+    try {
+      const release = await acquireScanExecution(
+        stateDirectory,
+        scanDirectory,
+        pluginRoot,
+      );
+      if (signal?.aborted) {
+        release();
+        signal.throwIfAborted();
+      }
+      return release;
+    } catch (error) {
+      if (!(error instanceof ScanAlreadyRunningError)) throw error;
+    }
+    try {
+      await delay(100, undefined, { signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw error;
+    }
+  }
+}
 
 /** A process-owned lock protects saved scans across SDK and native hosts, including Node 20. */
 export async function acquireScanExecution(
@@ -102,12 +138,9 @@ export async function acquireScanExecution(
       if ((info.attributes & (0x10 | 0x400)) !== 0 || type.value !== 1)
         throw new Error("Scan execution lock must be an ordinary file.");
       const error = handle.lock(true);
+      if (error === 33) throw new ScanAlreadyRunningError(alreadyRunning);
       if (error !== 0)
-        throw new Error(
-          error === 33
-            ? alreadyRunning
-            : `Cannot lock saved scan (Windows error ${error}).`,
-        );
+        throw new Error(`Cannot lock saved scan (Windows error ${error}).`);
     } catch (error) {
       handle.close();
       throw error;
@@ -132,13 +165,13 @@ export async function acquireScanExecution(
     if (!info.isFile() || info.nlink !== 1)
       throw new Error("Scan execution lock must be an ordinary file.");
     const { errno } = native.fileLock(fd, false, true);
+    if (
+      errno === osConstants.errno.EAGAIN ||
+      errno === osConstants.errno.EWOULDBLOCK
+    )
+      throw new ScanAlreadyRunningError(alreadyRunning);
     if (errno !== 0)
-      throw new Error(
-        errno === osConstants.errno.EAGAIN ||
-          errno === osConstants.errno.EWOULDBLOCK
-          ? alreadyRunning
-          : `Cannot lock saved scan (errno ${errno}).`,
-      );
+      throw new Error(`Cannot lock saved scan (errno ${errno}).`);
   } catch (error) {
     closeSync(fd);
     throw error;

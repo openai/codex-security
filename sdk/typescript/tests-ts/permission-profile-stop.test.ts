@@ -6,6 +6,112 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import { ScanPermissionError } from "../src/scan-execution.js";
+import { createRequire } from "node:module";
+import { mkdir } from "node:fs/promises";
+import { scanRuntimeCodexConfig } from "../src/api.js";
+import { createProviderProfile } from "../src/provider-profile.js";
+import { preparedRuntime } from "./support/api-events.js";
+import { executablePathForSpawn } from "../src/runtime.js";
+import {
+  createExecutionCodex,
+  prepareExecutionSource,
+  prepareDiscoveryExecution,
+  prepareMergeExecution,
+  type PreparedExecution,
+} from "../src/execution-preparation.js";
+
+test.each(
+  (["discovery", "merge"] as const).flatMap((role) =>
+    [false, true].map((resumed) => ({ role, resumed })),
+  ),
+)(
+  "provider worker fallback keeps its terminal permission error: %j",
+  async ({ role, resumed }) => {
+    const root = await mkdtemp(join(tmpdir(), "provider-permission-stop-"));
+    const home = join(root, "home");
+    await mkdir(home, { mode: 0o700 });
+    const executable = join(root, "synthetic-codex.exe");
+    const script = join(root, "codex.cjs");
+    const warningPrefix =
+      "Configured value for `permission_profile` is disallowed by requirements; falling back from `";
+    const warningSuffix = "` to required value `:read-only`.";
+    await writeFile(
+      script,
+      `
+const {parse} = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
+const args = process.argv.slice(2), config = {};
+const merge = (a,b) => { for(const [k,v] of Object.entries(b)) a[k] = v && typeof v === "object" && !Array.isArray(v) ? merge(a[k] ?? {},v) : v; return a; };
+for(let i=0;i<args.length;i++) if(["-c","--config"].includes(args[i])) merge(config,parse(args[++i]));
+if(args.includes("app-server")) require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+ const request=JSON.parse(line); if(request.id===undefined)return;
+ const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null};
+ console.log(JSON.stringify({id:request.id,result}));
+});
+else { process.stdin.resume(); process.stdin.on("end",()=>{
+ console.log(JSON.stringify({type:"thread.started",thread_id:"synthetic-worker"}));
+ console.log(JSON.stringify({type:"error",message:${JSON.stringify(warningPrefix)}+config.default_permissions+${JSON.stringify(warningSuffix)}}));
+}); }
+`,
+    );
+    const spawning = spyOn(childProcess, "spawn").mockImplementation(
+      fixtureSpawn(executablePathForSpawn(executable), script, () => {}),
+    );
+    const configuration = {
+      model_provider: "synthetic",
+      model_providers: {
+        synthetic: { name: "Synthetic", wire_api: "responses" },
+      },
+    };
+    const profile = await createProviderProfile(home, configuration);
+    try {
+      const source = prepareExecutionSource({
+        command: { command: executable },
+        configuration,
+        environment: { PATH: process.env["PATH"], CODEX_HOME: home },
+      });
+      const session: PreparedExecution = {
+        policy: "ordinary",
+        source,
+        runtime: { ...preparedRuntime(home), providerProfile: profile },
+        runtimeHome: home,
+        effectiveConfig: configuration,
+        preflightConfig: {},
+        sessionConfig: scanRuntimeCodexConfig(configuration, root),
+        authentication: source.authentication,
+        approvalPolicy: "never",
+        python: process.execPath,
+        releaseCredentialHome: null,
+      };
+      const worker =
+        role === "discovery"
+          ? prepareDiscoveryExecution(session)
+          : prepareMergeExecution(session, 2);
+      const { codex } = await createExecutionCodex(
+        { surface: "sdk", command: "scan" },
+        worker,
+        {},
+      );
+      const options = { workingDirectory: root };
+      const thread = resumed
+        ? codex.resumeThread!("synthetic-worker", options)
+        : codex.startThread(options);
+      await expect(
+        (async () => {
+          const { events } = await thread.runStreamed(
+            "Synthetic permission fallback.",
+            {},
+          );
+          for await (const _event of events) {
+          }
+        })(),
+      ).rejects.toBeInstanceOf(ScanPermissionError);
+    } finally {
+      spawning.mockRestore();
+      await profile.cleanup();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("cancellation drains a preflight child that ignores graceful termination", async () => {
   const root = await mkdtemp(join(tmpdir(), "permission-stop-"));

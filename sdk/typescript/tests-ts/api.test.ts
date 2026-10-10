@@ -4056,6 +4056,8 @@ describe("CodexSecurity orchestration", () => {
       let modelCalled = false;
       let matchingTurns = 0;
       let observedSingleTurn: boolean | undefined;
+      let observedCyberProgram: string | undefined;
+      let matchingCyberProgram: string | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
       const client = new TestClient(
@@ -4117,6 +4119,7 @@ describe("CodexSecurity orchestration", () => {
           async matchFindings(input, options, runtimeOptions) {
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
+            observedCyberProgram = options?.cyberAccessProgram;
             if (failure === "matcher") throw new Error("matcher unavailable");
             if (failure === "budget-context") {
               return await matchScanFindingsInternal(
@@ -4126,7 +4129,9 @@ describe("CodexSecurity orchestration", () => {
                   createCodex: () => ({
                     startThread() {
                       return {
-                        async run() {
+                        async run(_prompt, turnOptions) {
+                          matchingCyberProgram =
+                            turnOptions?.cyberAccessProgram;
                           matchingTurns += 1;
                           return {
                             finalResponse: JSON.stringify({
@@ -4173,6 +4178,7 @@ describe("CodexSecurity orchestration", () => {
       );
 
       const result = await client.run(repository, {
+        cyberAccessProgram: "daybreak_blue",
         ...(limited ? { maxCostUsd: 1 } : {}),
         onWarning: (message) => warnings.push(message),
       });
@@ -4190,11 +4196,15 @@ describe("CodexSecurity orchestration", () => {
         warning === undefined ? [] : [expect.stringContaining(warning)],
       );
       expect(modelCalled).toBe(failure !== "index");
+      expect(observedCyberProgram).toBe(
+        failure === "index" ? undefined : "daybreak_blue",
+      );
       expect(observedSingleTurn).toBe(
         failure === "index" ? undefined : limited,
       );
       if (failure === "budget-context") {
         expect(matchingTurns).toBe(1);
+        expect(matchingCyberProgram).toBe("daybreak_blue");
         expect(matched).toBe(false);
       }
       expect(commands.some(([command]) => command === "complete-scan")).toBe(

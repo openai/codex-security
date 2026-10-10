@@ -2608,6 +2608,7 @@ export class CodexSecurity {
                 };
               },
               model,
+              cyberAccessProgram: options.cyberAccessProgram,
               signal,
               inheritedPermissions: session.inheritedPermissions,
               preserveProviderEnvironment:

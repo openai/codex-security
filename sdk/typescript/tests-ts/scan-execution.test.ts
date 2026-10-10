@@ -14,7 +14,10 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
-import { acquireScanExecution } from "../src/scan-execution.js";
+import {
+  acquireScanExecution,
+  waitForScanExecution,
+} from "../src/scan-execution.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const roots: string[] = [];
@@ -78,9 +81,30 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
     ).rejects.toThrow("already running");
     const releaseOther = await acquireScanExecution(state, other, PLUGIN_ROOT);
     releaseOther();
+    const controller = new AbortController();
+    const canceled = waitForScanExecution(
+      state,
+      first,
+      PLUGIN_ROOT,
+      controller.signal,
+    );
+    const stopped = new Error("Synthetic native transport closed.");
+    await Bun.sleep(120);
+    controller.abort(stopped);
+    await expect(canceled).rejects.toBe(stopped);
+    let acquired = false;
+    const joined = waitForScanExecution(state, first, PLUGIN_ROOT).then(
+      (release) => {
+        acquired = true;
+        return release;
+      },
+    );
+    await Bun.sleep(150);
+    expect(acquired).toBe(false);
     child.stdin!.write("release\n");
     expect((await output.next()).value).toBe("released");
-    const release = await acquireScanExecution(state, first, PLUGIN_ROOT);
+    const release = await joined;
+    expect(acquired).toBe(true);
     try {
       await expect(
         acquireScanExecution(state, first, PLUGIN_ROOT),
@@ -92,9 +116,10 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
     }
     child.stdin!.write("acquire\n");
     expect((await output.next()).value).toBe("owned");
+    const recovered = waitForScanExecution(state, first, PLUGIN_ROOT);
     child.kill();
     await exited;
-    (await acquireScanExecution(state, first, PLUGIN_ROOT))();
+    (await recovered)();
   } finally {
     lines.close();
     if (child.exitCode === null && child.signalCode === null) {
@@ -124,6 +149,9 @@ test.each(["directory", "hard link"] as const)(
     else await link(target, lock);
     await expect(
       acquireScanExecution(state, scan, PLUGIN_ROOT),
+    ).rejects.toThrow("ordinary file");
+    await expect(
+      waitForScanExecution(state, scan, PLUGIN_ROOT),
     ).rejects.toThrow("ordinary file");
     expect(await readFile(target, "utf8")).toBe("synthetic contents");
   },

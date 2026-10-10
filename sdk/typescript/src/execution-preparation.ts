@@ -325,11 +325,7 @@ export async function createExecutionCodex(
     const profileCodex =
       runtime.providerProfile === undefined
         ? undefined
-        : await createProfileCodex(
-            codexOptions,
-            runtime.providerProfile.name,
-            checkPermissions ? SCAN_PERMISSION_PROFILE : undefined,
-          );
+        : await createProfileCodex(codexOptions, runtime.providerProfile.name);
     if (checkPermissions) {
       const preflightCommand = await providerPreflightCommand(
         { command: session.source.command.command },

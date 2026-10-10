@@ -7,7 +7,10 @@ import { stat } from "node:fs/promises";
 import { type TomlTable } from "smol-toml";
 import * as runtimeCommands from "../src/runtime.js";
 import { executablePathForSpawn } from "../src/runtime.js";
-import { resolveCommandAuthConfig } from "../src/config.js";
+import {
+  resolveCommandAuthConfig,
+  structuredCodexConfig,
+} from "../src/config.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import { execFileSync } from "node:child_process";
 
@@ -97,77 +100,117 @@ describe("semantic scan comparison", () => {
     expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
   });
 
-  test("uses prepared scan execution with the matcher restrictions", async () => {
-    const home = await mkdtemp(join(tmpdir(), "prepared-matcher-"));
-    temporaryDirectories.push(home);
-    await writeFile(join(home, "config.toml"), "invalid competing config = [");
-    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
-    let prepared: CodexOptions | undefined;
-    await matchScanFindingsInternal(
-      { before: [finding("before")], after: [finding("after")] },
-      {
-        config: {
-          codexOverrides: {
-            model: "gpt-6-astra",
-            model_reasoning_effort: "ultra",
-            model_provider: "synthetic",
-            model_providers: {
-              synthetic: { name: "Synthetic", env_key: "SYNTHETIC_KEY" },
+  test.each([false, true])(
+    "uses prepared scan execution with the matcher restrictions (selected profile: %p)",
+    async (selectedProfile) => {
+      const home = await mkdtemp(join(tmpdir(), "prepared-matcher-"));
+      temporaryDirectories.push(home);
+      await writeFile(
+        join(home, "config.toml"),
+        "invalid competing config = [",
+      );
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      let prepared: CodexOptions | undefined;
+      let effective: JsonObject | undefined;
+      await matchScanFindingsInternal(
+        { before: [finding("before")], after: [finding("after")] },
+        {
+          config: {
+            codexOverrides: {
+              model: "gpt-6-astra",
+              model_reasoning_effort: "ultra",
+              model_provider: "synthetic",
+              model_providers: {
+                synthetic: { name: "Synthetic", env_key: "SYNTHETIC_KEY" },
+              },
+              mcp_servers: { selected: { command: "synthetic-mcp" } },
+              features: { plugins: true },
+              plugins: { "codex-security@synthetic": { enabled: true } },
+              ...(selectedProfile
+                ? {
+                    profile: "selected",
+                    profiles: {
+                      selected: {
+                        project_doc_max_bytes: 32768,
+                        features: {
+                          shell_tool: true,
+                          unified_exec: true,
+                          plugins: true,
+                          apps: true,
+                        },
+                        mcp_servers: {
+                          selected: { command: "synthetic-mcp", enabled: true },
+                        },
+                      },
+                    },
+                  }
+                : {}),
             },
-            mcp_servers: { selected: { command: "synthetic-mcp" } },
-            features: { plugins: true },
-            plugins: { "codex-security@synthetic": { enabled: true } },
+          },
+          environment: {
+            CODEX_HOME: home,
+            CODEX_CLI_PATH: join(home, "absent"),
+          },
+          inheritedPermissions: {
+            filesystem: { "/private": "deny" },
+            network: { enabled: true },
+          },
+          createCodex(options) {
+            prepared = options;
+            effective = structuredCodexConfig(options.config as JsonObject);
+            return codex;
           },
         },
-        environment: { CODEX_HOME: home, CODEX_CLI_PATH: join(home, "absent") },
-        inheritedPermissions: {
-          filesystem: { "/private": "deny" },
-          network: { enabled: true },
+        { surface: "sdk" },
+      );
+      expect(effective?.["features"]).toMatchObject({
+        shell_tool: false,
+        unified_exec: false,
+        plugins: false,
+        apps: false,
+      });
+      expect(effective?.["project_doc_max_bytes"]).toBe(0);
+      expect(effective?.["mcp_servers"]).toEqual({
+        selected: { command: "synthetic-mcp", enabled: false },
+      });
+      expect(prepared?.config?.["model_provider"]).toBe("synthetic");
+      expect(prepared?.config?.["model_providers"]).toEqual({
+        synthetic: { name: "Synthetic", env_key: "SYNTHETIC_KEY" },
+      });
+      expect(prepared?.config?.["mcp_servers"]).toEqual({
+        selected: { command: "synthetic-mcp", enabled: false },
+      });
+      expect(prepared?.config?.["features"]).toMatchObject({
+        plugins: false,
+        shell_tool: false,
+        multi_agent_v2: false,
+      });
+      expect(prepared?.config?.["default_permissions"]).toBe(
+        "codex_security_comparison",
+      );
+      const permissionOverride = prepared?.configOverrides?.find((value) =>
+        value.startsWith("permissions.codex_security_comparison="),
+      );
+      expect(permissionOverride).toBeDefined();
+      expect(parse(permissionOverride!)).toMatchObject({
+        permissions: {
+          codex_security_comparison: {
+            filesystem: { "/private": "deny" },
+            network: { enabled: false },
+          },
         },
-        createCodex(options) {
-          prepared = options;
-          return codex;
-        },
-      },
-      { surface: "sdk" },
-    );
-    expect(prepared?.config?.["model_provider"]).toBe("synthetic");
-    expect(prepared?.config?.["model_providers"]).toEqual({
-      synthetic: { name: "Synthetic", env_key: "SYNTHETIC_KEY" },
-    });
-    expect(prepared?.config?.["mcp_servers"]).toEqual({
-      selected: { command: "synthetic-mcp", enabled: false },
-    });
-    expect(prepared?.config?.["features"]).toMatchObject({
-      plugins: false,
-      shell_tool: false,
-      multi_agent_v2: false,
-    });
-    expect(prepared?.config?.["default_permissions"]).toBe(
-      "codex_security_comparison",
-    );
-    const permissionOverride = prepared?.configOverrides?.find((value) =>
-      value.startsWith("permissions.codex_security_comparison="),
-    );
-    expect(permissionOverride).toBeDefined();
-    expect(parse(permissionOverride!)).toMatchObject({
-      permissions: {
-        codex_security_comparison: {
-          filesystem: { "/private": "deny" },
-          network: { enabled: false },
-        },
-      },
-    });
-    expect(calls.threadOptions).toMatchObject({
-      model: "gpt-6-astra",
-      modelReasoningEffort: "ultra",
-      networkAccessEnabled: false,
-      approvalPolicy: "never",
-    });
-    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
-      "invalid competing config = [",
-    );
-  });
+      });
+      expect(calls.threadOptions).toMatchObject({
+        model: "gpt-6-astra",
+        modelReasoningEffort: "ultra",
+        networkAccessEnabled: false,
+        approvalPolicy: "never",
+      });
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+        "invalid competing config = [",
+      );
+    },
+  );
 
   test("retains inherited read restrictions without writes at the matcher process boundary", async () => {
     const home = await mkdtemp(

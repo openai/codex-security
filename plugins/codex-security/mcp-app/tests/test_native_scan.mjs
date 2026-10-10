@@ -22,6 +22,7 @@ const bundle = await build({
   bundle: true,
   stdin: {
     contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
+      export { acquireScanExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-execution.ts", import.meta.url)))};
       export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
@@ -60,6 +61,7 @@ new Function("require", "module", "exports", bundle.outputFiles[0].text)(
 );
 const {
   NativeScanHost,
+  acquireScanExecution,
   prepareNativeScan,
   nativeScanConfiguration,
   scanRuntimeCodexConfig,
@@ -1463,6 +1465,32 @@ test("native saved scans retain settings, auth environment, permissions and iden
       },
       network: { enabled: false },
     });
+    const ownedDirectory = join(root, "owned-scan");
+    await mkdir(ownedDirectory, { mode: 0o700 });
+    const nativePlugin = fileURLToPath(
+      new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url),
+    );
+    const releaseOwner = await acquireScanExecution(
+      root,
+      ownedDirectory,
+      nativePlugin,
+    );
+    let acquired = false;
+    const joined = client.dependencies
+      .acquireScanExecution(root, ownedDirectory, nativePlugin)
+      .then((release) => {
+        acquired = true;
+        return release;
+      });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(acquired, false);
+    } finally {
+      releaseOwner();
+    }
+    const releaseJoined = await joined;
+    assert.equal(acquired, true);
+    releaseJoined();
     assert.equal(options.workers, 4);
     assert.equal(options.subagents, 3);
     assert.equal(options.auth, "api-key");
