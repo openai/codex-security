@@ -947,12 +947,15 @@ describe("CodexSecurity orchestration", () => {
       pythonPath: "/definitely/missing/python",
     });
     const onScanStarted = mock();
+    const onScanRegistered = mock();
     await expect(
       client.run("/definitely/missing/repository", {
         onScanStarted,
+        onScanRegistered,
       }),
     ).rejects.toBeInstanceOf(InvalidTargetError);
     expect(onScanStarted).not.toHaveBeenCalled();
+    expect(onScanRegistered).not.toHaveBeenCalled();
     await client.close();
   });
 
@@ -2065,26 +2068,52 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("isolates authentication observer failures from scan startup", async () => {
+  test.each(["onAuthentication", "onScanRegistered"] as const)(
+    "isolates %s observer failures from scan startup",
+    async (observer) => {
+      const { root, repository, codexHome } = await runtimeDirectories();
+      const observerErrors: Array<[ScanObserverName, string]> = [];
+      const client = TestClient.withDependencies({
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: codexFactory(scanDidNotStart),
+      });
+
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "scan"),
+          [observer]: () => fail("observer exploded"),
+          onObserverError: collectObserverErrors(observerErrors),
+        }),
+      ).rejects.toThrow("scan did not start");
+      expect(observerErrors).toEqual([[observer, "observer exploded"]]);
+      await client.close();
+    },
+  );
+
+  test("does not announce a scan when its output directory registration fails", async () => {
     const { root, repository, codexHome } = await runtimeDirectories();
-    const observerErrors: Array<[ScanObserverName, string]> = [];
+    const onOutputDirReady = mock();
+    const onScanRegistered = mock();
     const client = TestClient.withDependencies({
       prepareRuntime: async () => preparedRuntime(codexHome),
       resolvePluginPython: async () => "/managed/python",
       repositoryRevision: async () => null,
+      runWorkbench: async () => {
+        throw new Error("Output directory already registered");
+      },
       createCodex: codexFactory(scanDidNotStart),
     });
-
     await expect(
       client.run(repository, {
         outputDir: join(root, "scan"),
-        onAuthentication: () => fail("authentication observer exploded"),
-        onObserverError: collectObserverErrors(observerErrors),
+        onOutputDirReady,
+        onScanRegistered,
       }),
-    ).rejects.toThrow("scan did not start");
-    expect(observerErrors).toEqual([
-      ["onAuthentication", "authentication observer exploded"],
-    ]);
+    ).rejects.toThrow("Output directory already registered");
+    expect(onOutputDirReady).toHaveBeenCalled();
+    expect(onScanRegistered).not.toHaveBeenCalled();
     await client.close();
   });
 
@@ -2336,7 +2365,7 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each(
-    (["preparation", "empty", "legacy", "commit", "rollback"] as const).flatMap(
+    (["preparation", "empty", "commit", "rollback"] as const).flatMap(
       (boundary) =>
         (["real", "mock", "import"] as const).flatMap((mode) =>
           (mode === "import"
@@ -2423,13 +2452,6 @@ describe("CodexSecurity orchestration", () => {
           "            connection.recv(1)",
           "def main(**kwargs):",
           "    sys.stdout.reconfigure(newline='\\r\\n')",
-          ...(boundary === "legacy"
-            ? [
-                "    if sys.argv[1:3] == ['register-cli-scan', '--help']:",
-                "        print('--archive-existing --archived-scan-dir')",
-                "        return",
-              ]
-            : []),
           "    if sys.argv[1:2] == ['register-cli-scan'] and '--help' not in sys.argv:",
           ...(mode === "real"
             ? [

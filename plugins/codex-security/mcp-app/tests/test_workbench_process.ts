@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { PassThrough } from "node:stream";
@@ -24,8 +26,8 @@ interface WorkbenchModule {
   executeWorkbench(
     python: string,
     args: string[],
-    stateDir?: string,
     input?: string | Buffer,
+    options?: { isolatedPython?: boolean },
   ): Promise<Record<string, unknown>>;
 }
 const invocations: {
@@ -93,8 +95,126 @@ try {
 }
 
 const { executeWorkbench } = await loadWorkbenchProcess();
+async function userSitePython(): Promise<string> {
+  // A caller's virtualenv may intentionally disable user-site imports.
+  const { stdout } = await promisify(execFile)(
+    process.env.PYTHON?.trim() || "python3",
+    ["-I", "-X", "utf8", "-B", "-c", "import sys; print(sys._base_executable)"],
+  );
+  return stdout.trim();
+}
+
+async function fixtureWorkbench(root: string, source: string) {
+  const script = path.join(root, "workbench_db.py");
+  await writeFile(script, source);
+  const { executeWorkbench } = await loadWorkbenchProcess((source) =>
+    source.replace(
+      'return join(PLUGIN_ROOT, "scripts", "workbench_db.py");',
+      `return ${JSON.stringify(script)};`,
+    ),
+  );
+  return executeWorkbench as WorkbenchModule["executeWorkbench"];
+}
+
+for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
+  await test(`isolated workbench ignores ${variable} startup hooks and preserves its environment`, async () => {
+    const root = await temporaryDirectory("workbench-python-startup-");
+    const marker = path.join(root, "startup-ran");
+    const python = await userSitePython();
+    const original = process.env[variable];
+    try {
+      process.env[variable] = path.join(root, "startup-hooks");
+      const hooks =
+        variable === "PYTHONPATH"
+          ? process.env[variable]
+          : (
+              await promisify(execFile)(python, [
+                "-E",
+                "-X",
+                "utf8",
+                "-B",
+                "-c",
+                "import site; print(site.getusersitepackages())",
+              ])
+            ).stdout.trim();
+      await mkdir(hooks, { recursive: true });
+      await writeFile(
+        path.join(
+          hooks,
+          variable === "PYTHONPATH" ? "sitecustomize.py" : "usercustomize.py",
+        ),
+        `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("startup hook ran")\n`,
+      );
+      await promisify(execFile)(python, ["-X", "utf8", "-B", "-c", "pass"]);
+      assert.equal(await readFile(marker, "utf8"), "startup hook ran");
+      await rm(marker);
+
+      const executeFixture = await fixtureWorkbench(
+        root,
+        'import json\ndef main():\n    print(json.dumps({"scans": []}))\n',
+      );
+      const result = await executeFixture(
+        python,
+        ["list-scans", "--limit", "1"],
+        undefined,
+        { isolatedPython: true },
+      );
+      assert.deepEqual(result.scans, []);
+      await assert.rejects(stat(marker), { code: "ENOENT" });
+      assert.equal(process.env[variable], path.join(root, "startup-hooks"));
+    } finally {
+      if (original === undefined) delete process.env[variable];
+      else process.env[variable] = original;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+await test("workbench can import dependencies installed in the Python user site", async () => {
+  const root = await temporaryDirectory("workbench-python-user-site-");
+  const originalUserBase = process.env.PYTHONUSERBASE;
+  try {
+    const python = await userSitePython();
+    process.env.PYTHONUSERBASE = path.join(root, "user-base");
+    const { stdout: userSite } = await promisify(execFile)(python, [
+      "-E",
+      "-X",
+      "utf8",
+      "-B",
+      "-c",
+      "import site; print(site.getusersitepackages())",
+    ]);
+    await mkdir(userSite.trim(), { recursive: true });
+    await writeFile(
+      path.join(userSite.trim(), "synthetic_dependency.py"),
+      'VALUE = "user-site dependency"\n',
+    );
+    const { stdout: imported } = await promisify(execFile)(python, [
+      "-E",
+      "-X",
+      "utf8",
+      "-B",
+      "-c",
+      "from synthetic_dependency import VALUE; print(VALUE)",
+    ]);
+    assert.equal(imported.trim(), "user-site dependency");
+    const executeFixture = await fixtureWorkbench(
+      root,
+      'import json\nfrom synthetic_dependency import VALUE\ndef main():\n    print(json.dumps({"dependency": VALUE}))\n',
+    );
+    assert.deepEqual(await executeFixture(python, ["list-scans"]), {
+      dependency: "user-site dependency",
+    });
+  } finally {
+    if (originalUserBase === undefined) delete process.env.PYTHONUSERBASE;
+    else process.env.PYTHONUSERBASE = originalUserBase;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 const root = await temporaryDirectory("workbench-framing-", true);
+const stateDir = path.join(root, "state");
+const previousStateDir = process.env.CODEX_SECURITY_STATE_DIR;
 try {
+  process.env.CODEX_SECURITY_STATE_DIR = stateDir;
   const target = path.join(root, "target");
   await mkdir(target);
   const title = "--message\0café\n日本語😀high\ud800low\udfff";
@@ -116,12 +236,15 @@ try {
           ? "--user-context-stdin"
           : `--user-context=${input.toString("utf8")}`,
       ],
-      path.join(root, "state"),
       stdin ? input : undefined,
     );
     assert.equal(result.targetTitle, Buffer.from(title).toString("utf8"));
     assert.equal(result.userContext, input.toString("utf8"));
   }
+  assert.equal(
+    (await stat(path.join(stateDir, "workbench.sqlite3"))).isFile(),
+    true,
+  );
   const artifactRoot = path.join(root, "artifacts");
   await mkdir(artifactRoot, { mode: 0o700 });
   const binary = Buffer.from([0xff, 0x00, 0x0a, 0x0d, 0xfe]);
@@ -134,7 +257,6 @@ try {
   await executeWorkbench(
     process.env.PYTHON?.trim() || "python3",
     ["save-artifact", ...artifactArgs],
-    undefined,
     binary,
   );
   const saved = await executeWorkbench(
@@ -166,5 +288,8 @@ try {
     );
   }
 } finally {
+  if (previousStateDir === undefined)
+    delete process.env.CODEX_SECURITY_STATE_DIR;
+  else process.env.CODEX_SECURITY_STATE_DIR = previousStateDir;
   await rm(root, { recursive: true, force: true });
 }
