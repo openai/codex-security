@@ -2544,8 +2544,17 @@ test("native saved scans retain settings, auth environment, permissions and iden
     await mkdir(ownedDirectory, { mode: 0o700 });
     const nativePlugin = join(root, "native-plugin");
     await mkdir(join(nativePlugin, "mcp"), { recursive: true });
+    const nativeDirectory = await realpath(
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/native/",
+        import.meta.url,
+      ),
+    ).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+      return fileURLToPath(new URL("../../native/dist/", import.meta.url));
+    });
     await symlink(
-      fileURLToPath(new URL("../../native/dist/", import.meta.url)),
+      nativeDirectory,
       join(nativePlugin, "mcp", "native"),
       process.platform === "win32" ? "junction" : "dir",
     );
