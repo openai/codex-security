@@ -15,7 +15,10 @@ import {
   codexSecurityStateDirectory,
   validatePreparedOutputDir,
 } from "./runtime.js";
-import { readVendorFindings, type VendorFindings } from "./wiz-findings.js";
+import {
+  readVendorFindingsForPublication,
+  type VendorFindings,
+} from "./wiz-findings.js";
 import {
   repositoryUrlKey,
   validateImportRequest,
@@ -99,6 +102,7 @@ interface SavedSubmission {
   accountId: string;
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
+  inputProjection?: { inputDigest: string; savedEvidenceDigest: string };
 }
 
 export interface ExternalPublicationPreview extends VendorFindings {
@@ -254,7 +258,8 @@ export async function prepareExternalPublication(
     );
   }
   progress({ phase: "reading", completed: 0 });
-  const parsed = await readVendorFindings(path);
+  const { current: parsed, legacy: legacyParsed } =
+    await readVendorFindingsForPublication(path);
   if (parsed.findings.length === 0) {
     throw new CodexSecurityError(
       `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}`,
@@ -352,14 +357,57 @@ export async function prepareExternalPublication(
     destination.id,
     destination.repo_connector_id,
     source,
-    parsed.findings,
   ];
-  const key = hash("sha256", canonicalJson(checkpointIdentity));
+  const inputDigest = hash("sha256", canonicalJson(parsed.findings));
+  function validateSaved(serialized: string, legacy = false): SavedSubmission {
+    const content = JSON.parse(serialized) as SavedSubmission;
+    if (
+      content.accountId !== credentials.account_id ||
+      !Array.isArray(content.requests) ||
+      content.requests.length === 0
+    )
+      throw new Error("Saved import account or requests do not match.");
+    content.requests = content.requests.map(validateImportRequest);
+    const savedEvidence = canonicalJson(
+      content.requests.flatMap((batch) =>
+        batch.items.map(({ source_finding_id, evidence }) => ({
+          source_finding_id,
+          evidence,
+        })),
+      ),
+    );
+    const matches =
+      !legacy && content.inputProjection !== undefined
+        ? content.inputProjection?.inputDigest === inputDigest &&
+          content.inputProjection?.savedEvidenceDigest ===
+            hash("sha256", savedEvidence)
+        : savedEvidence ===
+          canonicalJson(legacy ? legacyParsed.findings : parsed.findings);
+    if (!matches)
+      throw new Error(
+        "Saved import evidence does not match the selected input.",
+      );
+    for (const submission of content.requests) {
+      if (
+        submission.repository.id !== destination.id ||
+        submission.repository.repo_connector_id !==
+          destination.repo_connector_id ||
+        canonicalJson(submission.source) !== canonicalJson(source)
+      )
+        throw new Error("Saved import destination does not match.");
+    }
+    return content;
+  }
+  const key = hash(
+    "sha256",
+    canonicalJson([...checkpointIdentity, parsed.findings]),
+  );
   const pendingPath = join(state, `${key}.pending.json`);
   const legacyKey = hash(
     "sha256",
-    canonicalJson(checkpointIdentity, (left, right) =>
-      left.localeCompare(right),
+    canonicalJson(
+      [...checkpointIdentity, legacyParsed.findings],
+      (left, right) => left.localeCompare(right),
     ),
   );
   if (legacyKey !== key) {
@@ -381,12 +429,40 @@ export async function prepareExternalPublication(
               throw error;
             },
           );
-          if (!current)
-            await rename(legacyPath, pendingPath).catch(
-              (error: NodeJS.ErrnoException) => {
-                if (error.code !== "ENOENT") throw error;
-              },
+          if (current) return;
+          const serialized = await readFile(legacyPath, "utf8").catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return undefined;
+              throw error;
+            },
+          );
+          if (serialized === undefined) return;
+          const content = validateSaved(serialized, true);
+          if (
+            content.requests.some(
+              (submission) =>
+                submission.repository.reset_marker !== destination.reset_marker,
+            )
+          ) {
+            await rm(legacyPath);
+            throw new CloudImportError(
+              409,
+              "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
             );
+          }
+          const savedEvidenceDigest = hash(
+            "sha256",
+            canonicalJson(legacyParsed.findings),
+          );
+          if (savedEvidenceDigest === inputDigest) {
+            await rename(legacyPath, pendingPath);
+          } else {
+            // Bind the new input projection to the original immutable evidence,
+            // so later inventory reordering still resumes these exact requests.
+            content.inputProjection = { inputDigest, savedEvidenceDigest };
+            await writeAtomicJson(pendingPath, content);
+            await rm(legacyPath);
+          }
         }),
       );
     }
@@ -394,36 +470,8 @@ export async function prepareExternalPublication(
   let saved: SavedSubmission | undefined;
   try {
     const serialized = await readFile(pendingPath, "utf8");
-    const content = JSON.parse(serialized) as SavedSubmission;
-    if (
-      content.accountId !== credentials.account_id ||
-      !Array.isArray(content.requests) ||
-      content.requests.length === 0
-    )
-      throw new Error("Saved import account or requests do not match.");
-    content.requests = content.requests.map(validateImportRequest);
-    if (
-      canonicalJson(
-        content.requests.flatMap((batch) =>
-          batch.items.map(({ source_finding_id, evidence }) => ({
-            source_finding_id,
-            evidence,
-          })),
-        ),
-      ) !== canonicalJson(parsed.findings)
-    ) {
-      throw new Error(
-        "Saved import evidence does not match the selected input.",
-      );
-    }
+    const content = validateSaved(serialized);
     for (const submission of content.requests) {
-      if (
-        submission.repository.id !== destination.id ||
-        submission.repository.repo_connector_id !==
-          destination.repo_connector_id ||
-        canonicalJson(submission.source) !== canonicalJson(source)
-      )
-        throw new Error("Saved import destination does not match.");
       if (submission.repository.reset_marker !== destination.reset_marker) {
         // The old request is never sent after reset. A subsequent explicit
         // invocation prepares a fresh submission and asks for approval again.
@@ -547,6 +595,9 @@ export async function prepareExternalPublication(
     accountId: credentials.account_id,
     requests,
     receipts: saved?.receipts,
+    ...(saved?.inputProjection
+      ? { inputProjection: saved.inputProjection }
+      : {}),
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,

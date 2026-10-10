@@ -146,6 +146,7 @@ type RepositoryMetadata = {
 type FindingInput = {
   records: InputRecord[];
   repositories: Map<string, RepositoryMetadata & { platform: string | null }>;
+  legacyRepositories?: FindingInput["repositories"];
 };
 
 // Wiz's documented inventory platform establishes custom GitHub host semantics.
@@ -334,6 +335,7 @@ function repositoryFinding(
 
 function records(payload: unknown): FindingInput {
   const repositories: FindingInput["repositories"] = new Map();
+  const legacyRepositories: FindingInput["repositories"] = new Map();
   if (Array.isArray(payload))
     return { records: payload.map((value) => ({ value })), repositories };
   const envelope = object(payload);
@@ -403,6 +405,10 @@ function records(payload: unknown): FindingInput {
             : entry.name,
         platform: entry.platform ?? previous?.platform ?? null,
       });
+      legacyRepositories.set(entry.id, {
+        ...entry,
+        platform: entry.platform ?? previous?.platform ?? null,
+      });
     }
     for (const entry of entries) {
       const resolved = repositories.get(entry.id)!;
@@ -436,7 +442,17 @@ function records(payload: unknown): FindingInput {
       );
     for (const value of collection["nodes"]) selected.push({ value, kind });
   }
-  if (found) return { records: selected, repositories };
+  if (found)
+    return {
+      records: selected,
+      repositories,
+      ...([...repositories].some(([id, current]) => {
+        const legacy = legacyRepositories.get(id)!;
+        return current.url !== legacy.url || current.name !== legacy.name;
+      })
+        ? { legacyRepositories }
+        : {}),
+    };
   throw new Error(
     "Unsupported Wiz export. Supply vulnerability finding objects, named sastFindings/secretInstances/iacFindings collections, or normalized JSONL. CSV reports must be converted to the documented normalized JSONL profile.",
   );
@@ -445,7 +461,25 @@ function records(payload: unknown): FindingInput {
 export async function readVendorFindings(
   path: string,
 ): Promise<VendorFindings> {
-  let input: FindingInput;
+  return normalizeFindings(await readFindingInput(path));
+}
+
+/** @internal Preserve older inventory projections only for saved publication replay. */
+export async function readVendorFindingsForPublication(path: string): Promise<{
+  current: VendorFindings;
+  legacy: VendorFindings;
+}> {
+  const input = await readFindingInput(path);
+  const current = normalizeFindings(input);
+  return {
+    current,
+    legacy: input.legacyRepositories
+      ? normalizeFindings({ ...input, repositories: input.legacyRepositories })
+      : current,
+  };
+}
+
+async function readFindingInput(path: string): Promise<FindingInput> {
   try {
     // Wiz's default report export is gzip, sometimes with a .json filename.
     // Inspect the bytes rather than requiring users to rename their download.
@@ -465,13 +499,16 @@ export async function readVendorFindings(
         .filter((line) => line.trim())
         .map((line) => JSON.parse(line));
     }
-    input = records(payload);
+    return records(payload);
   } catch (cause) {
     throw new CodexSecurityError(
       `Could not read vendor findings as UTF-8 JSON or JSONL: ${cause instanceof Error ? cause.message : String(cause)}`,
       { cause },
     );
   }
+}
+
+function normalizeFindings(input: FindingInput): VendorFindings {
   const result: VendorFindings = {
     read: input.records.length,
     findings: [],
