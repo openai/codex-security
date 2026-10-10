@@ -1,13 +1,10 @@
+import { readFileSync } from "node:fs";
 import { brotliCompressSync, brotliDecompressSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
 
 import { assertPublicPackageContents } from "../scripts/package-public-content.mjs";
 
-// Synthetic alphanumeric text whose compressed bytes happen to contain " Go/w".
-const cleanCompressedPayload = Buffer.from(
-  "G/8DAGRwm7EiGn34sGFNRM5DuwB8/2zECGTx7hk1/DY6puqEJWJumAz3HfjBg7bx5FxwfFCafaN2of0Oi2uTSSE+wAYOJS4Ii53urIa5BOIkTbR5t2YJ4/UM6dWzXcEvk92TZNz/Y7hNVxjrsXKemVnN4i1pUOdQiCYQNLU7Dbh77pXyrGIWSl+X+L7DUfFR+4Rz3GF85xCbj1NuwlDfIWj42+ueic5NDX4bPXmp46fE8bTdpAUmMvt48x99pm2wlp+oKNvvcb64GT4i7F9zCJMIdfmc06UCn7Go4jQ1WI2P+e05ZbpsWoTkPXnAFULsyUtefeZ1d5nbvE2CDXV3eF7Hxc2KgtQQv8j/CIEd+9vG3REfGcJVIVMqjo1SKzOfADpWQYh3p18YFMyF6R4qOYzPB+zjBy/ZQiCaNm1LpVYdJ7XL0wXPjAVOzJU4zeSUvNFqQ0TeXFGat6ikPEii43FRFSx3aQi2HnWI3rBd1tts0LlTjIWUq8+agHu/mwmJ+jWxAF74Yvij4++fUTHxm8PvqXOK+3QpR82rAPZ+pyRgKX1Z9k9XHlVwNXzJCd5laKwKOWnAOF6vKnrqhZz4aw1VqEJ+1x/4+AM++Pw58PdlRKBjKoLl7DKgEBCGKsd5FF8XPQz9pC3MWj1UbdVa/jLl5M1iIfl9P44zgKV1TaG1LEjuS09t7e0UFSrgXI0BWvBuyNfEras635PJBiZuI8mX6s5yt5NkocDkATyMNP1BnW+wKyTzduIFbd2yV45t/t6ttd5y5FeAAKnT0Jjsmk3zbYdl12fpKKDUvs363EVzTjWEhNaoTC3ntUZKNlYzX74UMDogR28vd8vvJniJvfamegrjMcf3fviFr9caYVQH+bq/TpxK078VtU0Z5iah0E2+ttjzWXHi//ftzs9e+xArq7zohSgVrMpgsL2kjfl/zaltHiNmTgogtQI6gRiI1ICa3kimcK2a/gj0cTkCVwKywUt6xu1N2x2lPi7dk/pnx8/iSkdyphyFA4OQov+d8maitV0XwU9/NKTW048C",
-  "base64",
-);
+import { cleanCompressedPayload } from "./package-tar-fixtures.js";
 
 function compressedFiles(bytes: Buffer, split: boolean): Map<string, Buffer> {
   if (!split) return new Map([["package/runtime.mjs.br", bytes]]);
@@ -58,6 +55,31 @@ describe("npm package public contents", () => {
       ).toThrow("npm tarball contains trailing Brotli data");
     },
   );
+
+  test("checks the approved PNG digest before exempting binary contents", () => {
+    const approved = readFileSync(
+      new URL(
+        "../../../plugins/codex-security/assets/logo.png",
+        import.meta.url,
+      ),
+    );
+    expect(() =>
+      assertPublicPackageContents(new Map([["package/logo.png", approved]])),
+    ).not.toThrow();
+    const stored = Buffer.from(approved);
+    expect(stored.subarray(171, 178)).toEqual(Buffer.alloc(7));
+    stored.set(Buffer.from("\0go/x\0\0"), 171);
+    expect(() =>
+      assertPublicPackageContents(new Map([["package/logo.png", stored]])),
+    ).toThrow("npm tarball contains an unexpected PNG asset");
+  });
+
+  test("keeps the expanded Brotli size bound", () => {
+    const bytes = brotliCompressSync(Buffer.alloc(32 * 1024 * 1024 + 1));
+    expect(() =>
+      assertPublicPackageContents(compressedFiles(bytes, false)),
+    ).toThrow();
+  });
 
   test("checks tar metadata", () => {
     expect(() =>
