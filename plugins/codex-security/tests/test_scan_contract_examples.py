@@ -322,6 +322,36 @@ class ScanContractExamplesTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "does not match"):
             validate_schema_node(findings, schema, "findings")
 
+    def test_findings_reject_unsafe_code_evidence_paths(self) -> None:
+        schema = read_json(SCHEMA_DIR / "findings.schema.json")
+        for path in (
+            "src/handler.py",
+            "../outside.py",
+            "src/../../outside.py",
+            "/etc/passwd",
+            "src\\\\outside.py",
+            "C:/outside.py",
+            ".",
+            "src/\\x00outside.py",
+        ):
+            with self.subTest(path=path):
+                findings = copy.deepcopy(self.findings)
+                findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "request-input",
+                        "label": "Request input",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "value = request.args.get('value')",
+                        "explanation": "The request controls the value.",
+                    }
+                ]
+                if path == "src/handler.py":
+                    validate_schema_node(findings, schema, "findings")
+                else:
+                    with self.assertRaises(AssertionError):
+                        validate_schema_node(findings, schema, "findings")
+
     def test_findings_accept_code_evidence_call_stack_role(self) -> None:
         schema = read_json(SCHEMA_DIR / "findings.schema.json")
         common_schema = read_json(SCHEMA_DIR / "definitions" / "artifact-common.schema.json")
