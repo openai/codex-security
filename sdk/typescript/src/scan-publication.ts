@@ -47,7 +47,7 @@ export interface ScanPublicationContext extends ScanResultContext {
 /** This is only a read-path hint; the workbench still validates the complete seal and binding. */
 export async function hasSealedScanArtifacts(
   scanDir: string,
-  signal: AbortSignal,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   let manifest: unknown;
   try {

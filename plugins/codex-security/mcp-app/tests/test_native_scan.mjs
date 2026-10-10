@@ -1893,7 +1893,7 @@ test("native rejoin restores bound knowledge without overwriting its snapshot", 
   const document = join(root, "architecture.md");
   const scanDir = join(root, "scan");
   const home = join(root, "home");
-  await mkdir(scanDir);
+  await mkdir(scanDir, { mode: 0o700 });
   await mkdir(home);
   await writeFile(document, "Original synthetic architecture.\n");
   const restoreEnvironment = captureEnvironment([

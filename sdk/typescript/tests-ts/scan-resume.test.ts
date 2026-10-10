@@ -3120,6 +3120,7 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
 test.each([
   { bulk: false, missingHome: true, publicationOnly: true },
   { bulk: true, missingHome: false, publicationOnly: true },
+  { bulk: false, missingHome: false, interactive: true, publicationOnly: true },
   {
     bulk: true,
     missingHome: true,
@@ -3158,6 +3159,7 @@ test.each([
 ] as {
   bulk: boolean;
   missingHome: boolean;
+  interactive?: boolean;
   savedPrompt?: string;
   fallbackPrompt?: string;
   rerun?: boolean;
@@ -3168,6 +3170,7 @@ test.each([
   async ({
     bulk,
     missingHome,
+    interactive,
     savedPrompt,
     fallbackPrompt,
     rerun,
@@ -3183,12 +3186,14 @@ test.each([
         synthetic: {
           name: "Synthetic",
           wire_api: "responses",
+          auth: { command: ["synthetic-credential-command"] },
           http_headers: { Authorization: "synthetic-private-replay-token" },
         },
       },
     });
     const recipe = {
       ...f.recipe,
+      auth: interactive ? "auto" : "api-key",
       config: {
         ...(f.recipe.config as JsonObject),
         model_provider: "synthetic",
@@ -3239,7 +3244,10 @@ test.each([
     if (rerun)
       await writeFile(instructionFile, "Keep the original scan instructions.");
     const stdout = capture(),
-      stderr = capture();
+      stderr = capture(interactive);
+    if (interactive)
+      Object.assign(f.environment, { OPENAI_API_KEY: "synthetic-unused-key" });
+    let authenticationChecks = 0;
     const requests: (string | undefined)[] = [];
     let runtimeStarts = 0;
     const code = await main(
@@ -3270,6 +3278,17 @@ test.each([
           currentDirectory: f.root,
         }),
         runWorkbench: f.command,
+        scanAuthenticationPrompt: {
+          isInteractive: () => true,
+          async select() {
+            authenticationChecks++;
+            throw new Error("Publication must not prompt for authentication");
+          },
+        },
+        hasStoredChatGPTSignIn: async () => {
+          authenticationChecks++;
+          throw new Error("Publication must not inspect authentication");
+        },
         createSecurity(config) {
           const client = new TestClient(
             { ...config, pluginPath: PLUGIN_ROOT, pythonPath: f.python },
@@ -3301,6 +3320,7 @@ test.each([
     );
     expect(code, stderr.text()).toBe(2);
     expect(runtimeStarts).toBe(0);
+    expect(authenticationChecks).toBe(0);
     expect(requests).toEqual(publicationOnly ? [f.scanId] : []);
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],

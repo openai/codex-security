@@ -245,6 +245,17 @@ test.each([
       experimental_bearer_token: "synthetic-inline-private-provider-token",
     },
   },
+  ...(["publish", "follow-up", "wrong-claim", "unsealed"] as const).map(
+    (missingReplay) => ({
+      budget: false,
+      native: missingReplay === "unsealed" ? "discovery" : "sealed",
+      missingReplay,
+      provider: {
+        env_key: "PROVIDER_KEY",
+        experimental_bearer_token: "synthetic-inline-private-provider-token",
+      },
+    }),
+  ),
 ] as {
   budget: boolean;
   firstChildBudget?: boolean;
@@ -254,6 +265,7 @@ test.each([
   provider?: JsonObject;
   native?: "discovery" | "sealed";
   queuedNativeKnowledge?: boolean;
+  missingReplay?: "publish" | "follow-up" | "wrong-claim" | "unsealed";
 }[])(
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
   async ({
@@ -265,6 +277,7 @@ test.each([
     provider,
     native,
     queuedNativeKnowledge,
+    missingReplay,
   }) => {
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
@@ -497,7 +510,10 @@ process.exit(0);
             recipe: queuedNativeKnowledge
               ? undefined
               : (nativeRecipe ?? {
-                  postScanPrompt: "Post-scan instructions once.",
+                  postScanPrompt:
+                    missingReplay && missingReplay !== "follow-up"
+                      ? ""
+                      : "Post-scan instructions once.",
                   cyberAccessProgram: "daybreak_blue",
                 }),
             savedDeepScanSettings: {
@@ -522,7 +538,10 @@ process.exit(0);
             ...prepared.options,
             ...(queuedNativeKnowledge
               ? {
-                  postScanPrompt: "Post-scan instructions once.",
+                  postScanPrompt:
+                    missingReplay && missingReplay !== "follow-up"
+                      ? ""
+                      : "Post-scan instructions once.",
                   cyberAccessProgram: "daybreak_blue",
                 }
               : {}),
@@ -1147,7 +1166,10 @@ process.exit(0);
           : requiredCost
             ? { maxCostUsd: 1 }
             : {}),
-        postScanPrompt: "Post-scan instructions once.",
+        postScanPrompt:
+          missingReplay && missingReplay !== "follow-up"
+            ? ""
+            : "Post-scan instructions once.",
         onDeepProgress: (update) => {
           deepProgressUpdates.push(update);
           throw progressObserverFailure;
@@ -1355,6 +1377,119 @@ process.exit(0);
             ),
             writeFile(join(codexHome, "config.toml"), ambientConfig),
           ]);
+        }
+        if (missingReplay) {
+          const resumed = await runWorkbench(commandOptions, [
+            "begin-deep-scan",
+            "--scan-id",
+            registeredScan!.scanId,
+            "--thread-id",
+            registeredScan!.threadId,
+            "--claim-token",
+            registeredScan!.handoffClaimToken!,
+          ]);
+          const recipe = resumed["recipe"] as JsonObject;
+          const reference = recipe["replayProfile"] as JsonObject;
+          expect(reference["home"]).toBe("ambient");
+          expect(typeof reference["name"]).toBe("string");
+          const privatePath = join(
+            codexHome,
+            `${reference["name"]}.config.toml`,
+          );
+          expect(await readFile(privatePath, "utf8")).toContain(
+            "synthetic-inline-private-provider-token",
+          );
+          const stored = await runWorkbench(commandOptions, [
+            "get-cli-scan-resume",
+            "--scan-id",
+            registeredScan!.scanId,
+            "--claim-token",
+            registeredScan!.handoffClaimToken!,
+          ]);
+          expect(typeof stored["sealedProducerVersion"]).toBe(
+            missingReplay === "unsealed" ? "undefined" : "string",
+          );
+          await rm(privatePath);
+          const captured = Object.fromEntries(
+            Object.keys(environment).map((key) => [key, process.env[key]]),
+          );
+          const count = turns.length;
+          try {
+            for (const [key, value] of Object.entries(environment)) {
+              if (value === undefined) delete process.env[key];
+              else process.env[key] = value;
+            }
+            const prepare = await nativeScanFactory();
+            const preparation = prepare({
+              scan: {
+                ...(resumed["scan"] as JsonObject),
+                ...(missingReplay === "wrong-claim"
+                  ? { handoffClaimToken: randomUUID() }
+                  : {}),
+              },
+              recipe,
+              threadId: registeredScan!.threadId,
+              pluginRoot,
+              pythonPath: python,
+              stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
+              parentSandbox: { filesystemDenies: [join(root, "private")] },
+            });
+            if (missingReplay === "follow-up" || missingReplay === "unsealed") {
+              await expect(preparation).rejects.toThrow("ENOENT");
+            } else {
+              const prepared = await preparation;
+              await using resumedClient = new CodexSecurity(
+                prepared.client.config,
+                {
+                  ...prepared.client.dependencies,
+                  environment:
+                    prepared.client.dependencies?.environment ?? environment,
+                  prepareRuntime: async () => {
+                    throw new Error("Publication must not prepare a runtime");
+                  },
+                  createCodex: () => {
+                    throw new Error(
+                      "Publication must not create a model client",
+                    );
+                  },
+                },
+                { surface: "sdk" },
+              );
+              const recovery = resumedClient.run(repo, prepared.options);
+              if (missingReplay === "wrong-claim")
+                await expect(recovery).rejects.toThrow(
+                  /owned by another continuation/iu,
+                );
+              else {
+                const restored = await recovery;
+                expect(restored.findings.findings).toHaveLength(1);
+                expect(restored.threadId).toBe(savedExecutionThread);
+              }
+            }
+          } finally {
+            for (const [key, value] of Object.entries(captured)) {
+              if (value === undefined) delete process.env[key];
+              else process.env[key] = value;
+            }
+          }
+          expect(turns).toHaveLength(count);
+          expect(
+            (
+              await runWorkbench(commandOptions, [
+                "get-scan",
+                "--scan-id",
+                registeredScan!.scanId,
+              ])
+            )["scan"],
+          ).toMatchObject({
+            progress: {
+              status: missingReplay === "publish" ? "complete" : "running",
+            },
+          });
+          if (sealedArtifacts)
+            for (const [path, bytes] of sealedArtifacts)
+              expect(await readFile(join(scanDir, path))).toEqual(bytes);
+          return;
         }
         client = await makeClient();
         if (native === "discovery") {

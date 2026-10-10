@@ -1,3 +1,4 @@
+import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import { join } from "node:path";
 import { restoreScanKnowledge } from "../../../../sdk/typescript/src/scan-inputs.js";
 import {
@@ -219,11 +220,19 @@ export async function prepareNativeScan(
         "config.toml",
       ),
   );
-  const config = await nativeScanConfiguration(
-    environment,
-    input,
-    deep.settings.subagents,
-  );
+  const publicationOnly =
+    input.recipe !== undefined &&
+    !options.postScanPrompt?.trim() &&
+    (await hasSealedScanArtifacts(input.scan.scanDir, signal));
+  // The SDK validates the saved seal, owner and claim before publishing.
+  // Read-only publication does not need the model's private configuration.
+  const config = publicationOnly
+    ? ((recipe.config as JsonObject | undefined) ?? {})
+    : await nativeScanConfiguration(
+        environment,
+        input,
+        deep.settings.subagents,
+      );
   const security = config["codex_security"];
   if (
     input.recipe === undefined &&
@@ -234,16 +243,20 @@ export async function prepareNativeScan(
       "cyber_access_program"
     ] as ScanOptions["cyberAccessProgram"];
   }
-  const ambientExecution = await prepareAmbientExecution(
-    {
-      environment,
-      command: { command: codex.executable },
-      configuration: config,
-      auth: options.auth,
-      pluginRoot: input.pluginRoot,
-    },
-    signal,
-  );
+  const ambientInput = {
+    environment,
+    command: { command: codex.executable },
+    configuration: config,
+    auth: options.auth,
+    pluginRoot: input.pluginRoot,
+  };
+  const ambientExecution = publicationOnly
+    ? {
+        ...ambientInput,
+        preserveProviderEnvironment:
+          recipe.preserveProviderEnvironment === true,
+      }
+    : await prepareAmbientExecution(ambientInput, signal);
   options.auth = ambientExecution.auth;
   const selectedEnvironment = ambientExecution.environment;
   const configuredProvider = ambientExecution.preserveProviderEnvironment;
