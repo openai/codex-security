@@ -84,11 +84,7 @@ assert.equal(
 
 const root = await temporaryDirectory("codex-security-validation-phase-", true);
 try {
-  const context = {
-    root: path.join(root, "scan"),
-    repoRoot: root,
-    layout: "scan" as const,
-  };
+  const context = await scanContext(root, "scan", scanId);
   const ledger = path.join(
     context.root,
     "artifacts",
@@ -233,7 +229,7 @@ try {
   await rm(root, { recursive: true, force: true });
 }
 
-async function scanContext(root, directory, scanId) {
+async function scanContext(root: string, directory: string, scanId: string) {
   const scanRoot = path.join(root, directory);
   const repository = path.join(root, "repository");
   await Promise.all([
@@ -245,7 +241,6 @@ async function scanContext(root, directory, scanId) {
   return { root: scanRoot, repoRoot: repository, scanId };
 }
 
-function candidate(candidateId, sourcePath) {
 function candidate(candidateId: string, sourcePath: string) {
   return {
     candidate_id: candidateId,

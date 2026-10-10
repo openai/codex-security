@@ -446,11 +446,17 @@ export function classifyConnectionFailure(
     return "unknown";
   }
   if (
-    /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(
+    /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b|\bThrottlingException\b/iu.test(
       message,
     )
   ) {
     return "rate_limited";
+  }
+  if (/\bNotAuthorized\b/iu.test(message)) return "forbidden";
+  if (
+    /\b(?:ExpiredTokenException|UnrecognizedClientException)\b/iu.test(message)
+  ) {
+    return "unauthorized";
   }
   if (
     /\b401\b|\bunauthori[sz]ed\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b/iu.test(

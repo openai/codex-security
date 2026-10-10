@@ -184,14 +184,19 @@ def run_workbench(
 
 
 def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = ?, phase = 'terminal', error_message = ? "
+            "WHERE scan_id = ?",
+            (deep_status or "failed", message, scan_id),
+        )
     return run_workbench(
         state_dir,
-        "fail-deep-scan",
+        "fail-scan",
         "--scan-id",
         scan_id,
         "--message",
         message,
-        *(["--deep-status", deep_status] if deep_status is not None else []),
         environment={"CODEX_HOME": str(codex_home)},
     )
 

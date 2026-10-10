@@ -45,6 +45,7 @@ def test_terminal_deep_draft_compares_previous_bytes_without_parsing_review_docu
     args = ("write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
     environment = {"CODEX_HOME": str(codex_home)}
     run_workbench(state_dir, *args, environment=environment)
+    staged.write_text(json.dumps(documents))
     old_document = scan_dir / filename
     if previous == "symlink":
         outside = tmp_path / "outside.json"

@@ -222,9 +222,13 @@ def test_draft_publication_acknowledges_or_retains_stages(
             )
             if failure in {"history", "canonical"}:
                 with pytest.raises(OSError, match="Synthetic disk full"):
-                    workbench_api["write_scan_draft"](connection, arguments)
+                    saved.write_scan_draft(
+                        workbench_api["_WORKBENCH_DB_CONTEXT"], connection, arguments
+                    )
             else:
-                result = workbench_api["write_scan_draft"](connection, arguments)
+                result = saved.write_scan_draft(
+                    workbench_api["_WORKBENCH_DB_CONTEXT"], connection, arguments
+                )
                 assert result["status"] == "draft_written"
                 assert draft.exists() is (failure == "cleanup")
                 assert checkpoint.exists() is (failure == "cleanup")
@@ -262,9 +266,9 @@ def test_pending_stage_requires_a_matching_marker_and_unchanged_bytes(
     name = hashlib.sha256(contents).hexdigest() + ".json"
     saved.write_scan_local_bytes(scan_dir, stage_path, contents)
     saved.write_scan_local_bytes(scan_dir, "checkpoints/" + "0" * 64 + ".json", b"old evidence")
-    assert list(saved._saved_result_paths(scan_dir)) == []
+    assert (f"checkpoints/{name}", None) not in saved._saved_result_paths(scan_dir, [])
     saved.write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", stage_path.encode())
-    assert list(saved._saved_result_paths(scan_dir)) == [f"checkpoints/{name}"]
+    assert (f"checkpoints/{name}", None) in saved._saved_result_paths(scan_dir, [])
     assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == payload
     saved.write_scan_local_bytes(scan_dir, stage_path, contents + b"\n")
     with pytest.raises(saved.ContractError, match="changed after publication failed"):

@@ -35,6 +35,7 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     finalizer = sys.modules[namespace["finalize_scan"].__module__]
     backend = mock.Mock()
+    backend._MISSING_ERRORS = {2, 3}
 
     def open_read_fd(root: Path, relative_path: str, _context: str) -> int:
         return os.open(root / relative_path, os.O_RDONLY)

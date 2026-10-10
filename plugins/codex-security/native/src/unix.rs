@@ -2,6 +2,26 @@ use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::ffi::{CStr, CString};
 
+#[napi(object)]
+pub struct FileLockResult {
+    pub value: i32,
+    pub errno: i32,
+}
+
+#[napi]
+pub fn file_lock(fd: i32, unlock: bool, nonblocking: bool) -> FileLockResult {
+    let operation = if unlock { libc::LOCK_UN } else { libc::LOCK_EX };
+    let value = unsafe { libc::flock(fd, operation | if nonblocking { libc::LOCK_NB } else { 0 }) };
+    FileLockResult {
+        value,
+        errno: if value == 0 {
+            0
+        } else {
+            std::io::Error::last_os_error().raw_os_error().unwrap()
+        },
+    }
+}
+
 #[napi(object, use_nullable = true)]
 pub struct UserHomeResult {
     pub errno: i32,

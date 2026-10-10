@@ -35,7 +35,7 @@ def test_saved_checkpoint_fallback_classifies_windows_missing_errors(
             raise error
         return os.open(root / path, os.O_RDONLY)
 
-    monkeypatch.setattr(finalizer, "_descriptor_relative_reads_available", lambda: False)
+    monkeypatch.setattr(finalizer.os, "supports_dir_fd", set())
     monkeypatch.setattr(finalizer, "_is_windows", lambda: True)
     monkeypatch.setattr(finalizer, "_windows_scan_local_files", lambda: WINDOWS_FILES)
     monkeypatch.setattr(WINDOWS_FILES, "open_read_fd", open_read_fd)

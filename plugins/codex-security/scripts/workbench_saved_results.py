@@ -188,10 +188,11 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
 
 
 def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
+    names = set(_children(scan_dir, directory))
+    if directory == "checkpoints":
+        names.update(_children(scan_dir, "checkpoints/pending"))
     return [
-        f"{directory}/{name}"
-        for name in _children(scan_dir, directory)
-        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
+        f"{directory}/{name}" for name in sorted(names) if re.fullmatch(r"[0-9a-f]{64}\.json", name)
     ]
 
 
@@ -256,9 +257,28 @@ def _is_source_order_snapshot(relative: str) -> bool:
 def _read_saved_result(
     scan_dir: Path, relative: str, scan_id: str, *, kind: str | None = None
 ) -> tuple[dict[str, Any], str, int]:
-    draft, _, metadata = _read_scan_local_json_with_metadata(
-        scan_dir, relative, "Saved scan checkpoint"
-    )
+    try:
+        draft, _, metadata = _read_scan_local_json_with_metadata(
+            scan_dir, relative, "Saved scan checkpoint"
+        )
+    except ContractError as exc:
+        if not isinstance(exc.__cause__, FileNotFoundError) or not re.fullmatch(
+            r"checkpoints/[0-9a-f]{64}\.json", relative
+        ):
+            raise
+        name = Path(relative).name
+        descriptor = open_scan_local_file_descriptor(
+            scan_dir, f"checkpoints/pending/{name}", "Pending scan checkpoint"
+        )
+        with os.fdopen(descriptor, "rb") as handle:
+            staged = handle.read().decode("utf-8")
+        if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.checkpoint\.json", staged):
+            raise ContractError("Pending scan checkpoint does not name a staged draft") from exc
+        draft, contents, metadata = _read_scan_local_json_with_metadata(
+            scan_dir, staged, "Pending scan checkpoint"
+        )
+        if hashlib.sha256(contents).hexdigest() != Path(name).stem:
+            raise ContractError("Staged checkpoint changed after publication failed") from exc
     directory = _checkpoint_head_directory(relative)
     if directory is not None:
         checkpoint = draft.get("checkpoint")
@@ -2332,11 +2352,18 @@ def preserve_scan_results_locked(
     }
     if recovery_source_digests is not None:
         model_source.clear()
+    workers = (
+        connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+        ).fetchall()
+        if composition.legacy_run is not None and composition.checkpoint is None
+        else []
+    )
     documents = merge_saved_results(
         scan_dir,
         scan_id,
         binding,
-        [],
+        workers,
         warnings,
         stopped=True,
         reason=(
@@ -2557,25 +2584,34 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         acknowledged = set()
-        checkpoint_relative = None
+        staged_checkpoint_relative = None
         if args.checkpoint_path is not None:
             try:
-                checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
+                staged_checkpoint_relative = (
+                    Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
+                )
             except ValueError as exc:
                 raise SystemExit(
                     "Scan checkpoint must be inside the registered scan drafts directory."
                 ) from exc
-            if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.checkpoint\.json", checkpoint_relative):
+            if not re.fullmatch(
+                r"drafts/[0-9a-fA-F-]+\.checkpoint\.json", staged_checkpoint_relative
+            ):
                 raise SystemExit(
                     "Scan checkpoint must be inside the registered scan drafts directory."
                 )
             checkpoint, checkpoint_contents = _read_scan_local_json_bytes(
-                scan_dir, checkpoint_relative, "Staged scan checkpoint"
+                scan_dir, staged_checkpoint_relative, "Staged scan checkpoint"
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
-            acknowledged.add(
-                save_pending_checkpoint(scan_dir, checkpoint_contents, checkpoint_relative)
+            # Keep the staged observation discoverable on a publication conflict,
+            # without archiving a new checkpoint before the draft is accepted.
+            checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
+            write_scan_local_bytes(
+                scan_dir,
+                f"checkpoints/pending/{checkpoint_name}",
+                staged_checkpoint_relative.encode("utf-8"),
             )
         if (
             args.expected_draft_digest is not None
@@ -2606,27 +2642,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
-        if args.checkpoint_path is not None:
-            try:
-                checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
-            except ValueError as exc:
-                raise SystemExit(
-                    "Scan checkpoint must be inside the registered scan drafts directory."
-                ) from exc
-            if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.checkpoint\.json", checkpoint_relative):
-                raise SystemExit(
-                    "Scan checkpoint must be inside the registered scan drafts directory."
-                )
-            checkpoint, checkpoint_contents = _read_scan_local_json_bytes(
-                scan_dir, checkpoint_relative, "Staged scan checkpoint"
-            )
-            if checkpoint.get("scanId") != scan_id:
-                raise SystemExit("Staged scan checkpoint belongs to another scan.")
-            checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
-            write_scan_local_bytes(
-                scan_dir,
-                f"checkpoints/{checkpoint_digest}.json",
-                checkpoint_contents,
+        if staged_checkpoint_relative is not None:
+            acknowledged.add(
+                save_pending_checkpoint(scan_dir, checkpoint_contents, staged_checkpoint_relative)
             )
         checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         checkpoint_contents = _encoded(checkpoint)
@@ -2664,7 +2682,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             advance_scan_phase(db, connection, scan_id, phase)
         # Failed publication leaves its inputs available for retry/recovery. Only
         # this acknowledged write can remove its own per-attempt stage paths.
-        for staged in (relative, checkpoint_relative):
+        for staged in (relative, staged_checkpoint_relative):
             if staged is not None:
                 try:
                     _remove_scan_local_file_if_exists(scan_dir, staged)

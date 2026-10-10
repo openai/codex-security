@@ -13,6 +13,7 @@ from unittest import mock
 
 import pytest
 from workbench_test_support import (
+    begin_legacy_scan,
     finding_fixture,
     run_workbench,
     worker_paths,
@@ -1552,57 +1553,27 @@ def deep_scan_fixture(
     config_path = codex_home / "codex-security" / "config.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(f"[deep_scan]\nworkers = {workers}\nmax_discovery_runs = {workers}\n")
-    environment = {"CODEX_HOME": str(codex_home)}
-
-    if budget:
-        scan_dir = tmp_path / "scan"
-        scan_dir.mkdir(mode=0o700)
-        registered = run_workbench(
-            state_dir,
-            "register-cli-scan",
-            "--scan-dir",
-            str(scan_dir),
-            "--repository",
-            str(target),
-            "--recipe-json",
-            json.dumps(
-                {
-                    "config": {},
-                    "mode": "deep",
-                    "repository": str(target),
-                    "target": {"kind": "repository", "paths": []},
-                    "maxCostUsd": 0.005,
-                }
-            ),
+    begun = begin_legacy_scan(
+        state_dir, codex_home, target, tmp_path / "scans", thread_id="standard-worker-thread"
+    )["deepScan"]
+    scan_id = str(begun["scanId"])
+    scan_dir = Path(str(begun["scanDir"]))
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET workers = ?, max_discovery_runs = ? WHERE scan_id = ?",
+            (workers, workers, scan_id),
         )
-        scan_id = str(registered["scanId"])
-        run_workbench(
-            state_dir,
-            "begin-deep-scan",
-            "--thread-id",
-            "standard-worker-thread",
-            "--scan-id",
-            scan_id,
-            environment=environment,
-        )
-    else:
-        begun = run_workbench(
-            state_dir,
-            "begin-deep-scan",
-            "--thread-id",
-            "standard-worker-thread",
-            "--target-path",
-            str(target),
-            "--scope",
-            ".",
-            "--scan-root",
-            str(tmp_path / "scans"),
-            "--available-parallelism",
-            "16",
-            environment=environment,
-        )["deepScan"]
-        scan_id = str(begun["scanId"])
-        scan_dir = Path(str(begun["scanDir"]))
+        if budget:
+            recipe = {
+                "config": {},
+                "mode": "deep",
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+                "maxCostUsd": 0.005,
+            }
+            connection.execute(
+                "UPDATE scans SET recipe_json = ? WHERE id = ?", (json.dumps(recipe), scan_id)
+            )
 
     return state_dir, codex_home, target, scan_dir, scan_id
 
@@ -1617,23 +1588,6 @@ def accepted_standard_worker(
 ) -> tuple[str, Path]:
     worker_id = str(uuid.uuid4())
     prompt_path, artifact_dir, result_path = worker_paths(scan_dir, name)
-    base_args = (
-        "upsert-deep-scan-worker",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        worker_id,
-        "--kind",
-        "discovery",
-        "--prompt-path",
-        str(prompt_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--attempt",
-        "1",
-    )
-    environment = {"CODEX_HOME": str(codex_home)}
-    run_workbench(state_dir, *base_args, "--status", "running", environment=environment)
     result_path.write_text(
         json.dumps(
             {
@@ -1649,15 +1603,15 @@ def accepted_standard_worker(
             }
         )
     )
-    run_workbench(
-        state_dir,
-        *base_args,
-        "--status",
-        "succeeded",
-        "--result-manifest-path",
-        str(result_path),
-        environment=environment,
-    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "INSERT INTO deep_scan_workers "
+            "(id,scan_id,kind,status,prompt_path,artifact_dir,result_manifest_path,attempt,"
+            "created_at,started_at,completed_at,updated_at) "
+            "SELECT ?,id,'discovery','succeeded',?,?,?,1,started_at,started_at,updated_at,updated_at "
+            "FROM scans WHERE id = ?",
+            (worker_id, str(prompt_path), str(artifact_dir), str(result_path), scan_id),
+        )
     return worker_id, result_path
 
 

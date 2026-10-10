@@ -626,6 +626,8 @@ async function startReadOnlyCodexThread(
     scanCyberAccessConfig(config, options.cyberAccessProgram),
     options.inheritedPermissions,
   );
+  const inheritedFeatures = resolveCodexProfile(prepared.config)["features"] as
+    JsonObject | undefined;
   const configOverrides = [...client.configOverrides, ...prepared.overrides];
   const codex = await client.create({
     ...(configOverrides.length ? { configOverrides } : {}),
@@ -637,16 +639,14 @@ async function startReadOnlyCodexThread(
         codex_security_surface: runtimeOptions.surface,
       },
       features: {
-        api_key_cyber_access_programs:
-          resolveCodexProfile(prepared.config)["features"] &&
-          (resolveCodexProfile(prepared.config)["features"] as JsonObject)[
-            "api_key_cyber_access_programs"
-          ],
-        api_key_model_discovery:
-          resolveCodexProfile(prepared.config)["features"] &&
-          (resolveCodexProfile(prepared.config)["features"] as JsonObject)[
-            "api_key_model_discovery"
-          ],
+        ...Object.fromEntries(
+          ["api_key_cyber_access_programs", "api_key_model_discovery"].flatMap(
+            (name) =>
+              inheritedFeatures?.[name] === undefined
+                ? []
+                : [[name, inheritedFeatures[name]]],
+          ),
+        ),
         apps: false,
         code_mode: false,
         code_mode_only: false,

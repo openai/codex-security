@@ -410,13 +410,16 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             plugins/codex-security
+            sdk/typescript
             .github/actions/setup-tools
       - name: Set up TypeScript tools
         uses: ./.github/actions/setup-tools
         with:
           cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Install plugin dependencies
-        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Build and test the standalone host runtime
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
 

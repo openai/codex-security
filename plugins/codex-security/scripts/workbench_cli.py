@@ -424,12 +424,12 @@ def parse_args(description: str) -> argparse.Namespace:
     return parser.parse_args(arguments)
 
 
-if __name__ == "__main__":
-    parse_args(__doc__)
-
-
 def non_negative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("Value must be non-negative.")
     return parsed
+
+
+if __name__ == "__main__":
+    parse_args(__doc__)
