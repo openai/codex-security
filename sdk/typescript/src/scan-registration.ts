@@ -7,6 +7,7 @@ import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { findScanSession } from "./scan-logs.js";
 import { join } from "node:path";
+import { workflowDigest } from "./finding-workflow.js";
 
 /** Validated saved execution options shared by SDK and native resume. */
 export interface SavedScanRecipe {
@@ -22,6 +23,7 @@ export interface SavedScanRecipe {
   cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
   knowledgeBasePaths?: string[];
   knowledgeBaseSha256?: string;
+  scanInputs?: JsonObject;
   maxCostUsd?: number;
   postScanPrompt?: string;
   failOnSeverity?: ScanOptions["failureSeverity"];
@@ -57,6 +59,20 @@ export async function registerScan(options: {
     workbench,
   } = options;
   const repo = expectation.repository;
+  // The execution lock is held: a queued native caller may have prepared
+  // before another process bound the original recipe and saved its knowledge.
+  const resumed =
+    scanOptions.resumeScanId !== undefined ||
+    (scanOptions.registeredScan !== undefined &&
+      isRecord(
+        (
+          await workbench([
+            "get-scan",
+            "--scan-id",
+            scanOptions.registeredScan.scanId,
+          ])
+        )["recipe"],
+      ));
   const registration =
     scanOptions.resumeScanId !== undefined &&
     scanOptions.registeredScan === undefined
@@ -118,6 +134,18 @@ export async function registerScan(options: {
     throw new CodexSecurityError(
       "The knowledge base changed since this scan started. Restore the original documents before resuming.",
     );
+  if (
+    (scanOptions.resumeScanId !== undefined ||
+      scanOptions.registeredScan !== undefined) &&
+    isRecord(savedRecipe) &&
+    isRecord(savedRecipe["scanInputs"]) &&
+    workflowDigest(savedRecipe["scanInputs"]["knowledgeBase"]) !==
+      workflowDigest((recipe["scanInputs"] as JsonObject)["knowledgeBase"])
+  ) {
+    throw new CodexSecurityError(
+      "The supplied knowledge base differs from this scan's original context. Restore the saved snapshot or start a new scan.",
+    );
+  }
   if (scanOptions.resumeScanId !== undefined) {
     if (
       scanId !== scanOptions.resumeScanId ||
@@ -183,6 +211,7 @@ export async function registerScan(options: {
       ? registeredFileCount
       : null;
   return {
+    resumed,
     registration,
     scanId,
     resumeThreadId,

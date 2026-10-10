@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { restoreScanKnowledge } from "../src/scan-inputs.js";
 import {
   appendFile,
   cp,
@@ -1657,7 +1658,17 @@ test.each([false, true])(
     await using client = h.makeClient();
     const result = await client.run(h.repository, {
       ...h.options,
-      ...(resumed ? { resumeScanId, signal: undefined } : {}),
+      ...(resumed
+        ? {
+            resumeScanId,
+            signal: undefined,
+            knowledgeBaseSnapshot: await restoreScanKnowledge(
+              h.outputDir,
+              h.repository,
+              h.records.get(resumeScanId!)!.recipe["scanInputs"],
+            ),
+          }
+        : {}),
       postScanPrompt: "Write follow-up notes",
     });
     expect(result.turnResult.finalResponse).toBe(
@@ -2383,3 +2394,22 @@ test.each(["standard", "deep", "primary"] as const)(
     expect(covered.size).toBeGreaterThan(0);
   },
 );
+
+test("queued native callers preserve the first saved knowledge snapshot", async () => {
+  const h = await fixture(undefined, true);
+  await using first = h.makeClient();
+  await using queued = h.makeClient();
+  const queuedOptions = { ...h.options, signal: undefined };
+  h.stopAfterSealing("standard");
+  await expect(first.run(h.repository, h.options)).rejects.toBeInstanceOf(
+    ScanTransportClosedError,
+  );
+  const path = join(h.outputDir, ".scan-knowledge.json");
+  const original = await readFile(path, "utf8");
+  await writeFile(h.knowledgePath, "Original immutable context");
+  const result = await queued.run(h.repository, queuedOptions);
+  expect(result.manifest.scan.status).toBe("completed");
+  expect(await readFile(path, "utf8")).toBe(original);
+  expect(result.manifest.scan.id).toBe(h.options.registeredScan!.scanId);
+  expect(h.launches.length).toBeGreaterThan(1);
+});

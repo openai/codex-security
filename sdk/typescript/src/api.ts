@@ -196,6 +196,7 @@ import {
   type PreparedKnowledgeBase,
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
+import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
   ScanResult,
@@ -311,7 +312,7 @@ export interface ScanOptions extends ScanSettings {
   preserveProviderEnvironment?: boolean;
   /** @internal A complete ordinary pass owned by a Deep Scan. */
   deepScanPass?: boolean;
-  /** @internal Frozen inputs shared by ordinary passes of the same Deep Scan. */
+  /** @internal Captured knowledge inputs shared by related operations or resume. */
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Persist composition membership after normal registration. */
   onRegisteredScan?: (registration: JsonObject) => Promise<void>;
@@ -1413,6 +1414,15 @@ export class CodexSecurity {
           "temporary",
         );
       }
+      if (
+        options.resumeScanId !== undefined &&
+        options.knowledgeBasePaths?.length &&
+        options.knowledgeBaseSnapshot === undefined
+      ) {
+        throw new CodexSecurityError(
+          "Resuming a scan requires its saved knowledge-base snapshot. Use scans resume with the original scan state, or start a new scan.",
+        );
+      }
       if (options.knowledgeBasePaths?.length || options.knowledgeBaseSnapshot) {
         knowledgeBase =
           this.#preparedKnowledgeBase ??
@@ -1423,6 +1433,7 @@ export class CodexSecurity {
       }
       checkOpen();
 
+      const scanKnowledge = knowledgeBase?.snapshot;
       const resumeScanId =
         options.resumeScanId ?? options.registeredScan?.scanId;
       if (
@@ -1523,6 +1534,10 @@ export class CodexSecurity {
             target: { ...normalized, paths: [...normalized.paths] },
             mode,
           };
+          recipe["scanInputs"] = scanInputIdentity(
+            options.scanPrompt,
+            scanKnowledge,
+          );
           delete recipe["knowledgeBaseSha256"];
           if (knowledgeBase !== null)
             recipe["knowledgeBaseSha256"] = knowledgeBase.sha256;
@@ -1767,6 +1782,7 @@ export class CodexSecurity {
         options,
         knowledgeBasePaths: knowledgeBase?.sources,
         knowledgeBaseSha256: knowledgeBase?.sha256,
+        scanKnowledge,
         deepScan: deepScanConfiguration?.settings,
       });
       let skillName = "";
@@ -1816,6 +1832,9 @@ export class CodexSecurity {
       });
       if (!sealed && typeof registered.resumeThreadId !== "string")
         activeScan = { id: scanId, options: workbenchOptions };
+      if (!registered.resumed && scanKnowledge !== undefined) {
+        await saveScanKnowledge(scanDir, scanKnowledge);
+      }
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           options,
@@ -4217,6 +4236,7 @@ function prepareSavedScanRecipe({
   options,
   knowledgeBasePaths,
   knowledgeBaseSha256,
+  scanKnowledge,
   deepScan,
 }: {
   expectation: ScanExpectation;
@@ -4234,6 +4254,7 @@ function prepareSavedScanRecipe({
   >;
   knowledgeBasePaths?: string[];
   knowledgeBaseSha256?: string;
+  scanKnowledge?: KnowledgeBaseSnapshot;
   deepScan?: Required<DeepScanOptions>;
 }): JsonObject {
   const { runtime, preflightConfig, approvalPolicy } = session;
@@ -4277,6 +4298,7 @@ function prepareSavedScanRecipe({
     auth: options.auth,
     cyberAccessProgram: options.cyberAccessProgram,
   });
+  recipe["scanInputs"] = scanInputIdentity(options.scanPrompt, scanKnowledge);
   if (knowledgeBaseSha256 !== undefined)
     recipe["knowledgeBaseSha256"] = knowledgeBaseSha256;
   if (session.inheritedPermissions !== undefined)

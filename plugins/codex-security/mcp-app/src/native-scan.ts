@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { restoreScanKnowledge } from "../../../../sdk/typescript/src/scan-inputs.js";
 import { isRecord } from "./record.js";
 import {
   CodexSecurity,
@@ -274,6 +275,20 @@ export async function prepareNativeScan(
     options: {
       ...options,
       ...deep.settings,
+      ...(input.recipe === undefined
+        ? {}
+        : {
+            resumeScanId: input.scan.scanId,
+            ...(options.knowledgeBasePaths?.length
+              ? {
+                  knowledgeBaseSnapshot: await restoreScanKnowledge(
+                    input.scan.scanDir,
+                    input.scan.targetPath,
+                    input.recipe.scanInputs,
+                  ),
+                }
+              : {}),
+          }),
       inheritedPermissions,
       target:
         recipe?.target?.kind === "paths"
