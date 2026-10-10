@@ -116,7 +116,14 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     );
     const target = buildTarget(context, contract, trustedTarget);
     const scope = buildScope(context, trustedScope, reconciled.scope);
-    const findings = buildFindings(reconciled.findings, context.mode);
+    const scopedFindings =
+      context.mode === "deep"
+        ? findingsWithinScope(
+            reconciled.findings,
+            scope.includePaths as string[],
+          )
+        : reconciled.findings;
+    const findings = buildFindings(scopedFindings, context.mode);
     const coverage = buildCoverage(
       context,
       contract,
@@ -140,7 +147,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       coverage,
       manifest: { scan: manifestScan },
     };
-    const checkpoint = finalDeepDraft ? reconciled : parsed;
+    const checkpoint = finalDeepDraft
+      ? { ...reconciled, findings: scopedFindings }
+      : parsed;
     const expectedDigest = preserved.previousDigest;
     let documentWarnings: string[] | undefined;
     const checkpointPath = await artifactDestination(
@@ -221,20 +230,14 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
-  const scope = context.scope;
-  let scoped =
-    scope && scope !== "."
-      ? {
-          ...parsed,
-          findings: parsed.findings.filter((finding) =>
-            (finding.locations as JsonObject[]).some((location) => {
-              const path = (location.path as string).replace(/^\.\//u, "");
-              return path === scope || path.startsWith(`${scope}/`);
-            }),
-          ),
-        }
-      : parsed;
+  const includePaths = context.includePaths ?? [context.scope || "."];
+  let scoped = {
+    ...parsed,
+    findings: findingsWithinScope(parsed.findings, includePaths),
+  };
   scoped = (await preserveScanDraft(context, scoped)).input;
+  // Older checkpoints predate the coordinator's requested-path binding.
+  scoped.findings = findingsWithinScope(scoped.findings, includePaths);
   const destination = await artifactDestination(
     context,
     ["result.json"],
@@ -255,6 +258,22 @@ export async function recordCodexSecurityWorkerScanDraft(
     status: "draft_written",
     ...(documentWarning === undefined ? {} : { warnings: [documentWarning] }),
   };
+}
+
+/** Keep findings with at least one location in the host's requested paths. */
+export function findingsWithinScope(
+  findings: JsonObject[],
+  includePaths: readonly string[],
+): JsonObject[] {
+  if (includePaths.includes(".")) return findings;
+  return findings.filter((finding) =>
+    (finding.locations as JsonObject[]).some((location) => {
+      const path = (location.path as string).replace(/^\.\//u, "");
+      return includePaths.some(
+        (scope) => path === scope || path.startsWith(`${scope}/`),
+      );
+    }),
+  );
 }
 
 /** Keep the semantic input before any replaceable worker or canonical artifact. */

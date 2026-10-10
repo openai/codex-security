@@ -1526,6 +1526,14 @@ def _validate_completion_binding(
             raise ContractError(f"coverage.{key}: must match the workbench scan")
 
 
+def path_within_scope(path: str, scope: str) -> bool:
+    candidate = PurePosixPath(path)
+    requested = PurePosixPath(scope)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    return candidate.is_relative_to(requested)
+
+
 def _validate_finding(finding: dict[str, Any], context: str) -> None:
     for key in ("findingId", "occurrenceId", "ruleId", "title", "summary", "remediation"):
         _require_str(finding, key, context)
@@ -2922,6 +2930,7 @@ def _prepare_scan_finalization(
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    finding_scope: list[str] | None = None,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
 
@@ -3003,6 +3012,25 @@ def _prepare_scan_finalization(
     )
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
+    if finding_scope is not None:
+        # Accepted worker/reducer files remain immutable; only the new parent
+        # projection is scoped, after the existing validation of every finding.
+        scoped_findings = [
+            finding
+            for finding in findings["findings"]
+            if any(
+                path_within_scope(location["path"], path)
+                for location in finding["locations"]
+                for path in finding_scope
+            )
+        ]
+        if was_sealed and len(scoped_findings) != len(findings["findings"]):
+            raise ContractError(
+                "The sealed Deep scan contains findings outside its requested paths; "
+                "start a new scan to produce scoped results."
+            )
+        if not was_sealed:
+            findings["findings"] = scoped_findings
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)

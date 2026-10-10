@@ -251,7 +251,7 @@ model_reasoning_summary = "none"
     assert.equal(workerContext.pluginRoot, pluginRoot);
     assert.equal(startedWorker.readCoreScanReference, true);
     assert.equal(workerContext.targetPath, await realpath(targetPath));
-    assert.equal(workerContext.scope, ".");
+    assert.deepEqual(workerContext.includePaths, ["."]);
     assert.equal(workerContext.scanId, scanId);
     for (const field of [
       "artifactDir",
@@ -957,7 +957,10 @@ model_reasoning_summary = "none"
         assertReadOnlyWorkerInvocation(execution.argv, codexHome);
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
-        if (context.workerLabel) assert.equal(context.pluginRoot, pluginRoot);
+        if (context.workerLabel) {
+          assert.equal(context.pluginRoot, pluginRoot);
+          assert.deepEqual(context.includePaths, ["."]);
+        }
         assertWorkerArtifactEnvironment(
           execution.argv,
           pluginRoot,
@@ -1028,24 +1031,48 @@ async function testCliDeepScanEngine({
     path.join(repository, "fixture.py"),
     "print('engine fixture')\n",
   );
+  const paths = ["api", "background jobs"];
+  for (const directory of paths) {
+    await mkdir(path.join(repository, directory));
+    await writeFile(
+      path.join(repository, directory, "source.py"),
+      "# scoped fixture\n",
+    );
+  }
+  const userContext =
+    "  Review café authentication.\r\nPreserve exact context.\t";
+  const knowledgeBase = path.join(canonicalRoot, "knowledge-base");
+  await mkdir(knowledgeBase);
+  await writeFile(
+    path.join(knowledgeBase, "context.txt"),
+    "Synthetic deployment context.",
+  );
   const threadId = "cli-engine-session";
-  const register = async (name: string) => {
+  const register = async (name: string, scoped = false) => {
     const scanDir = path.join(canonicalRoot, name);
     await mkdir(scanDir, { mode: 0o700 });
-    const registration = await runWorkbench(environment, [
-      "register-cli-scan",
-      "--repository",
-      repository,
-      "--scan-dir",
-      scanDir,
-      "--recipe-json",
-      JSON.stringify({
+    const registration = await runWorkbench(
+      environment,
+      [
+        "register-cli-scan",
+        "--repository",
         repository,
-        mode: "deep",
-        target: { kind: "repository", paths: [] },
-        config: { model: "gpt-6.1-sol", model_reasoning_effort: "max" },
+        "--scan-dir",
+        scanDir,
+        "--registration-json-stdin",
+      ],
+      JSON.stringify({
+        recipe: {
+          repository,
+          mode: "deep",
+          target: scoped
+            ? { kind: "paths", paths }
+            : { kind: "repository", paths: [] },
+          config: { model: "gpt-6.1-sol", model_reasoning_effort: "max" },
+        },
+        userContext,
       }),
-    ]);
+    );
     await runWorkbench(environment, [
       "set-scan-thread",
       "--scan-id",
@@ -1060,7 +1087,11 @@ async function testCliDeepScanEngine({
       process.execPath,
       [serverBundlePath, "--deep-scan-engine"],
       {
-        env: { ...environment, ...overrides },
+        env: {
+          ...environment,
+          CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase,
+          ...overrides,
+        },
         encoding: "utf8",
         timeout: 30_000,
       },
@@ -1078,7 +1109,7 @@ async function testCliDeepScanEngine({
     );
     return execution;
   };
-  const completed = await register("cli-engine-completed");
+  const completed = await register("cli-engine-completed", true);
   const startIndex = (await readLogLines(environment.FAKE_CODEX_START_LOG!))
     .length;
   const helperStartIndex = (
@@ -1115,6 +1146,12 @@ async function testCliDeepScanEngine({
     assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
     assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
     assert.equal(entry.hasExpectedApiKey, true);
+    assert.equal(entry.knowledgeBase, knowledgeBase);
+    const context = discoveryPromptContext(entry.stdin);
+    if (context.workerLabel) {
+      assert.deepEqual(context.includePaths, paths);
+      assert.equal(context.userContext, userContext);
+    }
   }
   const count = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length;
   await launch(completed.scanId);
@@ -1132,6 +1169,7 @@ async function testCliDeepScanEngine({
   );
   assert.equal(manifest.scan.status, "completed");
   assert.ok(manifest.scan.sealedAt);
+  assert.deepEqual(manifest.scan.scope.includePaths, paths);
   assert.ok(
     (await readFile(path.join(completed.scanDir, "report.md"), "utf8")).length >
       0,
@@ -1365,14 +1403,20 @@ function discoveryPromptContext(prompt: string) {
   return JSON.parse(match[1]);
 }
 
-async function runWorkbench(environment: NodeJS.ProcessEnv, args: string[]) {
+async function runWorkbench(
+  environment: NodeJS.ProcessEnv,
+  args: string[],
+  input?: string,
+) {
   const python = process.env.PYTHON?.trim() || "python3";
-  const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
+  const execution = execFileAsync(python, [workbenchPath, ...args], {
     cwd: pluginRoot,
     env: environment,
     maxBuffer: 4 * 1024 * 1024,
     timeout: 30_000,
   });
+  execution.child.stdin!.end(input);
+  const { stdout } = await execution;
   return JSON.parse(stdout);
 }
 
@@ -1417,7 +1461,7 @@ const stdin = (await process.stdin.toArray()).join('');
 const context = JSON.parse(stdin.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
 const root = process.argv[process.argv.indexOf('--cd') + 1];
 const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, 'references', 'core-scan.md'), 'utf8').length > 0;
-appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key' }) + '\\n');
+appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key', knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }) + '\\n');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-\${process.pid}\` }));
 if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');

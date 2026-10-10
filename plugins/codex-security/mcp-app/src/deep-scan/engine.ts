@@ -40,6 +40,7 @@ export function startDeepScanEngine(options: {
           repoRoot: run.targetPath,
           scanId: run.scanId,
           scope: run.scope,
+          includePaths: run.includePaths,
           pythonCommand: options.pythonCommand,
         },
       }),
