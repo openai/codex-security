@@ -3832,10 +3832,21 @@ export async function runScanEvents(
           "Codex Security did not report a thread ID.",
         );
       }
-      return { ...turn, threadId, status };
+      // The workbench reconciles saved checkpoints before validating and sealing
+      // its canonical artifacts. Preserve that authoritative preparation order.
+      options.signal.throwIfAborted();
+      const usage =
+        options.workbenchValidated && options.onFinalize !== undefined
+          ? ((await options.onFinalize(turn.usage)) ?? turn.usage)
+          : turn.usage;
+      return { ...turn, threadId, status, usage };
     };
     const accept = async (): Promise<ScanDraftInput> => {
-      // Matching, custom validation and the canonical seal remain with the caller.
+      await requireScanArtifacts(
+        options.scanDir,
+        ["scan-manifest.json", "findings.json", "coverage.json"],
+        options.signal,
+      );
       const [manifest, findings, coverage] = await Promise.all(
         ["scan-manifest.json", "findings.json", "coverage.json"].map(
           async (name) =>
@@ -3871,7 +3882,7 @@ export async function runScanEvents(
     }
     const { status, threadId, finalResponse } = audit.execution;
     let { usage } = audit.execution;
-    if (options.onFinalize !== undefined) {
+    if (!options.workbenchValidated && options.onFinalize !== undefined) {
       usage = (await options.onFinalize(usage)) ?? usage;
     }
     const result = await collectResult(
@@ -4261,23 +4272,11 @@ function addScanCosts(
   };
 }
 
-async function collectResult(
-  turnResult: TurnResultMetadata,
-  threadId: string,
+async function requireScanArtifacts(
   scanDir: string,
-  pluginRoot: string,
-  expectation: ScanExpectation,
+  required: readonly string[],
   signal: AbortSignal,
-  workbenchValidated = false,
-  pythonPath?: string,
-  protectedRoot?: string,
-): Promise<ScanResult> {
-  const required = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
+): Promise<void> {
   const missing: string[] = [];
   for (const name of required) {
     try {
@@ -4296,6 +4295,24 @@ async function collectResult(
       `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
     );
   }
+}
+
+async function collectResult(
+  turnResult: TurnResultMetadata,
+  threadId: string,
+  scanDir: string,
+  pluginRoot: string,
+  expectation: ScanExpectation,
+  signal: AbortSignal,
+  workbenchValidated = false,
+  pythonPath?: string,
+  protectedRoot?: string,
+): Promise<ScanResult> {
+  await requireScanArtifacts(
+    scanDir,
+    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    signal,
+  );
   const { manifest, findings, coverage } = await loadContract(scanDir, {
     pluginRoot,
     expectation,

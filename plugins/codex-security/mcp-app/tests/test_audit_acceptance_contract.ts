@@ -1,3 +1,5 @@
+import type { ArtifactContext } from "../src/artifact-context.js";
+import { recordCodexSecurityScanDraft } from "./scan-draft-recovery-fixture.ts";
 import assert from "node:assert/strict";
 import {
   mkdtemp,
@@ -28,7 +30,6 @@ const bundle = await build({
 });
 const {
   createDeepScanArtifacts,
-  recordCodexSecurityScanDraft,
   recordCodexSecurityWorkerScanDraft,
   validateDiscoveryArtifacts,
   readDiscoveryAuditDraft,
@@ -97,7 +98,7 @@ for (const completeness of ["complete", "partial", "unknown"]) {
                 ],
         },
       };
-      const standard = {
+      const standard: ArtifactContext = {
         root: scanDir,
         repoRoot: repository,
         layout: "scan",
@@ -116,7 +117,7 @@ for (const completeness of ["complete", "partial", "unknown"]) {
           diffTarget: null,
         },
       };
-      const worker = {
+      const worker: ArtifactContext = {
         root: workerRoot,
         repoRoot: repository,
         layout: "worker",
@@ -134,8 +135,9 @@ for (const completeness of ["complete", "partial", "unknown"]) {
         /checkpoint/,
       );
       assert.equal(
-        JSON.parse(await readFile(path.join(scanDir, "scan-manifest.json")))
-          .scan.complete,
+        JSON.parse(
+          await readFile(path.join(scanDir, "scan-manifest.json"), "utf8"),
+        ).scan.complete,
         false,
       );
       const controller = new AbortController();
@@ -174,13 +176,13 @@ for (const completeness of ["complete", "partial", "unknown"]) {
         scanId,
       );
       const manifest = JSON.parse(
-        await readFile(path.join(scanDir, "scan-manifest.json")),
+        await readFile(path.join(scanDir, "scan-manifest.json"), "utf8"),
       );
       const findings = JSON.parse(
-        await readFile(path.join(scanDir, "findings.json")),
+        await readFile(path.join(scanDir, "findings.json"), "utf8"),
       );
       const coverage = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json")),
+        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
       );
       assert.deepEqual(accepted.findings, [finding]);
       for (const [key, value] of Object.entries(finding)) {

@@ -1,6 +1,6 @@
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { once } from "node:events";
-import { chmod, mkdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -1150,14 +1150,58 @@ describe("one-shot scan events", () => {
   });
 });
 
-test("missing required artifacts remain incomplete scans", async () => {
+test.each([
+  "scan-manifest.json",
+  "findings.json",
+  "coverage.json",
+  "report.md",
+])("missing required artifact %s remains an incomplete scan", async (name) => {
   const scanDir = await copyCompletedScan(await temporaryDirectory());
-  await rm(join(scanDir, "report.md"));
+  await rm(join(scanDir, name));
   await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
     name: IncompleteScanError.name,
-    message:
-      "Codex Security scan completed without required artifacts: report.md",
+    message: `Codex Security scan completed without required artifacts: ${name}`,
   });
+});
+
+test("an aborted completed turn cannot prepare workbench artifacts", async () => {
+  const abortController = new AbortController();
+  let finalizations = 0;
+  async function* events() {
+    yield { type: "thread.started", thread_id: "synthetic-thread" } as const;
+    yield { type: "turn.started" } as const;
+    abortController.abort("synthetic cancellation");
+    yield completedTurn();
+  }
+  await expect(
+    runEvents("/synthetic-scan", events(), {
+      abortController,
+      workbenchValidated: true,
+      onFinalize: async () => {
+        finalizations++;
+      },
+    }),
+  ).rejects.toMatchObject({ name: ScanInterruptedError.name });
+  expect(finalizations).toBe(0);
+});
+
+test("workbench reconciliation precedes admission of canonical artifacts", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const file = join(scanDir, "scan-manifest.json");
+  const original = await readFile(file, "utf8");
+  const interrupted = JSON.parse(original);
+  interrupted.scan.complete = false;
+  await writeFile(file, JSON.stringify(interrupted));
+  let reconciliations = 0;
+  const result = await runEvents(scanDir, completedEvents(), {
+    workbenchValidated: true,
+    onFinalize: async () => {
+      reconciliations++;
+      await writeFile(file, original);
+    },
+  });
+  expect(reconciliations).toBe(1);
+  expect(result.turnResult.status).toBe("completed");
 });
 
 test.skipIf(process.platform === "win32")(
