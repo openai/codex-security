@@ -1,19 +1,22 @@
 import { codexWithRun } from "./support/codex.js";
 import { createCliTest } from "./support/cli-run.js";
-import { gitText } from "./support/shell.js";
+import { gitText, nodeCommand } from "./support/shell.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
+  chmod,
   readFile,
   readdir,
   realpath,
   rename,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative, sep } from "node:path";
+import { delimiter, dirname, join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
 import { writeThreatModel } from "../src/artifact-export.js";
@@ -49,6 +52,7 @@ import {
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting, throwing } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } =
@@ -228,19 +232,11 @@ async function scopedInventory(paths: Fixture, scope: string) {
         "sys.path.insert(0, sys.argv[1])",
         "import workbench_target as target",
         "from generate_rank_input import make_repo_scope_input",
-        "queries = []",
-        "git_bytes = target.git_bytes",
-        "def record_query(repository, *args, **kwargs):",
-        "    data = git_bytes(repository, *args, **kwargs)",
-        "    if 'ls-files' in args:",
-        "        queries.append({'pathspec': args[-1], 'count': len([path for path in (data or b'').split(b'\\0') if path])})",
-        "    return data",
-        "target.git_bytes = record_query",
         "repo, scope, scopes, output = sys.argv[2:]",
         "make_repo_scope_input(Namespace(repo=repo, scopes_file=scopes, out=output))",
         "rows = [json.loads(line)['path'] for line in Path(output).read_text().splitlines()]",
         "count = target.directory_snapshot_regular_file_count((Path(repo) / scope).resolve())",
-        "print(json.dumps({'paths': rows, 'count': count, 'queries': queries}))",
+        "print(json.dumps({'paths': rows, 'count': count}))",
       ].join("\n"),
       join(PLUGIN_ROOT, "scripts"),
       paths.repository,
@@ -253,7 +249,6 @@ async function scopedInventory(paths: Fixture, scope: string) {
   return JSON.parse(stdout.trim().split("\n").at(-1)!) as {
     paths: string[];
     count: number;
-    queries: Array<{ pathspec: string; count: number }>;
   };
 }
 
@@ -929,6 +924,124 @@ test("rejects escaped component paths and output inside the enclosing worktree",
   ).rejects.toThrow();
 });
 
+test("component inventory uses the shared Git runner without fsmonitor callbacks", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  const marker = join(paths.root, "fsmonitor-called");
+  const hook = join(paths.root, "fsmonitor-hook");
+  await writeFile(
+    hook,
+    `#!/bin/sh\nprintf called > '${marker.replaceAll("'", `'"'"'`)}'\nprintf '\\0'\n`,
+  );
+  await chmod(hook, 0o700);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "config",
+    "core.fsmonitor",
+    hook,
+  ]);
+  const plan = await planComponents(paths.repository, {
+    codex: fakeCodex(() => ({
+      components: [{ name: "Source", paths: ["."] }],
+    })),
+  });
+  expect(plan.components).toHaveLength(1);
+  expect(await stat(marker).catch(() => null)).toBeNull();
+});
+
+test.each(["inline", "global"])(
+  "component inventory preserves inherited %s Git exclusions",
+  async (configuration) => {
+    const paths = await fixture();
+    execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+    const excludes = join(paths.root, "excludes");
+    const config = join(paths.root, "gitconfig");
+    await writeFile(excludes, "ignored.ts\n");
+    await writeFile(join(paths.repository, "ignored.ts"), "export {};\n");
+    execFileSync("git", [
+      "config",
+      "--file",
+      config,
+      "core.excludesFile",
+      excludes,
+    ]);
+    const previousEnvironment = process.env;
+    process.env = {
+      ...previousEnvironment,
+      ...(configuration === "inline"
+        ? {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.excludesFile",
+            GIT_CONFIG_VALUE_0: excludes,
+          }
+        : { GIT_CONFIG_GLOBAL: config }),
+    };
+    try {
+      const plan = await planComponents(paths.repository, {
+        codex: {
+          startThread: () => ({
+            async run(prompt) {
+              expect(prompt).not.toContain("ignored.ts");
+              return {
+                finalResponse: JSON.stringify({ components: [components[0]] }),
+              };
+            },
+          }),
+        },
+      });
+      expect(plan.components.flatMap(({ paths }) => paths)).not.toContain(
+        "ignored.ts",
+      );
+    } finally {
+      process.env = previousEnvironment;
+    }
+  },
+);
+
+test("component inventory reports broken Git configuration without walking ignored files", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  await writeFile(join(paths.repository, ".git", "config"), "[broken config\n");
+  let planned = false;
+  await expect(
+    planComponents(paths.repository, {
+      codex: fakeCodex(() => {
+        planned = true;
+        return { components: [{ name: "Source", paths: ["."] }] };
+      }),
+    }),
+  ).rejects.toThrow("bad config line");
+  expect(planned).toBe(false);
+});
+
+test("component inventory preserves non-ASCII Git failure diagnostics", async () => {
+  const paths = await fixture();
+  const name = "git-日本語-😀";
+  const metadata = join(paths.root, name);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "init",
+    "-q",
+    "--separate-git-dir",
+    metadata,
+  ]);
+  execFileSync("git", [
+    "--git-dir",
+    metadata,
+    "config",
+    "core.worktree",
+    paths.repository,
+  ]);
+  await writeFile(join(metadata, "index"), "broken index");
+  const response = mock(() => ({ components: [components[0]!] }));
+  await expect(
+    planComponents(paths.repository, { codex: fakeCodex(response) }),
+  ).rejects.toThrow(name);
+  expect(response).not.toHaveBeenCalled();
+});
+
 test("plans from a Git inventory without tools or ignored files", async () => {
   const paths = await fixture();
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);
@@ -985,6 +1098,100 @@ test("plans from a Git inventory without tools or ignored files", async () => {
       proposed,
     );
   }
+});
+
+// Windows and macOS do not support the synthetic 0xff filename fixture.
+for (const rawByteNames of [false, true]) {
+  test
+    .skipIf(rawByteNames && ["win32", "darwin"].includes(process.platform))
+    .each(["Git", "plain directory"])(
+    `preserves exact UTF-8 paths in a %s component inventory${rawByteNames ? " with raw-byte entries" : ""}`,
+    async (kind) => {
+      const repository = join(await temporaryDirectory(), "repository");
+      await mkdir(repository);
+      if (kind === "Git") execFileSync("git", ["-C", repository, "init", "-q"]);
+      const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts", "résumé.ts", "🙂.ts"];
+      for (const path of paths)
+        await writeFile(join(repository, path), "export {};\n");
+      const proposed = { components: [{ name: "Sources", paths }] };
+      const response = mock(() => proposed);
+      const options = { codex: fakeCodex(response) };
+      if (rawByteNames) {
+        const invalid = Buffer.concat([
+          Buffer.from(join(repository, "name-")),
+          Buffer.from([0xff]),
+          Buffer.from(".ts"),
+        ]);
+        await writeFile(invalid, "export {};\n");
+        await expect(
+          planComponents(repository, options),
+        ).rejects.toBeInstanceOf(TypeError);
+        expect(response).not.toHaveBeenCalled();
+        await unlink(invalid);
+        await symlink("missing.ts", invalid);
+      }
+      expect(await planComponents(repository, options)).toEqual(proposed);
+      expect(response).toHaveBeenCalledTimes(1);
+    },
+  );
+}
+
+test("plans Unicode files when directory entry types are unknown", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "plans Unicode files when directory entry types are unknown",
+    )
+  )
+    return;
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts", "résumé/🙂.ts"];
+  for (const path of [...paths, "nested/.git/ignored.ts"]) {
+    await mkdir(dirname(join(repository, path)), { recursive: true });
+    await writeFile(join(repository, path), "export {};\n");
+  }
+  const source = new URL("../src/component-plan.ts", import.meta.url);
+  const built = await Bun.build({
+    entrypoints: [fileURLToPath(source)],
+    target: "node",
+    format: "esm",
+    define: { "import.meta.url": JSON.stringify(source.href) },
+  });
+  expect(built.success).toBe(true);
+  const module = join(root, "component-plan.mjs");
+  await writeFile(module, await built.outputs[0]!.text());
+  const proposed = { components: [{ name: "Sources", paths }] };
+  const output = execFileSync(
+    nodeCommand().command,
+    [
+      "--input-type=module",
+      "--eval",
+      `
+      import assert from "node:assert/strict";
+      const binding = process.binding("fs");
+      const original = binding.readdir;
+      let unknownEntries = 0;
+      binding.readdir = async function (...args) {
+        const result = await original.apply(this, args);
+        if (args[2] === true) {
+          unknownEntries += result[1].length;
+          result[1].fill(0);
+        }
+        return result;
+      };
+      const { planComponents } = await import(${JSON.stringify(pathToFileURL(module).href)});
+      const proposed = ${JSON.stringify(proposed)};
+      const plan = await planComponents(${JSON.stringify(repository)}, {
+        codex: { startThread: () => ({ run: async () => ({ finalResponse: JSON.stringify(proposed) }) }) },
+      });
+      assert.ok(unknownEntries > 0);
+      console.log(JSON.stringify(plan));
+    `,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(JSON.parse(output)).toEqual(proposed);
 });
 
 test.each(["directories", "manifests", "root files"])(
@@ -1149,10 +1356,6 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
   expect(await scopedInventory(paths, source)).toEqual({
     paths: ordinaryPaths,
     count: 3,
-    queries: [
-      { pathspec: ":(icase,literal)" + source, count: 3 },
-      { pathspec: ":(icase,literal)" + source, count: 3 },
-    ],
   });
   git("switch", "-c", "case-rename");
   git("mv", source, "renaming");
@@ -1171,12 +1374,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
   expect(entries).toContain(uppercase);
 
   const inventory = async (scope: string) => {
-    const { queries, ...selected } = await scopedInventory(paths, scope);
-    const pathspec = scope === "." ? "." : ":(icase,literal)" + scope;
-    expect(queries.map((query) => query.pathspec)).toEqual([
-      pathspec,
-      pathspec,
-    ]);
+    const selected = await scopedInventory(paths, scope);
     if (scope === ".") {
       selected.paths = (
         await Promise.all(
@@ -1213,13 +1411,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
     paths: [...expectedInventory.paths, scope + "/untracked.ts"].sort(),
     count: 4,
   };
-  expect(await scopedInventory(paths, scope)).toEqual({
-    ...mixedInventory,
-    queries: [
-      { pathspec: ":(icase,literal)" + scope, count: 4 },
-      { pathspec: ":(icase,literal)" + scope, count: 4 },
-    ],
-  });
+  expect(await scopedInventory(paths, scope)).toEqual(mixedInventory);
   const repositoryInventory = {
     paths: [
       ".gitignore",
@@ -1286,10 +1478,10 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
   await writeFile(join(paths.repository, nonCased, "app.ts"), "export {};\n");
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);
   execFileSync("git", ["-C", paths.repository, "add", "--force", "."]);
-  expect((await scopedInventory(paths, nonCased)).queries).toEqual([
-    { pathspec: ":(icase,literal)" + nonCased, count: 1 },
-    { pathspec: ":(icase,literal)" + nonCased, count: 1 },
-  ]);
+  expect(await scopedInventory(paths, nonCased)).toEqual({
+    paths: [nonCased + "/app.ts"],
+    count: 1,
+  });
   await rename(
     join(paths.repository, source),
     join(paths.repository, "renaming"),
@@ -1325,7 +1517,6 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
     ).sort();
   expect(await identities(inventory.paths)).toEqual(await identities(selected));
   expect(inventory.count).toBe(selected.length);
-  expect(inventory.queries.map((query) => query.pathspec)).toEqual([".", "."]);
 });
 
 test("plans plain directories and rejects unsafe or overlapping model scopes", async () => {
@@ -1411,6 +1602,7 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
       {
         ...dependencies({ currentDirectory: paths.root, environment }),
         planComponents: async (_repository, options) => {
+          expect(options?.surface).toBe("cli");
           expect(options?.auth).toBe(auth);
           expect(options?.cyberAccessProgram).toBe("daybreak_blue");
           expect(options?.environment).toEqual(expectedEnvironment);
@@ -1609,3 +1801,41 @@ test("CLI rejects ambiguous component selection", async () => {
     expect(result.stderr).toContain("Choose exactly one");
   }
 });
+
+(process.platform === "win32" ? test.skip : test)(
+  "component inventory excludes checkout-local Git when planning a subdirectory",
+  async () => {
+    if (
+      runTestInSubprocess(
+        "./tests-ts/component-scan.test.ts",
+        "component inventory excludes checkout-local Git when planning a subdirectory",
+      )
+    )
+      return;
+    const paths = await fixture();
+    execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+    const actualGit = Bun.which("git")!;
+    const bin = join(paths.repository, "bin");
+    const marker = join(paths.root, "local-git-called");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh\nprintf called > '${marker.replaceAll("'", `'"'"'`)}'\nexec '${actualGit.replaceAll("'", `'"'"'`)}' "$@"\n`,
+      { mode: 0o700 },
+    );
+    const previous = process.env["PATH"];
+    process.env["PATH"] = bin + delimiter + previous;
+    try {
+      const plan = await planComponents(join(paths.repository, "apps", "api"), {
+        codex: fakeCodex(() => ({
+          components: [{ name: "Source", paths: ["."] }],
+        })),
+      });
+      expect(plan.components).toHaveLength(1);
+      expect(await stat(marker).catch(() => null)).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previous;
+    }
+  },
+);

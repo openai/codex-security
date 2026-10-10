@@ -1,3 +1,4 @@
+import { codexFactory } from "./support/api-events.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -283,6 +284,10 @@ test.each([
           unified_exec: false,
           view_image: index === 0,
         };
+        const shellPolicy = {
+          inherit: "none",
+          set: { SYNTHETIC_WORKER_VALUE: `shell-value-${index}` },
+        };
         const providerEnvironment: Record<string, string> = {
           [providerKey]: fileProfile
             ? `synthetic-key-${index}`
@@ -315,6 +320,7 @@ test.each([
               agents,
               skills,
               web_search: webSearch,
+              shell_environment_policy: shellPolicy,
             }),
           );
         }
@@ -330,6 +336,8 @@ test.each([
                 : {
                     model_provider: "openrouter",
                     web_search: selection === "root" ? webSearch : "live",
+                    shell_environment_policy:
+                      selection === "root" ? shellPolicy : { inherit: "all" },
                     features: selection === "root" ? featureOverrides : {},
                     agents: selection === "root" ? agents : {},
                     skills: selection === "root" ? skills : {},
@@ -361,6 +369,7 @@ test.each([
                               agents,
                               skills,
                               web_search: webSearch,
+                              shell_environment_policy: shellPolicy,
                               ...(selection === "null profile"
                                 ? {
                                     model_provider: null,
@@ -401,141 +410,138 @@ test.each([
               resolvePluginPython: async () => "/managed/python",
               prepareOutputDir: async () => scan,
               repositoryRevision: async () => "deadbeef",
-              createCodex: (options) => ({
-                startThread: () => ({
-                  id: null,
-                  async runStreamed() {
-                    const environment = options.env!;
-                    snapshots[index] =
-                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-                    const permission = parseToml(
-                      options.configOverrides!.find((value) =>
-                        value.startsWith(
-                          "permissions.codex_security_scan.filesystem=",
-                        ),
-                      )!,
-                    )["permissions"] as Record<string, Record<string, unknown>>;
-                    filesystems[index] = permission["codex_security_scan"]![
-                      "filesystem"
-                    ] as Record<string, unknown>;
-                    ready[index]!.resolve();
-                    await ready[1]!.promise;
-                    expect(snapshots[0]).not.toBe(snapshots[1]);
-                    for (const snapshot of snapshots) {
-                      expect(dirname(dirname(snapshot))).toBe(sharedHome);
-                      for (const filesystem of filesystems) {
-                        // The same denied home protects both concurrent snapshots.
-                        expect(filesystem[sharedHome]).toEqual({ ".": "deny" });
-                      }
-                    }
-                    const preflight = await readFile(
-                      environment["CODEX_SECURITY_CONFIG_PATH"]!,
-                      "utf8",
-                    );
-                    expect(preflight).not.toContain("synthetic-key-");
-                    expect(preflight).not.toContain("synthetic-header-");
-                    const workerSnapshotPath =
-                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-                    const workerSnapshot = parseToml(
-                      await readFile(workerSnapshotPath, "utf8"),
-                    );
-                    expect(workerSnapshot["worker_runtime"]).toMatchObject({
-                      environment: workerEnvironment,
-                      features: featureOverrides,
-                      agents: resolvedAgents,
-                      skills: resolvedSkills,
-                      web_search: webSearch,
-                    });
-                    if (fileProfile)
-                      expect(options.config!["model"]).toBe("gpt-5.6-terra");
-                    expect(options.config!["agents"]).toEqual(
-                      fileProfile ? resolvedAgents : agents,
-                    );
-                    expect(options.config!["skills"]).toEqual(
-                      fileProfile && !explicitFileSkills
-                        ? resolvedSkills
-                        : skills,
-                    );
-                    expect(skills.config[0]!.path).toBe(
-                      `skill-${index}/SKILL.md`,
-                    );
-                    expect(options.config!["web_search"]).toBe(webSearch);
-                    expect(options.config!["features"]).toMatchObject(
-                      featureOverrides,
-                    );
-                    expect(
-                      (workerSnapshot["worker_runtime"] as JsonObject)[
-                        "environment"
-                      ],
-                    ).toEqual(workerEnvironment);
-                    if (process.platform !== "win32") {
-                      expect(
-                        (await stat(workerSnapshotPath)).mode & 0o777,
-                      ).toBe(0o600);
-                    }
-                    expect(
-                      JSON.stringify({
-                        config: options.config,
-                        overrides: options.configOverrides,
-                      }),
-                    ).not.toContain("synthetic-key-");
-                    const settings = await workerRuntimeSettings(environment);
-                    expect(settings.environment).toEqual(workerEnvironment);
-                    expect(settings.config["features"]).toMatchObject(
-                      featureOverrides,
-                    );
-                    expect(settings.config["web_search"]).toBe(webSearch);
-                    expect(settings.config["agents"]).toEqual(resolvedAgents);
-                    expect(settings.config["model_provider"]).toBe(
-                      "openrouter",
-                    );
-                    expect(settings.nativeProfile).toBeDefined();
-                    expect(settings.nativeProfile).toBe(options.nativeProfile);
-                    expect(
-                      (workerSnapshot["worker_runtime"] as JsonObject)[
-                        "native_profile"
-                      ],
-                    ).toBe(settings.nativeProfile);
-                    // Read A's private profile after B updates the shared home.
-                    // Native profile loading is covered by the inheritance tests.
-                    const nativeConfig = parseToml(
-                      await readFile(
-                        join(
-                          sharedHome,
-                          `${settings.nativeProfile}.config.toml`,
-                        ),
-                        "utf8",
+              createCodex: (options) =>
+                codexFactory(async function runStreamed() {
+                  const environment = options.env!;
+                  snapshots[index] =
+                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                  const permission = parseToml(
+                    options.configOverrides!.find((value) =>
+                      value.startsWith(
+                        "permissions.codex_security_scan.filesystem=",
                       ),
-                    );
-                    const actual = (
-                      nativeConfig["model_providers"] as JsonObject
-                    )["openrouter"] as JsonObject;
-                    expect(actual).toMatchObject(provider);
-                    expect(actual["http_headers"] ?? {}).toEqual(
-                      provider.http_headers ?? {},
-                    );
-                    expect(environment[providerKey]).toBe(
-                      workerEnvironment[providerKey],
-                    );
-                    expect(environment["SYNTHETIC_CUSTOM_HEADER"]).toBe(
-                      workerEnvironment["SYNTHETIC_CUSTOM_HEADER"],
-                    );
-                    for (const [name, value] of Object.entries(
-                      canonicalHeader,
-                    )) {
-                      expect(environment[name]).toBe(value);
+                    )!,
+                  )["permissions"] as Record<string, Record<string, unknown>>;
+                  filesystems[index] = permission["codex_security_scan"]![
+                    "filesystem"
+                  ] as Record<string, unknown>;
+                  ready[index]!.resolve();
+                  await ready[1]!.promise;
+                  expect(snapshots[0]).not.toBe(snapshots[1]);
+                  for (const snapshot of snapshots) {
+                    expect(dirname(dirname(snapshot))).toBe(sharedHome);
+                    for (const filesystem of filesystems) {
+                      // The same denied home protects both concurrent snapshots.
+                      expect(filesystem[sharedHome]).toEqual({ ".": "deny" });
                     }
-                    const saved = await readFile(
-                      join(sharedHome, "config.toml"),
-                      "utf8",
+                  }
+                  const preflight = await readFile(
+                    environment["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "utf8",
+                  );
+                  expect(preflight).not.toContain("synthetic-key-");
+                  expect(preflight).not.toContain("synthetic-header-");
+                  expect(preflight).not.toContain("shell-value-");
+                  const workerSnapshotPath =
+                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                  const workerSnapshot = parseToml(
+                    await readFile(workerSnapshotPath, "utf8"),
+                  );
+                  expect(workerSnapshot["worker_runtime"]).toMatchObject({
+                    environment: workerEnvironment,
+                    shell_environment_policy: shellPolicy,
+                    features: featureOverrides,
+                    agents: resolvedAgents,
+                    skills: resolvedSkills,
+                    web_search: webSearch,
+                  });
+                  if (fileProfile)
+                    expect(options.config!["model"]).toBe("gpt-5.6-terra");
+                  expect(options.config!["agents"]).toEqual(
+                    fileProfile ? resolvedAgents : agents,
+                  );
+                  expect(options.config!["skills"]).toEqual(
+                    fileProfile && !explicitFileSkills
+                      ? resolvedSkills
+                      : skills,
+                  );
+                  expect(skills.config[0]!.path).toBe(
+                    `skill-${index}/SKILL.md`,
+                  );
+                  expect(options.config!["web_search"]).toBe(webSearch);
+                  expect(options.config!["shell_environment_policy"]).toEqual(
+                    shellPolicy,
+                  );
+                  expect(options.config!["features"]).toMatchObject(
+                    featureOverrides,
+                  );
+                  expect(
+                    (workerSnapshot["worker_runtime"] as JsonObject)[
+                      "environment"
+                    ],
+                  ).toEqual(workerEnvironment);
+                  if (process.platform !== "win32") {
+                    expect((await stat(workerSnapshotPath)).mode & 0o777).toBe(
+                      0o600,
                     );
-                    expect(saved).not.toContain("model_providers");
-                    expect(saved).not.toContain("synthetic-key-");
-                    expect(saved).not.toContain("synthetic-header-");
-                    throw new Error("synthetic provider configuration checked");
-                  },
-                }),
-              }),
+                  }
+                  expect(
+                    JSON.stringify({
+                      config: options.config,
+                      overrides: options.configOverrides,
+                    }),
+                  ).not.toContain("synthetic-key-");
+                  const settings = await workerRuntimeSettings(environment);
+                  expect(settings.environment).toEqual(workerEnvironment);
+                  expect(settings.config["features"]).toMatchObject(
+                    featureOverrides,
+                  );
+                  expect(settings.config["web_search"]).toBe(webSearch);
+                  expect(settings.config["shell_environment_policy"]).toEqual(
+                    shellPolicy,
+                  );
+                  expect(settings.config["agents"]).toEqual(resolvedAgents);
+                  expect(settings.config["model_provider"]).toBe("openrouter");
+                  expect(settings.nativeProfile).toBeDefined();
+                  expect(settings.nativeProfile).toBe(options.nativeProfile);
+                  expect(
+                    (workerSnapshot["worker_runtime"] as JsonObject)[
+                      "native_profile"
+                    ],
+                  ).toBe(settings.nativeProfile);
+                  // Read A's private profile after B updates the shared home.
+                  // Native profile loading is covered by the inheritance tests.
+                  const nativeConfig = parseToml(
+                    await readFile(
+                      join(sharedHome, `${settings.nativeProfile}.config.toml`),
+                      "utf8",
+                    ),
+                  );
+                  const actual = (
+                    nativeConfig["model_providers"] as JsonObject
+                  )["openrouter"] as JsonObject;
+                  expect(actual).toMatchObject(provider);
+                  expect(actual["http_headers"] ?? {}).toEqual(
+                    provider.http_headers ?? {},
+                  );
+                  expect(environment[providerKey]).toBe(
+                    workerEnvironment[providerKey],
+                  );
+                  expect(environment["SYNTHETIC_CUSTOM_HEADER"]).toBe(
+                    workerEnvironment["SYNTHETIC_CUSTOM_HEADER"],
+                  );
+                  for (const [name, value] of Object.entries(canonicalHeader)) {
+                    expect(environment[name]).toBe(value);
+                  }
+                  const saved = await readFile(
+                    join(sharedHome, "config.toml"),
+                    "utf8",
+                  );
+                  expect(saved).not.toContain("model_providers");
+                  expect(saved).not.toContain("synthetic-key-");
+                  expect(saved).not.toContain("synthetic-header-");
+                  throw new Error("synthetic provider configuration checked");
+                })(),
             },
           ),
         );
@@ -1085,7 +1091,7 @@ const legacyScanCases: Array<
     ],
   ),
   [
-    "deep with a filtered profile and readable snapshot",
+    "deep with a resolved profile and readable snapshot",
     "deep",
     {
       profile: "selected.profile",
@@ -1094,8 +1100,6 @@ const legacyScanCases: Array<
     {
       capability: true,
       inherited: "synthetic.system",
-      reads: true,
-      rejects: true,
     },
   ],
 ];

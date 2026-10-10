@@ -531,7 +531,7 @@ test.each(["screen", "pair"])(
                   (finding) => finding.findingId === findings[2]!.findingId,
                 )
               ? distinct
-              : merged(originals),
+              : { ...sameRecommendation },
         );
       },
     };
@@ -620,7 +620,7 @@ test.each(["screening", "pair-review"] as const)(
                   originals.slice(1).map(screeningRecommendation),
                 ),
               }
-            : merged(originals),
+            : { ...sameRecommendation },
         );
       },
     };
@@ -743,7 +743,7 @@ test("resumes a saved Sol review after overlapping Luna work fails", async () =>
                   originals.slice(1).map(screeningRecommendation),
                 ),
               }
-            : merged(originals),
+            : { ...sameRecommendation },
         );
       },
     },
@@ -809,7 +809,7 @@ test("replays an unacknowledged group write after migrating its workflow databas
           ? {
               decisions: { "pair-1": { ...sameRecommendation } },
             }
-          : merged(originals),
+          : { ...sameRecommendation },
       );
     },
   };

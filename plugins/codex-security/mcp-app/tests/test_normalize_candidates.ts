@@ -11,10 +11,10 @@ const { normalizeCandidatesCommand } = await importSource(
 
 const cases = [
   {
-    name: "preserves a literal trailing carriage return",
-    files: ["file\r"],
-    inventory: "file\r\n",
-    candidate: "file\r",
+    name: "accepts LF inventories and preserves filename whitespace",
+    files: [" file.ts", "other.ts"],
+    inventory: "\n file.ts\nother.ts\n",
+    candidate: " file.ts",
   },
   {
     name: "accepts CRLF inventories",
@@ -23,84 +23,29 @@ const cases = [
     candidate: "file",
   },
   {
-    name: "uses independent CRLF evidence when filenames collide",
-    files: ["file", "file\r", "other"],
-    inventory: "file\r\nother\r\n",
+    name: "accepts an unterminated final row",
+    files: ["file", "other"],
+    inventory: "other\nfile",
     candidate: "file",
   },
   {
-    name: "preserves separately listed carriage-return filenames",
-    files: ["file", "file\r"],
-    inventory: "file\nfile\r\n",
-    candidate: "file\r",
-  },
-  {
-    name: "preserves an unterminated final literal filename",
-    files: ["file", "file\r", "other"],
-    inventory: "other\r\nfile\r",
-    candidate: "file\r",
-  },
-  {
-    name: "uses independent literal filename evidence",
-    files: ["file", "file\r", "literal\r"],
-    inventory: "file\r\nliteral\r\n",
-    candidate: "file\r",
-  },
-  {
-    name: "does not strip an unterminated missing literal filename",
-    files: ["file"],
-    inventory: "file\r",
-    candidate: "file",
-    error: /ENOENT/,
-  },
-  {
-    name: "keeps an unterminated missing literal outside a diff scope",
-    files: ["file"],
-    inventory: "file\r",
-    candidate: "file",
-    allowMissing: true,
-    error: /expected at least one in-scope file/,
-  },
-  {
-    name: "does not infer CRLF from an unterminated row",
-    files: ["file", "file\r", "other"],
-    inventory: "file\r\nother\r",
-    candidate: "file",
-    error: /ambiguous carriage-return paths/,
-  },
-  {
-    name: "rejects an ambiguous inventory without selecting another file",
-    files: ["file", "file\r"],
-    inventory: "file\r\n",
-    candidate: "file",
-    error: /ambiguous carriage-return paths/,
-  },
-  {
-    name: "keeps CRLF normalization for missing diff-scope files",
+    name: "keeps missing diff-scope files with CRLF inventories",
     files: ["file"],
     inventory: "file\r\ndeleted\r\n",
     candidate: "file",
     allowMissing: true,
   },
   {
-    name: "does not replace a missing CRLF path with its literal sibling",
-    files: ["file\r", "other"],
-    inventory: "file\r\nother\r\n",
-    candidate: "file\r",
-    allowMissing: true,
-    error: /ambiguous carriage-return paths/,
-  },
-  {
-    name: "preserves explicitly listed literal siblings in a diff scope",
-    files: ["file\r"],
-    inventory: "file\nfile\r\n",
-    candidate: "file\r",
-    allowMissing: true,
+    name: "rejects a missing file outside diff mode",
+    files: ["file"],
+    inventory: "deleted\nfile\n",
+    candidate: "file",
+    error: /ENOENT/,
   },
 ];
 
 for (const fixture of cases) {
-  test(fixture.name, { skip: process.platform === "win32" }, async (t) => {
+  test(fixture.name, async (t) => {
     const root = await temporaryDirectory("normalize-candidates-");
     t.after(() => rm(root, { recursive: true, force: true }));
     const repo = join(root, "repo");

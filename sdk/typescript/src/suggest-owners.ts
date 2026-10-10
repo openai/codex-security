@@ -64,13 +64,11 @@ export interface OwnerSuggestions extends ScanModelConfiguration {
   results: OwnerSuggestion[];
 }
 
-const decisionSchema = z
-  .object({
-    identityIndex: z.number().int().min(-1),
-    reason: text,
-    evidenceIds: z.array(text),
-  })
-  .strict();
+const decisionSchema = z.strictObject({
+  identityIndex: z.number().int().min(-1),
+  reason: text,
+  evidenceIds: z.array(text),
+});
 
 /** Suggest contributors from local Git evidence without changing findings or assigning tickets. */
 export async function suggestOwners(
@@ -148,6 +146,7 @@ export async function suggestOwnersInternal(
         },
         {
           surface,
+          command: "suggest-owners",
           threadSource: CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
         },
       );

@@ -6,7 +6,8 @@ let schema: object | undefined;
 let validator: ValidateFunction<Finding> | undefined;
 
 export function findingSchema(): object {
-  return (schema ??= JSON.parse(
+  if (schema) return schema;
+  const document = JSON.parse(
     readFileSync(
       new URL(
         "../../_bundled_plugin/schemas/findings.schema.json",
@@ -14,7 +15,11 @@ export function findingSchema(): object {
       ),
       "utf8",
     ),
-  ).properties.findings.items);
+  );
+  return (schema = {
+    ...document.properties.findings.items,
+    $defs: document.$defs,
+  });
 }
 
 export function requireFinding(value: unknown): Finding {
