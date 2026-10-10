@@ -1281,14 +1281,38 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
   ).toMatchObject({ knowledgeBasePaths: [document] });
 });
 
-test.each([false, true])(
-  "CLI restores selected finalization without current inputs or session logs (bulk: %p)",
-  async (bulk) => {
+test.each([
+  [false, "none", "deleted"],
+  [true, "none", "deleted"],
+  [false, "saved", "deleted"],
+  [false, "saved", "moved"],
+  [false, "saved", "available"],
+  [false, "modified", "available"],
+  [false, "missing", "available"],
+  [false, "missing", "deleted"],
+] as const)(
+  "CLI restores selected finalization without current inputs or session logs (bulk: %p, knowledge: %s, checkout: %s)",
+  async (bulk, knowledge, checkout) => {
+    const document = join(await temporaryDirectory(), "architecture.md");
+    await writeFile(document, "Original architecture.");
     const f = await interruptedScan("deep", bulk, {
       postScanPrompt: "Keep the saved follow-up behavior.",
+      ...(knowledge === "none" ? {} : { knowledgeBasePaths: [document] }),
     });
+    await writeFile(document, "Edited source context must not be loaded.");
+    if (knowledge === "modified") {
+      const snapshotPath = join(f.scanDir, ".scan-knowledge.json");
+      const snapshot = JSON.parse(await readFile(snapshotPath, "utf8"));
+      snapshot.documents["0-architecture.md.txt"] = "Modified saved context.";
+      await writeFile(snapshotPath, JSON.stringify(snapshot));
+    } else if (knowledge === "missing") {
+      await rm(join(f.scanDir, ".scan-knowledge.json"));
+    }
     await rm(f.sessionPath);
-    await rm(f.repository, { recursive: true });
+    if (checkout === "moved")
+      await rename(f.repository, `${f.repository}-moved`);
+    else if (checkout === "deleted")
+      await rm(f.repository, { recursive: true });
     const { stdout, stderr, runCli } = createCliTest(main);
     const calls: { repository: string; options: ScanOptions }[] = [];
     const deps = dependencies({
@@ -1318,8 +1342,23 @@ test.each([false, true])(
             : f.command(args, input),
       },
     );
+    if (knowledge === "modified" || knowledge === "missing") {
+      expect(code, stderr.text()).toBe(2);
+      expect(calls).toHaveLength(0);
+      expect(stderr.text()).toContain(
+        knowledge === "modified" ? "snapshot changed" : ".scan-knowledge.json",
+      );
+      return;
+    }
     expect(code, stderr.text()).toBe(0);
     expect(calls).toHaveLength(1);
+    if (knowledge === "saved" && checkout === "available") {
+      expect(calls[0]!.options.knowledgeBaseSnapshot?.documents).toEqual({
+        "0-architecture.md.txt": "Original architecture.",
+      });
+    } else {
+      expect(calls[0]!.options.knowledgeBaseSnapshot).toBeUndefined();
+    }
     expect(calls[0]).toMatchObject({
       repository: f.repository,
       options: {

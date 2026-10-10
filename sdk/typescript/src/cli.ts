@@ -2308,11 +2308,27 @@ export async function main(
             saved["scanDir"],
           );
           if (scanArguments.knowledgeBasePaths.length > 0) {
-            scanArguments.knowledgeBaseSnapshot = await restoreScanKnowledge(
-              scanArguments.outputDir,
-              scanArguments.repository!,
-              (saved["recipe"] as JsonObject)["scanInputs"],
-            );
+            try {
+              scanArguments.knowledgeBaseSnapshot = await restoreScanKnowledge(
+                scanArguments.outputDir,
+                scanArguments.repository!,
+                (saved["recipe"] as JsonObject)["scanInputs"],
+              );
+            } catch (error) {
+              const cause = error instanceof Error ? error.cause : undefined;
+              // A missing original checkout can use selected artifact recovery.
+              if (
+                !selectedFinalization ||
+                typeof cause !== "object" ||
+                cause === null ||
+                !("code" in cause) ||
+                cause.code !== "ENOENT" ||
+                !("path" in cause) ||
+                cause.path !== scanArguments.repository
+              ) {
+                throw error;
+              }
+            }
           }
           scanArguments.parentScanId = undefined;
           // Resume uses the installed engine with the saved recipe and checkpoints.
