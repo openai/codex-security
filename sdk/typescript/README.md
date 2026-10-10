@@ -240,6 +240,11 @@ stops before model work with the plugin upgrade message.
 When no provider is selected, discovery, reducer, and resumed workers inherit the
 same native configuration as the parent.
 
+Custom plugins must support the current workbench protocol for scan comparison
+and archival. Update an older custom plugin or omit `pluginPath` to use the
+bundled version. The SDK no longer adapts payloads or archives scan directories
+on behalf of older workbench implementations.
+
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
 for supported overrides and defaults.

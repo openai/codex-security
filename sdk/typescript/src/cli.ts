@@ -256,6 +256,7 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -1745,6 +1746,7 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
+  let rawExportOutput = false;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
@@ -3793,12 +3795,17 @@ export async function main(
           ]
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
-          const contents = `#!/bin/sh\nset -eu\nexec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const invocation = `exec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const contents = `#!/bin/sh\nset -eu\nunset ${[...UNSUPPORTED_GIT_ENVIRONMENT].join(" ")}\n${invocation}`;
+          const previousScopedContents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n${invocation}`;
+          const previousContents = `#!/bin/sh\nset -eu\n${invocation}`;
           const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
           const existing = await readFile(hook, "utf8").catch(() => null);
           if (
             existing !== null &&
             existing !== contents &&
+            existing !== previousScopedContents &&
+            existing !== previousContents &&
             existing !== legacyContents
           ) {
             throw new Error(`A pre-commit hook already exists at ${hook}.`);
@@ -3806,7 +3813,7 @@ export async function main(
           if (existing === null) {
             await mkdir(dirname(hook), { recursive: true });
             await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
-          } else if (existing === legacyContents) {
+          } else if (existing !== contents) {
             await writeFile(hook, contents, { flag: "w" });
           }
           return {
@@ -4801,6 +4808,7 @@ export async function main(
           },
         ),
       async run({ args, options }) {
+        rawExportOutput = options.output === "-";
         try {
           const currentDirectory = dependencies.currentDirectory();
           if (args.scanDir !== undefined && options.scan !== undefined) {
@@ -6184,6 +6192,7 @@ export async function main(
       return 2;
     }
   }
+  if (rawExportOutput) return exitCode;
   if (
     frameworkOutput.length === 0 &&
     streamedLogs === undefined &&
@@ -8615,13 +8624,15 @@ async function executeScan(
         progress?.stage(message);
         progress?.startTimer(runningMessage());
       },
-      onActivity: (activity) => {
-        if (dashboard === null) return;
-        dashboard.record(activity);
-        if (activity.paths.length > 0 && phase === "preflight") {
-          dashboard.setStage("inspecting repository files");
-        }
-      },
+      onActivity:
+        dashboard === null
+          ? undefined
+          : (activity) => {
+              dashboard?.record(activity);
+              if (activity.paths.length > 0 && phase === "preflight") {
+                dashboard?.setStage("inspecting repository files");
+              }
+            },
       onSessionEvent:
         scanInput.isTTY === true
           ? dashboard?.recordDetails.bind(dashboard)

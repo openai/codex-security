@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import directory_content_digest, git_output, git_revision
+from workbench_target import directory_content_digest, git_bytes, git_revision
 
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
@@ -138,9 +138,9 @@ def finding_workflow(
                 "repository": str(target),
                 "revision": "unversioned" if payload.get("gitDisabled") else git_revision(target),
                 "refsDigest": hashlib.sha256(
-                    (
-                        "" if payload.get("gitDisabled") else (git_output(target, "show-ref") or "")
-                    ).encode()
+                    b""
+                    if payload.get("gitDisabled")
+                    else (git_bytes(target, "show-ref") or b"").strip()
                 ).hexdigest(),
                 "content": directory_content_digest(
                     target, excluded=excluded, include_ignored=True
