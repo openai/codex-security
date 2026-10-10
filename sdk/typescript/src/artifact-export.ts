@@ -1,11 +1,10 @@
 import { spawn } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
-import type { ThreatModel } from "./models.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import {
   bundledPluginRoot,
@@ -36,12 +35,6 @@ export interface ArtifactExportArguments {
   pythonPath?: string;
   signal?: AbortSignal;
   includeMetadata?: boolean;
-}
-
-interface ThreatModelDescription {
-  threatModel: ThreatModel | null;
-  provenance: JsonObject;
-  path: string | null;
 }
 
 export type ExportArtifactOptions = {
@@ -180,7 +173,7 @@ export async function readThreatModelPath(
       ["--scan-dir", directory, "--describe-threat-model"],
       options,
     );
-    return (JSON.parse(result.stdout) as ThreatModelDescription).path;
+    return (JSON.parse(result.stdout) as ArtifactExportResult).path;
   } catch {
     options.signal?.throwIfAborted();
     return null;
@@ -190,7 +183,7 @@ export async function readThreatModelPath(
 export async function runArtifactExport(
   arguments_: ArtifactExportArguments,
   output?: ArtifactOutput,
-): Promise<Uint8Array | undefined> {
+): Promise<string | undefined> {
   const artifact = arguments_.artifact ?? "findings";
   resolveArtifactFormat(artifact, arguments_.format);
   const result = await runArtifactHelper(
@@ -220,7 +213,7 @@ export async function runArtifactExport(
   );
   return (arguments_.output === "-" && output === undefined) ||
     arguments_.includeMetadata
-    ? Buffer.from(result.stdout)
+    ? result.stdout
     : undefined;
 }
 
@@ -264,13 +257,39 @@ export async function resolveArtifactExportOutput(
           );
   if (arguments_.output !== "-") {
     const outputFromCurrent = relative(currentDirectory, arguments_.output);
-    if (!isOutsidePath(outputFromCurrent)) {
+    if (outputFromCurrent !== "" && !isOutsidePath(outputFromCurrent)) {
+      let existingParent: string | undefined;
+      for (
+        let directory = dirname(arguments_.output);
+        relative(currentDirectory, directory) !== "";
+        directory = dirname(directory)
+      ) {
+        const metadata = await lstat(directory).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return undefined;
+            throw error;
+          },
+        );
+        if (metadata?.isSymbolicLink()) {
+          throw new CodexSecurityError(
+            "The export output path cannot traverse a repository symlink.",
+          );
+        }
+        if (metadata !== undefined) existingParent ??= directory;
+      }
       const canonicalCurrent = await realpath(currentDirectory).catch(
         () => currentDirectory,
       );
+      const expectedOutput =
+        existingParent === undefined
+          ? resolve(canonicalCurrent, outputFromCurrent)
+          : resolve(
+              await realpath(existingParent),
+              relative(existingParent, arguments_.output),
+            );
       if (
-        relative(resolve(canonicalCurrent, outputFromCurrent), outputPath) !==
-        ""
+        isOutsidePath(relative(canonicalCurrent, outputPath)) ||
+        relative(expectedOutput, outputPath) !== ""
       ) {
         throw new CodexSecurityError(
           "The export output path cannot traverse a repository symlink.",
@@ -368,9 +387,7 @@ export async function exportArtifact(
   const description =
     metadata === undefined
       ? null
-      : (JSON.parse(
-          Buffer.from(metadata).toString("utf8"),
-        ) as ThreatModelDescription);
+      : (JSON.parse(metadata) as ArtifactExportResult);
   return {
     path: arguments_.output === "-" ? null : arguments_.output,
     provenance: description?.provenance ?? null,
@@ -434,6 +451,7 @@ export function exportEnvironment(
         "TEMP",
         "TMPDIR",
         "PYTHON",
+        "XDG_CACHE_HOME",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",

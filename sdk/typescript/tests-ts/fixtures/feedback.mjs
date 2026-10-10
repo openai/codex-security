@@ -2,6 +2,8 @@ import { createInterface } from "node:readline";
 import { readFile, writeFile } from "node:fs/promises";
 
 const requests = [];
+if (process.env.FEEDBACK_STDERR)
+  process.stderr.write(process.env.FEEDBACK_STDERR);
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   requests.push(request);
@@ -28,6 +30,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         );
         break;
       case "exit":
+      case "exit-diagnostic":
         process.exit(1);
         break;
       case "missing-id":
