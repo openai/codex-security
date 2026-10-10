@@ -197,10 +197,11 @@ test("the SDK launches long Windows paths with the native namespace prefix", asy
 });
 
 test("the SDK executable override preserves bundled tools at the child boundary", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "eval-tools-test-"));
+  const directory = await temporaryDirectory("eval-tools-test-", true);
   t.after(() => rm(directory, { recursive: true, force: true }));
   const executable = join(directory, "bin", "codex");
   const tools = join(directory, "codex-path");
+  await mkdir(dirname(executable));
   await mkdir(tools);
   const inherited = {
     Path: [tools, join(directory, "other tools"), tools].join(delimiter),
@@ -427,6 +428,7 @@ test(
     const exec = await readJson(join(directory, "exec.json"));
     assert.equal(preflight.cwd, prepared.repo);
     assert.equal(exec.effectiveCwd, prepared.repo);
+    assert.equal(exec.config.model_provider, undefined);
     assert.deepEqual(preflight.config, exec.config);
     assert.deepEqual(exec.config.features, {
       memories: false,
@@ -774,3 +776,40 @@ async ({ root, home, signal }) => {
     },
   );
 }
+
+test(
+  "fixture roots are canonical when the temporary directory is a symlink",
+  unixOnly,
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "eval-aliased-temp-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const actual = join(directory, "actual");
+    const alias = join(directory, "alias");
+    await mkdir(actual);
+    await symlink(actual, alias);
+    childProcess.execFileSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--input-type=module",
+        "--eval",
+        `
+    import assert from "node:assert/strict";
+    import { mkdtemp, realpath } from "node:fs/promises";
+    import { tmpdir } from "node:os";
+    import { join } from "node:path";
+    import { withEvalState } from ${JSON.stringify(runtimeUrl)};
+    import { gradeResult } from ${JSON.stringify(new URL("./grade.mts", import.meta.url).href)};
+    await withEvalState(async () => await mkdtemp(join(tmpdir(), "home-")), join(tmpdir(), "missing-synthetic-home"), async ({root}) => {
+      assert.equal(root, await realpath(root));
+      const result = { findings: [], coverage: { completeness: "complete", explicitExclusions: [{ pattern: await realpath(root) }] } };
+      const grade = gradeResult(result, { positives: [], files: { "fixture.txt": "synthetic" } }, root);
+      assert.ok(grade.errors.includes("incomplete coverage"));
+    });
+  `,
+      ],
+      { env: { ...process.env, TMPDIR: alias }, stdio: "pipe" },
+    );
+    assert.deepEqual(await readdir(actual), []);
+  },
+);

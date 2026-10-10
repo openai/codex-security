@@ -1,3 +1,4 @@
+import { isDeepStrictEqual as same } from "node:util";
 import { createHash } from "node:crypto";
 import { basename, dirname } from "node:path";
 import { mkdir, readFile, writeFile } from "./helper-files";
@@ -28,9 +29,6 @@ interface Worker {
   output_shards: string[];
   slot: number;
 }
-const same = (left: string[], right: string[]) =>
-  left.length === right.length &&
-  left.every((name, index) => name === right[index]);
 
 function requirePlanDirectory(plan: string, directory: string): void {
   const expected = childPath(dirname(plan), "rank_shards");
@@ -169,7 +167,7 @@ function validatePlan(plan: string, directory: string) {
     throw new Error(
       `${plan}: workers must contain exactly ${workerCount} worker assignments`,
     );
-  const workers = payload.workers.map((raw: unknown, index): Worker => {
+  payload.workers.forEach((raw: unknown, index) => {
     const label = `${plan}: workers[${index}]`;
     if (!object(raw)) throw new Error(`${label} must be a JSON object`);
     fields(raw, ["slot", "input_shards", "output_shards"], label);
@@ -187,12 +185,8 @@ function validatePlan(plan: string, directory: string) {
       );
     if (!same(assignedOutputs, assignedInputs.map(outputShardName)))
       throw new Error(`${label}.output_shards do not match its input_shards`);
-    return {
-      slot: slot,
-      input_shards: assignedInputs,
-      output_shards: assignedOutputs,
-    };
   });
+  const workers = payload.workers as Worker[];
   const counts = new Map<string, number>();
   for (const worker of workers)
     for (const name of worker.input_shards)

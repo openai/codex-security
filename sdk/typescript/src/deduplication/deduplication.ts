@@ -1,3 +1,4 @@
+import { findingGroupRoots } from "../finding-catalogue.js";
 import type { Finding } from "../models.js";
 import type { FindingNeighborhood } from "../finding-retrieval.js";
 import {
@@ -338,61 +339,33 @@ export class FindingDeduplicator {
       else rejected.push(state.ids);
     }
 
-    const adjacent = new Map<string, Set<string>>();
-    for (const pair of supported) {
-      for (const [left, right] of [pair, [pair[1], pair[0]]] as const) {
-        const neighbors = adjacent.get(left) ?? new Set<string>();
-        neighbors.add(right);
-        adjacent.set(left, neighbors);
-      }
-    }
-
-    const components: {
-      members: string[];
-      supported: [string, string][];
-      rejected: [string, string][];
-    }[] = [];
-    const componentByFinding = new Map<string, (typeof components)[number]>();
-    for (const id of findings.keys()) {
-      this.signal?.throwIfAborted();
-      if (!adjacent.has(id) || componentByFinding.has(id)) continue;
-      const component: (typeof components)[number] = {
-        members: [],
-        supported: [],
-        rejected: [],
-      };
-      components.push(component);
-      const pending = [id];
-      while (pending.length > 0) {
-        const member = pending.pop()!;
-        if (componentByFinding.has(member)) continue;
-        componentByFinding.set(member, component);
-        pending.push(...adjacent.get(member)!);
-      }
-    }
+    const { parents, root } = findingGroupRoots();
+    for (const [left, right] of supported) parents.set(root(right), root(left));
     // Preserve finding insertion order for contradiction-grouping ties.
-    for (const id of findings.keys())
-      componentByFinding.get(id)?.members.push(id);
-    for (const pair of supported)
-      componentByFinding.get(pair[0])!.supported.push(pair);
-    for (const pair of rejected) {
-      const component = componentByFinding.get(pair[0]);
-      if (component && component === componentByFinding.get(pair[1]))
-        component.rejected.push(pair);
-    }
+    const membersByRoot = Map.groupBy(findings.keys(), (id) => {
+      this.signal?.throwIfAborted();
+      return parents.has(id) ? root(id) : undefined;
+    });
+    membersByRoot.delete(undefined);
+    const supportedByRoot = Map.groupBy(supported, ([left]) => root(left));
+    const rejectedByRoot = Map.groupBy(
+      rejected.filter(([left, right]) => root(left) === root(right)),
+      ([left]) => root(left),
+    );
 
     const selected = new Set(ids);
     const duplicateGroups: string[][] = [];
     const canonical = new Map<string, string>();
-    for (const component of components) {
+    for (const [componentRoot, members] of membersByRoot) {
       this.signal?.throwIfAborted();
+      const conflicts = rejectedByRoot.get(componentRoot!);
       const groups =
-        component.rejected.length === 0
-          ? [new Set(component.members)]
+        conflicts === undefined
+          ? [new Set(members)]
           : contradictionFreeSubgroups(
-              component.members,
-              component.supported,
-              component.rejected,
+              members,
+              supportedByRoot.get(componentRoot!)!,
+              conflicts,
               this.signal,
             );
       for (const group of groups) {

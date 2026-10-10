@@ -24,7 +24,7 @@ The SastBench adapter owns only benchmark-specific behavior:
 
 The model-visible prompt contains the affected checkout, an opaque case ID, and the record's `to_analyzer` data. Ground truth is stored in Promptfoo test metadata. The upstream `finding_id`, `ground_truth`, `metadata.source`, and dataset class statistics are not prompt variables.
 
-The Codex provider runs from a throwaway directory containing only the runtime skill files. A deny-by-default permission profile grants reads only to that directory, the hydrated target repos and their label-free Git cache, and Codex's minimal runtime paths; the label-bearing dataset and Promptfoo harness stay denied.
+The Codex provider runs from the common runner's throwaway skill directory. Its permission profile also grants reads to the hydrated target repositories, its label-free Git cache, the Node runtime, and Codex's minimal runtime paths; the label-bearing dataset and Promptfoo harness stay denied.
 
 ## Verdict mapping
 
