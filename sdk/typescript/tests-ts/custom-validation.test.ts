@@ -46,6 +46,7 @@ async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
   scan.id = scanId;
   scan.target.kind = diff ? "git_diff" : "directory_snapshot";
   scan.scope.validationMode = "custom_pending";
+  if (!diff) scan["complete"] = false;
   await save(join(scanDir, "scan-manifest.json"), { ...manifest, scan });
   const findings = await json<FindingsDocument>(join(scanDir, "findings.json"));
   const original = findings.findings[0]!;
@@ -92,6 +93,7 @@ async function publishDraft(
   const staged = {
     manifest: {
       scan: {
+        complete: manifest.scan["complete"],
         target: manifest.scan.target,
         scope: manifest.scan.scope,
       },
@@ -278,6 +280,11 @@ describe("custom validation", () => {
       "artifacts/custom-validation/proof.txt",
     );
     expect(coverage.deferred).toHaveLength(1);
+    expect(
+      (await json<ScanManifest>(join(f.scanDir, "scan-manifest.json"))).scan[
+        "complete"
+      ],
+    ).not.toBe(false);
     expect(await json(join(f.scanDir, resultName))).toMatchObject({
       scanId: f.scanId,
       ...output,
@@ -426,6 +433,8 @@ describe("custom validation", () => {
   ])("rejects %s results without losing the draft", async (kind) => {
     const f = await fixture();
     const original = await readFile(join(f.scanDir, "findings.json"), "utf8");
+    const manifestPath = join(f.scanDir, "scan-manifest.json");
+    const manifest = await json<ScanManifest>(manifestPath);
     const output = result("reportable");
     if (kind === "missing") output.validations = [];
     if (kind === "duplicate") output.validations.push(output.validations[0]!);
@@ -448,6 +457,8 @@ describe("custom validation", () => {
     expect(await json(join(f.scanDir, "findings.json"))).toEqual(
       JSON.parse(original),
     );
+    expect(await json<ScanManifest>(manifestPath)).toEqual(manifest);
+    expect(manifest.scan["complete"]).toBe(false);
   });
 
   test("rejects output directories linked outside the scan", async () => {
@@ -614,6 +625,9 @@ describe("custom validation", () => {
                     expect(pendingManifest.scan.id).toBe(scanId);
                     expect(pendingManifest.scan.scope.validationMode).toBe(
                       "custom_pending",
+                    );
+                    expect(pendingManifest.scan["complete"]).toBe(
+                      diff ? undefined : false,
                     );
                     expect(pendingManifest.scan).not.toHaveProperty("sealedAt");
                     expect(pendingManifest.scan).not.toHaveProperty(
@@ -785,6 +799,7 @@ describe("custom validation", () => {
             "reportable",
           );
         expect(completed.manifest.scan.scope.validationMode).toBe("custom");
+        expect(completed.manifest.scan["complete"]).not.toBe(false);
         expect(
           completed.manifest.scan.artifacts.map((artifact) => artifact.path),
         ).toContain(resultName);

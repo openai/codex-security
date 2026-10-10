@@ -592,3 +592,24 @@ def test_legacy_summary_stays_pending_after_an_explicit_closure(
             {key: value for key, value in row.items() if key != "id"} == summary for row in pending
         )
     assert replay[2] == first[2]
+
+
+def test_candidate_scoped_deferred_cannot_be_closed_as_generic_work(tmp_path: Path, saved_results):
+    candidate = {
+        "id": "candidate-review",
+        "candidateScoped": True,
+        "reason": "Candidate still needs evidence.",
+    }
+    initial = saved_draft("identity-scan", deferred=[candidate])
+    closed = saved_draft(
+        "identity-scan",
+        closures=[{"id": candidate["id"], "reason": "Generic review completed."}],
+        complete=False,
+    )
+    worker = save_worker(tmp_path, saved_results, "reviewer", [initial], closed)
+    first = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], first[0]["scan"]["preservedSources"])
+    for documents in (first, replay):
+        assert candidate in documents[2]["deferred"]
+        assert documents[2]["completeness"] == "partial"
+        assert not documents[2].get("resolvedDeferred")

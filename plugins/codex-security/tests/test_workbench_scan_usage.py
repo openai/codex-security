@@ -13,19 +13,15 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
-    begin_deep_scan,
     create_saved_workspace,
     fail_scan,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     run_workbench,
     scan_command,
     start_delivered_scan,
-    upsert_deep_worker,
     write_completed_contract,
 )
-
-pytestmark = pytest.mark.native_macos
 
 
 @dataclass(frozen=True)
@@ -38,6 +34,46 @@ class ScanFixture:
     environment: dict[str, str]
     mode: str = "standard"
     diff_target: dict[str, Any] | None = None
+
+
+@pytest.mark.parametrize("include_cost", [False, True])
+def test_cost_envelopes_preserve_usage_without_nesting(workbench_api, include_cost: bool) -> None:
+    usage = {
+        "coverage": "unavailable",
+        "source": "codex_rollout",
+        "threadCount": 0,
+        "warnings": ["scan_thread_unavailable"],
+    }
+    measured = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(0, 0, 0),
+        "threadCount": 1,
+    }
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 0,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 0,
+        "estimatedUsd": 0,
+    }
+    merge = workbench_api["scan_usage"].merge_scan_cost
+    stored = json.dumps({"usage": usage, "cost": cost})
+    incoming = json.dumps({"usage": measured, **({"cost": cost} if include_cost else {})})
+    assert json.loads(merge(stored, incoming)) == {"usage": measured, "cost": cost}
+    assert json.loads(merge(stored, json.dumps(cost))) == {"usage": usage, "cost": cost}
+    assert json.loads(merge(None, json.dumps(cost))) == cost
+    assert merge(None, None) is None
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE scans (id TEXT, status TEXT, cost_json TEXT)")
+        connection.execute("INSERT INTO scans VALUES ('scan', 'complete', ?)", (stored,))
+        connection.commit()
+        workbench_api["scan_usage"].reconcile_completed_scan_cost(
+            connection, {"id": "scan", "cost_json": stored}, incoming
+        )
+        receipt = connection.execute("SELECT cost_json FROM scans").fetchone()[0]
+        assert json.loads(receipt) == {"usage": measured, "cost": cost}
 
 
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
@@ -84,7 +120,7 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
     else:
         target.mkdir()
         (target / "app.py").write_text("print('fixture')\n", encoding="utf-8")
-        workspace = create_saved_workspace(state_dir, target, thread_id="scan-parent")
+        workspace = create_saved_workspace(state_dir, target, thread_id="scan-parent", mode=mode)
         workspace_id = str(workspace["id"])
 
     started = start_delivered_scan(
@@ -231,7 +267,7 @@ def _counts(
     }
 
 
-def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
+def _complete_scan(fixture: ScanFixture, *, cost: dict[str, Any] | None = None) -> dict[str, Any]:
     options: dict[str, Any] = {"relative_path": "app.py"}
     if fixture.mode == "diff":
         assert fixture.diff_target is not None
@@ -243,15 +279,20 @@ def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
         )
     elif fixture.mode == "deep":
         options["coverage_mode"] = "deep_repository"
-        mark_deep_coordinator_succeeded(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
+        mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
     write_completed_contract(
         fixture.scan_dir,
         fixture.scan_id,
         fixture.target,
         **options,
     )
-    return scan_command(
-        fixture.state_dir, "complete-scan", fixture.scan_id, environment=fixture.environment
+    return run_workbench(
+        fixture.state_dir,
+        "complete-scan",
+        "--scan-id",
+        fixture.scan_id,
+        *(["--cost-json", json.dumps(cost)] if cost is not None else []),
+        environment=fixture.environment,
     )
 
 
@@ -480,40 +521,6 @@ def test_completion_marks_unverifiable_workers_partial(
     assert usage["totalTokens"] == 16
 
 
-@pytest.mark.parametrize("home_variable", ["CODEX_HOME", "CODEX_SQLITE_HOME"])
-@pytest.mark.parametrize("home_kind", ["absolute", "literal_tilde", "relative_home", "home"])
-def test_completion_reads_usage_from_literal_home(
-    tmp_path: Path, home_variable: str, home_kind: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fixture = _start_scan(tmp_path)
-    home = tmp_path / ("native home" if sys.platform == "win32" else "native home ")
-    if home_kind == "literal_tilde":
-        home = tmp_path / ("~ literal" if sys.platform == "win32" else "~ ")
-    fixture.environment["CODEX_SQLITE_HOME"] = str(home)
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
-        [_token_event(fixture.started_at + timedelta(microseconds=1), 12, 3)],
-    )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
-    configured_home = str(home)
-    if home_kind == "literal_tilde":
-        monkeypatch.chdir(tmp_path)
-        configured_home = home.name
-    elif home_kind in {"relative_home", "home"}:
-        monkeypatch.setenv("HOME", str(home if home_kind == "home" else tmp_path))
-        monkeypatch.setenv("USERPROFILE", str(home if home_kind == "home" else tmp_path))
-        configured_home = "~" if home_kind == "home" else f"~/{home.name}"
-    fixture.environment[home_variable] = configured_home
-    if home_variable == "CODEX_HOME":
-        fixture.environment["CODEX_SQLITE_HOME"] = ""
-
-    usage = _complete_scan(fixture)["scan"]["usage"]
-
-    assert usage["coverage"] == "complete"
-    assert usage["totalTokens"] == 15
-
-
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     usage = _complete_scan(fixture)["scan"]["usage"]
@@ -561,59 +568,107 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
     }
 
 
-def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> None:
-    state_dir = tmp_path / "workbench-state"
-    target = tmp_path / "target"
-    target.mkdir()
-    environment = {
-        "CODEX_HOME": str(tmp_path / "codex-home"),
-        "CODEX_SQLITE_HOME": str(tmp_path / "codex-sqlite"),
-        "CODEX_STATE_DB": "",
-    }
-    deep = begin_deep_scan(
-        state_dir,
-        "scan-parent",
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--scan-root",
-        str(tmp_path / "scans"),
-        "--available-parallelism",
-        "4",
-        environment=environment,
-    )["deepScan"]
-    scan_id = str(deep["scanId"])
-    scan_dir = Path(str(deep["scanDir"]))
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        row = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan_id,)).fetchone()
-    assert row is not None
-    fixture = ScanFixture(
-        state_dir,
-        target,
-        scan_id,
-        scan_dir,
-        datetime.fromisoformat(row[0].replace("Z", "+00:00")),
-        environment,
-        "deep",
-    )
+@pytest.mark.parametrize(
+    ("prior_session_unavailable", "child_session_saved", "merge_state"),
+    [
+        (False, True, "saved"),
+        (True, True, "saved"),
+        (False, False, "saved"),
+        (False, True, "merged"),
+        (False, True, "prepared"),
+        (False, True, "not-started"),
+        (True, True, "not-started"),
+        (False, True, "accepted-without-merge"),
+        (False, True, "accepted-with-prepared-merge"),
+        (False, True, "started"),
+        (True, True, "accepted-without-merge"),
+    ],
+)
+def test_completion_counts_ordinary_child_scans_and_descendants(
+    tmp_path: Path,
+    prior_session_unavailable: bool,
+    child_session_saved: bool,
+    merge_state: str,
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    environment = fixture.environment
     counted = fixture.started_at + timedelta(microseconds=1)
-    artifact = scan_dir / "artifacts" / "usage-worker"
-    artifact.mkdir(parents=True)
-    prompt = artifact / "prompt.md"
-    prompt.write_text("Review the fixture target.\n", encoding="utf-8")
-    upsert_deep_worker(
-        state_dir,
-        scan_id,
-        str(uuid.uuid4()),
-        "discovery",
-        "running",
-        str(prompt),
-        str(artifact),
-        "--sdk-thread-id",
-        "sdk-worker",
+    directory = fixture.scan_dir / "artifacts" / "deep-scan" / "passes" / "pass-1"
+    directory.mkdir(parents=True, mode=0o700)
+    child = run_workbench(
+        fixture.state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(fixture.target),
+        "--scan-dir",
+        str(directory),
+        "--parent-scan-id",
+        fixture.scan_id,
+        "--registration-json-stdin",
+        input_text=json.dumps(
+            {
+                "parentScanRole": "deep_pass",
+                "recipe": {
+                    "repository": str(fixture.target),
+                    "mode": "standard",
+                    "target": {"kind": "repository", "paths": []},
+                    "config": {},
+                },
+            }
+        ),
         environment=environment,
     )
+    if child_session_saved:
+        run_workbench(
+            fixture.state_dir,
+            "set-scan-thread",
+            "--scan-id",
+            child["scanId"],
+            "--thread-id",
+            "sdk-worker",
+            environment=environment,
+        )
+    else:
+        run_workbench(
+            fixture.state_dir,
+            "fail-scan",
+            "--scan-id",
+            child["scanId"],
+            "--message",
+            "Synthetic failure after optional session persistence failed.",
+            "--cost-json",
+            json.dumps({"model": "synthetic-model", "estimatedUsd": 0.01, **_counts(20, 0, 5)}),
+            environment=environment,
+        )
+    checkpoint = mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
+    document = json.loads(checkpoint.read_text())
+    document["passes"] = [{"directory": str(directory), "scanId": child["scanId"]}]
+    if merge_state != "saved":
+        write_completed_contract(directory, child["scanId"], fixture.target, relative_path="app.py")
+        run_workbench(
+            fixture.state_dir,
+            "complete-scan",
+            "--scan-id",
+            child["scanId"],
+            environment=environment,
+        )
+        document["passes"][0]["completed"] = True
+        if merge_state in {"merged", "accepted-without-merge", "accepted-with-prepared-merge"}:
+            document["mergedScanIds"] = [child["scanId"]]
+        if merge_state in {"accepted-without-merge", "accepted-with-prepared-merge"}:
+            document["mergeStarted"] = False
+        elif merge_state == "started":
+            document["mergeStarted"] = True
+        if merge_state in {"prepared", "accepted-with-prepared-merge"}:
+            # Preparation is durable before launch; interrupted contents still record intent.
+            (checkpoint.parent / "merge-inputs.json").write_text("{")
+        with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET continuation_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
+            )
+    if prior_session_unavailable:
+        document["costUnavailable"] = True
+    checkpoint.write_text(json.dumps(document))
     _state_graph(
         environment,
         {
@@ -629,16 +684,28 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         [("sdk-worker", "sdk-child")],
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
+    incomplete = (
+        prior_session_unavailable
+        or not child_session_saved
+        or merge_state in {"merged", "prepared", "accepted-with-prepared-merge", "started"}
+    )
     assert usage == {
-        "coverage": "complete",
+        "coverage": "partial" if incomplete else "complete",
         "source": "codex_rollout",
-        **_counts(37, 0, 10),
-        "threadCount": 3,
+        **(_counts(37, 0, 10) if child_session_saved else _counts(10, 0, 3)),
+        "threadCount": 3 if child_session_saved else 1,
+        **({"warnings": ["scan_thread_unavailable"]} if incomplete else {}),
     }
 
 
-def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+def test_completion_preserves_explicit_legacy_cost(tmp_path: Path, mode: str) -> None:
+    fixture = _start_scan(tmp_path, mode=mode)
+    # Ordinary SDK registration has no native execution owner.
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
+        )
     counted = fixture.started_at + timedelta(microseconds=1)
     _state_graph(
         fixture.environment,
@@ -653,19 +720,104 @@ def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
         "outputTokens": 6,
         "estimatedUsd": 0.002,
     }
-    write_completed_contract(
-        fixture.scan_dir, fixture.scan_id, fixture.target, relative_path="app.py"
-    )
-    completed = scan_command(
-        fixture.state_dir,
-        "complete-scan",
-        fixture.scan_id,
-        "--cost-json",
-        json.dumps(cost),
-        environment=fixture.environment,
-    )["scan"]
+    completed = _complete_scan(fixture, cost=cost)["scan"]
     assert completed["cost"] == cost
     assert "usage" not in completed
+
+
+@pytest.mark.parametrize("readable_usage", [False, True])
+def test_native_completion_retains_measured_usage_with_sdk_cost(
+    tmp_path: Path, readable_usage: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    if readable_usage:
+        _state_graph(
+            fixture.environment,
+            {
+                "scan-parent": _rollout(
+                    tmp_path, "scan-parent", [_token_event(counted, 15, 6, cached_input_tokens=4)]
+                )
+            },
+            [],
+        )
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 15,
+        "cachedInputTokens": 4,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 6,
+        "estimatedUsd": 0.002,
+    }
+    completed = _complete_scan(fixture, cost=cost)["scan"]
+    expected_usage = (
+        {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(15, 4, 6),
+            "threadCount": 1,
+        }
+        if readable_usage
+        else {
+            "coverage": "unavailable",
+            "source": "codex_rollout",
+            "threadCount": 0,
+            "warnings": ["codex_state_unavailable"],
+        }
+    )
+    assert completed["cost"] == cost
+    assert completed["usage"] == expected_usage
+    assert completed["progress"]["status"] == "complete"
+    repeated = run_workbench(
+        fixture.state_dir,
+        "complete-scan",
+        "--scan-id",
+        fixture.scan_id,
+        environment=fixture.environment,
+    )["scan"]
+    assert repeated["cost"] == cost
+    assert repeated["usage"] == expected_usage
+
+
+@pytest.mark.parametrize("readable_usage", [False, True])
+def test_fresh_completion_does_not_promote_a_running_cost_estimate(
+    tmp_path: Path, readable_usage: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 10,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.001,
+    }
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET cost_json = ? WHERE id = ?", (json.dumps(cost), fixture.scan_id)
+        )
+    if readable_usage:
+        _state_graph(
+            fixture.environment,
+            {
+                "scan-parent": _rollout(
+                    tmp_path,
+                    "scan-parent",
+                    [_token_event(fixture.started_at + timedelta(microseconds=1), 30, 10)],
+                )
+            },
+            [],
+        )
+    completed = _complete_scan(fixture)["scan"]
+    assert "cost" not in completed
+    assert completed["usage"]["coverage"] == ("complete" if readable_usage else "unavailable")
+    if readable_usage:
+        assert completed["usage"]["totalTokens"] == 40
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        receipt = connection.execute(
+            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+        ).fetchone()[0]
+    assert json.loads(receipt) == {"usage": completed["usage"]}
 
 
 def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:

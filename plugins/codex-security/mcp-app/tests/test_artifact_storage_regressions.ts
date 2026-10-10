@@ -22,8 +22,10 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { build } from "esbuild";
+import { applicationRoot } from "./build-server.ts";
 import { importModule } from "./import-module.ts";
-import { applicationRoot, buildServer } from "./build-server.ts";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const pluginRoot = path.dirname(applicationRoot);
 const python = process.env.PYTHON || "python3";
@@ -45,11 +47,15 @@ const temporaryDirectories: string[] = [];
 
 await fs.mkdir(repository);
 await fs.writeFile(path.join(repository, "example.py"), "value = 1\n");
-await buildServer(bundle, {
+await build({
+  ...mcpBundleOptions,
   define: {
     __dirname: JSON.stringify(applicationRoot),
-    "import.meta.url": "__filename",
+    ...mcpBundleOptions.define,
   },
+  entryPoints: [path.join(applicationRoot, "main.ts")],
+  logLevel: "silent",
+  outfile: bundle,
 });
 const {
   readCodexSecurityArtifact,
@@ -113,218 +119,82 @@ async function connect(overrides: Record<string, string | undefined> = {}) {
 }
 
 try {
-  await test(
-    "temporary artifact operations reject a collection owned by another user",
-    { skip: typeof process.geteuid !== "function" },
-    async (t) => {
-      const context = await standaloneArtifactContext(
-        repository,
-        workbench,
-        true,
-        path.join(fixture, "temporary-owner"),
-        "persistent",
-      );
-      const saved = await saveCodexSecurityArtifact(
-        context,
-        { storage: "temporary", path: "proof.txt", content: "owned evidence" },
-        workbench,
-      );
-      temporaryDirectories.push(saved.directory);
-      const lstat = fs.lstat;
-      t.mock.method(
-        fs,
-        "lstat",
-        async (...args: Parameters<typeof fs.lstat>) => {
-          const metadata = await lstat(...args);
-          return String(args[0]) === saved.directory
-            ? Object.assign(Object.create(metadata), {
-                uid: process.geteuid!() + 1,
-              })
-            : metadata;
-        },
-      );
-      let calls = 0;
-      const run = (...args: Parameters<typeof workbench>) => {
-        calls += 1;
-        return workbench(...args);
+  await test("supplemental saves reject the Deep Scan runtime subtree before writing", async () => {
+    for (const scanId of [undefined, "00000000-0000-4000-8000-000000000001"]) {
+      const context = {
+        root: path.join(
+          fixture,
+          `deep-scan-rejected-${scanId ?? "standalone"}`,
+        ),
+        repoRoot: repository,
+        scanId,
       };
-      try {
-        const operations = [
-          () =>
-            saveCodexSecurityArtifact(context, { storage: "temporary" }, run),
-          () =>
-            saveCodexSecurityArtifact(
-              context,
-              {
-                storage: "temporary",
-                path: "proof.txt",
-                content: "replacement",
-              },
-              run,
-            ),
-          () =>
-            readCodexSecurityArtifact(
-              context,
-              { storage: "temporary", path: "proof.txt", encoding: "utf8" },
-              run,
-            ),
-          () =>
-            saveCodexSecurityArtifact(
-              context,
-              {
-                storage: "persistent",
-                path: "artifacts/imported.txt",
-                sourcePath: saved.path,
-              },
-              run,
-            ),
-        ];
-        for (const operation of operations) {
-          await assert.rejects(operation, /owned by the current user/);
-          assert.equal(calls, 0);
+      for (const artifact of [
+        "artifacts/deep-scan",
+        "artifacts/deep-scan/checkpoint.json",
+        "artifacts/deep-scan/passes/pass-1/report.md",
+        "artifacts/DEEP-SCAN/checkpoint.json",
+      ]) {
+        for (const source of [
+          { content: "synthetic state" },
+          { sourcePath: path.join(fixture, "unused-source.txt") },
+        ]) {
+          await assert.rejects(
+            () =>
+              saveCodexSecurityArtifact(
+                context,
+                {
+                  storage: "persistent",
+                  path: artifact,
+                  ...source,
+                },
+                async () =>
+                  assert.fail("Rejected writes must not reach the workbench"),
+              ),
+            /canonical artifacts/,
+          );
         }
-      } finally {
-        t.mock.restoreAll();
       }
-      assert.equal(await fs.readFile(saved.path, "utf8"), "owned evidence");
-      await assert.rejects(
-        fs.stat(path.join(context.root, "artifacts/imported.txt")),
-        {
-          code: "ENOENT",
-        },
-      );
-      assert.equal(
-        (
-          await saveCodexSecurityArtifact(
-            context,
-            { storage: "temporary" },
-            workbench,
-          )
-        ).directory,
-        saved.directory,
-      );
-      assert.equal(
-        (
-          await readCodexSecurityArtifact(
-            context,
-            { storage: "temporary", path: "proof.txt", encoding: "utf8" },
-            workbench,
-          )
-        ).content,
-        "owned evidence",
-      );
-      const imported = await saveCodexSecurityArtifact(
-        context,
-        {
-          storage: "persistent",
-          path: "artifacts/imported.txt",
-          sourcePath: saved.path,
-        },
-        workbench,
-      );
-      assert.equal(await fs.readFile(imported.path, "utf8"), "owned evidence");
-    },
-  );
+      await assert.rejects(fs.stat(context.root), { code: "ENOENT" });
+    }
+  });
 
-  await test(
-    "temporary collections use the effective filesystem identity",
-    {
-      skip:
-        typeof process.getuid !== "function" ||
-        typeof process.geteuid !== "function",
-    },
-    async (t) => {
-      const context = await standaloneArtifactContext(
-        repository,
-        workbench,
-        true,
-        path.join(fixture, "effective-owner"),
-        "persistent",
-      );
-      const effectiveUid = process.geteuid!();
-      t.mock.method(
-        process as typeof process & { getuid: () => number },
-        "getuid",
-        () => effectiveUid + 1,
-      );
-      try {
-        const saved = await saveCodexSecurityArtifact(
+  await test("supplemental Deep Scan reads, temporary writes and sibling writes stay available", async () => {
+    const context = {
+      root: path.join(fixture, "deep-scan-allowed"),
+      repoRoot: repository,
+    };
+    await fs.mkdir(context.root);
+    const artifact = "artifacts/deep-scan/checkpoint.json";
+    const run = async (args) => {
+      assert.ok(["read-artifact", "save-artifact"].includes(args[0]));
+      return { content: Buffer.from("synthetic state").toString("base64") };
+    };
+    const read = await readCodexSecurityArtifact(
+      context,
+      { storage: "persistent", path: artifact, encoding: "utf8" },
+      run,
+    );
+    assert.equal(read.content, "synthetic state");
+    const scratch = await saveCodexSecurityArtifact(
+      context,
+      { storage: "temporary", path: artifact, content: "synthetic state" },
+      run,
+    );
+    temporaryDirectories.push(scratch.directory);
+    assert.equal(scratch.relativePath, artifact);
+    const sibling = "artifacts/deep-scan.backup/checkpoint.json";
+    assert.equal(
+      (
+        await saveCodexSecurityArtifact(
           context,
-          {
-            storage: "temporary",
-            path: "proof.txt",
-            content: "owned evidence",
-          },
-          workbench,
-        );
-        temporaryDirectories.push(saved.directory);
-        assert.equal((await fs.lstat(saved.directory)).uid, effectiveUid);
-        const read = await readCodexSecurityArtifact(
-          context,
-          { storage: "temporary", path: "proof.txt", encoding: "utf8" },
-          workbench,
-        );
-        assert.equal(read.content, "owned evidence");
-      } finally {
-        t.mock.restoreAll();
-      }
-    },
-  );
-
-  await test(
-    "temporary collections check ownership of the selected path",
-    { skip: typeof process.geteuid !== "function" },
-    async (t) => {
-      const context = await standaloneArtifactContext(
-        repository,
-        workbench,
-        true,
-        path.join(fixture, "selected-owner"),
-        "persistent",
-      );
-      const saved = await saveCodexSecurityArtifact(
-        context,
-        { storage: "temporary" },
-        workbench,
-      );
-      temporaryDirectories.push(saved.directory);
-      const resolved = path.join(fixture, "resolved-owner");
-      await fs.mkdir(resolved, { mode: 0o700 });
-      const realpath = fs.realpath;
-      const lstat = fs.lstat;
-      t.mock.method(
-        fs,
-        "realpath",
-        async (...args: Parameters<typeof fs.realpath>) =>
-          String(args[0]) === saved.directory ? resolved : realpath(...args),
-      );
-      t.mock.method(
-        fs,
-        "lstat",
-        async (...args: Parameters<typeof fs.lstat>) => {
-          const metadata = await lstat(...args);
-          return String(args[0]) === saved.directory
-            ? Object.assign(Object.create(metadata), {
-                uid: process.geteuid!() + 1,
-              })
-            : metadata;
-        },
-      );
-      try {
-        await assert.rejects(
-          saveCodexSecurityArtifact(
-            context,
-            { storage: "temporary" },
-            workbench,
-          ),
-          /owned by the current user/,
-        );
-      } finally {
-        t.mock.restoreAll();
-      }
-      assert.deepEqual(await fs.readdir(resolved), []);
-    },
-  );
+          { storage: "persistent", path: sibling, content: "synthetic state" },
+          run,
+        )
+      ).relativePath,
+      sibling,
+    );
+  });
 
   await test("binary imports and readback preserve files larger than the workbench JSON buffer", async () => {
     const call = await connect();

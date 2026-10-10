@@ -1,3 +1,5 @@
+import { expandHome, expandHomePath, environmentValue } from "./codex-home.js";
+export { expandHome } from "./codex-home.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
@@ -63,6 +65,7 @@ import {
   abortReason,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
+import type { ScanMergeInput } from "./scan-merge.js";
 import { isRecord } from "./record.js";
 import {
   isWithin,
@@ -136,11 +139,16 @@ import sys
 
 module = run_path(sys.argv[1])
 try:
-    module["write_scan_local_bytes"](
-        Path(sys.argv[2]),
-        sys.argv[3],
-        sys.stdin.buffer.read(),
-        expected_root_identity=(int(sys.argv[4]), int(sys.argv[5])),
+    operation = {
+        "restore": "write_scan_local_bytes",
+        "prepareDirectory": "prepare_scan_local_directory",
+        "remove": "_remove_scan_local_file_if_exists",
+    }[sys.argv[6]]
+    arguments = [Path(sys.argv[2]), sys.argv[3]]
+    if sys.argv[6] == "restore":
+        arguments.append(sys.stdin.buffer.read())
+    module[operation](
+        *arguments, expected_root_identity=(int(sys.argv[4]), int(sys.argv[5]))
     )
 except (module["ContractError"], OSError) as error:
     raise SystemExit(str(error))
@@ -194,20 +202,6 @@ export interface WorkbenchCommandOptions {
 
 export interface ScanArtifactRestorer {
   restore(relativePath: string, contents: Uint8Array): Promise<void>;
-}
-
-function environmentValue(
-  environment: ProcessEnvironment,
-  requested: string,
-  preserveWhitespace = false,
-): string | undefined {
-  const exact = environment[requested];
-  const value = exact?.trim()
-    ? exact
-    : Object.entries(environment).find(
-        ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-      )?.[1];
-  return preserveWhitespace ? value : value?.trim();
 }
 
 export function codexSecurityStateDirectory(
@@ -1704,6 +1698,7 @@ export async function runWorkbench(
           )
         : input,
       signal,
+      undefined,
       archiveHandshake,
       // Match native argv's UTF-8 encoding for the private argument frame.
       framedArguments
@@ -1755,6 +1750,8 @@ export function bundledPluginCandidates(moduleDirectory: string): string[] {
   return [
     resolve(moduleDirectory, "_bundled_plugin"),
     resolve(moduleDirectory, "../_bundled_plugin"),
+    // The standalone MCP bundle lives directly inside its own plugin payload.
+    resolve(moduleDirectory, ".."),
   ];
 }
 
@@ -1832,7 +1829,18 @@ export async function validateOutputDir(
 export async function prepareScanArtifactRestorer(
   options: WorkbenchCommandOptions,
   scanDirectory: string,
-): Promise<ScanArtifactRestorer> {
+): Promise<
+  ScanArtifactRestorer & {
+    prepareDirectory(relativePath: string): Promise<void>;
+    remove(relativePath: string): Promise<void>;
+    projectChild(
+      parentScanId: string,
+      sourceScanId: string,
+      sourceDirectory: string,
+      signal?: AbortSignal,
+    ): Promise<ScanMergeInput>;
+  }
+> {
   let helperPath: string;
   let canonicalPath: string;
   let dev: string;
@@ -1889,40 +1897,90 @@ export async function prepareScanArtifactRestorer(
     );
   }
 
-  return {
-    async restore(relativePath, contents) {
-      try {
-        const result = await runCodexCommand(
-          { command: options.python },
-          [
-            "-I",
-            "-X",
-            "utf8",
-            "-B",
-            "-c",
-            RESTORE_SCAN_ARTIFACT_PROGRAM,
-            helperPath,
-            canonicalPath,
-            relativePath,
-            dev,
-            ino,
-          ],
-          pluginHelperEnvironment(options.environment),
-          contents,
-        );
-        if (!result.success) {
-          throw new Error(
-            result.stderr.trim() ||
-              result.stdout.trim() ||
-              `Artifact restoration exited with status ${result.exitCode}.`,
-          );
-        }
-      } catch (error) {
-        throw new OutputDirectoryError(
-          "Could not safely restore a completed scan artifact.",
-          { cause: error },
+  const update = async (
+    operation: "restore" | "prepareDirectory" | "remove",
+    relativePath: string,
+    contents?: Uint8Array,
+  ): Promise<void> => {
+    try {
+      const result = await runCodexCommand(
+        { command: options.python },
+        [
+          "-I",
+          "-X",
+          "utf8",
+          "-B",
+          "-c",
+          RESTORE_SCAN_ARTIFACT_PROGRAM,
+          helperPath,
+          canonicalPath,
+          relativePath,
+          dev,
+          ino,
+          operation,
+        ],
+        pluginHelperEnvironment(options.environment),
+        contents,
+        operation === "restore" ? undefined : options.signal,
+      );
+      if (!result.success) {
+        throw new Error(
+          result.stderr.trim() ||
+            result.stdout.trim() ||
+            `Artifact restoration exited with status ${result.exitCode}.`,
         );
       }
+    } catch (error) {
+      throw new OutputDirectoryError(
+        operation === "restore"
+          ? "Could not safely restore a completed scan artifact."
+          : "Could not safely update a scan artifact.",
+        { cause: error },
+      );
+    }
+  };
+  return {
+    restore: (path, contents) => update("restore", path, contents),
+    prepareDirectory: (path) => update("prepareDirectory", path),
+    remove: (path) => update("remove", path),
+    async projectChild(
+      parentScanId,
+      sourceScanId,
+      sourceDirectory,
+      signal = options.signal,
+    ) {
+      signal?.throwIfAborted();
+      const result = await runCodexCommand(
+        { command: options.python },
+        [
+          "-I",
+          "-X",
+          "utf8",
+          "-B",
+          join(dirname(helperPath), "project_scan_artifacts.py"),
+        ],
+        pluginHelperEnvironment(options.environment),
+        JSON.stringify({
+          parentScanId,
+          sourceScanId,
+          sourceDirectory,
+          parentDirectory: canonicalPath,
+          expectedParentIdentity: { dev, ino },
+        }),
+        signal,
+      ).catch((error: unknown) => {
+        signal?.throwIfAborted();
+        throw error;
+      });
+      signal?.throwIfAborted();
+      if (!result.success)
+        throw new OutputDirectoryError(
+          result.stderr.trim() ||
+            `Scan projection exited with status ${result.exitCode}.`,
+        );
+      // The SDK-owned helper validates the sealed child and writes its evidence
+      // before returning the semantic projection. Its response retains extensions.
+      return JSON.parse(result.stdout) as ScanMergeInput;
     },
   };
 }
@@ -2681,7 +2739,7 @@ export function resolveCodexCommand(
   const expanded =
     configured === undefined
       ? undefined
-      : expandExecutableHome(configured, environment);
+      : expandHomePath(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
@@ -2792,13 +2850,11 @@ export async function bootstrapPlugin(
   const registration = isRecord(marketplaces)
     ? marketplaces[MARKETPLACE_NAME]
     : undefined;
-
   const registered =
     isRecord(registration) &&
     registration["source_type"] === "local" &&
     typeof registration["source"] === "string" &&
     (await sameFile(registration["source"], marketplace));
-
   if (!registered) {
     await run(
       command,
@@ -2807,24 +2863,21 @@ export async function bootstrapPlugin(
       options.signal,
     );
   }
-
+  // The startup lock serializes bootstraps, but other scans can still be using
+  // the installed tree. Even a same-version `plugin add` replaces that tree
+  // and leaves their MCP coordinators with a deleted working directory.
   const installRecord = join(marketplace, "installed-plugin.json");
   const previous: unknown = await readFile(installRecord, "utf8")
     .then((value) => JSON.parse(value) as unknown)
     .catch((error: unknown) => {
-      if (nodeErrorCode(error) === "ENOENT" || error instanceof SyntaxError) {
+      if (nodeErrorCode(error) === "ENOENT" || error instanceof SyntaxError)
         return null;
-      }
       throw error;
     });
-
   const plugins = configuration["plugins"];
   const plugin = isRecord(plugins)
     ? plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]
     : undefined;
-
-  // Codex replaces the shared install even at the same version. Reuse it so
-  // workers from an earlier scan can keep using their plugin files.
   if (
     stagedMatches &&
     registered &&
@@ -2850,7 +2903,6 @@ export async function bootstrapPlugin(
       version,
     };
   }
-
   const output = await run(
     command,
     ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
@@ -2877,16 +2929,11 @@ export async function bootstrapPlugin(
       "Codex plugin install did not return the selected plugin path and version.",
     );
   }
-
   await writeFile(
     installRecord,
-    JSON.stringify({
-      installedPath: installed["installedPath"],
-      version,
-    }),
+    JSON.stringify({ installedPath: installed["installedPath"], version }),
     { mode: 0o600, signal: options.signal },
   );
-
   return {
     pluginRoot: root,
     marketplaceRoot: marketplace,
@@ -2905,19 +2952,15 @@ async function pluginContentsMatch(
   projection?: LegacyPluginProjection,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
-
   const sourceMetadata = await lstat(source);
   const destinationMetadata = await lstat(destination).catch(
     (error: unknown) => {
-      if (["ENOENT", "ENOTDIR"].includes(nodeErrorCode(error) ?? "")) {
+      if (["ENOENT", "ENOTDIR"].includes(nodeErrorCode(error) ?? ""))
         return null;
-      }
       throw error;
     },
   );
-
   if (destinationMetadata === null) return false;
-
   if (sourceMetadata.isFile() && destinationMetadata.isFile()) {
     const projected = projection?.files.get(
       relative(projection.root, source).split(sep).join("/"),
@@ -2937,11 +2980,8 @@ async function pluginContentsMatch(
     ]);
     return (projected?.contents ?? sourceBytes).equals(destinationBytes);
   }
-
-  if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory()) {
+  if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory())
     return false;
-  }
-
   const entries = await readdir(source);
   const projectedDirectory =
     projection === undefined
@@ -2979,11 +3019,9 @@ async function pluginContentsMatch(
         allowExtraFiles,
         projection,
       ))
-    ) {
+    )
       return false;
-    }
   }
-
   return true;
 }
 
@@ -3171,6 +3209,7 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
+  cwd?: string,
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
@@ -3182,6 +3221,7 @@ export async function runCodexCommand(
     [...(command.args ?? []), ...args],
     {
       env: environment,
+      cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: cancellation?.signal ?? signal,
@@ -3426,7 +3466,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandExecutableHome(candidate, environment)
+      ? expandHomePath(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3480,35 +3520,6 @@ export function sameFile(left: string, right: string): Promise<boolean> {
       leftMetadata.ino === rightMetadata.ino,
     () => false,
   );
-}
-
-function expandExecutableHome(
-  value: string,
-  environment: ProcessEnvironment,
-): string {
-  const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
-  // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
-  return path.startsWith("~/")
-    ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
-    : expandHome(path, environment);
-}
-
-export function expandHome(
-  value: string,
-  environment: ProcessEnvironment = process.env,
-): string {
-  const home =
-    (process.platform === "win32"
-      ? (environmentValue(environment, "USERPROFILE") ??
-        environmentValue(environment, "HOME"))
-      : (environmentValue(environment, "HOME") ??
-        environmentValue(environment, "USERPROFILE"))) ?? homedir();
-  if (value === "~") return home;
-  if (value.startsWith("~/")) return join(home, value.slice(2));
-  if (value.startsWith("~\\")) {
-    return join(home, ...value.slice(2).split("\\"));
-  }
-  return value;
 }
 
 function safePrefix(value: string): string {

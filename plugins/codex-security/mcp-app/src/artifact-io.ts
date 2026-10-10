@@ -2,8 +2,7 @@ import { canonicalDirectory } from "./artifact-context.js";
 import { isRecord } from "./record.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, isAbsolute, join, sep } from "node:path";
-
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 export interface DeepReducerWorkerContext {
   id: string;
   resultPath: string;
@@ -21,7 +20,6 @@ export interface DeepReducerContext {
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
-  layout: "scan" | "worker" | "reducer";
   scanId?: string;
   scope?: string;
   pluginRoot?: string;
@@ -31,7 +29,6 @@ export interface ArtifactContext {
   handoffClaimToken?: string;
   status?: string;
   mode?: string;
-  deepReducer?: DeepReducerContext;
 }
 
 export interface ArtifactPage {
@@ -199,7 +196,7 @@ export function paginateArtifactRows<Row>(
 }
 
 /**
- * Resolve one operation-owned destination inside its bound scan or worker root.
+ * Resolve one operation-owned destination inside its bound scan root.
  */
 export async function artifactDestination(
   context: ArtifactContext,

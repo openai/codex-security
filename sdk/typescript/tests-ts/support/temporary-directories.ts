@@ -1,3 +1,4 @@
+import { copyCompletedScan } from "../plugin-root.js";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +35,7 @@ export function createApiTestFixtures(
   return {
     temporaryDirectories,
     cleanup: temporaryDirectories.cleanup,
+    copyCompletedScan,
     temporaryDirectory(directoryPrefix = prefix): Promise<string> {
       return temporaryDirectories.create(directoryPrefix);
     },

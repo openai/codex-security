@@ -79,6 +79,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       {
         scanId: first.manifest.scan.id,
         scanDir: first.scanDir,
+        startedAt: first.manifest.scan.startedAt,
       },
     ]);
     expect(first.findings.findings).toHaveLength(12);
@@ -319,7 +320,7 @@ test("aborting mock generation leaves a terminal scan record", async () => {
       ["list-scans", "--repository", repository],
     );
     expect(history["scans"]).toMatchObject([
-      { progress: { status: "failed" } },
+      { progress: { status: "canceled" } },
     ]);
   } finally {
     await client.close();

@@ -17,17 +17,12 @@ from types import ModuleType
 from typing import Any
 from unittest import TestCase, mock
 
-BUDGET_COST = {
-    "model": "gpt-5.6-sol",
-    "inputTokens": 1250,
-    "cachedInputTokens": 200,
-    "cacheWriteInputTokens": 0,
-    "outputTokens": 30,
-    "estimatedUsd": 0.00625,
-}
-
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
+
+
 SNAPSHOT_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "snapshot_sqlite.py"
+
+
 PLUGIN_MANIFEST = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
 
 
@@ -52,17 +47,11 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
+    if checkpoint_dir.name == "checkpoints":
+        (checkpoint_dir / "pending").mkdir(exist_ok=True)
+        (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(b"")
     checkpoint_path.write_bytes(encoded)
     return checkpoint_path
-
-
-def saved_coverage(*, deferred=(), surfaces=(), completeness=None):
-    return {
-        "completeness": completeness or ("partial" if deferred else "complete"),
-        "surfaces": list(surfaces),
-        "explicitExclusions": [],
-        "deferred": list(deferred),
-    }
 
 
 def saved_draft(
@@ -193,6 +182,471 @@ def run_workbench(
     if not check:
         return {"returncode": completed.returncode, "stderr": completed.stderr}
     return json.loads(completed.stdout)
+
+
+def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = ?, phase = 'terminal', error_message = ? "
+            "WHERE scan_id = ?",
+            (deep_status or "failed", message, scan_id),
+        )
+    return run_workbench(
+        state_dir,
+        "fail-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        message,
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+
+
+def start_delivered_scan(
+    state_dir: Path,
+    *args: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Prepare an unclaimed, delivered scan for tests outside handoff ownership."""
+    started = run_workbench(state_dir, "start-scan", *args, environment=environment)
+    scan = started["results"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan["scanId"],)
+        )
+    scan["handoffStatus"] = "delivered"
+    return started
+
+
+def start_workspace_scan(state_dir: Path, workspace_id: str, scan_root: Path) -> tuple[str, Path]:
+    started = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        workspace_id,
+        "--scan-root",
+        str(scan_root),
+    )["results"]
+    return str(started["scanId"]), Path(str(started["scanDir"]))
+
+
+def start_saved_scan(state_dir: Path, target: Path, scan_root: Path) -> tuple[str, Path]:
+    saved = create_saved_workspace(state_dir, target)
+    return start_workspace_scan(state_dir, str(saved["id"]), scan_root)
+
+
+def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
+    return state_dir, target, scan_id, scan_dir
+
+
+def initialize_git_repository(target: Path) -> str:
+    target.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=target, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=target, check=True)
+    (target / "README.md").write_text("fixture\n")
+    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Initial commit"], cwd=target, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=target, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def configure_git_command(target: Path, key: str, script: Path) -> None:
+    subprocess.run(
+        ["git", "config", key, shlex.join([sys.executable, str(script)])],
+        cwd=target,
+        check=True,
+    )
+
+
+def create_saved_workspace(
+    state_dir: Path, target: Path, *, thread_id: str | None = None, mode: str = "standard"
+) -> dict[str, object]:
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(
+        state_dir,
+        workspace_id,
+        *(["--thread-id", thread_id] if thread_id else []),
+        "--target-path",
+        str(target),
+        "--target-title",
+        "Fixture Repository",
+        "--target-summary",
+        "Resolved fixture repository.",
+    )
+    assert created["setup"] == {"submitted": False}
+    assert created["targetMetadata"] == {
+        "hasHead": False,
+        "isGit": False,
+        "isWorktree": False,
+        "reviewChangesSupported": False,
+    }
+    return save_workspace(
+        state_dir,
+        workspace_id,
+        str(target),
+        ".",
+        mode,
+        "--user-context",
+        "Pay attention to uploaded archives.",
+    )
+
+
+def create_saved_git_workspace(
+    state_dir: Path, target: Path, *, mode: str = "standard"
+) -> dict[str, object]:
+    workspace_id = str(uuid.uuid4())
+    create_workspace(state_dir, workspace_id, "--target-path", str(target))
+    return save_workspace(state_dir, workspace_id, str(target), ".", mode)
+
+
+def mark_deep_aggregate_ready(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
+    checkpoint = scan_dir / "artifacts" / "deep-scan" / "checkpoint.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    document = (
+        json.loads(checkpoint.read_text())
+        if checkpoint.exists()
+        else {
+            "version": 2,
+            "startedAt": "2026-01-01T00:00:00Z",
+            "passes": [],
+            "mergedScanIds": [],
+            "aggregate": [],
+            "noNewStreak": 4,
+            "consecutiveErrors": 0,
+        }
+    )
+    document["terminalReason"] = "saturated"
+    checkpoint.write_text(json.dumps(document))
+    return checkpoint
+
+
+def begin_legacy_scan(
+    state_dir: Path, codex_home: Path, target: Path, scan_root: Path, *, thread_id: str
+) -> dict[str, object]:
+    """Seed a v1 saved scan to test historical artifact/usage readers without its retired engine."""
+    started = run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--thread-id",
+        thread_id,
+        "--target-path",
+        str(target),
+        "--scope",
+        ".",
+        "--scan-root",
+        str(scan_root),
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    scan = started["scan"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET handoff_claim_token = NULL, continuation_thread_id = NULL WHERE id = ?",
+            (scan["scanId"],),
+        )
+        connection.execute(
+            "INSERT INTO deep_scan_runs (scan_id,schema_version,workflow_version,status,phase,workers,"
+            "subagents,stop_after_no_new,max_discovery_runs,created_at,updated_at) "
+            "SELECT id,1,'deep-security-scan/v1','running','discovery',4,3,4,8,started_at,updated_at "
+            "FROM scans WHERE id = ?",
+            (scan["scanId"],),
+        )
+    scan["createdAt"] = scan["updatedAt"]
+    return {"deepScan": scan}
+
+
+def finding_fixture(
+    *,
+    relative_path: str = "src/extract.py",
+    identity_anchor: str = "archive-entry-write-without-containment",
+) -> dict[str, Any]:
+    return {
+        "ruleId": "path-traversal.archive-extraction",
+        "identity": {"anchor": identity_anchor},
+        "title": "Unsafe archive extraction can escape the output directory",
+        "summary": "An attacker-controlled path reaches a filesystem write.",
+        "severity": {
+            "level": "high",
+            "rationale": "The reachable write can escape the extraction root.",
+        },
+        "confidence": {"level": "high", "rationale": "Direct source trace."},
+        "taxonomy": {"category": "path-traversal", "cwe": ["CWE-22"]},
+        "locations": [{"path": relative_path, "startLine": 41, "endLine": 44, "role": "sink"}],
+        "codeEvidence": [
+            {
+                "id": "archive-write",
+                "label": "Unchecked archive write",
+                "path": relative_path,
+                "startLine": 41,
+                "endLine": 44,
+                "language": "python",
+                "code": "destination.write_bytes(entry.read())",
+                "explanation": "The destination is written before containment is checked.",
+            }
+        ],
+        "validation": {
+            "method": "archive extraction test",
+            "summary": "A crafted entry wrote outside the extraction root.",
+            "evidenceRefs": ["archive-write"],
+            "assertions": ["The archive entry controls the destination path."],
+            "limitations": ["The test used a temporary extraction directory."],
+        },
+        "rootCause": {
+            "summary": "The archive destination is written before containment is enforced.",
+            "evidenceRefs": ["archive-write"],
+        },
+        "evidenceExcerpt": "destination.write_bytes(entry.read())",
+        "attackPath": {
+            "dataFlow": "archive entry -> destination path -> filesystem write",
+            "reachability": "An archive uploader can supply the crafted entry.",
+            "evidenceRefs": ["archive-write"],
+            "impact": {
+                "level": "high",
+                "why": "The write can replace files outside the extraction root.",
+            },
+            "likelihood": {
+                "level": "high",
+                "why": "No containment check blocks the crafted path.",
+            },
+            "limitations": ["Writable targets depend on process permissions."],
+        },
+        "preventiveControls": ["Use a containment-checking extraction helper."],
+        "remediation": "Reject archive entries that escape the extraction root.",
+        "remediationTests": ["Reject traversal entries during extraction."],
+        "provenance": {"source": "local_plugin"},
+    }
+
+
+def write_completed_contract(
+    scan_dir: Path,
+    scan_id: str,
+    target: Path,
+    *,
+    artifact_scan_id: str | None = None,
+    exclude_paths: list[str] | None = None,
+    identity_anchor: str = "archive-entry-write-without-containment",
+    include_paths: list[str] | None = None,
+    relative_path: str = "src/extract.py",
+    target_kind: str = "directory_snapshot",
+    target_revision: str | None = None,
+    diff_base_revision: str | None = None,
+    diff_head_revision: str | None = None,
+    snapshot_digest: str | None = None,
+    target_id: str | None = None,
+    coverage_mode: str = "repository",
+    inventory_strategy: str = "repository",
+) -> None:
+    artifact_scan_id = artifact_scan_id or scan_id
+    exclude_paths = exclude_paths or []
+    include_paths = include_paths or ["."]
+    target_contract = {
+        "kind": target_kind,
+        "targetId": target_id or stable_target_id(target),
+        "displayName": target.name,
+        "snapshotDigest": snapshot_digest
+        or (
+            directory_snapshot_digest(target, excluded=(scan_dir,))
+            if target_kind == "directory_snapshot"
+            else f"codex-security-snapshot/v1:sha256:{'a' * 64}"
+        ),
+    }
+    if target_revision is not None:
+        target_contract["revision"] = target_revision
+    if diff_base_revision is not None:
+        target_contract["baseRevision"] = diff_base_revision
+    if diff_head_revision is not None:
+        target_contract["headRevision"] = diff_head_revision
+    findings = {
+        "documentType": "codex-security.findings",
+        "schemaVersion": "1.0",
+        "scanId": artifact_scan_id,
+        "findings": [finding_fixture(relative_path=relative_path, identity_anchor=identity_anchor)],
+    }
+    coverage = {
+        "documentType": "codex-security.coverage",
+        "schemaVersion": "1.0",
+        "scanId": artifact_scan_id,
+        "mode": coverage_mode,
+        "completeness": "complete",
+        "inventoryStrategy": inventory_strategy,
+        "includePaths": include_paths,
+        "excludePaths": exclude_paths,
+        "surfaces": [
+            {
+                "id": "surface_archive_extraction",
+                "label": "Archive extraction",
+                "disposition": "reported",
+                "receiptRefs": [],
+            }
+        ],
+        "explicitExclusions": [],
+        "deferred": [],
+    }
+    manifest = {
+        "documentType": "codex-security.scan-manifest",
+        "schemaVersion": "1.0",
+        "scan": {
+            "id": artifact_scan_id,
+            "producer": {
+                "name": "codex-security-plugin",
+                "version": source_plugin_version(),
+            },
+            "status": "completed",
+            "startedAt": "2026-06-02T18:00:00Z",
+            "completedAt": "2026-06-02T18:09:00Z",
+            "target": target_contract,
+            "scope": {"includePaths": include_paths, "excludePaths": exclude_paths},
+            "coverageRef": "coverage.json",
+            "findingsRef": "findings.json",
+        },
+    }
+    (scan_dir / "findings.json").write_text(json.dumps(findings))
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    (scan_dir / "report.md").write_text("# Fixture report\n")
+
+
+def recipe(target: Path, mode: str = "standard") -> dict:
+    return {
+        "repository": str(target),
+        "target": {"kind": "repository", "paths": []},
+        "mode": mode,
+        "config": {"model": "synthetic-model", "model_reasoning_effort": "high"},
+        **({"deepScan": {"maxDiscoveryRuns": 8}} if mode == "deep" else {}),
+    }
+
+
+def register(
+    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
+) -> dict:
+    missing = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for path in reversed(missing):
+        path.mkdir(mode=0o700)
+    saved_recipe = recipe(target, mode)
+    if paths:
+        saved_recipe["target"] = {"kind": "paths", "paths": list(paths)}
+    return run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(directory),
+        "--registration-json-stdin",
+        *(("--parent-scan-id", parent) if parent else ()),
+        input_text=json.dumps({"recipe": saved_recipe, "parentScanRole": role}),
+    )
+
+
+def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
+    value = {
+        "version": 2,
+        "startedAt": "2026-01-01T00:00:00Z",
+        "passes": list(passes),
+        "mergedScanIds": list(merged),
+        "aggregate": None,
+        "noNewStreak": 0,
+        "consecutiveErrors": 0,
+        **({"terminalReason": terminal} if terminal else {}),
+    }
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan["scanId"],
+        "--artifact-path",
+        "artifacts/deep-scan/checkpoint.json",
+        input_text=json.dumps(value),
+    )
+    return value
+
+
+def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
+    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
+    artifact_dir.mkdir(parents=True)
+    prompt_path = artifact_dir / "prompt.md"
+    prompt_path.write_text(f"Prompt for {name}\n")
+    result_path = artifact_dir / "result.json"
+    return prompt_path, artifact_dir, result_path
+
+
+def windows_file_backend() -> mock.Mock:
+    backend = mock.Mock()
+
+    def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
+        return os.open(scan_dir / relative_path, os.O_RDONLY)
+
+    def atomic_write(
+        scan_dir: Path,
+        relative_path: str,
+        payload: bytes,
+        *,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
+        path = scan_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
+        (scan_dir / relative_path).unlink(missing_ok=True)
+
+    backend.open_read_fd.side_effect = open_read_fd
+    backend.atomic_write.side_effect = atomic_write
+    backend.unlink_if_exists.side_effect = unlink_if_exists
+    return backend
+
+
+class ScanFixtureTestCase(TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.scan_dir = Path(self.temp_dir.name) / "scan"
+        shutil.copytree(self.example_scan, self.scan_dir)
+        manifest = json.loads((self.scan_dir / "scan-manifest.json").read_text())
+        findings = json.loads((self.scan_dir / "findings.json").read_text())
+        coverage = json.loads((self.scan_dir / "coverage.json").read_text())
+        report = self.validator.FINALIZER._generate_report_projection(manifest, findings, coverage)
+        (self.scan_dir / "report.md").write_bytes(report)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def read_json(self, name: str) -> dict[str, object]:
+        return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
+
+    def sha256_file(self, name: str) -> str:
+        return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()
+
+
+BUDGET_COST = {
+    "model": "gpt-5.6-sol",
+    "inputTokens": 1250,
+    "cachedInputTokens": 200,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 30,
+    "estimatedUsd": 0.00625,
+}
+
+
+def saved_coverage(*, deferred=(), surfaces=(), completeness=None):
+    return {
+        "completeness": completeness or ("partial" if deferred else "complete"),
+        "surfaces": list(surfaces),
+        "explicitExclusions": [],
+        "deferred": list(deferred),
+    }
 
 
 def begin_deep_scan(
@@ -595,337 +1049,3 @@ def mark_remediation_delivered(
         "--action-token",
         action_token,
     )
-
-
-def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
-    return scan_command(
-        state_dir,
-        "fail-deep-scan",
-        scan_id,
-        "--message",
-        message,
-        *(["--deep-status", deep_status] if deep_status is not None else []),
-        environment={"CODEX_HOME": str(codex_home)},
-    )
-
-
-def start_delivered_scan(
-    state_dir: Path,
-    *args: str,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
-    """Prepare an unclaimed, delivered scan for tests outside handoff ownership."""
-    started = run_workbench(state_dir, "start-scan", *args, environment=environment)
-    scan = started["results"]
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan["scanId"],)
-        )
-    scan["handoffStatus"] = "delivered"
-    return started
-
-
-def start_workspace_scan(state_dir: Path, workspace_id: str, scan_root: Path) -> tuple[str, Path]:
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(scan_root),
-    )["results"]
-    return str(started["scanId"]), Path(str(started["scanDir"]))
-
-
-def start_saved_scan(state_dir: Path, target: Path, scan_root: Path) -> tuple[str, Path]:
-    saved = create_saved_workspace(state_dir, target)
-    return start_workspace_scan(state_dir, str(saved["id"]), scan_root)
-
-
-def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
-    return state_dir, target, scan_id, scan_dir
-
-
-def initialize_git_repository(target: Path) -> str:
-    target.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
-    subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=target, check=True)
-    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=target, check=True)
-    (target / "README.md").write_text("fixture\n")
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Initial commit"], cwd=target, check=True)
-    subprocess.run(["git", "branch", "-M", "main"], cwd=target, check=True)
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=target,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-
-def configure_git_command(target: Path, key: str, script: Path) -> None:
-    subprocess.run(
-        ["git", "config", key, shlex.join([sys.executable, str(script)])],
-        cwd=target,
-        check=True,
-    )
-
-
-def create_saved_workspace(
-    state_dir: Path, target: Path, *, thread_id: str | None = None, mode: str = "standard"
-) -> dict[str, object]:
-    workspace_id = str(uuid.uuid4())
-    created = create_workspace(
-        state_dir,
-        workspace_id,
-        *(["--thread-id", thread_id] if thread_id else []),
-        "--target-path",
-        str(target),
-        "--target-title",
-        "Fixture Repository",
-        "--target-summary",
-        "Resolved fixture repository.",
-    )
-    assert created["setup"] == {"submitted": False}
-    assert created["targetMetadata"] == {
-        "hasHead": False,
-        "isGit": False,
-        "isWorktree": False,
-        "reviewChangesSupported": False,
-    }
-    return save_workspace(
-        state_dir,
-        workspace_id,
-        str(target),
-        ".",
-        mode,
-        "--user-context",
-        "Pay attention to uploaded archives.",
-    )
-
-
-def create_saved_git_workspace(
-    state_dir: Path, target: Path, *, mode: str = "standard"
-) -> dict[str, object]:
-    workspace_id = str(uuid.uuid4())
-    create_workspace(state_dir, workspace_id, "--target-path", str(target))
-    return save_workspace(state_dir, workspace_id, str(target), ".", mode)
-
-
-def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
-    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
-    artifact_dir.mkdir(parents=True)
-    prompt_path = artifact_dir / "prompt.md"
-    prompt_path.write_text(f"Prompt for {name}\n")
-    result_path = artifact_dir / "result.json"
-    return prompt_path, artifact_dir, result_path
-
-
-def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
-    manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"status":"succeeded"}\n')
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            """
-            UPDATE deep_scan_runs
-            SET status = 'succeeded', phase = 'terminal', terminal_reason = 'saturated',
-                manifest_path = ?, completed_at = updated_at
-            WHERE scan_id = ?
-            """,
-            (str(manifest), scan_id),
-        )
-    return manifest
-
-
-def write_completed_contract(
-    scan_dir: Path,
-    scan_id: str,
-    target: Path,
-    *,
-    identity_anchor: str = "archive-entry-write-without-containment",
-    include_paths: list[str] | None = None,
-    relative_path: str = "src/extract.py",
-    target_kind: str = "directory_snapshot",
-    target_revision: str | None = None,
-    diff_base_revision: str | None = None,
-    diff_head_revision: str | None = None,
-    snapshot_digest: str | None = None,
-    coverage_mode: str = "repository",
-    inventory_strategy: str = "repository",
-) -> None:
-    include_paths = include_paths or ["."]
-    target_contract = {
-        "kind": target_kind,
-        "targetId": stable_target_id(target),
-        "displayName": target.name,
-        "snapshotDigest": snapshot_digest
-        or (
-            directory_snapshot_digest(target, excluded=(scan_dir,))
-            if target_kind == "directory_snapshot"
-            else f"codex-security-snapshot/v1:sha256:{'a' * 64}"
-        ),
-    }
-    if target_revision is not None:
-        target_contract["revision"] = target_revision
-    if diff_base_revision is not None:
-        target_contract["baseRevision"] = diff_base_revision
-    if diff_head_revision is not None:
-        target_contract["headRevision"] = diff_head_revision
-    findings = {
-        "documentType": "codex-security.findings",
-        "schemaVersion": "1.0",
-        "scanId": scan_id,
-        "findings": [
-            {
-                "ruleId": "path-traversal.archive-extraction",
-                "identity": {"anchor": identity_anchor},
-                "title": "Unsafe archive extraction can escape the output directory",
-                "summary": "An attacker-controlled path reaches a filesystem write.",
-                "severity": {
-                    "level": "high",
-                    "rationale": "The reachable write can escape the extraction root.",
-                },
-                "confidence": {"level": "high", "rationale": "Direct source trace."},
-                "taxonomy": {"category": "path-traversal", "cwe": ["CWE-22"]},
-                "locations": [
-                    {"path": relative_path, "startLine": 41, "endLine": 44, "role": "sink"}
-                ],
-                "codeEvidence": [
-                    {
-                        "id": "archive-write",
-                        "label": "Unchecked archive write",
-                        "path": relative_path,
-                        "startLine": 41,
-                        "endLine": 44,
-                        "language": "python",
-                        "code": "destination.write_bytes(entry.read())",
-                        "explanation": "The destination is written before containment is checked.",
-                    }
-                ],
-                "validation": {
-                    "method": "archive extraction test",
-                    "summary": "A crafted entry wrote outside the extraction root.",
-                    "evidenceRefs": ["archive-write"],
-                    "assertions": ["The archive entry controls the destination path."],
-                    "limitations": ["The test used a temporary extraction directory."],
-                },
-                "rootCause": {
-                    "summary": "The archive destination is written before containment is enforced.",
-                    "evidenceRefs": ["archive-write"],
-                },
-                "evidenceExcerpt": "destination.write_bytes(entry.read())",
-                "attackPath": {
-                    "dataFlow": "archive entry -> destination path -> filesystem write",
-                    "reachability": "An archive uploader can supply the crafted entry.",
-                    "evidenceRefs": ["archive-write"],
-                    "impact": {
-                        "level": "high",
-                        "why": "The write can replace files outside the extraction root.",
-                    },
-                    "likelihood": {
-                        "level": "high",
-                        "why": "No containment check blocks the crafted path.",
-                    },
-                    "limitations": ["Writable targets depend on process permissions."],
-                },
-                "preventiveControls": ["Use a containment-checking extraction helper."],
-                "remediation": "Reject archive entries that escape the extraction root.",
-                "remediationTests": ["Reject traversal entries during extraction."],
-                "provenance": {"source": "local_plugin"},
-            }
-        ],
-    }
-    coverage = {
-        "documentType": "codex-security.coverage",
-        "schemaVersion": "1.0",
-        "scanId": scan_id,
-        "mode": coverage_mode,
-        "completeness": "complete",
-        "inventoryStrategy": inventory_strategy,
-        "includePaths": include_paths,
-        "excludePaths": [],
-        "surfaces": [
-            {
-                "id": "surface_archive_extraction",
-                "label": "Archive extraction",
-                "disposition": "reported",
-                "receiptRefs": [],
-            }
-        ],
-        "explicitExclusions": [],
-        "deferred": [],
-    }
-    manifest = {
-        "documentType": "codex-security.scan-manifest",
-        "schemaVersion": "1.0",
-        "scan": {
-            "id": scan_id,
-            "producer": {
-                "name": "codex-security-plugin",
-                "version": source_plugin_version(),
-            },
-            "status": "completed",
-            "startedAt": "2026-06-02T18:00:00Z",
-            "completedAt": "2026-06-02T18:09:00Z",
-            "target": target_contract,
-            "scope": {"includePaths": include_paths, "excludePaths": []},
-            "coverageRef": "coverage.json",
-            "findingsRef": "findings.json",
-        },
-    }
-    (scan_dir / "findings.json").write_text(json.dumps(findings))
-    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
-    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
-    (scan_dir / "report.md").write_text("# Fixture report\n")
-
-
-def windows_file_backend() -> mock.Mock:
-    backend = mock.Mock()
-
-    def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
-        return os.open(scan_dir / relative_path, os.O_RDONLY)
-
-    def atomic_write(
-        scan_dir: Path,
-        relative_path: str,
-        payload: bytes,
-        *,
-        expected_root_identity: tuple[int, int] | None = None,
-    ) -> None:
-        path = scan_dir / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
-
-    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
-        (scan_dir / relative_path).unlink(missing_ok=True)
-
-    backend.open_read_fd.side_effect = open_read_fd
-    backend.atomic_write.side_effect = atomic_write
-    backend.unlink_if_exists.side_effect = unlink_if_exists
-    return backend
-
-
-class ScanFixtureTestCase(TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.scan_dir = Path(self.temp_dir.name) / "scan"
-        shutil.copytree(self.example_scan, self.scan_dir)
-        manifest = json.loads((self.scan_dir / "scan-manifest.json").read_text())
-        findings = json.loads((self.scan_dir / "findings.json").read_text())
-        coverage = json.loads((self.scan_dir / "coverage.json").read_text())
-        report = self.validator.FINALIZER._generate_report_projection(manifest, findings, coverage)
-        (self.scan_dir / "report.md").write_bytes(report)
-
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
-
-    def read_json(self, name: str) -> dict[str, object]:
-        return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
-
-    def sha256_file(self, name: str) -> str:
-        return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()

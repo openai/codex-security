@@ -19,7 +19,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     resume_deep_scan,
     run_workbench,
     save_workspace,
@@ -54,7 +54,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
         "thread-completion-binding",
         environment={"CODEX_HOME": str(tmp_path / "codex-home")},
     )
-    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     return state_dir, scan_id, scan_dir
 
@@ -239,7 +239,7 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
             (manifest["scan"]["completedAt"], "Scan stopped.", scan_id),
         )
 
-    recovered = scan_command(state_dir, "recover-scan-results", scan_id)
+    recovered = run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
 
     assert recovered["scan"]["progress"]["status"] == "failed"
     manifest = json.loads(manifest_path.read_text())
@@ -247,22 +247,23 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
     assert manifest["scan"]["preservedSources"]
     assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
     sealed_artifacts = _sealed_artifacts(scan_dir)
-    scan_command(state_dir, "recover-scan-results", scan_id)
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
     late_review = {"id": "late-review", "reason": "Review remains pending.", "paths": ["README.md"]}
-    write_checkpoint(
-        scan_dir / "checkpoints",
-        {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
-    )
-    scan_command(state_dir, "recover-scan-results", scan_id)
+    for directory in ("checkpoints", "checkpoints/pending"):
+        write_checkpoint(
+            scan_dir / directory,
+            {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
+        )
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
 
     manifest = json.loads(manifest_path.read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == legacy_digest
     assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
     assert late_review in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
     sealed_artifacts = _sealed_artifacts(scan_dir)
-    scan_command(state_dir, "recover-scan-results", scan_id)
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
 
@@ -411,36 +412,6 @@ def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: P
         ).fetchone() == ("complete", manifest["scan"]["completedAt"])
 
 
-@pytest.mark.parametrize(
-    "timestamp",
-    [
-        "2026-10-08T03:00:00.123456+02:00",
-        "2026-10-08T01:00:00.123Z",
-    ],
-)
-def test_sealed_completion_preserves_original_timestamp_text(
-    tmp_path: Path, timestamp: str
-) -> None:
-    state_dir, target = tmp_path / "state", tmp_path / "target"
-    target.mkdir()
-    scan_dir = tmp_path / "scan"
-    scan_id = register_cli_scan(state_dir, target, scan_dir)["scanId"]
-    write_completed_contract(scan_dir, scan_id, target)
-    manifest_path = scan_dir / "scan-manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["scan"]["completedAt"] = timestamp
-    manifest_path.write_text(json.dumps(manifest))
-    _seal_draft(scan_dir, target)
-    sealed_manifest_bytes = manifest_path.read_bytes()
-    scan_command(state_dir, "complete-scan", scan_id)
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT created_at, updated_at FROM findings").fetchall() == [
-            (timestamp, timestamp)
-        ]
-    assert manifest_path.read_bytes() == sealed_manifest_bytes
-    assert json.loads(sealed_manifest_bytes)["scan"]["completedAt"] == timestamp
-
-
 def test_incompatible_sealed_deep_scan_remains_recoverable(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
     scan_command(state_dir, "prepare-scan-completion", scan_id)
@@ -547,19 +518,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
                 "thread-completion-binding",
                 environment={"CODEX_HOME": str(codex_home)},
             )
-            coordinator_manifest = scan_dir / "coordinator-manifest.json"
-            coordinator_manifest.write_text("{}\n")
-            with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-                connection.execute(
-                    """
-                    UPDATE deep_scan_runs
-                    SET status = 'succeeded', phase = 'terminal',
-                        terminal_reason = 'capped', manifest_path = ?,
-                        completed_at = updated_at
-                    WHERE scan_id = ?
-                    """,
-                    (str(coordinator_manifest), scan_id),
-                )
+            mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
         write_completed_contract(
             scan_dir,
             scan_id,
@@ -904,6 +863,51 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
 
 
+def test_deep_completion_preserves_running_scan_after_transient_report_failure(
+    tmp_path: Path,
+) -> None:
+    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
+    hook_dir = tmp_path / "report-failure-hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'scripts')!r})\n"
+        "import report_projection\n"
+        "def unavailable(*args, **kwargs):\n"
+        "    raise OSError('fixture report projection temporarily unavailable')\n"
+        "report_projection.generate_report_markdown = unavailable\n"
+    )
+    before = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+
+    failed = run_workbench(
+        state_dir,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        check=False,
+        environment={"PYTHONPATH": str(hook_dir)},
+    )
+
+    assert failed["returncode"] != 0
+    assert "fixture report projection temporarily unavailable" in str(failed["stderr"])
+    preserved = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert preserved["progress"]["status"] == "running"
+    checkpoint = json.loads((scan_dir / "artifacts/deep-scan/checkpoint.json").read_text())
+    assert checkpoint["terminalReason"] == "saturated"
+    assert {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    } == before
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+
+
 @pytest.mark.parametrize("mode", ["standard", "deep"])
 @pytest.mark.parametrize("already_completed", [False, True])
 def test_completion_persists_optional_model_projection_warnings(
@@ -1200,8 +1204,7 @@ def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path)
         "findings": copy.deepcopy(findings["findings"]),
         "coverage": json.loads((scan_dir / "coverage.json").read_text()),
     }
-    (scan_dir / "checkpoints").mkdir()
-    (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
+    write_checkpoint(scan_dir / "checkpoints", checkpoint)
     findings["findings"][0]["summary"] = ""
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
@@ -1441,3 +1444,33 @@ def test_completion_recovers_malformed_hardening_portfolios(tmp_path: Path) -> N
         assert "../outside.md" not in warnings[0], case
         assert "hardening" not in json.loads(manifest_path.read_text())["scan"], case
         assert (scan_dir / "report.md").is_file(), case
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-10-08T03:00:00.123456+02:00",
+        "2026-10-08T01:00:00.123Z",
+    ],
+)
+def test_sealed_completion_preserves_original_timestamp_text(
+    tmp_path: Path, timestamp: str
+) -> None:
+    state_dir, target = tmp_path / "state", tmp_path / "target"
+    target.mkdir()
+    scan_dir = tmp_path / "scan"
+    scan_id = register_cli_scan(state_dir, target, scan_dir)["scanId"]
+    write_completed_contract(scan_dir, scan_id, target)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["completedAt"] = timestamp
+    manifest_path.write_text(json.dumps(manifest))
+    _seal_draft(scan_dir, target)
+    sealed_manifest_bytes = manifest_path.read_bytes()
+    scan_command(state_dir, "complete-scan", scan_id)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT created_at, updated_at FROM findings").fetchall() == [
+            (timestamp, timestamp)
+        ]
+    assert manifest_path.read_bytes() == sealed_manifest_bytes
+    assert json.loads(sealed_manifest_bytes)["scan"]["completedAt"] == timestamp

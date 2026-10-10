@@ -35,6 +35,7 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
+import { prepareReadOnlyExecution } from "./execution-preparation.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import {
@@ -155,7 +156,15 @@ export interface ReadOnlyCodexOptions {
   nativeProfile?: { name: string; path: string };
   /** @internal */
   codex?: ReadOnlyCodex;
+  /** @internal Use the owning scan's prepared execution and authentication. */
+  createCodex?: (
+    options: CodexOptions,
+  ) => ReadOnlyCodex | Promise<ReadOnlyCodex>;
   environment?: NodeJS.ProcessEnv;
+  /** @internal Keep authentication selected by a native provider. */
+  preserveProviderEnvironment?: boolean;
+  /** @internal Constraints inherited from the scan that owns this helper. */
+  inheritedPermissions?: { filesystem: JsonObject; network: JsonObject };
   model?: string;
   /** Passed through to Codex; support depends on the runtime, model, and provider. */
   reasoningEffort?: string;
@@ -173,6 +182,14 @@ interface CompletedScanMatchingOptions extends Pick<
   ScanComparisonOptions,
   "config" | "environment" | "model" | "signal"
 > {
+  /** @internal */
+  createCodex?: (
+    options: CodexOptions,
+  ) => ReadOnlyCodex | Promise<ReadOnlyCodex>;
+  /** @internal */
+  inheritedPermissions?: { filesystem: JsonObject; network: JsonObject };
+  /** @internal Keep authentication selected by a native provider. */
+  preserveProviderEnvironment?: boolean;
   /** @internal Private native profile owned by the calling scan. */
   nativeProfile?: ReadOnlyCodexOptions["nativeProfile"];
   /** @internal Cyber access program already selected by the calling scan. */
@@ -521,6 +538,91 @@ export async function matchScanFindingsInternal(
   }
 }
 
+async function startPreparedReadOnlyCodexThread(
+  options: ReadOnlyCodexOptions,
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
+): Promise<{ thread: ReturnType<ReadOnlyCodex["startThread"]> }> {
+  const suppliedConfig = resolveCodexProfile(
+    options.config?.codexOverrides ?? {},
+  );
+  const config = {
+    ...suppliedConfig,
+    mcp_servers: disabledMcpConfiguration(suppliedConfig, []),
+  };
+  const configuredModel = scanModelConfiguration(config);
+  const model = options.model ?? configuredModel?.model;
+  const reasoningEffort =
+    options.reasoningEffort ??
+    (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
+    "medium";
+  const prepared = prepareReadOnlyExecution(
+    scanCyberAccessConfig(config, options.cyberAccessProgram),
+    options.inheritedPermissions,
+  );
+  const inheritedFeatures = resolveCodexProfile(prepared.config)["features"] as
+    JsonObject | undefined;
+  const metadata = {
+    ...(prepared.config["responses_api_metadata"] as JsonObject | undefined),
+    ...codexSecurityRequestMetadata(
+      runtimeOptions.surface,
+      runtimeOptions.command,
+    ),
+  };
+  delete prepared.config["responses_api_metadata"];
+  const configOverrides = [
+    ...prepared.overrides,
+    `responses_api_metadata=${inlineToml(metadata)}`,
+  ];
+  const codex = await options.createCodex!({
+    ...(configOverrides.length ? { configOverrides } : {}),
+    config: {
+      ...prepared.config,
+      allow_login_shell: false,
+      project_doc_max_bytes: 0,
+      features: {
+        ...Object.fromEntries(
+          ["api_key_cyber_access_programs", "api_key_model_discovery"].flatMap(
+            (name) =>
+              inheritedFeatures?.[name] === undefined
+                ? []
+                : [[name, inheritedFeatures[name]]],
+          ),
+        ),
+        apps: false,
+        code_mode: false,
+        code_mode_only: false,
+        js_repl: false,
+        multi_agent: false,
+        multi_agent_v2: false,
+        plugins: false,
+        shell_tool: false,
+        unified_exec: false,
+      },
+      shell_environment_policy: {
+        inherit: "core",
+        ignore_default_excludes: false,
+        exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
+      },
+    } as NonNullable<CodexOptions["config"]>,
+  });
+  return {
+    thread: codex.startThread({
+      threadSource: runtimeOptions.threadSource,
+      ...(model === undefined ? {} : { model }),
+      // Native Codex accepts strings before the pinned SDK widens its effort type.
+      modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
+      ...(options.inheritedPermissions === undefined
+        ? { sandboxMode: "read-only" as const }
+        : {}),
+      approvalPolicy: "never",
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+      workingDirectory: options.workingDirectory ?? process.cwd(),
+      skipGitRepoCheck: true,
+    }),
+  };
+}
+
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
   runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
@@ -528,6 +630,8 @@ async function startReadOnlyCodexThread(
   thread: ReturnType<ReadOnlyCodex["startThread"]>;
   cleanup?: () => Promise<void>;
 }> {
+  if (options.createCodex !== undefined)
+    return await startPreparedReadOnlyCodexThread(options, runtimeOptions);
   const config =
     options.config === undefined
       ? undefined
@@ -603,20 +707,31 @@ async function startReadOnlyCodexThread(
     options.signal,
     undefined,
     providerConfig,
+    options.preserveProviderEnvironment,
   );
   const command = resolveCodexCommand(environment);
+  const prepared = prepareReadOnlyExecution(
+    sdkConfig,
+    options.inheritedPermissions,
+  );
+  if (options.inheritedPermissions !== undefined)
+    delete threadOptions.sandboxMode;
   const codexOptions: CodexOptions = {
     // A single table preserves literal keys that the SDK would split on dots.
-    configOverrides: [`responses_api_metadata=${inlineToml(requestMetadata)}`],
+    configOverrides: [
+      ...prepared.overrides,
+      `responses_api_metadata=${inlineToml(requestMetadata)}`,
+    ],
     codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
-    apiKey:
-      environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
-      environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
-      undefined,
+    apiKey: options.preserveProviderEnvironment
+      ? undefined
+      : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
+        environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
+        undefined,
     config: {
-      ...sdkConfig,
+      ...prepared.config,
       windows,
       mcp_servers: await disabledMcpServers(
         await providerPreflightCommand(command, providerSettings),
@@ -627,9 +742,14 @@ async function startReadOnlyCodexThread(
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       features: {
-        api_key_cyber_access_programs:
-          effectiveFeatures?.["api_key_cyber_access_programs"],
-        api_key_model_discovery: effectiveFeatures?.["api_key_model_discovery"],
+        ...Object.fromEntries(
+          ["api_key_cyber_access_programs", "api_key_model_discovery"].flatMap(
+            (name) =>
+              effectiveFeatures?.[name] === undefined
+                ? []
+                : [[name, effectiveFeatures[name]]],
+          ),
+        ),
         apps: false,
         code_mode: false,
         code_mode_only: false,
@@ -662,12 +782,23 @@ async function startReadOnlyCodexThread(
     let requestedPermissionProfile: string | undefined;
     if (profile !== undefined) {
       delete threadOptions.sandboxMode;
+      const inheritedReadOnlyFilesystem =
+        options.inheritedPermissions === undefined
+          ? {}
+          : ((
+              (
+                (parse(prepared.overrides[0]!) as JsonObject)[
+                  "permissions"
+                ] as JsonObject
+              )["codex_security_comparison"] as JsonObject
+            )["filesystem"] as JsonObject);
       const permissions = await preflightReadOnlyProfileCodex(
         codexOptions,
         {
           extends: ":read-only",
           filesystem: {
             ":root": "read",
+            ...inheritedReadOnlyFilesystem,
             [dirname(profile.path)]: { ".": "deny" },
           },
           network: { enabled: false },
@@ -743,17 +874,25 @@ export async function disabledMcpServers(
     environment,
     undefined,
     options.signal,
+    options.workingDirectory,
   );
   if (!success)
     throw new CodexSecurityError(
       `Could not read MCP configuration for a read-only helper: ${stderr.trim()}`,
     );
   const inherited = JSON.parse(stdout) as { name: string }[];
+  return disabledMcpConfiguration(
+    config,
+    inherited.map(({ name }) => name),
+  );
+}
+
+function disabledMcpConfiguration(
+  config: JsonObject | undefined,
+  inherited: string[],
+): JsonObject {
   const configured = (config?.["mcp_servers"] ?? {}) as JsonObject;
-  const names = new Set([
-    ...Object.keys(configured),
-    ...inherited.map(({ name }) => name),
-  ]);
+  const names = new Set([...Object.keys(configured), ...inherited]);
   return Object.fromEntries(
     [...names].map((name) => [
       name,
@@ -814,8 +953,11 @@ export async function matchCompletedScan(
   const comparison = await (options.matchFindings ?? matchScanFindings)(input, {
     allowHistoricalUncertainty: true,
     config: options.config,
+    createCodex: options.createCodex,
     cyberAccessProgram: options.cyberAccessProgram,
     environment: options.environment,
+    inheritedPermissions: options.inheritedPermissions,
+    preserveProviderEnvironment: options.preserveProviderEnvironment,
     model: options.model,
     nativeProfile: options.nativeProfile,
     signal: options.signal,
@@ -1175,6 +1317,7 @@ export async function comparisonEnvironment(
   signal?: AbortSignal,
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
   config?: JsonObject,
+  preserveProviderEnvironment = false,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const environment = Object.fromEntries(
@@ -1189,6 +1332,7 @@ export async function comparisonEnvironment(
       environment[key] = home;
     }
   }
+  if (preserveProviderEnvironment) return environment;
   if (
     hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
   ) {

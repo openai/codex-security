@@ -25,11 +25,11 @@ export async function resolvePythonCommand(
 ): Promise<string> {
   if (
     options.configuredPython === undefined &&
-    process.env.CODEX_SECURITY_PYTHON_COMMAND
+    process.env["CODEX_SECURITY_PYTHON_COMMAND"]
   ) {
-    return process.env.CODEX_SECURITY_PYTHON_COMMAND;
+    return process.env["CODEX_SECURITY_PYTHON_COMMAND"];
   }
-  const configuredPython = options.configuredPython ?? process.env.PYTHON;
+  const configuredPython = options.configuredPython ?? process.env["PYTHON"];
   if (configuredPython?.trim()) {
     return configuredPython.trim();
   }
@@ -37,7 +37,7 @@ export async function resolvePythonCommand(
   const platform = options.platform ?? process.platform;
   const pathImplementation = platform === "win32" ? path.win32 : path.posix;
   const cacheDirectory =
-    (options.cacheDirectory ?? process.env.XDG_CACHE_HOME) ||
+    (options.cacheDirectory ?? process.env["XDG_CACHE_HOME"]) ||
     pathImplementation.join(options.homeDirectory ?? homedir(), ".cache");
   const bundledPythonRoot = pathImplementation.join(
     cacheDirectory,
@@ -141,4 +141,30 @@ export function runPythonWithInput(
     });
     child.stdin.end(input);
   });
+}
+
+export function workbenchCommandTimeout(command: string | undefined): number {
+  return [
+    "begin-deep-scan",
+    "cancel-scan",
+    "fail-scan",
+    "complete-scan",
+    "export-findings",
+    "get-scan",
+    "get-workspace",
+    "inspect-setup",
+    "list-findings",
+    "preserve-scan-results",
+    "recover-scan-results",
+    "request-finding-remediation",
+    "request-finding-remediation-action",
+    "save-workspace",
+    "set-finding-triage",
+    "set-finding-remediation",
+    "start-headless-standard-scan",
+    "start-prompt-only-scan",
+    "start-scan",
+  ].includes(command ?? "")
+    ? 300_000
+    : 30_000;
 }

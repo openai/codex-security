@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,8 +20,9 @@ import pytest
 from workbench_test_support import ScanFixtureTestCase, load_script, windows_file_backend
 
 FINALIZER = load_script("finalize_scan_contract")
+
+
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "completed-scan"
-CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
 
 
 class FinalizeScanContractTest(ScanFixtureTestCase):
@@ -1338,7 +1340,33 @@ The extraction root is not enforced.
         self.coverage["surfaces"][0]["disposition"] = "no_issue_found"
         self.write_scan()
 
-        backend = windows_file_backend()
+        backend = mock.Mock()
+
+        def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
+            return os.open(scan_dir / relative_path, os.O_RDONLY)
+
+        def atomic_write(
+            scan_dir: Path,
+            relative_path: str,
+            payload: bytes,
+            *,
+            expected_root_identity: tuple[int, int] | None = None,
+        ) -> None:
+            path = scan_dir / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+
+        def unlink_if_exists(
+            scan_dir: Path,
+            relative_path: str,
+            *,
+            expected_root_identity: tuple[int, int] | None = None,
+        ) -> None:
+            (scan_dir / relative_path).unlink(missing_ok=True)
+
+        backend.open_read_fd.side_effect = open_read_fd
+        backend.atomic_write.side_effect = atomic_write
+        backend.unlink_if_exists.side_effect = unlink_if_exists
 
         with (
             mock.patch.object(FINALIZER.os, "supports_dir_fd", set()),
@@ -3138,6 +3166,13 @@ The extraction root is not enforced.
             FINALIZER.build_sarif(self.manifest, {"findings": findings}, source_root)
 
         self.assertEqual(line_hashes.call_count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
 
 
 @pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])

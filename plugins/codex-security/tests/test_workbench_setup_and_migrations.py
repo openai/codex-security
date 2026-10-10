@@ -24,7 +24,6 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
-    empty_target_scan,
     get_scan,
     initialize_git_repository,
     load_script,
@@ -38,8 +37,6 @@ from workbench_test_support import (
     workspace_command,
     write_completed_contract,
 )
-
-SCHEMA = load_script("workbench_schema")
 
 EXPECTED_MIGRATIONS = [
     (1, "initial workbench schema"),
@@ -89,221 +86,9 @@ EXPECTED_MIGRATIONS = [
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
     (47, "snapshot deep scan discovery context"),
+    (48, "persist composition child membership"),
+    (49, "reuse scan severity assessments"),
 ]
-
-
-@pytest.mark.parametrize(
-    "code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST]
-)
-def test_state_directory_failure_preserves_original_exception(
-    workbench_api, tmp_path, code, capsys
-):
-    error = OSError(code, os.strerror(code), str(tmp_path / "state"))
-    connect = workbench_api["connect"]
-    with (
-        mock.patch.dict(
-            connect.__globals__,
-            {
-                "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
-                "create_private_directory": mock.Mock(side_effect=error),
-            },
-        ),
-        pytest.raises(OSError) as failure,
-    ):
-        connect()
-    assert str(failure.value) == str(error)
-    assert failure.value is error
-    detail = capsys.readouterr().err
-    assert str(tmp_path / "state" / "workbench.sqlite3") in detail
-    assert "SQLite journal files" in detail
-    assert "CODEX_SECURITY_STATE_DIR" in detail
-
-
-@pytest.mark.parametrize("during_open", [True, False])
-def test_state_open_or_migration_failure_preserves_original_exception(
-    workbench_api, tmp_path, during_open, capsys
-):
-    error = sqlite3.OperationalError("unable to open database file")
-    connect = workbench_api["connect"]
-    connection = sqlite3.connect(":memory:")
-    try:
-        with (
-            mock.patch.dict(
-                connect.__globals__,
-                {
-                    "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
-                    "apply_migrations": mock.Mock(side_effect=error),
-                },
-            ),
-            mock.patch.object(
-                sqlite3,
-                "connect",
-                side_effect=error if during_open else None,
-                return_value=connection,
-            ),
-            pytest.raises(sqlite3.OperationalError) as failure,
-        ):
-            connect()
-        assert failure.value is error
-        assert str(error) == "unable to open database file"
-        detail = capsys.readouterr().err
-        assert str(tmp_path / "state" / "workbench.sqlite3") in detail
-        assert "SQLite journal files" in detail
-        assert "CODEX_SECURITY_STATE_DIR" in detail
-    finally:
-        connection.close()
-
-
-def create_historical_database(
-    before_version: int,
-    extra_migrations: tuple[tuple[int, str, str], ...] = (),
-) -> tuple[sqlite3.Connection, Callable[[sqlite3.Connection], None]]:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = (
-        *(migration for migration in namespace["MIGRATIONS"] if migration[0] < before_version),
-        *extra_migrations,
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
-    return connection, apply_migrations
-
-
-def create_migration_history(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-        """
-    )
-
-
-def apply_historical_migrations(
-    connection: sqlite3.Connection,
-    migrations: Iterable[tuple[int, str, str]],
-    timestamp: str,
-) -> None:
-    for version, name, sql in migrations:
-        for statement in SCHEMA.sql_statements(sql):
-            connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-            (version, name, timestamp),
-        )
-
-
-def add_legacy_profile_columns(connection: sqlite3.Connection, *, dynamic: bool) -> tuple[str, str]:
-    if dynamic:
-        model = "codex-next/security-pro"
-        effort = "adaptive_depth"
-        model_definition = """
-            TEXT CHECK (
-                execution_model IS NULL
-                OR (
-                    execution_model = trim(execution_model)
-                    AND length(execution_model) BETWEEN 1 AND 128
-                )
-            )
-        """
-        effort_definition = """
-            TEXT CHECK (
-                (reasoning_effort IS NULL
-                 OR (
-                    reasoning_effort = trim(reasoning_effort)
-                    AND length(reasoning_effort) BETWEEN 1 AND 64
-                 ))
-                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
-            )
-        """
-    else:
-        model = "gpt-5.5"
-        effort = "high"
-        model_definition = """
-            TEXT CHECK (
-                execution_model IS NULL
-                OR execution_model IN ('gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5')
-            )
-        """
-        effort_definition = """
-            TEXT CHECK (
-                (reasoning_effort IS NULL
-                 OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh'))
-                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
-            )
-        """
-    for table in ("workspaces", "scans"):
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model {model_definition}")
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN reasoning_effort {effort_definition}")
-    return model, effort
-
-
-def insert_legacy_profile_scan(
-    connection: sqlite3.Connection,
-    tmp_path: Path,
-    model: str,
-    effort: str,
-    timestamp: str,
-) -> tuple[str, str]:
-    workspace_id, scan_id = str(uuid.uuid4()), str(uuid.uuid4())
-    connection.execute(
-        """
-        INSERT INTO workspaces (
-            id, target_path, default_mode, execution_model, reasoning_effort,
-            created_at, updated_at
-        ) VALUES (?, ?, 'standard', ?, ?, ?, ?)
-        """,
-        (workspace_id, str(tmp_path / "target"), model, effort, timestamp, timestamp),
-    )
-    connection.execute(
-        """
-        INSERT INTO scans (
-            id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-            status, phase, started_at, created_at, updated_at, execution_model, reasoning_effort
-        ) VALUES (?, ?, ?, 'legacy-revision', '.', 'standard', ?, 'running',
-            'discovery', ?, ?, ?, ?, ?)
-        """,
-        (
-            scan_id,
-            workspace_id,
-            str(tmp_path / "target"),
-            str(tmp_path / "legacy-scan"),
-            timestamp,
-            timestamp,
-            timestamp,
-            model,
-            effort,
-        ),
-    )
-    return workspace_id, scan_id
-
-
-def assert_new_scan_model_is_independent(state_dir: Path, target: Path, scan_root: Path) -> None:
-    current_workspace = create_saved_workspace(state_dir, target)
-    current_scan = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(current_workspace["id"]),
-        "--scan-root",
-        str(scan_root),
-        "--model",
-        "gpt-5.6-sol",
-    )
-    current_scan_id = str(current_scan["results"]["scanId"])
-    assert current_scan["results"]["reasoningEffort"] is None
-    update_progress(state_dir, current_scan_id, "--reasoning-effort", "high")
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute(
-            """
-            SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort
-            FROM scans WHERE id = ?
-            """,
-            (current_scan_id,),
-        ).fetchone() == (None, None, "gpt-5.6-sol", "high")
 
 
 def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> None:
@@ -320,38 +105,6 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
             check=True,
         )
     with sqlite3.connect(snapshot) as connection:
-        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
-
-
-@pytest.mark.parametrize("alias_kind", ["same", "symlink", "hardlink"])
-def test_sqlite_snapshot_rejects_destination_aliasing_source(
-    tmp_path: Path, alias_kind: str
-) -> None:
-    source = tmp_path / "source.sqlite3"
-    with sqlite3.connect(source) as connection:
-        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
-        connection.execute("INSERT INTO records VALUES ('sealed')")
-        connection.commit()
-    destination = source
-    if alias_kind != "same":
-        destination = tmp_path / "alias.sqlite3"
-        if alias_kind == "symlink":
-            try:
-                destination.symlink_to(source)
-            except OSError as error:
-                pytest.skip(f"creating a symbolic link requires host support: {error}")
-        else:
-            destination.hardlink_to(source)
-    completed = subprocess.run(
-        [sys.executable, str(SNAPSHOT_SCRIPT), str(source), str(destination)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert completed.returncode == 2
-    assert "same file as source" in completed.stderr
-    with sqlite3.connect(source) as connection:
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
 
@@ -409,6 +162,38 @@ def test_windows_completion_lock_retries_and_unlocks(tmp_path: Path) -> None:
     assert sleep.call_args_list == [mock.call(0.05), mock.call(0.05)]
     lock_path = tmp_path / "completion-locks" / f"{scan_id}.lock"
     assert lock_path.stat().st_size == 1
+
+
+def test_completion_lock_reentry_is_scoped_to_the_state_directory(
+    tmp_path: Path, workbench_api
+) -> None:
+    completion_lock = workbench_api["scan_completion_lock"]
+    lock_globals = completion_lock.__wrapped__.__globals__
+    scan_id = str(uuid.uuid4())
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(tmp_path / "first")}),
+        mock.patch.dict(
+            lock_globals,
+            acquire_completion_file_lock=mock.Mock(),
+            release_completion_file_lock=mock.Mock(),
+        ),
+    ):
+        acquire = lock_globals["acquire_completion_file_lock"]
+        release = lock_globals["release_completion_file_lock"]
+        with completion_lock(scan_id):
+            with pytest.raises(RuntimeError, match="nested failure"), completion_lock(scan_id):
+                raise RuntimeError("nested failure")
+            assert acquire.call_count == 1
+            release.assert_not_called()
+            with (
+                mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(tmp_path / "second")}),
+                completion_lock(scan_id),
+            ):
+                assert acquire.call_count == 2
+            assert release.call_count == 1
+        with completion_lock(scan_id):
+            assert acquire.call_count == 3
+        assert release.call_count == 3
 
 
 def test_workbench_does_not_run_textconv_during_diff_setup(tmp_path: Path) -> None:
@@ -513,25 +298,6 @@ def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path)
             )
 
     assert started["results"]["progress"]["coverage"]["filesTotal"] == 1
-
-
-def initialize_git_repository_with_submodule(target: Path, dependency: Path) -> None:
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
 
 
 def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
@@ -664,9 +430,14 @@ def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: boo
 
 
 def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
-    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    workspace = create_saved_workspace(state_dir, target)
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
-    scan_command(state_dir, "complete-scan", scan_id)
+    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    thread_scan_id, _ = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
     database = state_dir / "workbench.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -702,7 +473,7 @@ def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) 
                 state_dir,
                 "set-scan-thread",
                 "--scan-id",
-                scan_id,
+                thread_scan_id,
                 "--thread-id",
                 "updated-thread",
             )
@@ -791,10 +562,15 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
 def test_severity_migration_only_copies_assessments_with_matching_scan_occurrences(
     indexed: bool,
 ) -> None:
-    connection, apply_migrations = create_historical_database(43)
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    previous = tuple(item for item in namespace["MIGRATIONS"] if item[0] < 42)
     timestamp = "2026-09-01T00:00:00Z"
-    with connection:
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        namespace["apply_schema_migrations"](
+            connection, previous, namespace["now"], namespace["backfill_security_targets"]
+        )
         connection.execute(
             "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
             ("workspace", timestamp, timestamp),
@@ -837,8 +613,8 @@ def test_severity_migration_only_copies_assessments_with_matching_scan_occurrenc
                 (timestamp,),
             )
 
-        apply_migrations(connection)
-        apply_migrations(connection)
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
 
         migrated = connection.execute(
             "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
@@ -1347,7 +1123,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
-            EXPECTED_MIGRATIONS[-1][0],
+            len(EXPECTED_MIGRATIONS),
         )
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
@@ -1985,6 +1761,9 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     database = state_dir / "workbench.sqlite3"
 
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX IF EXISTS scans_by_composition_parent")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 48")
+        connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         connection.execute(
@@ -2192,54 +1971,6 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
         }
-
-
-@pytest.mark.parametrize("preflight", [False, True], ids=("phase", "preflight"))
-def test_workbench_upgrades_pre_release_phase_and_preflight_progress_migration(
-    tmp_path: Path, preflight: bool
-) -> None:
-    state_dir = tmp_path / "state"
-    database = state_dir / "workbench.sqlite3"
-    database.parent.mkdir(parents=True)
-    migrations = SCHEMA.MIGRATIONS
-    phase_migration = next(
-        migration for migration in migrations if migration[1] == "phase-specific scan progress"
-    )
-    historical_migrations = [*migrations[:11], (12, *phase_migration[1:])]
-    expected_progress_columns = {
-        "scope_file_count",
-        "phase_items_completed",
-        "phase_items_total",
-        "phase_progress_unit",
-    }
-    if preflight:
-        preflight_migration = next(
-            migration for migration in migrations if migration[1] == "current scan preflight state"
-        )
-        historical_migrations.append((13, *preflight_migration[1:]))
-        expected_progress_columns.update(
-            ("preflight_checks_completed", "preflight_checks_total", "preflight_issues_json")
-        )
-
-    with sqlite3.connect(database) as connection:
-        create_migration_history(connection)
-        apply_historical_migrations(connection, historical_migrations, "2026-07-01T00:00:00Z")
-
-    run_workbench(state_dir, "database-info")
-
-    with sqlite3.connect(database) as connection:
-        assert (
-            connection.execute(
-                "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
-            ).fetchall()
-            == EXPECTED_MIGRATIONS[11:]
-        )
-        assert "continuation_thread_id" in {
-            row[1] for row in connection.execute("PRAGMA table_info(scans)")
-        }
-        assert {row[1] for row in connection.execute("PRAGMA table_info(scan_progress)")} >= (
-            expected_progress_columns
-        )
 
 
 def test_workbench_normalizes_pre_release_migration_numbers(tmp_path: Path) -> None:
@@ -2544,6 +2275,322 @@ def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_
     scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
     assert {"execution_model", "reasoning_effort"}.issubset(scan_columns)
     assert "legacy_execution_model" not in scan_columns
+
+
+SCHEMA = load_script("workbench_schema")
+
+
+@pytest.mark.parametrize(
+    "code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST]
+)
+def test_state_directory_failure_preserves_original_exception(
+    workbench_api, tmp_path, code, capsys
+):
+    error = OSError(code, os.strerror(code), str(tmp_path / "state"))
+    connect = workbench_api["connect"]
+    with (
+        mock.patch.dict(
+            connect.__globals__,
+            {
+                "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                "create_private_directory": mock.Mock(side_effect=error),
+            },
+        ),
+        pytest.raises(OSError) as failure,
+    ):
+        connect()
+    assert str(failure.value) == str(error)
+    assert failure.value is error
+    detail = capsys.readouterr().err
+    assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+    assert "SQLite journal files" in detail
+    assert "CODEX_SECURITY_STATE_DIR" in detail
+
+
+@pytest.mark.parametrize("during_open", [True, False])
+def test_state_open_or_migration_failure_preserves_original_exception(
+    workbench_api, tmp_path, during_open, capsys
+):
+    error = sqlite3.OperationalError("unable to open database file")
+    connect = workbench_api["connect"]
+    connection = sqlite3.connect(":memory:")
+    try:
+        with (
+            mock.patch.dict(
+                connect.__globals__,
+                {
+                    "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                    "apply_migrations": mock.Mock(side_effect=error),
+                },
+            ),
+            mock.patch.object(
+                sqlite3,
+                "connect",
+                side_effect=error if during_open else None,
+                return_value=connection,
+            ),
+            pytest.raises(sqlite3.OperationalError) as failure,
+        ):
+            connect()
+        assert failure.value is error
+        assert str(error) == "unable to open database file"
+        detail = capsys.readouterr().err
+        assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+        assert "SQLite journal files" in detail
+        assert "CODEX_SECURITY_STATE_DIR" in detail
+    finally:
+        connection.close()
+
+
+def create_historical_database(
+    before_version: int,
+    extra_migrations: tuple[tuple[int, str, str], ...] = (),
+) -> tuple[sqlite3.Connection, Callable[[sqlite3.Connection], None]]:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    apply_migrations = namespace["apply_migrations"]
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    historical_migrations = (
+        *(migration for migration in namespace["MIGRATIONS"] if migration[0] < before_version),
+        *extra_migrations,
+    )
+    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
+        apply_migrations(connection)
+    return connection, apply_migrations
+
+
+def create_migration_history(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )
+        """
+    )
+
+
+def apply_historical_migrations(
+    connection: sqlite3.Connection,
+    migrations: Iterable[tuple[int, str, str]],
+    timestamp: str,
+) -> None:
+    for version, name, sql in migrations:
+        for statement in SCHEMA.sql_statements(sql):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+            (version, name, timestamp),
+        )
+
+
+def add_legacy_profile_columns(connection: sqlite3.Connection, *, dynamic: bool) -> tuple[str, str]:
+    if dynamic:
+        model = "codex-next/security-pro"
+        effort = "adaptive_depth"
+        model_definition = """
+            TEXT CHECK (
+                execution_model IS NULL
+                OR (
+                    execution_model = trim(execution_model)
+                    AND length(execution_model) BETWEEN 1 AND 128
+                )
+            )
+        """
+        effort_definition = """
+            TEXT CHECK (
+                (reasoning_effort IS NULL
+                 OR (
+                    reasoning_effort = trim(reasoning_effort)
+                    AND length(reasoning_effort) BETWEEN 1 AND 64
+                 ))
+                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
+            )
+        """
+    else:
+        model = "gpt-5.5"
+        effort = "high"
+        model_definition = """
+            TEXT CHECK (
+                execution_model IS NULL
+                OR execution_model IN ('gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5')
+            )
+        """
+        effort_definition = """
+            TEXT CHECK (
+                (reasoning_effort IS NULL
+                 OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh'))
+                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
+            )
+        """
+    for table in ("workspaces", "scans"):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model {model_definition}")
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN reasoning_effort {effort_definition}")
+    return model, effort
+
+
+def insert_legacy_profile_scan(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+    model: str,
+    effort: str,
+    timestamp: str,
+) -> tuple[str, str]:
+    workspace_id, scan_id = str(uuid.uuid4()), str(uuid.uuid4())
+    connection.execute(
+        """
+        INSERT INTO workspaces (
+            id, target_path, default_mode, execution_model, reasoning_effort,
+            created_at, updated_at
+        ) VALUES (?, ?, 'standard', ?, ?, ?, ?)
+        """,
+        (workspace_id, str(tmp_path / "target"), model, effort, timestamp, timestamp),
+    )
+    connection.execute(
+        """
+        INSERT INTO scans (
+            id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+            status, phase, started_at, created_at, updated_at, execution_model, reasoning_effort
+        ) VALUES (?, ?, ?, 'legacy-revision', '.', 'standard', ?, 'running',
+            'discovery', ?, ?, ?, ?, ?)
+        """,
+        (
+            scan_id,
+            workspace_id,
+            str(tmp_path / "target"),
+            str(tmp_path / "legacy-scan"),
+            timestamp,
+            timestamp,
+            timestamp,
+            model,
+            effort,
+        ),
+    )
+    return workspace_id, scan_id
+
+
+def assert_new_scan_model_is_independent(state_dir: Path, target: Path, scan_root: Path) -> None:
+    current_workspace = create_saved_workspace(state_dir, target)
+    current_scan = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        str(current_workspace["id"]),
+        "--scan-root",
+        str(scan_root),
+        "--model",
+        "gpt-5.6-sol",
+    )
+    current_scan_id = str(current_scan["results"]["scanId"])
+    assert current_scan["results"]["reasoningEffort"] is None
+    update_progress(state_dir, current_scan_id, "--reasoning-effort", "high")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            """
+            SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort
+            FROM scans WHERE id = ?
+            """,
+            (current_scan_id,),
+        ).fetchone() == (None, None, "gpt-5.6-sol", "high")
+
+
+@pytest.mark.parametrize("alias_kind", ["same", "symlink", "hardlink"])
+def test_sqlite_snapshot_rejects_destination_aliasing_source(
+    tmp_path: Path, alias_kind: str
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('sealed')")
+        connection.commit()
+    destination = source
+    if alias_kind != "same":
+        destination = tmp_path / "alias.sqlite3"
+        if alias_kind == "symlink":
+            try:
+                destination.symlink_to(source)
+            except OSError as error:
+                pytest.skip(f"creating a symbolic link requires host support: {error}")
+        else:
+            destination.hardlink_to(source)
+    completed = subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), str(source), str(destination)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "same file as source" in completed.stderr
+    with sqlite3.connect(source) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+def initialize_git_repository_with_submodule(target: Path, dependency: Path) -> None:
+    initialize_git_repository(target)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            str(dependency),
+            "vendor/dependency",
+        ],
+        cwd=target,
+        check=True,
+    )
+    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+
+
+@pytest.mark.parametrize("preflight", [False, True], ids=("phase", "preflight"))
+def test_workbench_upgrades_pre_release_phase_and_preflight_progress_migration(
+    tmp_path: Path, preflight: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    database = state_dir / "workbench.sqlite3"
+    database.parent.mkdir(parents=True)
+    migrations = SCHEMA.MIGRATIONS
+    phase_migration = next(
+        migration for migration in migrations if migration[1] == "phase-specific scan progress"
+    )
+    historical_migrations = [*migrations[:11], (12, *phase_migration[1:])]
+    expected_progress_columns = {
+        "scope_file_count",
+        "phase_items_completed",
+        "phase_items_total",
+        "phase_progress_unit",
+    }
+    if preflight:
+        preflight_migration = next(
+            migration for migration in migrations if migration[1] == "current scan preflight state"
+        )
+        historical_migrations.append((13, *preflight_migration[1:]))
+        expected_progress_columns.update(
+            ("preflight_checks_completed", "preflight_checks_total", "preflight_issues_json")
+        )
+
+    with sqlite3.connect(database) as connection:
+        create_migration_history(connection)
+        apply_historical_migrations(connection, historical_migrations, "2026-07-01T00:00:00Z")
+
+    run_workbench(state_dir, "database-info")
+
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
+            ).fetchall()
+            == EXPECTED_MIGRATIONS[11:]
+        )
+        assert "continuation_thread_id" in {
+            row[1] for row in connection.execute("PRAGMA table_info(scans)")
+        }
+        assert {row[1] for row in connection.execute("PRAGMA table_info(scan_progress)")} >= (
+            expected_progress_columns
+        )
 
 
 @pytest.mark.cross_platform

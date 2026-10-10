@@ -89,7 +89,12 @@ export function runEvents(
   repositoryRevision = "deadbeef",
 ): ReturnType<typeof runScanEvents> {
   return runScanEvents({
-    thread: { id: null },
+    thread: {
+      id: null,
+      async runStreamed() {
+        return { events };
+      },
+    },
     events,
     signal: (options.abortController ?? new AbortController()).signal,
     scanDir,
@@ -141,3 +146,5 @@ export function codexFactory<Run>(
 }
 
 export const failedPostScanEvents = failedEvents;
+
+export { createApiTestFixtures } from "./temporary-directories.js";

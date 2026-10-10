@@ -17,6 +17,8 @@ import path from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { build } from "esbuild";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 import { applicationRoot, buildServer } from "./build-server.ts";
 
@@ -30,11 +32,15 @@ let client: Client | undefined;
 try {
   await mkdir(repository);
   await writeFile(path.join(repository, "example.py"), "value = 1\n");
-  await buildServer(bundle, {
+  await build({
+    ...mcpBundleOptions,
     define: {
       __dirname: JSON.stringify(applicationRoot),
-      "import.meta.url": "__filename",
+      ...mcpBundleOptions.define,
     },
+    entryPoints: [path.join(applicationRoot, "main.ts")],
+    logLevel: "silent",
+    outfile: bundle,
   });
   client = await connect();
   const started = await call<{

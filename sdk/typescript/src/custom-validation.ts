@@ -68,6 +68,7 @@ interface Schema {
 interface DraftManifest {
   scan: {
     id: string;
+    complete?: boolean;
     threatModel?: unknown;
     scope: { validationMode?: string };
     sealedAt?: string;
@@ -447,6 +448,7 @@ export async function runCustomValidation(options: {
   ];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
+  delete manifest.scan.complete;
   // Rewrite the captured draft, not any canonical-file edits made during validation.
   for (const [index, name] of DOCUMENTS.entries())
     await writeJson(scanDir, name, documents[index], signal);

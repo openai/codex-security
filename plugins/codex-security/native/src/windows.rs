@@ -359,6 +359,25 @@ impl WindowsHandle {
     }
 
     #[napi]
+    pub fn lock(&self, nonblocking: bool) -> u32 {
+        let file = match self.file() {
+            Ok(file) => file,
+            Err(error) => return io_error(error),
+        };
+        if nonblocking {
+            match file.try_lock() {
+                Ok(()) => 0,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION
+                }
+                Err(std::fs::TryLockError::Error(error)) => io_error(error),
+            }
+        } else {
+            io_status(file.lock())
+        }
+    }
+
+    #[napi]
     pub fn attributes(&self) -> AttributesResult {
         let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
         let error = status(unsafe {

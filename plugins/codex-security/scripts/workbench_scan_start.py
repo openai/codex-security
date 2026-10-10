@@ -125,13 +125,24 @@ def archive_scan(
     if previous_scan is None and not (args.archive_existing and has_contents):
         yield archived_scan_dir
         return
-    artifacts = (
+    scans = (
         connection.execute(
-            "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (previous_scan["id"],)
+            "WITH RECURSIVE descendants AS ("
+            "SELECT id, scan_dir FROM scans WHERE id = ? UNION "
+            "SELECT scans.id, scans.scan_dir FROM scans "
+            "JOIN descendants ON scans.parent_scan_id = descendants.id) "
+            "SELECT id, scan_dir FROM descendants",
+            (previous_scan["id"],),
         ).fetchall()
         if previous_scan is not None
         else []
     )
+    scans = [scan for scan in scans if Path(scan["scan_dir"]).is_relative_to(scan_dir)]
+    artifacts = connection.execute(
+        "SELECT scan_id, kind, path FROM scan_artifacts "
+        "WHERE scan_id IN (SELECT value FROM json_each(?))",
+        (json.dumps([scan["id"] for scan in scans]),),
+    ).fetchall()
     moved = False
     try:
         if archived_scan_dir is None:
@@ -162,10 +173,12 @@ def archive_scan(
             moved = True
             scan_dir.mkdir(mode=0o700)
             scan_dir.chmod(0o700)
-        if previous_scan is not None:
+        for scan in scans:
+            previous_directory = Path(scan["scan_dir"])
+            archived_directory = archived_scan_dir / previous_directory.relative_to(scan_dir)
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-                (str(archived_scan_dir), timestamp, previous_scan["id"]),
+                (str(archived_directory), timestamp, scan["id"]),
             )
             connection.execute(
                 """UPDATE finding_workflows SET scan_dir = ?,
@@ -173,22 +186,22 @@ def archive_scan(
                         THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
                     WHERE scan_id = ? AND scan_dir = ?""",
                 (
-                    str(archived_scan_dir),
-                    str(scan_dir / "exports" / "results.sarif"),
-                    str(archived_scan_dir / "exports" / "results.sarif"),
-                    previous_scan["id"],
-                    str(scan_dir),
+                    str(archived_directory),
+                    str(previous_directory / "exports" / "results.sarif"),
+                    str(archived_directory / "exports" / "results.sarif"),
+                    scan["id"],
+                    str(previous_directory),
                 ),
             )
-            for artifact in artifacts:
-                try:
-                    relative_path = Path(artifact["path"]).relative_to(scan_dir)
-                except ValueError:
-                    continue
-                connection.execute(
-                    "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
-                    (str(archived_scan_dir / relative_path), previous_scan["id"], artifact["kind"]),
-                )
+        for artifact in artifacts:
+            try:
+                relative_path = Path(artifact["path"]).relative_to(scan_dir)
+            except ValueError:
+                continue
+            connection.execute(
+                "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
+                (str(archived_scan_dir / relative_path), artifact["scan_id"], artifact["kind"]),
+            )
         # The caller commits registration before leaving this context. Older SDKs
         # supplied an already-moved directory; only restore moves we own.
         yield archived_scan_dir

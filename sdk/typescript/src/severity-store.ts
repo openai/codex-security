@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { workflowDigest } from "./finding-workflow.js";
 import { join } from "node:path";
 import {
   severityClassificationSchema,
@@ -35,11 +36,17 @@ export class SeverityStore {
     reprocess: boolean,
   ): SeverityClassificationCheckpoint {
     return {
-      load: async (result) => {
+      load: async (result, findings) => {
         const response = await this.run("severity-classification", {
           action: "begin",
           scanId,
           findingIds,
+          inputs: Object.fromEntries(
+            findings.map((finding) => [
+              finding.findingId,
+              workflowDigest(finding),
+            ]),
+          ),
           assessedAt: result.assessedAt,
           rubricSha256: result.rubricSha256,
           knowledgeBaseSha256: result.knowledgeBaseSha256,
@@ -51,9 +58,10 @@ export class SeverityStore {
               result,
             );
       },
-      save: async (finding, assessment, result) => {
+      save: async (finding, assessment, result, reused = false) => {
         await this.run("severity-classification", {
           action: "save",
+          reused,
           scanId,
           finding,
           assessment: {

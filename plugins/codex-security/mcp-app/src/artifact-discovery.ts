@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { decodeUtf8 } from "./helpers/utf8.js";
-import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
+import { runPythonWithInput } from "./python_command.js";
 import {
   stableJson,
   candidateRelativePath,
@@ -27,7 +27,11 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+import { candidateSchemaV1 } from "./artifact-candidate.js";
+import {
+  missingPythonHelperMessage,
+  resolvePythonCommand,
+} from "./python_command.js";
 
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";
@@ -69,6 +73,12 @@ export type CompactDiscoveryCandidate = z.infer<typeof candidateSchemaV1> &
   Record<string, unknown>;
 
 /** Every exposed validator is derived from the checked-in JSON Schema source. */
+export const rawDiscoveryCandidateSchema = loadArtifactZodSchema(
+  discoverySchemaDocuments,
+  discoveryCandidateDefinitions.$id,
+  "rawDiscoveryCandidate",
+) as z.ZodType<RawDiscoveryCandidate>;
+
 export const compactDiscoveryCandidateSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,
   discoveryCandidateDefinitions.$id,

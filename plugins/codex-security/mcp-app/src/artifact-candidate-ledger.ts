@@ -3,7 +3,7 @@ import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import validationSchema from "../../schemas/tools/candidate-validations.schema.json";
 import attackPathSchema from "../../schemas/tools/candidate-attack-paths.schema.json";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+import { candidateSchemaV1 } from "./artifact-candidate.js";
 import {
   artifactDestination,
   readArtifactJsonl,
@@ -62,7 +62,7 @@ export async function recordCodexSecurityCandidateValidations(
   operation: "replace";
   rowsWritten: number;
 }> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       "Candidate validation requires a scan-bound artifact context.",
     );
@@ -154,7 +154,7 @@ export async function recordCodexSecurityCandidateAttackPaths(
   operation: "replace";
   rowsWritten: number;
 }> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       "Candidate attack-path analysis requires a scan-bound artifact context.",
     );

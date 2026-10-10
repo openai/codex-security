@@ -581,12 +581,17 @@ def _open_scan_local_file_with_path(
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
+        backend = _windows_scan_local_files()
         try:
             backend = _windows_scan_local_files()
             if resolve_spelling:
                 return backend.open_read_fd_with_path(scan_dir, relative_path, context)
             return backend.open_read_fd(scan_dir, relative_path, context), relative_path
         except OSError as exc:
+            if exc.errno in backend._MISSING_ERRORS:
+                raise ContractError(str(exc)) from FileNotFoundError(
+                    errno.ENOENT, exc.strerror, exc.filename
+                )
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -739,7 +744,6 @@ def write_scan_local_bytes(
             raise ContractError("external output path: expected a safe file name")
     else:
         relative_path = _require_portable_relative_path(relative_path, "scan-local output path")
-    path = scan_dir / relative_path
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local output requires descriptor-relative file operations")
@@ -808,7 +812,7 @@ def write_scan_local_bytes(
                 finally:
                     if existing_fd >= 0:
                         os.close(existing_fd)
-        temp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
+        temp_name = f".codex-security-{secrets.token_hex(8)}.tmp"
         temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
         with os.fdopen(temp_fd, "wb") as handle:
             if owner_read_write:
@@ -832,21 +836,53 @@ def write_scan_local_bytes(
             os.close(root_fd)
 
 
-def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:
+def prepare_scan_local_directory(
+    scan_dir: Path,
+    relative_path: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> None:
+    scan_dir = _require_scan_directory(scan_dir)
+    relative_path = _require_portable_relative_path(relative_path, "scan-local directory path")
+    if not _descriptor_relative_writes_available():
+        if not _is_windows():
+            raise ContractError("scan-local output requires descriptor-relative file operations")
+        _windows_scan_local_files().prepare_directory(
+            scan_dir, relative_path, expected_root_identity=expected_root_identity
+        )
+        return
+    root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
+    try:
+        directory_fd = _open_scan_local_directory(
+            root_fd, PurePosixPath(relative_path).parts, create=True
+        )
+        os.close(directory_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _remove_scan_local_file_if_exists(
+    scan_dir: Path,
+    relative_path: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> None:
     scan_dir = _require_scan_directory(scan_dir)
     relative_path = _require_portable_relative_path(relative_path, "scan-local cleanup path")
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local cleanup requires descriptor-relative file operations")
         try:
-            _windows_scan_local_files().unlink_if_exists(scan_dir, relative_path)
+            _windows_scan_local_files().unlink_if_exists(
+                scan_dir, relative_path, expected_root_identity=expected_root_identity
+            )
         except OSError as exc:
             raise ContractError(f"{relative_path}: {exc}") from exc
         return
     root_fd: int | None = None
     parent_fd: int | None = None
     try:
-        root_fd = _open_verified_scan_directory(scan_dir)
+        root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
         parts = PurePosixPath(relative_path).parts
         parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=False)
         try:
@@ -1019,11 +1055,10 @@ def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, int]:
 def _recover_unsealed_findings(
     manifest: dict[str, Any],
     findings: dict[str, Any],
-    schema_dir: Path,
+    schema: dict[str, Any],
     scan_dir: Path,
     warnings: list[str],
 ) -> list[str]:
-    schema = _read_json(schema_dir / "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
     finding_array = _require_dict(properties, "findings", "findings.schema.properties")
     finding_schema = _require_dict(finding_array, "items", "findings.schema.properties.findings")
@@ -2984,9 +3019,13 @@ def _prepare_scan_finalization(
     findings_for_validation = (
         _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
     )
-    if not was_sealed and completion_warnings is not None:
+    if was_sealed:
+        _validate_findings(manifest, findings_for_validation)
+        _validate_derived_finding_identities(manifest, findings)
+    elif completion_warnings is not None:
+        schema = _read_json(schema_dir / "findings.schema.json")
         discarded_findings = _recover_unsealed_findings(
-            manifest, findings, schema_dir, scan_dir, completion_warnings
+            manifest, findings, schema, scan_dir, completion_warnings
         )
         _recover_unsealed_coverage(
             coverage, schema_dir, scan_dir, completion_warnings, discarded_findings

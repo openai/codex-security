@@ -1,26 +1,39 @@
+import { cp } from "node:fs/promises";
+import { symlink } from "node:fs/promises";
+import { basename } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  mcpSmokeInput,
+  mcpSmokeResponses,
+} from "../scripts/fixtures/mcp-smoke.mjs";
+
 import { execFile } from "node:child_process";
+
 import {
   chmod,
-  cp,
   mkdir,
   readFile,
   readdir,
   stat,
-  symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, delimiter, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { brotliDecompressSync } from "node:zlib";
+
+import { delimiter, join } from "node:path";
+
+import { fileURLToPath } from "node:url";
+
 import { promisify } from "node:util";
+
 import { afterEach, describe, expect, test } from "bun:test";
+
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
+
 import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
 
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const temporaryDirectories = createTemporaryDirectories(false);
+
 const execFileAsync = promisify(execFile);
 
 const temporaryDirectory = () =>
@@ -63,6 +76,226 @@ async function snapshot(root: string) {
 afterEach(temporaryDirectories.cleanup);
 
 describe("bundled plugin build", () => {
+  test("builds the MCP runtime without invoking an npm launcher", async () => {
+    const root = await temporaryDirectory();
+    const bin = join(root, "bin");
+    const launcher = process.platform === "win32" ? "npm.cmd" : "npm";
+    await writeFixture(
+      bin,
+      launcher,
+      process.platform === "win32" ? "@exit /b 91\r\n" : "#!/bin/sh\nexit 91\n",
+    );
+    if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
+
+    const destination = join(root, "mcp");
+    await execFileAsync(
+      "node",
+      [
+        fileURLToPath(
+          new URL(
+            "../../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs",
+            import.meta.url,
+          ),
+        ),
+        "--output",
+        destination,
+      ],
+      {
+        env: {
+          ...process.env,
+          PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
+        },
+      },
+    );
+
+    const contract = JSON.parse(
+      await readFile(
+        new URL(
+          "../../../plugins/codex-security/plugin-files.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as { shippedExact: string[] };
+    expect(await files(destination)).toEqual(
+      contract.shippedExact
+        .filter((path) => path.startsWith("mcp/"))
+        .map((path) => path.slice(4))
+        .sort(),
+    );
+    const helper = await execFileAsync("node", [
+      join(destination, "helpers.mjs"),
+      "resolve-security-md",
+      "--repo",
+      root,
+      "--list",
+    ]);
+    expect(helper.stdout).toBe("[]\n");
+    expect(helper.stderr).toBe("");
+    const execution = execFileAsync(
+      "node",
+      [join(destination, "server.mjs"), "--stdio"],
+      {
+        cwd: root,
+        timeout: 10_000,
+      },
+    );
+    execution.child.stdin?.end(mcpSmokeInput);
+    const standalone = await execution;
+    const responses = mcpSmokeResponses(standalone.stdout);
+    expect(
+      responses.find((response) => response.id === 2)?.result.tools,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "start_codex_security_deep_scan" }),
+      ]),
+    );
+  });
+
+  test("builds from a source snapshot without Git metadata", async () => {
+    const root = await temporaryDirectory();
+    const packageRoot = join(root, "sdk", "typescript");
+    const source = join(root, "plugins", "codex-security");
+
+    await writeFixture(
+      packageRoot,
+      "package.json",
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    for (const script of [
+      "build-plugin",
+      "check-plugin-source",
+      "is-main",
+      "plugin-contract",
+    ]) {
+      await writeFixture(
+        packageRoot,
+        `scripts/${script}.mjs`,
+        await readFile(
+          new URL(`../scripts/${script}.mjs`, import.meta.url),
+          "utf8",
+        ),
+      );
+    }
+    await writeFixture(
+      source,
+      "plugin-files.json",
+      `${JSON.stringify({
+        externalOwnedExact: [".codex-plugin/plugin.json"],
+        shippedExact: ["scripts/launch"],
+      })}\n`,
+    );
+    await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
+    await writeFixture(source, "scripts/launch", "#!/bin/sh\nexit 0\n");
+
+    await execFileAsync(process.execPath, ["--run", "build:plugin"], {
+      cwd: packageRoot,
+    });
+
+    expect(
+      await readFile(
+        join(packageRoot, "_bundled_plugin", "scripts", "launch"),
+        "utf8",
+      ),
+    ).toBe("#!/bin/sh\nexit 0\n");
+  });
+
+  test("stages only declared runtime files from the canonical plugin source", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "plugins", "codex-security");
+    const destination = join(root, "sdk", "typescript", "_bundled_plugin");
+    const contractPath = join(source, "plugin-files.json");
+
+    await writeFixture(
+      source,
+      ".codex-plugin/plugin.json",
+      '{"name":"fixture"}\n',
+    );
+    await writeFixture(source, "scripts/launch", "#!/bin/sh\nexit 0\n");
+    await chmod(join(source, "scripts", "launch"), 0o755);
+    await writeFixture(source, "schemas/scan.json", "{}\n");
+    await writeFixture(
+      source,
+      "mcp-app/scripts/build_mcp_app.mjs",
+      `import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const outputFlag = process.argv.indexOf("--output");
+if (outputFlag === -1 || process.argv[outputFlag + 1] === undefined) {
+  throw new Error("Missing --output.");
+}
+const output = process.argv[outputFlag + 1];
+await mkdir(output, { recursive: true });
+await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
+`,
+    );
+    await writeFixture(source, "tests/plugin.test.py", "assert True\n");
+    await writeFixture(source, "sdk/typescript/owned-by-sdk.txt", "sdk\n");
+    await writeFixture(destination, "stale.txt", "stale\n");
+    await writeFixture(
+      source,
+      "plugin-files.json",
+      `${JSON.stringify(
+        {
+          externalOwnedExact: [".codex-plugin/plugin.json"],
+          shippedExact: [
+            "mcp/server.mjs",
+            "schemas/scan.json",
+            "scripts/launch",
+            "sdk/typescript/owned-by-sdk.txt",
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await buildBundledPlugin({ contractPath, destination, source });
+
+    expect(await files(destination)).toEqual([
+      ".codex-plugin/plugin.json",
+      "mcp/server.mjs",
+      "schemas/scan.json",
+      "scripts/launch",
+    ]);
+    expect(
+      await readFile(join(destination, "schemas", "scan.json"), "utf8"),
+    ).toBe("{}\n");
+    expect(await readFile(join(destination, "mcp", "server.mjs"), "utf8")).toBe(
+      "generated mcp runtime\n",
+    );
+    if (process.platform !== "win32") {
+      expect(
+        (await stat(join(destination, "scripts", "launch"))).mode & 0o111,
+      ).toBe(0o111);
+    }
+
+    const firstBuild = await snapshot(destination);
+    await buildBundledPlugin({ contractPath, destination, source });
+    expect(await snapshot(destination)).toEqual(firstBuild);
+  });
+
+  test("fails when a declared runtime file is absent", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "plugins", "codex-security");
+    const destination = join(root, "sdk", "typescript", "_bundled_plugin");
+    const contractPath = join(source, "plugin-files.json");
+
+    await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
+    await writeFixture(
+      source,
+      "plugin-files.json",
+      `${JSON.stringify({
+        externalOwnedExact: [".codex-plugin/plugin.json"],
+        shippedExact: ["scripts/missing.py"],
+      })}\n`,
+    );
+
+    await expect(
+      buildBundledPlugin({ contractPath, destination, source }),
+    ).rejects.toThrow("Canonical plugin source is missing scripts/missing.py.");
+  });
+
   test("copies Python contracts and completed examples unchanged from source", async () => {
     const source = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
@@ -89,7 +322,22 @@ describe("bundled plugin build", () => {
       const plugin = fileURLToPath(
         new URL("../../../plugins/codex-security/", import.meta.url),
       );
-      const source = join(root, "plugin");
+      const source = join(root, "plugins", "codex-security");
+      const sdkSource = fileURLToPath(new URL("..", import.meta.url));
+      const sdkFixture = join(root, "sdk", "typescript");
+      await cp(join(sdkSource, "src"), join(sdkFixture, "src"), {
+        recursive: true,
+      });
+      await writeFixture(
+        sdkFixture,
+        "package.json",
+        await readFile(join(sdkSource, "package.json"), "utf8"),
+      );
+      await symlink(
+        join(sdkSource, "node_modules"),
+        join(sdkFixture, "node_modules"),
+        "junction",
+      );
       await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
         recursive: true,
         filter: (path) =>
@@ -292,150 +540,6 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
       expect(await snapshot(destination)).toEqual(previous);
     },
   );
-
-  test("builds from a source snapshot without Git metadata", async () => {
-    const root = await temporaryDirectory();
-    const packageRoot = join(root, "sdk", "typescript");
-    const source = join(root, "plugins", "codex-security");
-
-    await writeFixture(
-      packageRoot,
-      "package.json",
-      await readFile(new URL("../package.json", import.meta.url), "utf8"),
-    );
-    for (const script of [
-      "build-plugin",
-      "check-plugin-source",
-      "is-main",
-      "plugin-contract",
-    ]) {
-      await writeFixture(
-        packageRoot,
-        `scripts/${script}.mjs`,
-        await readFile(
-          new URL(`../scripts/${script}.mjs`, import.meta.url),
-          "utf8",
-        ),
-      );
-    }
-    await writeFixture(
-      source,
-      "plugin-files.json",
-      `${JSON.stringify({
-        externalOwnedExact: [".codex-plugin/plugin.json"],
-        shippedExact: ["scripts/launch"],
-      })}\n`,
-    );
-    await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
-    await writeFixture(source, "scripts/launch", "#!/bin/sh\nexit 0\n");
-
-    await execFileAsync(process.execPath, ["--run", "build:plugin"], {
-      cwd: packageRoot,
-    });
-
-    expect(
-      await readFile(
-        join(packageRoot, "_bundled_plugin", "scripts", "launch"),
-        "utf8",
-      ),
-    ).toBe("#!/bin/sh\nexit 0\n");
-  });
-
-  test("stages only declared runtime files from the canonical plugin source", async () => {
-    const root = await temporaryDirectory();
-    const source = join(root, "plugins", "codex-security");
-    const destination = join(root, "sdk", "typescript", "_bundled_plugin");
-    const contractPath = join(source, "plugin-files.json");
-
-    await writeFixture(
-      source,
-      ".codex-plugin/plugin.json",
-      '{"name":"fixture"}\n',
-    );
-    await writeFixture(source, "scripts/launch", "#!/bin/sh\nexit 0\n");
-    await chmod(join(source, "scripts", "launch"), 0o755);
-    await writeFixture(source, "schemas/scan.json", "{}\n");
-    await writeFixture(
-      source,
-      "mcp-app/scripts/build_mcp_app.mjs",
-      `import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
-const outputFlag = process.argv.indexOf("--output");
-if (outputFlag === -1 || process.argv[outputFlag + 1] === undefined) {
-  throw new Error("Missing --output.");
-}
-const output = process.argv[outputFlag + 1];
-await mkdir(output, { recursive: true });
-await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
-`,
-    );
-    await writeFixture(source, "tests/plugin.test.py", "assert True\n");
-    await writeFixture(source, "sdk/typescript/owned-by-sdk.txt", "sdk\n");
-    await writeFixture(destination, "stale.txt", "stale\n");
-    await writeFixture(
-      source,
-      "plugin-files.json",
-      `${JSON.stringify(
-        {
-          externalOwnedExact: [".codex-plugin/plugin.json"],
-          shippedExact: [
-            "mcp/server.mjs",
-            "schemas/scan.json",
-            "scripts/launch",
-            "sdk/typescript/owned-by-sdk.txt",
-          ],
-        },
-        null,
-        2,
-      )}\n`,
-    );
-
-    await buildBundledPlugin({ contractPath, destination, source });
-
-    expect(await files(destination)).toEqual([
-      ".codex-plugin/plugin.json",
-      "mcp/server.mjs",
-      "schemas/scan.json",
-      "scripts/launch",
-    ]);
-    expect(
-      await readFile(join(destination, "schemas", "scan.json"), "utf8"),
-    ).toBe("{}\n");
-    expect(await readFile(join(destination, "mcp", "server.mjs"), "utf8")).toBe(
-      "generated mcp runtime\n",
-    );
-    if (process.platform !== "win32") {
-      expect(
-        (await stat(join(destination, "scripts", "launch"))).mode & 0o111,
-      ).toBe(0o111);
-    }
-
-    const firstBuild = await snapshot(destination);
-    await buildBundledPlugin({ contractPath, destination, source });
-    expect(await snapshot(destination)).toEqual(firstBuild);
-  });
-
-  test("fails when a declared runtime file is absent", async () => {
-    const root = await temporaryDirectory();
-    const source = join(root, "plugins", "codex-security");
-    const destination = join(root, "sdk", "typescript", "_bundled_plugin");
-    const contractPath = join(source, "plugin-files.json");
-
-    await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
-    await writeFixture(
-      source,
-      "plugin-files.json",
-      `${JSON.stringify({
-        externalOwnedExact: [".codex-plugin/plugin.json"],
-        shippedExact: ["scripts/missing.py"],
-      })}\n`,
-    );
-
-    await expect(
-      buildBundledPlugin({ contractPath, destination, source }),
-    ).rejects.toThrow("Canonical plugin source is missing scripts/missing.py.");
-  });
 });
 
 describe("generated plugin ownership", () => {
@@ -477,6 +581,10 @@ describe("generated plugin ownership", () => {
     );
   });
 });
+
+import { brotliDecompressSync } from "node:zlib";
+
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 test("failed compiler preserves the previous bundle and its diagnostics", async () => {
   const root = await temporaryDirectory();

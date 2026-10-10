@@ -17,7 +17,9 @@ import { parse } from "smol-toml";
 import {
   createProfileCodex,
   createProviderProfile,
+  createReplayProfile,
   providerPreflightCommand,
+  restoreReplayProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
 import { structuredCodexConfig } from "../src/config.js";
@@ -57,6 +59,73 @@ const startupProviders = {
   omitted: null,
   "synthetic.gateway": startupProvider,
 };
+
+test.each(["ambient", "managed"] as const)(
+  "saved %s replay profiles keep concurrent replay credentials private and separate",
+  async (kind) => {
+    const root = await temporaryDirectory();
+    const environment = {
+      CODEX_HOME: join(root, "home"),
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const home =
+      kind === "managed"
+        ? join(environment.CODEX_SECURITY_STATE_DIR, "codex-home")
+        : environment.CODEX_HOME;
+    await mkdir(home, { recursive: true, mode: 0o700 });
+    const providers = ["first", "second"].map((name) => ({
+      synthetic: {
+        name,
+        wire_api: "responses",
+        auth: {
+          command: "synthetic-auth",
+          env: { TOKEN: `synthetic-${name}-secret` },
+        },
+      },
+    }));
+    const profiles = await Promise.all(
+      providers.map((model_providers) =>
+        createReplayProfile(home, {
+          model_providers,
+          mcp_servers: {
+            synthetic: {
+              url: "https://mcp.example.test",
+              http_headers: {
+                Authorization: model_providers.synthetic.auth.env.TOKEN,
+              },
+            },
+          },
+        }),
+      ),
+    );
+    expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
+    const restored = await Promise.all(
+      profiles.map((profile) =>
+        restoreReplayProfile(
+          { model_provider: "synthetic" },
+          { name: profile.name, home: kind },
+          environment,
+        ),
+      ),
+    );
+    for (const [index, profile] of profiles.entries()) {
+      expect(restored[index]!["model_providers"]).toEqual(providers[index]);
+      expect(restored[index]!["mcp_servers"]).toEqual({
+        synthetic: {
+          url: "https://mcp.example.test",
+          http_headers: {
+            Authorization: providers[index]!.synthetic.auth.env.TOKEN,
+          },
+        },
+      });
+      if (process.platform !== "win32")
+        expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
+    }
+    await expect(
+      restoreReplayProfile({}, { name: "../outside", home: kind }, environment),
+    ).rejects.toThrow("invalid replay profile");
+  },
+);
 
 test.each([
   [

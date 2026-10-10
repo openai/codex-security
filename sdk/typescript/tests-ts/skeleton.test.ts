@@ -43,12 +43,8 @@ async function workflow(name: string) {
 }
 
 describe("TypeScript package skeleton", () => {
-  test("pins one Codex version across the CLI, MCP app, and evals", async () => {
-    const directories = [
-      "sdk/typescript",
-      "plugins/codex-security/mcp-app",
-      "evals/triage-finding",
-    ];
+  test("pins one Codex version across the CLI and evals", async () => {
+    const directories = ["sdk/typescript", "evals/triage-finding"];
     const manifests = await Promise.all(
       directories.map(async (directory) =>
         JSON.parse(
@@ -416,6 +412,9 @@ describe("TypeScript package skeleton", () => {
       "false",
     );
     expect(quality.env?.["CODEX_SECURITY_INTEGRATION"]).toBe("0");
+    expect(quality.jobs["runner"]?.strategy?.matrix["exclude"]).toEqual([
+      { os: "windows-latest", mode: "isolated" },
+    ]);
     for (let shard = 1; shard <= 7; shard += 1) {
       expect(
         quality.jobs["runner"]?.strategy?.matrix["include"],
@@ -423,6 +422,13 @@ describe("TypeScript package skeleton", () => {
         os: "windows-latest",
         mode: `shard-${shard}`,
         args: `--shard=${shard}/7`,
+      });
+      expect(
+        quality.jobs["runner"]?.strategy?.matrix["include"],
+      ).toContainEqual({
+        os: "windows-latest",
+        mode: `isolated-${shard}`,
+        args: `--isolate --shard=${shard}/7`,
       });
     }
   });
