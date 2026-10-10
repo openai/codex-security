@@ -22,6 +22,7 @@ import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
+import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { workflowDigest } from "../src/finding-workflow.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { runPython } from "./support/python-probe.js";
@@ -47,6 +48,7 @@ async function interruptedScan(
   > & { config?: JsonObject } = {},
   resolvedDeep = false,
   modelProvider?: string,
+  knowledgeState: "saved" | "legacy" = "saved",
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -139,6 +141,10 @@ async function interruptedScan(
       : { OPENAI_API_KEY: "synthetic-resume-key" }),
   };
   const command = workbenchCommand(python, () => environment);
+  const knowledgeSnapshot =
+    !bulk && knowledgeState === "saved" && settings.knowledgeBasePaths?.length
+      ? await readKnowledgeBaseSnapshot(settings.knowledgeBasePaths)
+      : undefined;
   const recipe = {
     repository,
     target: { kind: "repository", paths: [] },
@@ -151,6 +157,14 @@ async function interruptedScan(
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
     ...settings,
+    ...(knowledgeSnapshot === undefined
+      ? {}
+      : {
+          scanInputs: scanInputIdentity(
+            "Keep the original scan instructions.",
+            knowledgeSnapshot,
+          ),
+        }),
     ...(mode === "deep"
       ? {
           deepScan: {
@@ -184,6 +198,8 @@ async function interruptedScan(
     }),
   );
   const scanId = registration["scanId"] as string;
+  if (knowledgeSnapshot !== undefined)
+    await saveScanKnowledge(scanDir, knowledgeSnapshot);
   const threadId = randomUUID();
   await command([
     "set-scan-thread",
@@ -1080,6 +1096,117 @@ test.each([
       progress: { status: "complete" },
       continuationThreadId: f.threadId,
     });
+  },
+);
+
+test.each(["unchanged", "edited", "deleted"] as const)(
+  "single Deep resume uses saved knowledge when original files are %s",
+  async (sourceState) => {
+    const documentRoot = await temporaryDirectory();
+    const document = join(documentRoot, "architecture.md");
+    await writeFile(document, "Original architecture.\n");
+    const f = await interruptedScan("deep", false, {
+      knowledgeBasePaths: [document],
+    });
+    const before = await f.command([
+      "get-deep-scan",
+      "--scan-id",
+      f.scanId,
+      "--thread-id",
+      f.threadId,
+    ]);
+    if (sourceState === "edited")
+      await writeFile(document, "Changed architecture.\n");
+    if (sourceState === "deleted") await rm(document);
+    const stdout = capture();
+    const stderr = capture();
+    let resumed = false;
+    let staged = "";
+    const code = await main(
+      ["scans", "resume", f.scanId, "--json"],
+      stdout.stream,
+      stderr.stream,
+      resumeDependencies(f, (codex) => ({
+        startThread() {
+          throw new Error("Expected original session");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed(prompt) {
+              expect(prompt).toContain("Keep the original scan instructions.");
+              staged = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+              expect(
+                await readFile(join(staged, "0-architecture.md.txt"), "utf8"),
+              ).toBe("Original architecture.\n");
+              resumed = true;
+              throw new Error("synthetic interrupted transport");
+            },
+          };
+        },
+      })),
+    );
+    expect(resumed, stderr.text()).toBe(true);
+    expect(code).toBe(2);
+    expect(
+      await readFile(join(f.scanDir, ".scan-knowledge.json"), "utf8"),
+    ).toContain("Original architecture.");
+    expect(await readdir(staged).catch(() => null)).toBeNull();
+    expect(
+      await f.command([
+        "get-deep-scan",
+        "--scan-id",
+        f.scanId,
+        "--thread-id",
+        f.threadId,
+      ]),
+    ).toEqual(before);
+    expect(
+      (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
+    ).toEqual(f.recipe);
+  },
+);
+
+test.each(["legacy", "missing", "modified"] as const)(
+  "single Deep resume preserves saved work when knowledge snapshot is %s",
+  async (snapshotState) => {
+    const documentRoot = await temporaryDirectory();
+    const document = join(documentRoot, "architecture.md");
+    await writeFile(document, "Original architecture.");
+    const f = await interruptedScan(
+      "deep",
+      false,
+      { knowledgeBasePaths: [document] },
+      false,
+      undefined,
+      snapshotState === "legacy" ? "legacy" : "saved",
+    );
+    const snapshot = join(f.scanDir, ".scan-knowledge.json");
+    if (snapshotState === "missing") await rm(snapshot);
+    if (snapshotState === "modified") {
+      const value = JSON.parse(await readFile(snapshot, "utf8"));
+      value.documents["0-architecture.md.txt"] = "Changed architecture.";
+      await writeFile(snapshot, JSON.stringify(value));
+    }
+    const before = await readFile(f.checkpoint, "utf8");
+    const stderr = capture();
+    const code = await main(
+      ["scans", "resume", f.scanId, "--json"],
+      capture().stream,
+      stderr.stream,
+      resumeDependencies(f, () =>
+        fail("Cannot run with missing or changed original context"),
+      ),
+    );
+    expect(code).toBe(2);
+    expect(stderr.text()).toMatch(/new scan/i);
+    expect(await readFile(f.checkpoint, "utf8")).toBe(before);
+    expect(
+      (await f.command(["get-cli-scan-resume", "--scan-id", f.scanId]))[
+        "recipe"
+      ],
+    ).toEqual(f.recipe);
   },
 );
 
