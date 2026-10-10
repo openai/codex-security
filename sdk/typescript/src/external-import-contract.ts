@@ -45,7 +45,9 @@ export function repositoryUrlKey(value: string): string {
   return `${parts[1]!.toLowerCase()}://${authority}${path}${parts[4]!}`;
 }
 
-// These model constraints are not represented by JSON Schema character limits.
+// Cloud ImportModel applies these constraints to both requests and responses.
+// Its UTF-8 limits are not exported as JSON Schema character limits: even a
+// plain string field such as a receipt error message inherits the 512-byte bound.
 function validateModelStrings(input: unknown): void {
   if (input === null || typeof input !== "object") return;
   if (Array.isArray(input)) {
