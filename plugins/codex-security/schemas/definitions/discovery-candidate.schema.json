@@ -61,7 +61,7 @@
       "properties": {
         "candidate_id": {
           "type": "string",
-          "pattern": "^(?!\\.{1,2}$)[^/\\\\]+$"
+          "pattern": "^(?!\\.{1,2}$)(?=.*\\S)[^/\\\\]+$"
         },
         "cwe_ids": {
           "type": "array",

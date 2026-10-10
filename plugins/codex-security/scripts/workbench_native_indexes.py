@@ -92,6 +92,8 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
         WHERE before_scans.target_id = after_scans.target_id
+            AND before_scans.parent_scan_role IS NOT 'deep_pass'
+            AND after_scans.parent_scan_role IS NOT 'deep_pass'
         """
     ):
         before = group((match["target_id"], match["before_finding_id"]))
@@ -99,11 +101,13 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         if before != after:
             parents[after] = before
 
-    latest_scan_by_target = dict(
-        connection.execute(
-            "SELECT target_id, id FROM scans WHERE status = 'complete' ORDER BY julianday(upper(started_at)), id"
+    latest_scan_by_target = {
+        row["target_id"]: row["id"]
+        for row in connection.execute(
+            "SELECT target_id, id FROM scans WHERE status = 'complete' "
+            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY julianday(upper(started_at)), id"
         )
-    )
+    }
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
@@ -137,6 +141,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         JOIN scans ON scans.id = occurrences.scan_id
         JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        WHERE scans.parent_scan_role IS NOT 'deep_pass'
         """,
     ):
         grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
@@ -204,14 +209,12 @@ def list_repositories(
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     scans = scan_history.list_scans(connection)["scans"]
-    scans_by_id = {scan["scanId"]: scan for scan in scans}
     scan_count_by_target = dict(Counter(scan["targetId"] for scan in scans))
-
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
-    for row in connection.execute(
-        "SELECT id, target_id FROM scans ORDER BY julianday(upper(started_at)) DESC, id DESC"
+    for scan in sorted(
+        scans, key=lambda scan: (timestamp_key(scan["startedAt"]), scan["scanId"]), reverse=True
     ):
-        latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
+        latest_scan_by_target.setdefault(scan["targetId"], scan)
 
     open_findings_by_target = Counter(
         row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"

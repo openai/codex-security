@@ -19,7 +19,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     resume_deep_scan,
     run_workbench,
     save_workspace,
@@ -54,7 +54,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
         "thread-completion-binding",
         environment={"CODEX_HOME": str(tmp_path / "codex-home")},
     )
-    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     return state_dir, scan_id, scan_dir
 
@@ -547,19 +547,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
                 "thread-completion-binding",
                 environment={"CODEX_HOME": str(codex_home)},
             )
-            coordinator_manifest = scan_dir / "coordinator-manifest.json"
-            coordinator_manifest.write_text("{}\n")
-            with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-                connection.execute(
-                    """
-                    UPDATE deep_scan_runs
-                    SET status = 'succeeded', phase = 'terminal',
-                        terminal_reason = 'capped', manifest_path = ?,
-                        completed_at = updated_at
-                    WHERE scan_id = ?
-                    """,
-                    (str(coordinator_manifest), scan_id),
-                )
+            mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
         write_completed_contract(
             scan_dir,
             scan_id,
@@ -723,7 +711,7 @@ def test_completion_keeps_recoverable_prewrite_failures_resumable(
 
     assert failed["returncode"] != 0
     assert "inventoryStrategy" in str(failed["stderr"])
-    assert not (scan_dir / "checkpoint-head.json").exists()
+    assert not (scan_dir / "artifacts/scan-draft.json").exists()
     pending = get_scan(state_dir, scan_id)["scan"]
     assert pending["progress"]["status"] == "running"
     coverage["inventoryStrategy"] = inventory_strategy
@@ -749,9 +737,9 @@ def test_completion_keeps_empty_coverage_defaults(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("command", ["complete-scan", "prepare-scan-completion"])
 @pytest.mark.parametrize("defect", ["target", "unicode"])
-@pytest.mark.parametrize("existing_head", [False, True])
-def test_rejected_completion_restores_parent_head_before_corrected_retry(
-    tmp_path: Path, workbench_api, command: str, defect: str, existing_head: bool
+@pytest.mark.parametrize("existing_snapshot", [False, True])
+def test_rejected_completion_preserves_committed_state_before_corrected_retry(
+    tmp_path: Path, workbench_api, command: str, defect: str, existing_snapshot: bool
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     saved_results = workbench_api["saved_results"]
@@ -776,28 +764,40 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
         },
     )
     os.utime(independent, ns=(50, 50))
-    head_path = scan_dir / "checkpoint-head.json"
-    if existing_head:
+    committed_path = scan_dir / "artifacts/scan-draft.json"
+    if existing_snapshot:
         checkpoint = write_checkpoint(
             scan_dir / "checkpoints",
             saved_results._parent_scan_draft(scan_id, manifest["scan"], findings, coverage),
         )
         os.utime(checkpoint, ns=(100, 100))
-        head_path.write_text(json.dumps({"checkpoint": checkpoint.name}, indent=3))
-        os.utime(head_path, ns=(100, 100))
-        saved_results._capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
 
-    def head_state():
-        head = (
-            (head_path.read_bytes(), head_path.stat().st_mtime_ns) if head_path.exists() else None
+    def write_committed_snapshot():
+        committed_path.parent.mkdir(parents=True, exist_ok=True)
+        committed_path.write_text(
+            json.dumps(
+                {
+                    "manifest": manifest,
+                    "findings": findings,
+                    "coverage": coverage,
+                    "reconciledCheckpointIds": [checkpoint.name],
+                },
+                indent=3,
+            )
+        )
+
+    def committed_state():
+        committed = (
+            (committed_path.read_bytes(), committed_path.stat().st_mtime_ns)
+            if committed_path.exists()
+            else None
         )
         snapshots = {
             path.name: (path.read_bytes(), path.stat().st_mtime_ns)
-            for path in (scan_dir / "checkpoint-heads").glob("*.json")
+            for path in (scan_dir / "source-order").glob("*.json")
         }
-        return head, snapshots
+        return committed, snapshots
 
-    previous_head = head_state()
     previous_checkpoints = {
         path.name: (path.read_bytes(), path.stat().st_mtime_ns)
         for path in (scan_dir / "checkpoints").glob("*.json")
@@ -815,11 +815,15 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
         path: path.read_bytes() for path in (manifest_path, findings_path, coverage_path)
     }
 
+    if existing_snapshot:
+        write_committed_snapshot()
+    previous_committed = committed_state()
+
     failed = scan_command(state_dir, command, scan_id, check=False)
 
     assert failed["returncode"] != 0
     assert ("target.kind" if defect == "target" else "coverage") in failed["stderr"]
-    assert head_state() == previous_head
+    assert committed_state() == previous_committed
     assert {
         path.name: (path.read_bytes(), path.stat().st_mtime_ns)
         for path in (scan_dir / "checkpoints").glob("*.json")
@@ -836,6 +840,8 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
     coverage_path.write_text(json.dumps(coverage))
     os.utime(coverage_path, ns=(300, 300))
     assert findings_path.stat().st_mtime_ns == 200
+    if existing_snapshot:
+        write_committed_snapshot()
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
@@ -850,7 +856,7 @@ def test_deep_completion_derives_inventory_without_downgrading_coverage(
 ) -> None:
     for index, inventory in enumerate((None, "", "invalid_strategy")):
         case_dir = tmp_path / f"case-{index}"
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(case_dir)
         coverage_path = scan_dir / "coverage.json"
         coverage = json.loads(coverage_path.read_text())
@@ -902,6 +908,99 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     assert preserved_coverage["inventoryStrategy"] == "repository"
     assert preserved_coverage["completeness"] == "partial"
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
+
+
+def test_deep_completion_preserves_running_scan_after_transient_report_failure(
+    tmp_path: Path,
+) -> None:
+    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
+    hook_dir = tmp_path / "report-failure-hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        "import builtins\n"
+        "original_import = builtins.__import__\n"
+        "def injected_import(name, *args, **kwargs):\n"
+        "    module = original_import(name, *args, **kwargs)\n"
+        "    if name == 'report_projection':\n"
+        "        def unavailable(*args, **kwargs):\n"
+        "            raise OSError('fixture report projection temporarily unavailable')\n"
+        "        module.generate_report_markdown = unavailable\n"
+        "    return module\n"
+        "builtins.__import__ = injected_import\n"
+    )
+    before = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+
+    failed = run_workbench(
+        state_dir,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        check=False,
+        environment={"PYTHONPATH": str(hook_dir)},
+    )
+
+    assert failed["returncode"] != 0
+    assert "fixture report projection temporarily unavailable" in str(failed["stderr"])
+    preserved = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert preserved["progress"]["status"] == "running"
+    checkpoint = json.loads((scan_dir / "artifacts/deep-scan/checkpoint.json").read_text())
+    assert checkpoint["terminalReason"] == "saturated"
+    assert {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    } == before
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+
+
+def test_deep_completion_retries_transient_report_failure_on_next_invocation(
+    tmp_path: Path,
+) -> None:
+    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
+    hook_dir = tmp_path / "report-failure-hook"
+    hook_dir.mkdir()
+    marker_path = hook_dir / "first-projection-attempt"
+    (hook_dir / "sitecustomize.py").write_text(
+        "import builtins\n"
+        "from pathlib import Path\n"
+        f"marker = Path({str(marker_path)!r})\n"
+        "original_import = builtins.__import__\n"
+        "def injected_import(name, *args, **kwargs):\n"
+        "    module = original_import(name, *args, **kwargs)\n"
+        "    if name == 'report_projection':\n"
+        "        original_report = module.generate_report_markdown\n"
+        "        def unavailable_once(*args, **kwargs):\n"
+        "            if not marker.exists():\n"
+        "                marker.touch()\n"
+        "                raise OSError('fixture report projection temporarily unavailable')\n"
+        "            return original_report(*args, **kwargs)\n"
+        "        module.generate_report_markdown = unavailable_once\n"
+        "    return module\n"
+        "builtins.__import__ = injected_import\n"
+    )
+
+    failed = run_workbench(
+        state_dir,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        environment={"PYTHONPATH": str(hook_dir)},
+        check=False,
+    )
+    assert failed["returncode"] != 0
+    assert "fixture report projection temporarily unavailable" in str(failed["stderr"])
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert marker_path.is_file()
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+    assert (scan_dir / "report.md").is_file()
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])
@@ -1087,7 +1186,7 @@ def test_completion_retains_strongest_duplicate_finding_regardless_of_order(
     )
     for case, candidates, expected in cases:
         case_dir = tmp_path / case
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(case_dir)
         findings_path = scan_dir / "findings.json"
         findings = json.loads(findings_path.read_text())
@@ -1144,6 +1243,9 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     linked_path = scan_dir / linked_report
     linked_path.parent.mkdir(parents=True)
     linked_path.write_text("# Verified finding\n")
+    shared_report = "findings/linked-writeup/other.md"
+    shared_path = scan_dir / shared_report
+    shared_path.write_text("# Another verified finding\n")
     symlink_report = "findings/symlink-writeup/symlink-writeup.md"
     symlink_path = scan_dir / symlink_report
     symlink_path.parent.mkdir(parents=True)
@@ -1152,6 +1254,7 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     for anchor, writeup in (
         ("linked-writeup", {"reportPath": linked_report}),
         ("duplicate-writeup", {"reportPath": linked_report}),
+        ("shared-directory-writeup", {"reportPath": shared_report}),
         ("missing-writeup", {"reportPath": "findings/missing-writeup/missing-writeup.md"}),
         ("symlink-writeup", {"reportPath": symlink_report}),
         ("unsafe-writeup", {"reportPath": "../outside.md"}),
@@ -1166,11 +1269,12 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["findingCount"] == 7
+    assert completed["scan"]["findingCount"] == 8
     warnings = completed["scan"]["warnings"]
-    assert len(warnings) == 5
+    assert len(warnings) == 6
     assert all(warning.startswith("Skipped malformed writeup for finding") for warning in warnings)
     assert any("duplicate report path" in warning for warning in warnings)
+    assert any("shared evidence directory" in warning for warning in warnings)
     assert any("inside the scan directory" in warning for warning in warnings)
     assert any("non-symlink" in warning for warning in warnings)
     assert any("schema pattern" in warning for warning in warnings)
@@ -1183,13 +1287,55 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     assert recovered["linked-writeup"]["writeup"] == {"reportPath": linked_report}
     for anchor in (
         "duplicate-writeup",
+        "shared-directory-writeup",
         "missing-writeup",
         "symlink-writeup",
         "unsafe-writeup",
         "invalid-writeup",
     ):
         assert "writeup" not in recovered[anchor]
+        assert recovered[anchor]["codeEvidence"] == valid["codeEvidence"]
+    assert linked_path.read_text() == "# Verified finding\n"
+    assert shared_path.read_text() == "# Another verified finding\n"
+    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "complete"
     assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("replacement_directory", ["original", "replacement"])
+def test_completion_tracks_writeup_directories_after_stronger_finding_replacement(
+    tmp_path: Path, replacement_directory: str
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    original = findings["findings"][0]
+    original["writeup"] = {"reportPath": "findings/original/first.md"}
+    stronger = copy.deepcopy(original)
+    stronger["severity"]["level"] = "critical"
+    stronger["writeup"] = {"reportPath": f"findings/{replacement_directory}/updated.md"}
+    other = copy.deepcopy(original)
+    other["identity"]["anchor"] = "another-finding"
+    available_directory = "original" if replacement_directory == "replacement" else "other"
+    other["writeup"] = {"reportPath": f"findings/{available_directory}/other.md"}
+    findings["findings"] = [original, stronger, other]
+    for finding in findings["findings"]:
+        path = scan_dir / finding["writeup"]["reportPath"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Verified finding\n")
+    findings_path.write_text(json.dumps(findings))
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 2
+    warnings = completed["scan"]["warnings"]
+    assert len(warnings) == 1
+    assert "retained stronger duplicate logical finding" in warnings[0]
+    recovered = json.loads(findings_path.read_text())["findings"]
+    assert recovered[0]["writeup"] == stronger["writeup"]
+    assert recovered[0]["severity"]["level"] == "critical"
+    assert recovered[1]["writeup"] == other["writeup"]
+    assert recovered[0]["provenance"]["previousFindings"][0]["writeup"] == original["writeup"]
 
 
 def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path) -> None:
@@ -1200,8 +1346,7 @@ def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path)
         "findings": copy.deepcopy(findings["findings"]),
         "coverage": json.loads((scan_dir / "coverage.json").read_text()),
     }
-    (scan_dir / "checkpoints").mkdir()
-    (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
+    write_checkpoint(scan_dir / "checkpoints", checkpoint)
     findings["findings"][0]["summary"] = ""
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
@@ -1420,7 +1565,7 @@ def test_completion_recovers_malformed_hardening_portfolios(tmp_path: Path) -> N
         ("symlink", {"portfolioPath": "hardening/hardening.md"}),
     ):
         case_dir = tmp_path / case
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(case_dir)
         manifest_path = scan_dir / "scan-manifest.json"
         manifest = json.loads(manifest_path.read_text())

@@ -455,6 +455,70 @@ describe("CLI workbench", () => {
     }
   });
 
+  test("preserves saved recipe configuration in public history output", async () => {
+    const publicConfig = {
+      model: "model-test",
+      model_provider: "custom",
+      model_reasoning_effort: "high",
+      approval_policy: "on-request",
+    };
+    const recipe = {
+      repository: "/repo",
+      config: {
+        ...publicConfig,
+        model_providers: {
+          custom: {
+            http_headers: { Authorization: "Bearer SYNTHETIC_PRIVATE_TOKEN" },
+          },
+        },
+        forced_chatgpt_workspace_id: "SYNTHETIC_PRIVATE_WORKSPACE",
+      },
+      knowledgeBasePaths: ["/knowledge"],
+      deepScan: { maxDiscoveryRuns: 12 },
+    };
+    const originalRecipe = structuredClone(recipe);
+    const response = {
+      scan: {
+        scanId: "scan-1",
+        targetPath: "/repo",
+        mode: "deep",
+        progress: { status: "complete" },
+        findings: [],
+      },
+      recipe,
+    };
+    const cases = [
+      ["scans", "show", "scan-1"],
+      ["scans", "show", "scan-1", "--json"],
+      [
+        "findings",
+        "false-positive",
+        "occurrence-1",
+        "--reason",
+        "Synthetic reason.",
+        "--json",
+      ],
+    ];
+    for (const argv of cases) {
+      const { stdout, stderr, runCli } = createCliTest(main, { stdout: true });
+      expect(
+        await runCli(argv, dependencies({ onWorkbench: () => response })),
+      ).toBe(0);
+      if (argv.includes("--json")) expect(stderr.text()).toBe("");
+      expect(stdout.text()).toContain("SYNTHETIC_PRIVATE_TOKEN");
+      expect(stdout.text()).toContain("SYNTHETIC_PRIVATE_WORKSPACE");
+      if (argv.includes("--json")) {
+        expect(JSON.parse(stdout.text()).recipe).toEqual(originalRecipe);
+      } else {
+        expect(stdout.text()).toContain("model=model-test");
+        expect(stdout.text()).toContain("approval_policy=on-request");
+        expect(stdout.text()).toContain("/knowledge");
+      }
+      expect(response.recipe).toBe(recipe);
+      expect(recipe).toEqual(originalRecipe);
+    }
+  });
+
   test("shows saved scan activity without starting Codex", async () => {
     const state = await temporaryDirectory("codex-security-cli-logs-", true);
     try {
@@ -1670,3 +1734,43 @@ describe("CLI workbench", () => {
     expect(onRun).not.toHaveBeenCalled();
   });
 });
+
+test.each([false, true])(
+  "scan history preserves saved diagnostic configuration (json: %p)",
+  async (json) => {
+    const config = {
+      model_provider: "synthetic",
+      model_providers: {
+        synthetic: {
+          base_url: "https://provider.example.test/v1",
+          wire_api: "responses",
+          env_key: "SYNTHETIC_PROVIDER_KEY",
+        },
+      },
+      synthetic_diagnostic: "Original diagnostic setting.",
+      approval_policy: "never",
+    };
+    const recipe = { repository: "/synthetic/repository", config };
+    const saved = {
+      scan: { scanId: "synthetic-scan", status: "complete", mode: "standard" },
+      recipe,
+    };
+    const stdout = captureCli(main, "stdout");
+    expect(
+      await stdout.run(
+        ["scans", "show", "synthetic-scan", ...(json ? ["--json"] : [])],
+        dependencies({ onWorkbench: () => saved }),
+      ),
+    ).toBe(0);
+    if (json) expect(JSON.parse(stdout.text()).recipe.config).toEqual(config);
+    else
+      for (const value of [
+        "https://provider.example.test/v1",
+        "responses",
+        "SYNTHETIC_PROVIDER_KEY",
+        config.synthetic_diagnostic,
+      ])
+        expect(stdout.text()).toContain(value);
+    expect(saved.recipe).toEqual(recipe);
+  },
+);

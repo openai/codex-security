@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import runpy
@@ -89,6 +90,12 @@ EXPECTED_MIGRATIONS = [
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
     (47, "snapshot deep scan discovery context"),
+    (51, "persist composition child membership"),
+    (52, "reuse scan severity assessments"),
+    (53, "persist scan execution sessions"),
+    (54, "recover unindexed severity assessments"),
+    (55, "repair stored composition membership"),
+    (56, "repair archived composition paths"),
 ]
 
 
@@ -409,6 +416,38 @@ def test_windows_completion_lock_retries_and_unlocks(tmp_path: Path) -> None:
     assert sleep.call_args_list == [mock.call(0.05), mock.call(0.05)]
     lock_path = tmp_path / "completion-locks" / f"{scan_id}.lock"
     assert lock_path.stat().st_size == 1
+
+
+def test_completion_lock_reentry_is_scoped_to_the_state_directory(
+    tmp_path: Path, workbench_api
+) -> None:
+    completion_lock = workbench_api["scan_completion_lock"]
+    lock_globals = completion_lock.__wrapped__.__globals__
+    scan_id = str(uuid.uuid4())
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(tmp_path / "first")}),
+        mock.patch.dict(
+            lock_globals,
+            acquire_completion_file_lock=mock.Mock(),
+            release_completion_file_lock=mock.Mock(),
+        ),
+    ):
+        acquire = lock_globals["acquire_completion_file_lock"]
+        release = lock_globals["release_completion_file_lock"]
+        with completion_lock(scan_id):
+            with pytest.raises(RuntimeError, match="nested failure"), completion_lock(scan_id):
+                raise RuntimeError("nested failure")
+            assert acquire.call_count == 1
+            release.assert_not_called()
+            with (
+                mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(tmp_path / "second")}),
+                completion_lock(scan_id),
+            ):
+                assert acquire.call_count == 2
+            assert release.call_count == 1
+        with completion_lock(scan_id):
+            assert acquire.call_count == 3
+        assert release.call_count == 3
 
 
 def test_workbench_does_not_run_textconv_during_diff_setup(tmp_path: Path) -> None:
@@ -788,13 +827,21 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
 
 
 @pytest.mark.parametrize("indexed", [False, True])
-def test_severity_migration_only_copies_assessments_with_matching_scan_occurrences(
+@pytest.mark.parametrize("previous_version", [41, 53, 54])
+def test_severity_migration_preserves_assessments_for_their_original_scan(
     indexed: bool,
+    previous_version: int,
 ) -> None:
-    connection, apply_migrations = create_historical_database(43)
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    previous = tuple(item for item in namespace["MIGRATIONS"] if item[0] < 42)
     timestamp = "2026-09-01T00:00:00Z"
-    with connection:
+    occurrence_id = "occ_" + hashlib.sha256(b"second-scan\0fingerprint").hexdigest()[:24]
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        namespace["apply_schema_migrations"](
+            connection, previous, namespace["now"], namespace["backfill_security_targets"]
+        )
         connection.execute(
             "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
             ("workspace", timestamp, timestamp),
@@ -823,29 +870,54 @@ def test_severity_migration_only_copies_assessments_with_matching_scan_occurrenc
             """INSERT INTO finding_severity_assessments
                 (finding_id, occurrence_id, input_sha256, assessed_at, source, decision,
                     level, rationale)
-                VALUES ('finding', 'second-occurrence', 'digest', ?, 'existing-severity',
+                VALUES ('finding', ?, 'digest', ?, 'existing-severity',
                     'assessed', 'high', 'Saved severity')""",
-            (timestamp,),
+            (occurrence_id, timestamp),
         )
         if indexed:
             connection.execute(
                 """INSERT INTO finding_occurrences
                     (id, finding_id, scan_id, title, summary, severity, confidence,
                         remediation, created_at)
-                    VALUES ('second-occurrence', 'finding', 'second-scan', 'Title', 'Summary',
+                    VALUES (?, 'finding', 'second-scan', 'Title', 'Summary',
                         'high', 'high', 'Remediation', ?)""",
-                (timestamp,),
+                (occurrence_id, timestamp),
             )
 
-        apply_migrations(connection)
-        apply_migrations(connection)
+        namespace["apply_schema_migrations"](
+            connection,
+            tuple(item for item in namespace["MIGRATIONS"] if item[0] <= previous_version),
+            namespace["now"],
+            namespace["backfill_security_targets"],
+        )
+        updated = previous_version == 54 or (previous_version == 53 and indexed)
+        if updated:
+            connection.execute(
+                "UPDATE scan_severity_assessments SET rationale = 'Updated assessment'"
+            )
+        if previous_version >= 52:
+            assert (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'scan_severity_reuse'"
+                ).fetchone()
+                is not None
+            )
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'scan_severity_reuse'"
+            ).fetchone()
+            is not None
+        )
 
         migrated = connection.execute(
             "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
         ).fetchall()
-        assert [tuple(row) for row in migrated] == (
-            [("second-scan", "second-occurrence")] if indexed else []
-        )
+        assert [tuple(row) for row in migrated] == [("second-scan", occurrence_id)]
+        assert connection.execute("SELECT rationale FROM scan_severity_assessments").fetchone()[
+            0
+        ] == ("Updated assessment" if updated else "Saved severity")
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -853,7 +925,7 @@ def test_severity_migration_scales_with_classified_scans() -> None:
     timestamp = "2026-09-01T00:00:00Z"
 
     def instruction_count(scale: int) -> int:
-        connection, apply_migrations = create_historical_database(43)
+        connection, apply_migrations = create_historical_database(42)
         with closing(connection):
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute(
@@ -1985,6 +2057,9 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     database = state_dir / "workbench.sqlite3"
 
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX scans_by_composition_parent")
+        connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 51")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         connection.execute(
@@ -2620,3 +2695,75 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
             ).fetchone()
             is not None
         ) is supported
+
+
+@pytest.mark.parametrize(
+    "history", ["main", "main-severity", "published-composition", "current-composition"]
+)
+def test_workbench_upgrades_colliding_released_migration_histories(history: str) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    timestamp = "2026-09-01T00:00:00Z"
+    old_versions = {43: 42, 51: 43, 52: 44, 53: 45, 54: 46, 55: 48, 56: 49}
+    if history == "main-severity":
+        old_versions = {}
+    elif history == "current-composition":
+        old_versions = {43: 50}
+    historical = [
+        (old_versions.get(version, version), name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if (
+            version <= 42
+            if history == "main"
+            else version <= 43
+            if history == "main-severity"
+            else (version <= 41 or version == 43 or version >= 51)
+            if history == "published-composition"
+            else (version <= 43 or version >= 51)
+        )
+    ]
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        create_migration_history(connection)
+        apply_historical_migrations(connection, historical, timestamp)
+        connection.execute(
+            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("retained-workspace", timestamp, timestamp),
+        )
+        previous = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT name, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
+        current = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT name, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+        assert all(row in current for row in previous)
+        assert connection.execute("SELECT id FROM workspaces").fetchone()[0] == "retained-workspace"
+        assert {row["name"] for row in connection.execute("PRAGMA table_info(scans)")} >= {
+            "name",
+            "parent_scan_role",
+        }
+        assert (
+            connection.execute("SELECT name FROM schema_migrations WHERE version = 42").fetchone()[
+                0
+            ]
+            == "editable scan names"
+        )
+        assert (
+            connection.execute("SELECT name FROM schema_migrations WHERE version = 43").fetchone()[
+                0
+            ]
+            == "preserve severity assessments per scan"
+        )
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'scan_severity_assessments'"
+        ).fetchone()
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'scan_execution_threads'"
+        ).fetchone()

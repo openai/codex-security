@@ -3,6 +3,7 @@ import { gitText } from "./support/shell.js";
 import { parseJsonLines, readJsonLines } from "./support/json.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync } from "node:child_process";
+import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import {
   access,
   appendFile,
@@ -2651,36 +2652,29 @@ describe("multiscan", () => {
                     recipes.push(JSON.parse(input!).recipe);
                   return mockWorkbench(args, input);
                 },
-                createCodex: (codex) => ({
-                  startThread: () => ({
-                    id: null,
-                    async runStreamed() {
-                      const first = calls++ === 0;
-                      if (first) {
-                        await writeFile(
-                          standard,
-                          "Changed after the manifest was saved.",
-                        );
-                        await rm(deep);
-                      }
-                      const directory =
-                        codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
-                      staged.push(
-                        Object.fromEntries(
-                          await Promise.all(
-                            (await readdir(directory)).map(async (name) => [
-                              name,
-                              await readFile(join(directory, name), "utf8"),
-                            ]),
-                          ),
-                        ),
-                      );
-                      throw new Error(
-                        "Synthetic model stop after reading staged knowledge.",
-                      );
-                    },
-                  }),
-                }),
+                createCodex: (codex) => {
+                  // Inspect the prepared execution input before Standard or Deep work begins.
+                  if (calls++ === 0) {
+                    writeFileSync(
+                      standard,
+                      "Changed after the manifest was saved.",
+                    );
+                    rmSync(deep);
+                  }
+                  const directory =
+                    codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+                  staged.push(
+                    Object.fromEntries(
+                      readdirSync(directory).map((name) => [
+                        name,
+                        readFileSync(join(directory, name), "utf8"),
+                      ]),
+                    ),
+                  );
+                  throw new Error(
+                    "Synthetic model stop after reading staged knowledge.",
+                  );
+                },
               });
             },
           },

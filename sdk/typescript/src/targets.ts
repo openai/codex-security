@@ -508,6 +508,24 @@ export async function normalizeTarget(
   target: ScanTarget,
   signal?: AbortSignal,
 ): Promise<NormalizedTarget> {
+  return normalizeTargetPaths(repository, target, signal, false);
+}
+
+/** Normalize a sealed read scope; the workbench still validates its saved binding. */
+export async function normalizeSealedReadTarget(
+  repository: string,
+  target: ScanTarget,
+  signal?: AbortSignal,
+): Promise<NormalizedTarget> {
+  return normalizeTargetPaths(repository, target, signal, true);
+}
+
+async function normalizeTargetPaths(
+  repository: string,
+  target: ScanTarget,
+  signal: AbortSignal | undefined,
+  allowMissingPaths: boolean,
+): Promise<NormalizedTarget> {
   const root = await normalizeRepository(repository, signal);
   throwIfAborted(signal);
   if (target === "repository") {
@@ -582,11 +600,32 @@ export async function normalizeTarget(
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
-    let metadata: Stats;
+    let metadata: Stats | undefined;
     let canonical: string;
     try {
-      metadata = await abortable(() => stat(candidate), signal);
-      canonical = await abortable(() => realpath(candidate), signal);
+      try {
+        metadata = await abortable(() => stat(candidate), signal);
+      } catch (error) {
+        if (
+          !allowMissingPaths ||
+          (error as NodeJS.ErrnoException).code !== "ENOENT"
+        )
+          throw error;
+      }
+      for (let ancestor = candidate; ; ancestor = dirname(ancestor)) {
+        try {
+          const resolved = await abortable(() => realpath(ancestor), signal);
+          canonical = resolve(resolved, relative(ancestor, candidate));
+          break;
+        } catch (error) {
+          if (
+            !allowMissingPaths ||
+            (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+            dirname(ancestor) === ancestor
+          )
+            throw error;
+        }
+      }
     } catch (error) {
       throwIfAborted(signal);
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
@@ -594,7 +633,11 @@ export async function normalizeTarget(
       });
     }
     // Match the bundled scan scope resolver's supported filesystem types.
-    if (!metadata.isFile() && !metadata.isDirectory()) {
+    if (
+      metadata !== undefined &&
+      !metadata.isFile() &&
+      !metadata.isDirectory()
+    ) {
       throw new InvalidTargetError(
         `Path target is not a regular file or directory: ${value}`,
       );

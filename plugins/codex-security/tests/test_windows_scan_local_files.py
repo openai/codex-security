@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import errno
+import hashlib
+import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from workbench_test_support import load_script
@@ -11,6 +16,40 @@ from workbench_test_support import load_script
 pytestmark = pytest.mark.native_windows
 
 WINDOWS_FILES = load_script("windows_scan_local_files")
+
+
+@pytest.mark.parametrize("error_code", [2, 3, 5, errno.EINVAL])
+def test_saved_checkpoint_fallback_classifies_windows_missing_errors(
+    tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch, error_code: int
+) -> None:
+    saved = workbench_api["saved_results"]
+    finalizer = sys.modules[saved._read_scan_local_json.__module__]
+    payload = {"scanId": "fixture-scan", "findings": [], "coverage": {}}
+    contents = json.dumps(payload).encode()
+    name = hashlib.sha256(contents).hexdigest() + ".json"
+    relative = f"checkpoints/{name}"
+    staged = "drafts/01234567-89ab-cdef-0123-456789abcdef.checkpoint.json"
+    (tmp_path / "checkpoints/pending").mkdir(parents=True)
+    (tmp_path / "drafts").mkdir()
+    (tmp_path / staged).write_bytes(contents)
+    (tmp_path / "checkpoints/pending" / name).write_text(staged)
+    error = WINDOWS_FILES.WindowsScanLocalFileError(error_code, "synthetic Windows read error")
+
+    def open_read_fd(root: Path, path: str, _context: str) -> int:
+        if path == relative:
+            raise error
+        return os.open(root / path, os.O_RDONLY)
+
+    monkeypatch.setattr(finalizer.os, "supports_dir_fd", set())
+    monkeypatch.setattr(finalizer, "_is_windows", lambda: True)
+    monkeypatch.setattr(finalizer, "_windows_scan_local_files", lambda: WINDOWS_FILES)
+    monkeypatch.setattr(WINDOWS_FILES, "open_read_fd", open_read_fd)
+    if error_code in WINDOWS_FILES._MISSING_ERRORS:
+        assert saved._read_saved_result(tmp_path, relative, "fixture-scan")[0] == payload
+    else:
+        with pytest.raises(finalizer.ContractError) as caught:
+            saved._read_saved_result(tmp_path, relative, "fixture-scan")
+        assert caught.value.__cause__ is error
 
 
 @pytest.mark.parametrize(
@@ -36,6 +75,42 @@ def test_accepts_normal_scan_local_path() -> None:
         "02_discovery",
         "work.jsonl",
     )
+
+
+@pytest.mark.parametrize("error_code", [2, 3, 5, errno.EINVAL])
+def test_read_preserves_missing_file_semantics(
+    tmp_path: Path, monkeypatch, error_code: int
+) -> None:
+    scan_dir = tmp_path / "scan"
+    missing_path = scan_dir / "artifacts" / "deep-scan"
+    error = WINDOWS_FILES.WindowsScanLocalFileError(
+        error_code, "synthetic error", str(missing_path)
+    )
+    monkeypatch.setattr(WINDOWS_FILES, "_locked_parent", mock.Mock(side_effect=error))
+    expected = (
+        FileNotFoundError if error_code in {2, 3} else WINDOWS_FILES.WindowsScanLocalFileError
+    )
+    with pytest.raises(expected) as caught:
+        WINDOWS_FILES.open_read_fd(scan_dir, "artifacts/deep-scan/checkpoint.json", "checkpoint")
+    assert caught.value.filename == str(missing_path)
+    assert caught.value.__cause__ is error
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
+@pytest.mark.parametrize("parent_exists", [False, True])
+def test_native_windows_read_reports_missing_checkpoint(
+    tmp_path: Path, parent_exists: bool
+) -> None:
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    parent = scan_dir / "artifacts" / "deep-scan"
+    if parent_exists:
+        parent.mkdir(parents=True)
+    with pytest.raises(FileNotFoundError) as caught:
+        WINDOWS_FILES.open_read_fd(scan_dir, "artifacts/deep-scan/checkpoint.json", "checkpoint")
+    expected = parent / "checkpoint.json" if parent_exists else scan_dir / "artifacts"
+    assert caught.value.filename == str(expected)
+    assert caught.value.errno == errno.ENOENT
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")

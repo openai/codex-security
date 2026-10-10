@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import history from "../../../shared/workbench-migrations.json";
 import repairPlan from "../../../shared/workbench-history-repairs.json";
@@ -196,6 +196,140 @@ function migrateWorkflowResults(database: DatabaseSync): void {
   }
 }
 
+function backfillUnindexedSeverityAssessments(database: DatabaseSync): void {
+  const rows = database
+    .prepare(
+      `SELECT classification.scan_id, assessment.finding_id,
+    assessment.occurrence_id, finding.fingerprint
+    FROM scan_severity_classifications AS classification
+    JOIN json_each(classification.finding_ids_json) AS selected
+    JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
+    JOIN findings AS finding ON finding.id = assessment.finding_id`,
+    )
+    .all();
+  const insert =
+    database.prepare(`INSERT OR IGNORE INTO scan_severity_assessments
+    SELECT ?, assessment.* FROM finding_severity_assessments AS assessment
+    WHERE assessment.finding_id = ?`);
+  for (const row of rows) {
+    // Classification may precede indexing the scan's occurrences.
+    const occurrence = `occ_${createHash("sha256").update(`${row.scan_id}\0${row.fingerprint}`).digest("hex").slice(0, 24)}`;
+    if (row.occurrence_id === occurrence)
+      insert.run(row.scan_id, row.finding_id);
+  }
+}
+
+function backfillCompositionChildren(database: DatabaseSync): void {
+  // Stored paths also cover archived scans and outputs that no longer exist.
+  const children = database
+    .prepare(
+      `SELECT children.id, children.scan_dir, parents.scan_dir AS parent_scan_dir
+    FROM scans AS children JOIN scans AS parents ON parents.id = children.parent_scan_id
+    WHERE parents.mode = 'deep' AND children.mode = 'standard'`,
+    )
+    .all();
+  for (const child of children) {
+    let childDirectory = String(child.scan_dir);
+    const parentDirectory = String(child.parent_scan_dir);
+    const previousParent = dirname(dirname(dirname(dirname(childDirectory))));
+    if (
+      dirname(childDirectory) ===
+        join(previousParent, "artifacts", "deep-scan", "passes") &&
+      dirname(parentDirectory) === dirname(previousParent) &&
+      basename(parentDirectory).startsWith(
+        `${basename(previousParent)}.previous-`,
+      )
+    ) {
+      const archivedChild = join(
+        parentDirectory,
+        relative(previousParent, childDirectory),
+      );
+      for (const artifact of database
+        .prepare("SELECT kind, path FROM scan_artifacts WHERE scan_id = ?")
+        .all(child.id)) {
+        const suffix = relative(childDirectory, String(artifact.path));
+        if (
+          !isAbsolute(suffix) &&
+          suffix !== ".." &&
+          !suffix.startsWith(`..${sep}`)
+        )
+          database
+            .prepare(
+              "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
+            )
+            .run(join(archivedChild, suffix), child.id, artifact.kind);
+      }
+      database
+        .prepare("UPDATE scans SET scan_dir = ? WHERE id = ?")
+        .run(archivedChild, child.id);
+      childDirectory = archivedChild;
+    }
+    if (
+      dirname(childDirectory) ===
+      join(parentDirectory, "artifacts", "deep-scan", "passes")
+    )
+      database
+        .prepare("UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = ?")
+        .run(child.id);
+  }
+  // Repair pass findings published by older indexers, preserving earlier imports.
+  const findings = database
+    .prepare(
+      `SELECT DISTINCT findings.id FROM findings
+    JOIN finding_occurrences AS occurrence ON occurrence.finding_id = findings.id
+    JOIN scans ON scans.id = occurrence.scan_id
+    WHERE scans.parent_scan_role = 'deep_pass'
+      AND findings.details_json = occurrence.details_json
+      AND EXISTS (SELECT 1 FROM finding_occurrences AS original
+        WHERE original.finding_id = findings.id AND original.created_at = findings.created_at)
+      AND NOT EXISTS (SELECT 1 FROM finding_embeddings WHERE finding_id = findings.id)`,
+    )
+    .all();
+  for (const finding of findings) {
+    database
+      .prepare(
+        `DELETE FROM finding_repositories WHERE finding_id = ?
+      AND repository_id IN (
+        SELECT scans.target_id FROM finding_occurrences AS occurrence
+        JOIN scans ON scans.id = occurrence.scan_id
+        WHERE occurrence.finding_id = ? AND scans.parent_scan_role = 'deep_pass')
+      AND repository_id NOT IN (
+        SELECT scans.target_id FROM finding_occurrences AS occurrence
+        JOIN scans ON scans.id = occurrence.scan_id
+        WHERE occurrence.finding_id = ? AND scans.parent_scan_role IS NOT 'deep_pass'
+          AND scans.target_id IS NOT NULL)`,
+      )
+      .run(finding.id, finding.id, finding.id);
+    const publicOccurrence = database
+      .prepare(
+        `SELECT occurrence.details_json, occurrence.created_at
+      FROM finding_occurrences AS occurrence JOIN scans ON scans.id = occurrence.scan_id
+      WHERE occurrence.finding_id = ? AND scans.parent_scan_role IS NOT 'deep_pass'
+        AND occurrence.details_json != '{}'
+      ORDER BY occurrence.created_at DESC, occurrence.id DESC LIMIT 1`,
+      )
+      .get(finding.id);
+    if (publicOccurrence)
+      database
+        .prepare(
+          "UPDATE findings SET details_json = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(
+          publicOccurrence.details_json,
+          publicOccurrence.created_at,
+          finding.id,
+        );
+    else if (
+      !database
+        .prepare("SELECT 1 FROM finding_repositories WHERE finding_id = ?")
+        .get(finding.id)
+    )
+      database
+        .prepare("UPDATE findings SET details_json = NULL WHERE id = ?")
+        .run(finding.id);
+  }
+}
+
 export function applyMigrations(
   database: DatabaseSync,
   selected: readonly Migration[] = migrations,
@@ -230,6 +364,10 @@ export function applyMigrations(
       } else {
         database.exec(item.statements.join("\n"));
         if (item.version === 38) migrateWorkflowResults(database);
+        else if ([51, 55, 56].includes(item.version))
+          backfillCompositionChildren(database);
+        else if (item.version === 54)
+          backfillUnindexedSeverityAssessments(database);
       }
       if (!applied.has(item.version)) {
         database

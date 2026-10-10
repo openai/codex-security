@@ -45,6 +45,9 @@ def test_terminal_deep_draft_compares_previous_bytes_without_parsing_review_docu
     args = ("write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
     environment = {"CODEX_HOME": str(codex_home)}
     run_workbench(state_dir, *args, environment=environment)
+    staged.write_text(json.dumps(documents))
+    # File-authored clients can publish before a committed snapshot exists.
+    (scan_dir / "artifacts/scan-draft.json").unlink()
     old_document = scan_dir / filename
     if previous == "symlink":
         outside = tmp_path / "outside.json"
@@ -66,7 +69,7 @@ def test_terminal_deep_draft_compares_previous_bytes_without_parsing_review_docu
         return
     old_document.write_text("unfinished review document")
     names = ("scan-manifest.json", "findings.json", "coverage.json")
-    before = {name: (scan_dir / name).read_bytes() for name in (*names, "checkpoint-head.json")}
+    before = {name: (scan_dir / name).read_bytes() for name in names}
     digest = hashlib.sha256()
     for name in names:
         digest.update(name.encode() + b"\0present\0" + before[name] + b"\0")
@@ -87,7 +90,6 @@ def test_terminal_deep_draft_compares_previous_bytes_without_parsing_review_docu
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert json.loads((scan_dir / "findings.json").read_text())["findings"] == []
     assert json.loads((scan_dir / "coverage.json").read_text())["deferred"] == []
-    head = json.loads((scan_dir / "checkpoint-head.json").read_text())
-    checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
-    assert checkpoint["threatModel"] == model
+    committed = json.loads((scan_dir / "artifacts/scan-draft.json").read_text())
+    assert committed["manifest"]["scan"]["threatModel"] == model
     assert (scan_dir / "threatmodel.md").read_text().startswith(model["content"])

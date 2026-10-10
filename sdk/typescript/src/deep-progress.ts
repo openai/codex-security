@@ -12,10 +12,11 @@ export interface DeepScanProgress {
 interface DeepScanProgressTrackerOptions {
   read: (signal: AbortSignal) => Promise<unknown>;
   onProgress: (progress: DeepScanProgress) => void;
+  onStopped?: () => void;
   onError?: (error: unknown) => void;
 }
 
-const DEEP_PROGRESS_POLL_INTERVAL_MS = 5_000;
+const DEEP_PROGRESS_POLL_INTERVAL_MS = 1_000;
 
 export class DeepScanProgressTracker {
   readonly #options: DeepScanProgressTrackerOptions;
@@ -47,17 +48,18 @@ export class DeepScanProgressTracker {
     let update: Promise<void> | null = null;
     update = (async () => {
       try {
-        const progress = deepScanProgressFromWorkbench(
-          await this.#options.read(abortController.signal),
-        );
-        if (
-          abortController.signal.aborted ||
-          progress === null ||
-          (progress.completed === this.#lastProgress?.completed &&
-            progress.active === this.#lastProgress?.active &&
-            progress.maximum === this.#lastProgress?.maximum &&
-            progress.consolidating === this.#lastProgress?.consolidating)
-        ) {
+        const response = await this.#options.read(abortController.signal);
+        if (abortController.signal.aborted) return;
+        if (isRecord(response) && isRecord(response["scan"])) {
+          const saved = response["scan"]["progress"];
+          if (
+            isRecord(saved) &&
+            (saved["status"] === "failed" || saved["status"] === "canceled")
+          )
+            this.#options.onStopped?.();
+        }
+        const progress = deepScanProgressFromWorkbench(response);
+        if (progress === null || sameProgress(progress, this.#lastProgress)) {
           return;
         }
         this.#lastProgress = progress;
@@ -108,5 +110,18 @@ export function deepScanProgressFromWorkbench(
   }
   throw new Error(
     "Codex Security workbench returned invalid Deep Scan progress.",
+  );
+}
+
+function sameProgress(
+  left: DeepScanProgress,
+  right: DeepScanProgress | null,
+): boolean {
+  return (
+    right !== null &&
+    left.completed === right.completed &&
+    left.active === right.active &&
+    left.maximum === right.maximum &&
+    left.consolidating === right.consolidating
   );
 }

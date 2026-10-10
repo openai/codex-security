@@ -377,6 +377,28 @@ async function ownershipProof(root: string): Promise<boolean> {
   return true;
 }
 
+function lockProof(root: string) {
+  const path = join(root, "owner.lock");
+  const first = open(path, undefined, undefined, flags.CREATE_NEW);
+  let second: WindowsHandle | undefined;
+  try {
+    second = open(path);
+    success(first.lock(true));
+    assert.equal(second.lock(true), 33); // ERROR_LOCK_VIOLATION
+    success(first.close());
+    success(second.lock(true));
+    assert.equal(first.lock(true), 6); // ERROR_INVALID_HANDLE
+    return {
+      nonblockingContention: true,
+      closeReleasesOwnership: true,
+      numericClosedError: true,
+    };
+  } finally {
+    first.close();
+    second?.close();
+  }
+}
+
 const root = realpathSync.native(
   mkdtempSync(join(tmpdir(), "codex-security-windows-")),
 );
@@ -389,6 +411,7 @@ try {
         architecture: process.arch,
         nodeApi: 8,
         handles: handleProof(root),
+        locks: lockProof(root),
         privateDirectories: privateDirectoryProof(root, native),
         wideProcessAndPaths: wideProcessProof(root),
         garbageCollectionClosesHandle: await ownershipProof(root),

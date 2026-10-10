@@ -3,11 +3,7 @@ import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ArtifactContext } from "./artifact-io.js";
 
-export type {
-  ArtifactContext,
-  DeepReducerContext,
-  DeepReducerWorkerContext,
-} from "./artifact-io.js";
+export type { ArtifactContext } from "./artifact-io.js";
 
 export type RunArtifactWorkbench = (
   arguments_: string[],
@@ -88,7 +84,6 @@ export async function createScanArtifactContext(
       rawRepoRoot,
       "Codex Security scan target root",
     ),
-    layout: "scan",
     scanId,
     ...defined("scope", optionalString(scan.scope)),
     ...defined("pluginRoot", options.pluginRoot),

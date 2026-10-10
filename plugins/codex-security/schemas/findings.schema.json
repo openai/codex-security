@@ -3,12 +3,7 @@
   "$id": "https://openai.com/codex-security/schemas/findings.schema.json",
   "title": "Codex Security findings",
   "type": "object",
-  "required": [
-    "documentType",
-    "schemaVersion",
-    "scanId",
-    "findings"
-  ],
+  "required": ["documentType", "schemaVersion", "scanId", "findings"],
   "properties": {
     "documentType": {
       "const": "codex-security.findings"
@@ -54,9 +49,7 @@
           },
           "identity": {
             "type": "object",
-            "required": [
-              "anchor"
-            ],
+            "required": ["anchor"],
             "properties": {
               "anchor": {
                 "type": "string",
@@ -70,10 +63,7 @@
           },
           "fingerprints": {
             "type": "object",
-            "required": [
-              "algorithm",
-              "primary"
-            ],
+            "required": ["algorithm", "primary"],
             "properties": {
               "algorithm": {
                 "const": "codex-security/v1"
@@ -94,18 +84,10 @@
           },
           "severity": {
             "type": "object",
-            "required": [
-              "level"
-            ],
+            "required": ["level"],
             "properties": {
               "level": {
-                "enum": [
-                  "critical",
-                  "high",
-                  "medium",
-                  "low",
-                  "informational"
-                ]
+                "enum": ["critical", "high", "medium", "low", "informational"]
               },
               "score": {
                 "type": "number",
@@ -132,17 +114,10 @@
           },
           "confidence": {
             "type": "object",
-            "required": [
-              "level",
-              "rationale"
-            ],
+            "required": ["level", "rationale"],
             "properties": {
               "level": {
-                "enum": [
-                  "high",
-                  "medium",
-                  "low"
-                ]
+                "enum": ["high", "medium", "low"]
               },
               "rationale": {
                 "type": "string",
@@ -152,10 +127,7 @@
           },
           "taxonomy": {
             "type": "object",
-            "required": [
-              "category",
-              "cwe"
-            ],
+            "required": ["category", "cwe"],
             "properties": {
               "category": {
                 "type": "string",
@@ -171,10 +143,7 @@
             "minItems": 1,
             "items": {
               "type": "object",
-              "required": [
-                "path",
-                "startLine"
-              ],
+              "required": ["path", "startLine"],
               "properties": {
                 "path": {
                   "type": "string",
@@ -197,13 +166,11 @@
           },
           "writeup": {
             "type": "object",
-            "required": [
-              "reportPath"
-            ],
+            "required": ["reportPath"],
             "properties": {
               "reportPath": {
                 "type": "string",
-                "pattern": "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$"
+                "pattern": "^(?:artifacts/deep-scan/passes/[a-zA-Z0-9][a-zA-Z0-9._-]*/)?findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md$"
               }
             }
           },
@@ -260,16 +227,10 @@
             }
           },
           "code_evidence": {
-            "type": [
-              "array",
-              "null"
-            ],
+            "type": ["array", "null"],
             "items": {
               "type": "object",
-              "required": [
-                "id",
-                "code"
-              ],
+              "required": ["id", "code"],
               "properties": {
                 "id": {
                   "type": "string",
@@ -283,13 +244,8 @@
             }
           },
           "rootCause": {
-            "type": [
-              "object",
-              "string"
-            ],
-            "required": [
-              "summary"
-            ],
+            "type": ["object", "string"],
+            "required": ["summary"],
             "properties": {
               "summary": {
                 "type": "string",
@@ -309,11 +265,7 @@
             }
           },
           "root_cause": {
-            "type": [
-              "object",
-              "string",
-              "null"
-            ],
+            "type": ["object", "string", "null"],
             "properties": {
               "summary": {
                 "type": "string",
@@ -340,10 +292,7 @@
             "minLength": 1
           },
           "validation": {
-            "type": [
-              "object",
-              "null"
-            ],
+            "type": ["object", "null"],
             "properties": {
               "assertions": {
                 "$ref": "#/$defs/stringList"
@@ -352,10 +301,7 @@
                 "$ref": "#/$defs/stringList"
               },
               "evidence": {
-                "type": [
-                  "string",
-                  "array"
-                ],
+                "type": ["string", "array"],
                 "minLength": 1,
                 "items": {
                   "type": "string",
@@ -376,10 +322,7 @@
                 "minLength": 1
               },
               "status": {
-                "type": [
-                  "string",
-                  "null"
-                ],
+                "type": ["string", "null"],
                 "minLength": 1
               },
               "summary": {
@@ -387,26 +330,17 @@
                 "minLength": 1
               },
               "disposition": {
-                "type": [
-                  "string",
-                  "null"
-                ],
+                "type": ["string", "null"],
                 "minLength": 1
               },
               "result": {
-                "type": [
-                  "string",
-                  "null"
-                ],
+                "type": ["string", "null"],
                 "minLength": 1
               }
             }
           },
           "attackPath": {
-            "type": [
-              "object",
-              "null"
-            ],
+            "type": ["object", "null"],
             "properties": {
               "assumptions": {
                 "$ref": "#/$defs/stringList"
@@ -445,10 +379,7 @@
                 "$ref": "#/$defs/stringList"
               },
               "reachability": {
-                "type": [
-                  "string",
-                  "object"
-                ],
+                "type": ["string", "object"],
                 "minLength": 1,
                 "properties": {
                   "summary": { "type": "string", "minLength": 1 },
@@ -485,9 +416,7 @@
           },
           "provenance": {
             "type": "object",
-            "required": [
-              "source"
-            ],
+            "required": ["source"],
             "properties": {
               "source": {
                 "type": "string",
@@ -518,10 +447,7 @@
   },
   "$defs": {
     "dataFlow": {
-      "type": [
-        "string",
-        "object"
-      ],
+      "type": ["string", "object"],
       "minLength": 1,
       "properties": {
         "summary": { "type": "string", "minLength": 1 },
@@ -540,11 +466,7 @@
       }
     },
     "assessment": {
-      "type": [
-        "string",
-        "object",
-        "null"
-      ],
+      "type": ["string", "object", "null"],
       "minLength": 1,
       "properties": {
         "level": { "type": "string", "minLength": 1 },

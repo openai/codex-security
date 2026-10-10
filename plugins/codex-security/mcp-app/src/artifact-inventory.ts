@@ -27,6 +27,10 @@ const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const label = "review_items";
 
+export interface PreparedReviewItems {
+  reviewItemsTotal: number;
+}
+
 export interface ReviewItem {
   path: string;
 }
@@ -52,8 +56,8 @@ const reviewItemSchema = loadArtifactZodSchema(
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
-) {
-  if (context.layout !== "scan") {
+): Promise<PreparedReviewItems> {
+  if (!context.scanId) {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
     );

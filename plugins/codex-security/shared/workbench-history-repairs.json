@@ -1,5 +1,25 @@
 [
   [
+    "-- Preserve known composition preview migration receipts before applying main history.",
+    "WITH input AS (SELECT :history AS history),",
+    "moves(position, version, destination, name) AS (",
+    "    VALUES",
+    "        (0, 43, 51, 'persist composition child membership'),",
+    "        (1, 44, 52, 'reuse scan severity assessments'),",
+    "        (2, 45, 53, 'persist scan execution sessions'),",
+    "        (3, 46, 54, 'recover unindexed severity assessments'),",
+    "        (4, 48, 55, 'repair stored composition membership'),",
+    "        (5, 49, 56, 'repair archived composition paths'),",
+    "        (6, 42, 43, 'preserve severity assessments per scan'),",
+    "        (7, 50, 43, 'preserve severity assessments per scan')",
+    ")",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination ||",
+    "    ' WHERE version = ' || version || ' AND name = ' || quote(name) AS value",
+    "FROM moves JOIN schema_migrations USING (version, name)",
+    "ORDER BY position;"
+  ],
+  [
     "-- mirror and early-moves: relocate numbers before checking profiles.",
     "WITH",
     "-- Keep the common :history binding even though these moves do not inspect it.",

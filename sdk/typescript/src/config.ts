@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isRecord } from "./record.js";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
@@ -178,10 +179,13 @@ export function inlineToml(value: JsonValue): string {
 export function scanApprovalPolicy(
   config: Readonly<JsonObject>,
 ): "never" | "on-request" {
-  return config["approval_policy"] === "never" ||
-    selectedScanProfile(config)?.["approval_policy"] === "never"
-    ? "never"
-    : "on-request";
+  const selectedProfile = selectedScanProfile(config);
+  const configured =
+    selectedProfile !== undefined &&
+    Object.hasOwn(selectedProfile, "approval_policy")
+      ? selectedProfile["approval_policy"]
+      : config["approval_policy"];
+  return configured === "never" ? "never" : "on-request";
 }
 
 function selectedScanProfile(
@@ -200,8 +204,9 @@ function selectedScanProfile(
 
 export function resolveCodexProfile(config: JsonObject): JsonObject {
   const normalized = parse(stringify(config)) as JsonObject;
-  const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
-  delete resolved["profile"];
+  const selected = selectedScanProfile(normalized);
+  const resolved = deepMerge(normalized, selected ?? {});
+  if (selected !== undefined) delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;
 }
@@ -224,6 +229,38 @@ export function scanCyberAccessConfig(
         features["api_key_cyber_access_programs"] ?? true,
     },
   };
+}
+
+/** Remove generated plugin registration before reusing user configuration. */
+export function removeManagedPluginRegistration(config: JsonObject): void {
+  const profiles = config["profiles"];
+  for (const value of [
+    config,
+    ...(isObject(profiles) ? Object.values(profiles) : []),
+  ]) {
+    if (!isObject(value)) continue;
+    delete value["plugins"];
+    delete value["marketplaces"];
+    if (isObject(value["features"])) delete value["features"]["plugins"];
+  }
+}
+
+/** Carry a selected scan into another ordinary client without copying managed plugin registration. */
+export function scanCompositionOverrides(
+  config: JsonObject,
+  subagents: number,
+): JsonObject {
+  const result = resolveCodexProfile(config);
+  removeManagedPluginRegistration(result);
+  const features = isObject(result["features"]) ? result["features"] : {};
+  features["multi_agent_v2"] = {
+    ...(isObject(features["multi_agent_v2"]) ? features["multi_agent_v2"] : {}),
+    enabled: true,
+    max_concurrent_threads_per_session: subagents + 1,
+  };
+  result["features"] = features;
+  if (isObject(result["agents"])) delete result["agents"]["max_threads"];
+  return result;
 }
 
 export async function mergedCodexConfig(
@@ -325,8 +362,6 @@ export async function writeCodexConfig(
   path: string,
   config: JsonObject,
 ): Promise<void> {
-  const parent = dirname(path);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
   let contents: string;
   try {
     contents = stringify(config);
@@ -335,6 +370,15 @@ export async function writeCodexConfig(
       cause: error,
     });
   }
+  await writeCodexConfigContents(path, contents);
+}
+
+export async function writeCodexConfigContents(
+  path: string,
+  contents: string | Uint8Array,
+): Promise<void> {
+  const parent = dirname(path);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
   const temporary = join(parent, `.${randomUUID()}.config.toml.tmp`);
   let created = false;
   try {
@@ -448,4 +492,61 @@ function isObject(value: unknown): value is Record<string, JsonValue> {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+/** @internal Provider credentials stay in protected config, not argv or shell environments. */
+export function providerProcessConfiguration(config: JsonObject): {
+  config: JsonObject;
+  requiresConfigFile: boolean;
+} {
+  const result = structuredClone(config);
+  let requiresConfigFile = false;
+  const providers = (source: JsonObject): void => {
+    if (!isRecord(source["model_providers"])) return;
+    for (const provider of Object.values(source["model_providers"])) {
+      if (!isRecord(provider)) continue;
+      for (const field of [
+        "experimental_bearer_token",
+        "http_headers",
+        "auth",
+      ]) {
+        if (!Object.hasOwn(provider, field)) continue;
+        delete provider[field];
+        requiresConfigFile = true;
+      }
+    }
+  };
+  providers(result);
+  if (isRecord(result["profiles"]))
+    for (const profile of Object.values(result["profiles"]))
+      if (isRecord(profile)) providers(profile);
+  return { config: result, requiresConfigFile };
+}
+
+/** @internal MCP credentials are read from protected config, not process arguments. */
+export function mcpProcessConfiguration(config: JsonObject): {
+  config: JsonObject;
+  requiresConfigFile: boolean;
+} {
+  const result = structuredClone(config);
+  let requiresConfigFile = false;
+  if (isRecord(result["mcp_servers"])) {
+    for (const server of Object.values(result["mcp_servers"])) {
+      if (!isRecord(server)) continue;
+      for (const field of ["env", "http_headers"]) {
+        if (!Object.hasOwn(server, field)) continue;
+        requiresConfigFile = true;
+        delete server[field];
+      }
+    }
+  }
+  return { config: result, requiresConfigFile };
+}
+
+/** Serialize full tables so dotted names and filesystem paths remain literal keys. */
+export function codexConfigOverrides(config: JsonObject): string[] {
+  return Object.entries(config).map(
+    ([name, value]) =>
+      `${/^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)}=${inlineToml(value)}`,
+  );
 }

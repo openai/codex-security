@@ -5,13 +5,12 @@ being embedded in its source tree or shipped npm runtime.
 
 - [Triage finding](triage-finding/README.md): Promptfoo input contracts, OSS
   calibration, and SastBench. This suite owns its private package and lockfile.
-- [Deep reducer](deep-reducer/README.md): optional model evaluation of real IPC
-  size-limit recovery, pagination, and finding retention. It reuses the MCP
-  test helpers and dependencies.
-- [Secret discovery](secret-discovery/README.md): checks whether the production
-  core audit finds synthetic credentials in source and keeps them in its final
-  findings, with deterministic grading and harness checks.
+
+- [Secret discovery](secret-discovery/README.md): checks synthetic credential
+  discovery with deterministic grading and harness checks.
+- [Completed-report merge](../sdk/typescript/scripts/merge-eval/README.md):
+  synthetic grouping quality checks and negative controls.
 
 Model runs are opt-in. CI runs the deterministic triage and secret-discovery
-helper checks and the real-IPC reducer regression through the normal MCP test
-suite.
+helper checks. The SDK test suite includes the completed-report merge oracle
+and its negative controls.

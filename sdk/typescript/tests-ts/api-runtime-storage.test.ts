@@ -1,11 +1,10 @@
-import { codexFactory } from "./support/api-events.js";
 import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as runtime from "../src/runtime.js";
-import { TestClient } from "./support/api-client.js";
-import { parse as parseToml } from "smol-toml";
+import type { CodexOptions } from "@openai/codex-sdk";
+import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -22,20 +21,24 @@ test.each([false, true])(
     await mkdir(scan, { mode: 0o700 });
     const original = runtime.requirePrivateCredentialHome;
     let protectedDirectory: string | undefined;
-    let workerFile: string | undefined;
+    let bootstrapDirectory: string | undefined;
     let launched = false;
+    let launchCount = 0;
+    let checkedLaunchCount = 0;
     let operation: "deep" | "standard" | "validation" = "deep";
     const guard = spyOn(
       runtime,
       "requirePrivateCredentialHome",
     ).mockImplementation(async (metadata, path, options) => {
-      if (!basename(path).startsWith("openai-codex-security-home-"))
+      if (path !== join(root, "state", "codex-home"))
         return original(metadata, path, options);
       await original(metadata, path, {
         platform: "win32",
         secureWindowsHome: async (directory) => {
-          expect(await readdir(directory)).toEqual([]);
-          protectedDirectory = directory;
+          if (protectedDirectory === undefined) {
+            expect(await readdir(directory)).toEqual([]);
+            protectedDirectory = directory;
+          }
           if (failAcl) throw new Error("synthetic ACL denial");
         },
       });
@@ -63,69 +66,84 @@ test.each([false, true])(
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options) =>
-          codexFactory(async function runStreamed() {
-            launched = true;
-            const file = join(protectedDirectory!, "config-preflight.toml");
-            expect(options.env!["CODEX_SECURITY_CONFIG_PATH"]).toBe(
-              operation === "validation" ? undefined : file,
-            );
-            expect(dirname(file)).toBe(protectedDirectory!);
-            expect(await readFile(file, "utf8")).not.toContain(
-              "synthetic-client-secret",
-            );
-            workerFile ??= options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
-            expect(options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]).toBe(
-              operation === "deep" ? workerFile : undefined,
-            );
-            expect(dirname(dirname(workerFile!))).toBe(
-              options.env!["CODEX_HOME"]!,
-            );
-            expect(await readFile(workerFile!, "utf8")).not.toContain(
-              "synthetic-client-secret",
-            );
-            const profileFile = join(
-              options.env!["CODEX_HOME"]!,
-              `${options.nativeProfile}.config.toml`,
-            );
-            expect(await readFile(profileFile, "utf8")).toContain(
-              "synthetic-client-secret",
-            );
-            expect(JSON.stringify(options)).not.toContain(
-              "synthetic-client-secret",
-            );
-            const filesystem = parseToml(
-              options.configOverrides!.find((value) =>
-                value.startsWith("permissions.codex_security_scan.filesystem="),
-              )!,
-            )["permissions"] as Record<string, Record<string, unknown>>;
-            expect(
-              (
-                filesystem["codex_security_scan"]!["filesystem"] as Record<
-                  string,
-                  unknown
-                >
-              )[dirname(profileFile)],
-            ).toEqual({ ".": "deny" });
-            if (process.platform !== "win32") {
-              expect((await stat(profileFile)).mode & 0o777).toBe(0o600);
-              expect((await stat(file)).mode & 0o777).toBe(0o600);
-              expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
-              expect((await stat(workerFile!)).mode & 0o777).toBe(0o600);
-              expect((await stat(dirname(workerFile!))).mode & 0o777).toBe(
-                0o700,
+        runWorkbench: async (_options, args, input) =>
+          args[0] === "list-scans"
+            ? { scans: [] }
+            : args[0] === "get-scan"
+              ? { scan: { progress: { status: "running" } } }
+              : mockWorkbench(args, input),
+        createCodex: (options: CodexOptions & { nativeProfile?: string }) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              launched = true;
+              launchCount++;
+              expect(options.env!["CODEX_HOME"]).toBe(protectedDirectory!);
+              const file = options.env!["CODEX_SECURITY_CONFIG_PATH"];
+              if (operation === "validation") {
+                expect(file).toBeUndefined();
+              } else {
+                expect(file).toBeDefined();
+                bootstrapDirectory ??= dirname(file!);
+                expect(dirname(file!)).toBe(bootstrapDirectory);
+                expect(dirname(file!)).not.toBe(protectedDirectory);
+                expect(await readFile(file!, "utf8")).not.toContain(
+                  "synthetic-client-secret",
+                );
+              }
+              // Deep Scan now composes ordinary scan sessions; their managed
+              // home and configuration replace the retired worker snapshot.
+              expect(
+                options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
+              ).toBeUndefined();
+              const providers = options.config!["model_providers"] as Record<
+                string,
+                Record<string, unknown>
+              >;
+              const auth = providers["synthetic.provider"]!["auth"] as {
+                env: Record<string, string>;
+              };
+              expect(auth.env["CLIENT_SECRET"]).toBe("synthetic-client-secret");
+              // The injected factory is a trusted local caller. Native profile
+              // transport and argv omission have separate real-process tests.
+              const profileFile = join(protectedDirectory!, "config.toml");
+              expect(await readFile(profileFile, "utf8")).toContain(
+                "synthetic-client-secret",
               );
-            }
-            throw new Error("synthetic scan reached");
-          })(),
+              const permissions = options.config!["permissions"] as Record<
+                string,
+                Record<string, unknown>
+              >;
+              const filesystem = permissions["codex_security_scan"]![
+                "filesystem"
+              ] as Record<string, unknown>;
+              expect(filesystem[protectedDirectory!]).toEqual({ ".": "deny" });
+              if (process.platform !== "win32") {
+                expect((await stat(profileFile)).mode & 0o777).toBe(0o600);
+                expect((await stat(protectedDirectory!)).mode & 0o777).toBe(
+                  0o700,
+                );
+                if (file !== undefined) {
+                  expect((await stat(file)).mode & 0o777).toBe(0o600);
+                  expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
+                }
+              }
+              checkedLaunchCount++;
+              throw new Error("synthetic scan reached");
+            },
+          }),
+        }),
       },
     );
     try {
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-        failAcl ? "synthetic ACL denial" : "synthetic scan reached",
+        failAcl
+          ? "synthetic ACL denial"
+          : "Deep Scan reached its consecutive error limit.",
       );
       expect(protectedDirectory).toBeDefined();
       expect(launched).toBe(!failAcl);
+      expect(checkedLaunchCount).toBe(launchCount);
       if (!failAcl) {
         operation = "standard";
         await expect(client.run(repository)).rejects.toThrow(
@@ -139,14 +157,25 @@ test.each([false, true])(
             outputDir: join(root, "validation"),
           }),
         ).rejects.toThrow("synthetic scan reached");
+        expect(checkedLaunchCount).toBe(launchCount);
       }
     } finally {
       guard.mockRestore();
       await client.close();
     }
-    expect(existsSync(protectedDirectory!)).toBe(false);
-    if (workerFile !== undefined) {
-      expect(existsSync(dirname(workerFile))).toBe(false);
+    // Credential storage persists across clients; only bootstrap state is disposable.
+    expect(existsSync(protectedDirectory!)).toBe(true);
+    if (bootstrapDirectory !== undefined) {
+      expect(existsSync(bootstrapDirectory)).toBe(false);
+      expect(
+        await readFile(join(protectedDirectory!, "config.toml"), "utf8"),
+      ).not.toContain("synthetic-client-secret");
+      if (process.platform !== "win32") {
+        expect((await stat(protectedDirectory!)).mode & 0o777).toBe(0o700);
+        expect(
+          (await stat(join(protectedDirectory!, "config.toml"))).mode & 0o777,
+        ).toBe(0o600);
+      }
     }
   },
 );

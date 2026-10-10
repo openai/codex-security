@@ -1,3 +1,4 @@
+import { nativeRequest } from "./support/native-request.js";
 import { existsSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import {
@@ -18,6 +19,7 @@ import {
   createProfileCodex,
   createProviderProfile,
   providerPreflightCommand,
+  restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
 import { structuredCodexConfig } from "../src/config.js";
@@ -57,6 +59,48 @@ const startupProviders = {
   omitted: null,
   "synthetic.gateway": startupProvider,
 };
+
+test("saved provider profiles keep concurrent replay credentials private and separate", async () => {
+  const home = join(await temporaryDirectory(), "home");
+  await mkdir(home, { mode: 0o700 });
+  const providers = ["first", "second"].map((name) => ({
+    synthetic: {
+      name,
+      wire_api: "responses",
+      auth: {
+        command: "synthetic-auth",
+        env: { TOKEN: `synthetic-${name}-secret` },
+      },
+    },
+  }));
+  const profiles = await Promise.all(
+    providers.map((model_providers) =>
+      createProviderProfile(home, { model_providers }),
+    ),
+  );
+  expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
+  const restored = await Promise.all(
+    profiles.map((profile) =>
+      restoreProviderProfile(
+        { model_provider: "synthetic" },
+        { name: profile.name, home: "ambient" },
+        { CODEX_HOME: home },
+      ),
+    ),
+  );
+  for (const [index, profile] of profiles.entries()) {
+    expect(restored[index]!["model_providers"]).toEqual(providers[index]);
+    if (process.platform !== "win32")
+      expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
+  }
+  await expect(
+    restoreProviderProfile(
+      {},
+      { name: "../outside", home: "ambient" },
+      { CODEX_HOME: home },
+    ),
+  ).rejects.toThrow("invalid provider profile");
+});
 
 test.each([
   [
@@ -109,6 +153,7 @@ test.each([
       script,
       `import { readFileSync } from "node:fs";
     import { join } from "node:path";
+import { pathToFileURL } from "node:url";
     console.log(JSON.stringify({
       args: process.argv.slice(2),
       home: process.env.CODEX_HOME,
@@ -182,22 +227,9 @@ test.each([
       settings,
     );
     expect(native.args?.slice(0, prefix.length)).toEqual(prefix);
-    const { readDeepScanRuntimeConfig } = await import(
-      pathToFileURL(
-        join(
-          await bundledPluginRoot(),
-          "mcp",
-          "permission-profile-preflight.mjs",
-        ),
-      ).href
-    );
-    const read = () =>
-      readDeepScanRuntimeConfig({
-        codexPath: native.command,
-        commandArgs: native.args,
-        cwd: home,
-        configOverrides: [],
-        env: {
+    const read = async () => {
+      const { config } = await nativeRequest(
+        {
           PATH: process.env["PATH"] ?? "",
           ...(process.env["SystemRoot"] === undefined
             ? {}
@@ -208,9 +240,14 @@ test.each([
           HOME: home,
           CODEX_HOME: home,
         },
-        signal: new AbortController().signal,
-        context: "helper",
-      });
+        home,
+        [...(native.args ?? [])],
+        "config/read",
+        { cwd: home, includeLayers: false },
+        native,
+      );
+      return config;
+    };
     if (selection === "") {
       await expect(read()).rejects.toThrow("Model provider `` not found");
     } else {

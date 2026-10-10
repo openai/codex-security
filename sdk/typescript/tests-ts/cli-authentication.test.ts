@@ -17,7 +17,10 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { main, runCodexSkillCommand } from "../src/cli.js";
+import {
+  main,
+  runCodexSkillCommand as executeSkillCommand,
+} from "../src/cli.js";
 import {
   CodexSecurityError,
   type JsonObject,
@@ -65,11 +68,30 @@ beforeEach(async () => {
   stateDirectory = await realpath(
     await temporaryDirectory("codex-security-cli-authentication-"),
   );
+  await mkdir(join(stateDirectory, "skill-working-directory"));
 });
 
 afterEach(async () => {
   await rm(stateDirectory, { recursive: true, force: true });
 });
+
+function runCodexSkillCommand(
+  ...[args, output, ...rest]: Parameters<typeof executeSkillCommand>
+) {
+  return executeSkillCommand(
+    args,
+    output === undefined
+      ? undefined
+      : {
+          ...output,
+          directory:
+            output.directory ??
+            output.appServer?.directory ??
+            join(stateDirectory, "skill-working-directory"),
+        },
+    ...rest,
+  );
+}
 
 function dependencies(
   options: Parameters<typeof cliDependencies>[0] = {},

@@ -1,10 +1,15 @@
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
+import { lockExecutionConfiguration } from "../src/execution-preparation.js";
 import {
   type JsonObject,
+  codexConfigOverrides,
+  scanCompositionOverrides,
   inlineToml,
   modelProviderConfigOverride,
   resolveCodexProfile,
@@ -967,3 +972,144 @@ describe("Codex configuration", () => {
     expect(parse(await readFile(path, "utf8"))).toEqual({ hooks });
   });
 });
+
+test.each([false, true])(
+  "worker launch pins provider, model and effort across shared-home changes (profile: %p)",
+  async (selectedProfile) => {
+    const home = await temporaryDirectory();
+    const provider = {
+      name: "Synthetic provider",
+      base_url: "https://example.invalid/v1",
+      wire_api: "responses",
+      env_key: "SYNTHETIC_PROVIDER_KEY",
+    };
+    const requested = await mergedCodexConfig({
+      codexOverrides: selectedProfile
+        ? {
+            profile: "review",
+            profiles: {
+              review: {
+                model_provider: "synthetic_requested",
+                model: "requested-model",
+                model_reasoning_effort: "high",
+              },
+            },
+            model_providers: { synthetic_requested: provider },
+          }
+        : {},
+    });
+    const prepared = scanRuntimeCodexConfig(requested, home);
+    // Another parent changes the shared home after this worker was prepared.
+    await writeCodexConfig(join(home, "config.toml"), {
+      model_provider: "synthetic_secondary",
+      model: "other-model",
+      model_reasoning_effort: "low",
+      forced_login_method: "chatgpt",
+      forced_chatgpt_workspace_id: "synthetic-secondary-workspace",
+      model_providers: { synthetic_secondary: provider },
+    });
+    const originalConfig = parse(
+      await readFile(join(home, "config.toml"), "utf8"),
+    );
+    for (const config of [prepared, scanCompositionOverrides(prepared, 0)]) {
+      const release = await lockExecutionConfiguration(home, config);
+      const child = spawn(
+        resolveCodexCommand({}).command,
+        [
+          ...codexConfigOverrides(config).flatMap((value) => [
+            "--config",
+            value,
+          ]),
+          "app-server",
+          "--stdio",
+        ],
+        { env: { PATH: process.env["PATH"], CODEX_HOME: home }, stdio: "pipe" },
+      );
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const closed = new Promise<void>((resolve) =>
+        child.once("close", () => resolve()),
+      );
+      const lines = createInterface({ input: child.stdout });
+      const iterator = lines[Symbol.asyncIterator]();
+      const request = async (id: number, method: string, params: unknown) => {
+        child.stdin.write(JSON.stringify({ id, method, params }) + "\n");
+        for (;;) {
+          const line = await iterator.next();
+          if (line.done)
+            throw new Error(
+              `Codex closed before returning configuration: ${stderr}`,
+            );
+          const response = JSON.parse(line.value);
+          if (response.id === id) {
+            if (response.error) throw new Error(JSON.stringify(response.error));
+            return response.result;
+          }
+        }
+      };
+      try {
+        await request(1, "initialize", {
+          clientInfo: { name: "synthetic_config_test", version: "1" },
+          capabilities: { experimentalApi: true },
+        });
+        child.stdin.write(
+          JSON.stringify({ method: "initialized", params: {} }) + "\n",
+        );
+        const actual = (
+          await request(2, "config/read", { cwd: home, includeLayers: false })
+        ).config;
+        expect(actual.model_provider).toBe(
+          selectedProfile ? "synthetic_requested" : "openai",
+        );
+        const selection = scanModelConfiguration(requested);
+        expect(actual.model).toBe(selection.model);
+        expect(actual.model_reasoning_effort).toBe(selection.reasoningEffort);
+        expect(actual.forced_login_method).toBeNull();
+        expect(actual.forced_chatgpt_workspace_id).toBeNull();
+      } finally {
+        lines.close();
+        child.kill();
+        await closed;
+        await release();
+      }
+      expect(parse(await readFile(join(home, "config.toml"), "utf8"))).toEqual(
+        originalConfig,
+      );
+    }
+  },
+);
+
+test.each([
+  ["missing", undefined],
+  ["plain", 'model = "previous-model"\n'],
+  [
+    "comments",
+    '# Preserve this user comment.\r\nmodel   =   "previous-model" # inline note\r\n',
+  ],
+  ["spacing", 'model="previous-model"\n\n# Keep custom formatting.\n'],
+] as const)(
+  "execution configuration restores original bytes (%s)",
+  async (_label, original) => {
+    const home = await temporaryDirectory();
+    const path = join(home, "config.toml");
+    if (original !== undefined)
+      await writeFile(path, original, { mode: 0o600 });
+    const release = await lockExecutionConfiguration(home, {
+      model: "selected-model",
+    });
+    expect(parse(await readFile(path, "utf8"))["model"]).toBe("selected-model");
+    await release();
+    await release();
+    if (original === undefined) {
+      expect(
+        await stat(path).catch((error: NodeJS.ErrnoException) => error.code),
+      ).toBe("ENOENT");
+    } else {
+      expect(await readFile(path)).toEqual(Buffer.from(original));
+      if (process.platform !== "win32")
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
+  },
+);

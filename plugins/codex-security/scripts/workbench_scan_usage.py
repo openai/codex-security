@@ -14,6 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from finalize_scan_contract import ContractError
+from workbench_composition import CompositionView, load_composition
+from workbench_constants import reject_nonstandard_json_number as _reject_nonstandard_json_number
+
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
     "cached_input_tokens": "cachedInputTokens",
@@ -49,10 +56,15 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
-def measured_scan_cost_json(usage: Mapping[str, Any]) -> str:
-    """Keep usage in the already-migrated scans.cost_json column."""
-
-    return json.dumps({"usage": dict(usage)}, separators=(",", ":"), allow_nan=False)
+def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
+    """Keep measured usage unless an incoming receipt explicitly replaces it."""
+    if incoming is None:
+        return existing
+    replacement = stored_scan_cost_fields(incoming)
+    if "usage" in replacement:
+        return json.dumps(replacement, allow_nan=False)
+    fields = {**stored_scan_cost_fields(existing), **replacement}
+    return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
 
 
 def reconcile_completed_scan_cost(
@@ -62,13 +74,7 @@ def reconcile_completed_scan_cost(
 ) -> None:
     """Persist authoritative SDK cost without discarding measured worker usage."""
 
-    existing = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
-    if isinstance(existing, dict) and "usage" in existing:
-        cost_json = json.dumps(
-            {**existing, "cost": json.loads(cost_json)},
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+    cost_json = merge_scan_cost(scan["cost_json"], cost_json)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         connection.execute(
@@ -86,7 +92,12 @@ def collect_scan_usage(
 ) -> dict[str, Any]:
     """Count only complete, attributable rollout events inside this scan's window."""
 
-    roots = _scan_root_thread_ids(connection, scan, thread_id)
+    try:
+        composition = load_composition(connection, scan)
+    except (ContractError, OSError) as exc:
+        print(f"Could not measure scan usage: {exc}", file=sys.stderr)
+        return _unavailable_usage("composition_checkpoint_unavailable")
+    roots = _scan_root_thread_ids(connection, scan, thread_id, composition=composition)
     if not roots:
         return _unavailable_usage("scan_thread_unavailable")
 
@@ -100,6 +111,27 @@ def collect_scan_usage(
         return _unavailable_usage("scan_window_unavailable")
 
     warnings: set[str] = set()
+    checkpoint = composition.checkpoint
+    # Known currency receipts do not make unavailable session token counts complete.
+    if (
+        checkpoint is not None
+        and (
+            checkpoint.get("costUnavailable")
+            or (
+                not scan["continuation_thread_id"]
+                and (
+                    checkpoint.get("mergeStarted") is True
+                    or (
+                        checkpoint.get("version") != 3
+                        and checkpoint.get("mergeStarted") is not False
+                        and checkpoint.get("mergedScanIds")
+                    )
+                    or _merge_was_prepared(scan["scan_dir"])
+                )
+            )
+        )
+    ) or any(not child["continuation_thread_id"] for child in composition.children):
+        warnings.add("scan_thread_unavailable")
     try:
         sessions, missing_thread_ids = _discover_rollout_sessions(
             state_database,
@@ -164,11 +196,21 @@ def collect_scan_usage(
     return result
 
 
+def _merge_was_prepared(scan_dir: str) -> bool:
+    # The host persists this input before launch; a completed discovery is not a merge.
+    try:
+        (Path(scan_dir) / "artifacts/deep-scan/merge-inputs.json").lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _scan_root_thread_ids(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     supplied_thread_id: str | None,
     *,
+    composition: CompositionView,
     include_owner_threads: bool = True,
 ) -> list[str]:
     candidates: list[str | None] = [supplied_thread_id]
@@ -183,19 +225,9 @@ def _scan_root_thread_ids(
         ).fetchone()
         if workspace is not None:
             candidates.append(workspace["thread_id"])
+    candidates.extend(composition.execution_threads)
     if scan["mode"] == "deep":
-        candidates.extend(
-            row["sdk_thread_id"]
-            for row in connection.execute(
-                """
-                SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
-                WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
-                ORDER BY sdk_thread_id
-                """,
-                (scan["id"],),
-            )
-        )
+        candidates.extend(child["continuation_thread_id"] for child in composition.children)
     roots: dict[str, None] = {}
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.strip():
@@ -203,13 +235,16 @@ def _scan_root_thread_ids(
     return list(roots)
 
 
-def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:
+def _scan_execution_thread_ids(
+    connection: sqlite3.Connection, scan: sqlite3.Row, composition: CompositionView
+) -> list[str]:
     # CLI recipes identify dedicated executions; Desktop continuations can be shared.
     return _scan_root_thread_ids(
         connection,
         scan,
         scan["continuation_thread_id"] if scan["recipe_json"] is not None else None,
         include_owner_threads=False,
+        composition=composition,
     )
 
 
@@ -576,10 +611,6 @@ def _unavailable_usage(reason: str, *, warnings: set[str] | None = None) -> dict
         "threadCount": 0,
         "warnings": sorted({reason, *(warnings or set())}),
     }
-
-
-def _reject_nonstandard_json_number(value: str) -> None:
-    raise ValueError(f"invalid JSON number {value}")
 
 
 if __name__ == "__main__":

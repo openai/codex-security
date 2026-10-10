@@ -21,6 +21,9 @@ import { syncBuiltinESMExports } from "node:module";
 import { mock } from "node:test";
 import { importSource } from "./import-module.ts";
 
+const { candidateSchemaV1 } = await importSource(
+  new URL("../src/artifact-candidate.ts", import.meta.url).pathname,
+);
 const {
   compactDiscoveryCandidateSchema,
   listCodexSecurityCandidates,
@@ -106,16 +109,15 @@ try {
     "first\nsecond\n",
   );
 
-  const scan = await createContext("scan", "scan");
+  const scan = await createContext(root, repoRoot, "scan");
   await verifyInputSchema();
   await verifyNormalizationAndPagination(scan);
   await verifyNormalizationRunsOffThread(scan);
   await verifyReaderPreservesSharedPhaseRecords(scan);
   await verifyNormalizerFailuresPreserveOutput(scan);
-  await verifyDiffInventoryAllowsDeletedFiles();
+  await verifyDiffInventoryAllowsDeletedFiles(root, repoRoot);
   await verifyEmptyReplacement(scan);
-  await verifyWorkerContext();
-  await verifyMalformedLedgerIsNotModified();
+  await verifyMalformedLedgerIsNotModified(root, repoRoot);
   await verifySymlinkRejection();
 } finally {
   await rootDirectories.cleanup();
@@ -268,6 +270,28 @@ async function verifyNormalizationAndPagination(context: ArtifactContext) {
         (location: RawDiscoveryLocation) => "end_line" in location,
       ),
       true,
+    );
+  }
+  const row = all.rows[0];
+  assert.deepEqual(candidateSchemaV1.parse(row), row);
+  const extended = { ...row, savedExtension: { retained: true } };
+  assert.equal(candidateSchemaV1.safeParse(extended).success, false);
+  assert.deepEqual(compactDiscoveryCandidateSchema.parse(extended), extended);
+  for (const invalid of [
+    { ...row, candidate_id: "  " },
+    {
+      ...row,
+      locations: [{ ...row.locations[0], start_line: 2, end_line: 1 }],
+    },
+    {
+      ...row,
+      locations: [{ ...row.locations[0], unexpected: true }],
+    },
+  ]) {
+    assert.equal(candidateSchemaV1.safeParse(invalid).success, false);
+    assert.equal(
+      compactDiscoveryCandidateSchema.safeParse(invalid).success,
+      false,
     );
   }
 
@@ -464,8 +488,11 @@ async function verifyNormalizationRunsOffThread(context: ArtifactContext) {
   }
 }
 
-async function verifyDiffInventoryAllowsDeletedFiles() {
-  const context = await createContext("diff-output", "scan");
+async function verifyDiffInventoryAllowsDeletedFiles(
+  root: string,
+  repoRoot: string,
+) {
+  const context = await createContext(root, repoRoot, "diff-output");
   const repository = path.join(root, "diff-repository");
   await mkdir(repository);
   const git = (...args: string[]) =>
@@ -757,22 +784,11 @@ async function verifyEmptyReplacement(context: ArtifactContext) {
   assert.equal(content, "");
 }
 
-async function verifyWorkerContext() {
-  const worker = await createContext("worker-output", "worker");
-  const result = await recordCodexSecurityDiscoveryCandidates(
-    {
-      candidates: [rawCandidate()],
-    },
-    worker,
-  );
-  assert.deepEqual(result, { operation: "replace", candidatesRecorded: 1 });
-  const page = await listCodexSecurityCandidates({}, worker);
-  assert.equal(page.rows.length, 1);
-  assert.match(page.rows[0].candidate_id, /^candidate-[a-f0-9]{16}$/u);
-}
-
-async function verifyMalformedLedgerIsNotModified() {
-  const context = await createContext("malformed-output", "scan");
+async function verifyMalformedLedgerIsNotModified(
+  root: string,
+  repoRoot: string,
+) {
+  const context = await createContext(root, repoRoot, "malformed-output");
   const destination = path.join(
     context.root,
     "artifacts",
@@ -791,7 +807,7 @@ async function verifyMalformedLedgerIsNotModified() {
 async function verifySymlinkRejection() {
   if (process.platform === "win32") return;
 
-  const context = await createContext("unsafe-output", "scan");
+  const context = await createContext(root, repoRoot, "unsafe-output");
   const outside = path.join(root, "outside.jsonl");
   await writeFile(outside, "outside must not change\n");
   const destination = path.join(
@@ -816,10 +832,7 @@ async function verifySymlinkRejection() {
   );
 }
 
-async function createContext(
-  name: string,
-  layout: ArtifactContext["layout"],
-): Promise<ArtifactContext> {
+async function createContext(root: string, repoRoot: string, name: string) {
   const artifactRoot = path.join(root, name);
   const discoveryDirectory = path.join(
     artifactRoot,
@@ -834,7 +847,6 @@ async function createContext(
   return {
     root: artifactRoot,
     repoRoot,
-    layout,
     pluginRoot: runtimePluginRoot,
     pythonCommand: path.join(root, "python-must-not-run"),
   };

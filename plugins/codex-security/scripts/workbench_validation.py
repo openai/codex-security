@@ -16,7 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
-from workbench_scan_usage import _reject_nonstandard_json_number as reject_nonstandard_json_number
+from workbench_constants import reject_nonstandard_json_number
 
 reject_non_finite_json = finalizer._reject_non_finite_json
 

@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { expect, test } from "bun:test";
 import { loadBundledRuntime } from "./plugin-root.js";
 
@@ -11,14 +12,18 @@ test("does not request completed findings after a prompt-only scan", async () =>
     /function scanActionResult\([^\n]*\) \{[\s\S]*?\n\}/u.exec(runtime)?.[0];
   expect(actionSource).toBeDefined();
 
+  const zodName = /\b(z\d*)\.string\(/u.exec(source!)?.[1];
+  expect(zodName).toBeDefined();
   const promptOnlyScanResult = new Function(
     "isRecord",
-    "string2",
+    zodName!,
+    "scanResponseContext",
     "toolErrorResult",
     `${source}\n${actionSource}\nreturn promptOnlyScanResult;`,
   )(
     (value: unknown) => value !== null && typeof value === "object",
-    () => ({ uuid: () => ({ safeParse: () => ({ success: true }) }) }),
+    z,
+    (value: unknown) => value,
     (message: string) => ({ content: [{ text: message }], isError: true }),
   ) as (input: {
     startDisposition: string;

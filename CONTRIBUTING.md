@@ -16,8 +16,7 @@ packages and releases. Do not edit or commit files in that directory. See the
 commands.
 
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
-source. Deterministic triage checks and the MCP reducer IPC regression remain
-part of normal CI.
+source. Deterministic triage checks remain part of normal CI.
 
 Search [existing issues](https://github.com/openai/codex-security/issues)
 before opening a new one.

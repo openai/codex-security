@@ -1,8 +1,8 @@
 # Native OS primitives
 
-These internal bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows.
+These internal bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows. Saved scan execution uses native file locks to serialize workers across processes.
 
-The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git.
+The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git. `fileLock` acquires or releases an exclusive lock on an open descriptor and returns the operating system error number on failure. Closing the descriptor also releases the lock.
 
 Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
 
@@ -45,6 +45,8 @@ node plugins/codex-security/native/check.mjs
 node --expose-gc plugins/codex-security/native/proof-windows.mjs
 ```
 
+`WindowsHandle.lock` acquires an exclusive file lock, optionally without waiting. Closing the handle releases the lock.
+
 The `native-windows` workflow builds x64 and arm64 with MSVC and a static CRT. It checks PE architecture and private paths, then runs the same artifact on Node 22.13.0 and 20.0.0 with an empty `PATH`. The proof covers handle lifetime and garbage collection, ancestor replacement, junctions, exact-handle operations, raw UTF-16 and long paths, and numeric errors.
 
 The build also compiles the test-only `windows-wide-launcher` Rust example. It starts a Node proof child with lone surrogates in arguments, environment values, and its working directory. That child checks complete directory iteration, distinct surrogate and replacement-character files, canonical paths, bounded reads, output truncation, and recursive long paths through the typed adapter. A Rust file guard with sharing disabled remains open while the child enumerates its name; an explicit data read fails with a sharing violation. Attribute-only access is not blocked by Windows file sharing. Adapter path and I/O tests run on the same matrix. Scope binding also reads raw requested-scope and contract paths, preserves ordered JSON and unrelated hash fields, truncates both outputs, and leaves documents unchanged when validation fails. The launcher cleans up the wide fixtures and is never included in the uploaded or bundled native payloads.
@@ -53,15 +55,16 @@ Creating file and directory symbolic links requires Windows Developer Mode or th
 
 ## Package inputs
 
-With the pinned Rust toolchain installed, build the plugin on its own:
+With the pinned Rust toolchain installed, build the standalone plugin from a checkout containing both the plugin and SDK source:
 
 ```sh
+pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
 
-`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. CI tests this build without the SDK on Linux, macOS, and Windows.
+`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. The MCP bundle includes the shared SDK implementation at build time; the packaged plugin does not require a separate SDK installation. CI builds and tests the host package on Linux, macOS, and Windows.
 
 For plugin and npm releases, use the default `--native universal`. It requires all eight verified binaries in `native/prebuilt`.
 

@@ -12,7 +12,7 @@ const KNOWLEDGE_SNAPSHOT_FILE = ".scan-knowledge.json";
 
 const knowledgeSnapshotSchema = z.object({
   sources: z.array(z.string()),
-  protectedRoots: z.array(z.string()).optional(),
+  protectedRoots: z.array(z.string()),
   documents: z.record(z.string(), z.string()),
 });
 

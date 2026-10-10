@@ -2,7 +2,7 @@ use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::{
     ffi::{CStr, OsString},
-    fs::{self, File},
+    fs::{self, File, TryLockError},
     io::{self, Read, Write},
     mem::{offset_of, size_of, MaybeUninit},
     os::windows::{
@@ -14,7 +14,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, LocalFree, SetLastError, ERROR_INVALID_HANDLE, HANDLE, INVALID_HANDLE_VALUE,
+        GetLastError, LocalFree, SetLastError, ERROR_INVALID_HANDLE, ERROR_LOCK_VIOLATION, HANDLE,
+        INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{
@@ -352,6 +353,22 @@ pub fn create_private_windows_directory(path: Buffer) -> napi::Result<u32> {
 
 #[napi]
 impl WindowsHandle {
+    #[napi]
+    pub fn lock(&self, nonblocking: bool) -> u32 {
+        io_status(self.file().and_then(|file| {
+            if nonblocking {
+                file.try_lock().map_err(|error| match error {
+                    TryLockError::WouldBlock => {
+                        io::Error::from_raw_os_error(ERROR_LOCK_VIOLATION as i32)
+                    }
+                    TryLockError::Error(error) => error,
+                })
+            } else {
+                file.lock()
+            }
+        }))
+    }
+
     #[napi]
     pub fn close(&mut self) -> u32 {
         drop(self.file.take());

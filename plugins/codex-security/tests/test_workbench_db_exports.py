@@ -23,7 +23,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     request_remediation,
     request_remediation_action,
     resume_deep_scan,
@@ -34,6 +34,7 @@ from workbench_test_support import (
     scan_command,
     set_remediation,
     set_triage,
+    start_delivered_scan,
     start_saved_scan,
     start_scan_command,
     start_workspace_scan,
@@ -761,7 +762,7 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     resume_deep_scan(
         state_dir, scan_id, "thread-deep-export", environment={"CODEX_HOME": str(codex_home)}
     )
-    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -826,8 +827,15 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
     assert row["remediation"] == "' \t＋1+1"
 
 
-def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> None:
-    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+@pytest.mark.parametrize("finding_count", [20, 21, 75])
+def test_completed_findings_are_returned_in_bounded_pages(
+    tmp_path: Path, finding_count: int
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     findings_path = scan_dir / "findings.json"
     document = json.loads(findings_path.read_text())
@@ -838,29 +846,50 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
             "identity": {"anchor": f"archive-entry-write-without-containment-{index:03d}"},
             "title": f"Unsafe archive extraction finding {index:03d}",
         }
-        for index in range(75)
+        for index in range(finding_count)
     ]
     findings_path.write_text(json.dumps(document))
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
-    assert completed["findingCount"] == 75
-    assert completed["findingsTruncated"] is True
+    assert completed["findingCount"] == finding_count
+    assert completed["findingsTruncated"] is (finding_count > 20)
     assert len(completed["findings"]) == 20
     embedded_occurrence_ids = {finding["occurrenceId"] for finding in completed["findings"]}
     second_page = scan_command(
         state_dir, "list-findings", scan_id, "--offset", "20", "--limit", "50"
     )["findingsPage"]
     assert second_page["offset"] == 20
-    assert second_page["nextOffset"] == 40
-    assert second_page["total"] == 75
-    assert len(second_page["findings"]) == 20
+    assert second_page["nextOffset"] == (40 if finding_count > 40 else None)
+    assert second_page["total"] == finding_count
+    assert len(second_page["findings"]) == min(finding_count - 20, 20)
     assert embedded_occurrence_ids.isdisjoint(
         finding["occurrenceId"] for finding in second_page["findings"]
     )
-    off_prefix_occurrence_id = second_page["findings"][0]["occurrenceId"]
-    selected = get_scan(state_dir, scan_id, "--occurrence-id", off_prefix_occurrence_id)["scan"]
-    assert any(
-        finding["occurrenceId"] == off_prefix_occurrence_id for finding in selected["findings"]
+    context = get_scan(state_dir, scan_id)
+    assert context["workspace"]["results"] == context["scan"] == completed
+    on_page_occurrence_id = completed["findings"][0]["occurrenceId"]
+    assert get_scan(state_dir, scan_id, "--occurrence-id", on_page_occurrence_id) == context
+    if second_page["findings"]:
+        off_prefix_occurrence_id = second_page["findings"][0]["occurrenceId"]
+        selected = get_scan(state_dir, scan_id, "--occurrence-id", off_prefix_occurrence_id)
+        assert selected["workspace"] == context["workspace"]
+        assert selected["scan"]["findings"][:-1] == completed["findings"]
+        assert selected["scan"]["findings"][-1]["occurrenceId"] == off_prefix_occurrence_id
+        assert selected["scan"]["findingsTruncated"] is (finding_count > 21)
+
+    other = start_delivered_scan(
+        state_dir, "--workspace-id", str(saved["id"]), "--scan-root", str(tmp_path / "scans")
+    )["results"]
+    rejected = run_workbench(
+        state_dir,
+        "get-scan",
+        "--scan-id",
+        other["scanId"],
+        "--occurrence-id",
+        on_page_occurrence_id,
+        check=False,
     )
+    assert rejected["returncode"] != 0
+    assert "does not belong to the selected scan" in rejected["stderr"]
 
 
 def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -> None:
@@ -1269,8 +1298,12 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
                     results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         else:
             results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
-        normalized_path = scan_dir / "checkpoints" / head["checkpoint"]
+        normalized_path = next(
+            path
+            for path in (scan_dir / "checkpoints").glob("*.json")
+            if json.loads(path.read_bytes())["coverage"]["deferred"]
+            == documents["coverage"]["deferred"]
+        )
         normalized_bytes = normalized_path.read_bytes()
         normalized = json.loads(normalized_bytes)
         assert normalized["coverage"]["deferred"] == documents["coverage"]["deferred"]
@@ -1304,7 +1337,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         raw_path.write_text(json.dumps(raw))
         staged.write_text(json.dumps(documents))
         results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-        head_bytes = (scan_dir / "checkpoint-head.json").read_bytes()
+        head_bytes = (scan_dir / "artifacts/scan-draft.json").read_bytes()
         checkpoints = set((scan_dir / "checkpoints").iterdir())
         # A rejected write must not leave a fresh closure for stopped recovery.
         raw["coverage"]["deferred"] = []
@@ -1312,10 +1345,11 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
             {"id": "stale-review", "reason": "An outdated observation closed this task."}
         ]
         raw_path.write_text(json.dumps(raw))
+        staged.write_text(json.dumps(documents))
         args.expected_draft_digest = "0" * 64
         with pytest.raises(SystemExit, match="scan_draft_conflict"):
             results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-        assert (scan_dir / "checkpoint-head.json").read_bytes() == head_bytes
+        assert (scan_dir / "artifacts/scan-draft.json").read_bytes() == head_bytes
         assert set((scan_dir / "checkpoints").iterdir()) == checkpoints
         args.expected_draft_digest = None
         target = documents["manifest"]["scan"]["target"]
@@ -1323,7 +1357,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         staged.write_text(json.dumps(documents))
         with pytest.raises(results.ContractError, match="target"):
             results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-        assert (scan_dir / "checkpoint-head.json").read_bytes() == head_bytes
+        assert (scan_dir / "artifacts/scan-draft.json").read_bytes() == head_bytes
         assert set((scan_dir / "checkpoints").iterdir()) == checkpoints
         documents["manifest"]["scan"]["target"] = target
         documents["coverage"]["deferred"].remove(pending)

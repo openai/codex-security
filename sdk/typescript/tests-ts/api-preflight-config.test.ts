@@ -442,6 +442,7 @@ describe("CodexSecurity preflight configuration", () => {
     };
 
     expect(scanRuntimeCodexConfig(original)).toEqual({
+      model_provider: "openai",
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",
       allow_login_shell: false,
@@ -528,12 +529,12 @@ describe("CodexSecurity preflight configuration", () => {
     expect(scanRuntimeCodexConfig(config)).toMatchObject({
       approval_policy: "never",
       approvals_reviewer: "auto_review",
-      profiles: { strict: { model: "profile-model" }, other: {} },
+      model: "profile-model",
     });
     expect(config.profiles.strict.approval_policy).toBe("never");
   });
 
-  test("removes execution and permission overrides from every configured profile", () => {
+  test("resolves the selected profile without its execution and permission overrides", () => {
     const original = {
       profile: "selected",
       profiles: {
@@ -561,12 +562,11 @@ describe("CodexSecurity preflight configuration", () => {
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",
       default_permissions: "codex_security_scan",
-      profile: "selected",
+      model: "profile-model",
     });
-    expect(hardened["profiles"]).toEqual({
-      selected: { model: "profile-model" },
-      other: { model_reasoning_effort: "high" },
-    });
+    expect(hardened).not.toHaveProperty("profile");
+    expect(hardened).not.toHaveProperty("profiles");
+    expect(hardened["permissions"]).not.toHaveProperty("unsafe");
     expect(original.profiles.selected).toMatchObject({
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",
@@ -960,6 +960,41 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
+  test.each(EXTERNAL_PROVIDER_CASES)(
+    "does not synthesize %s defaults over native provider settings",
+    (_name, provider, _apiKey, model, providerConfig) => {
+      const cases: JsonObject[] = [
+        { base_url: "https://example.invalid/custom" },
+        { env_key: "SYNTHETIC_PROVIDER_KEY" },
+        { experimental_bearer_token: "synthetic-provider-token" },
+        { auth: { command: "synthetic-auth", args: ["synthetic-account"] } },
+        { requires_openai_auth: true },
+        { http_headers: { Authorization: "Bearer synthetic-provider-header" } },
+        { env_http_headers: { Authorization: "SYNTHETIC_PROVIDER_HEADER" } },
+      ];
+      for (const settings of cases) {
+        const nativeProvider: JsonObject = { ...providerConfig, ...settings };
+        if ("http_headers" in settings || "env_http_headers" in settings)
+          delete nativeProvider["env_key"];
+        const projected = scanPreflightCodexConfig(
+          {
+            profile: "selected",
+            profiles: { selected: { model, model_provider: provider } },
+            model_providers: {
+              [provider]: nativeProvider,
+            },
+          },
+          true,
+        );
+        expect(scanModelProvider(projected)).toBe(provider);
+        expect(projected).not.toHaveProperty("model_providers");
+        expect(projected["profiles"]).toEqual({
+          selected: { model, model_provider: provider },
+        });
+      }
+    },
+  );
+
   test("preserves safe Bedrock provider settings in profile-selected scan recipes", () => {
     const config = scanPreflightCodexConfig({
       model_provider: "openai",
@@ -1003,5 +1038,53 @@ describe("CodexSecurity preflight configuration", () => {
     });
     expect(scanModelProvider(config)).toBe("amazon-bedrock");
     expect(JSON.stringify(config)).not.toContain("synthetic-");
+  });
+
+  test("preserves cyber_access_program in sanitized scan configuration and profiles", () => {
+    const config = scanPreflightCodexConfig({
+      model: "gpt-5.6-sol",
+      cyber_access_program: "daybreakBlue",
+      profile: "daybreak-red",
+      profiles: {
+        "daybreak-red": {
+          model: "gpt-5.6-sol",
+          cyber_access_program: "daybreakRed",
+        },
+      },
+    });
+
+    expect(config).toEqual({
+      model: "gpt-5.6-sol",
+      cyber_access_program: "daybreakBlue",
+      profile: "daybreak-red",
+      profiles: {
+        "daybreak-red": {
+          model: "gpt-5.6-sol",
+          cyber_access_program: "daybreakRed",
+        },
+      },
+    });
+  });
+
+  test("filters invalid cyber_access_program values in preflight configuration", () => {
+    const config = scanPreflightCodexConfig({
+      model: "gpt-5.6-sol",
+      cyber_access_program: "",
+      profiles: {
+        invalid: {
+          model: "gpt-5.6-sol",
+          cyber_access_program: 123 as unknown as string,
+        },
+      },
+    });
+
+    expect(config).toEqual({
+      model: "gpt-5.6-sol",
+      profiles: {
+        invalid: {
+          model: "gpt-5.6-sol",
+        },
+      },
+    });
   });
 });

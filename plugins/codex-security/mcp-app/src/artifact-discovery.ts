@@ -27,7 +27,10 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+import {
+  candidateSchemaV1,
+  candidateLedgerRowSchema,
+} from "./artifact-candidate.js";
 
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";
@@ -69,11 +72,7 @@ export type CompactDiscoveryCandidate = z.infer<typeof candidateSchemaV1> &
   Record<string, unknown>;
 
 /** Every exposed validator is derived from the checked-in JSON Schema source. */
-export const compactDiscoveryCandidateSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidateDefinitions.$id,
-  "discoveryCandidate",
-) as z.ZodType<CompactDiscoveryCandidate>;
+export const compactDiscoveryCandidateSchema = candidateLedgerRowSchema;
 
 export const workbenchDiscoveryCandidatesInputSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,

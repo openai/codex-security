@@ -24,6 +24,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { importModule } from "./import-module.ts";
 import { applicationRoot, buildServer } from "./build-server.ts";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const pluginRoot = path.dirname(applicationRoot);
 const python = process.env.PYTHON || "python3";
@@ -48,7 +49,7 @@ await fs.writeFile(path.join(repository, "example.py"), "value = 1\n");
 await buildServer(bundle, {
   define: {
     __dirname: JSON.stringify(applicationRoot),
-    "import.meta.url": "__filename",
+    ...mcpBundleOptions.define,
   },
 });
 const {
@@ -113,6 +114,79 @@ async function connect(overrides: Record<string, string | undefined> = {}) {
 }
 
 try {
+  await test("scan-backed supplemental saves reject the Deep Scan runtime subtree before writing", async () => {
+    const context = {
+      root: path.join(fixture, "deep-scan-rejected"),
+      repoRoot: repository,
+      layout: "scan",
+      scanId: "00000000-0000-4000-8000-000000000001",
+    };
+    for (const artifact of [
+      "artifacts/deep-scan",
+      "artifacts/deep-scan/checkpoint.json",
+      "artifacts/deep-scan/passes/pass-1/report.md",
+      "artifacts/DEEP-SCAN/checkpoint.json",
+    ]) {
+      for (const source of [
+        { content: "synthetic state" },
+        { sourcePath: path.join(fixture, "unused-source.txt") },
+      ]) {
+        await assert.rejects(
+          () =>
+            saveCodexSecurityArtifact(
+              context,
+              {
+                storage: "persistent",
+                path: artifact,
+                ...source,
+              },
+              async () =>
+                assert.fail("Rejected writes must not reach the workbench"),
+            ),
+          /canonical artifacts/,
+        );
+      }
+    }
+    await assert.rejects(fs.stat(context.root), { code: "ENOENT" });
+  });
+
+  await test("supplemental Deep Scan reads, temporary writes and sibling writes stay available", async () => {
+    const context = {
+      root: path.join(fixture, "deep-scan-allowed"),
+      repoRoot: repository,
+    };
+    await fs.mkdir(context.root);
+    const artifact = "artifacts/deep-scan/checkpoint.json";
+    const run = async (args: string[]) => {
+      assert.ok(["read-artifact", "save-artifact"].includes(args[0]));
+      return { content: Buffer.from("synthetic state").toString("base64") };
+    };
+    const read = await readCodexSecurityArtifact(
+      context,
+      { storage: "persistent", path: artifact, encoding: "utf8" },
+      run,
+    );
+    assert.equal(read.content, "synthetic state");
+    const scratch = await saveCodexSecurityArtifact(
+      context,
+      { storage: "temporary", path: artifact, content: "synthetic state" },
+      run,
+    );
+    temporaryDirectories.push(scratch.directory);
+    assert.equal(scratch.relativePath, artifact);
+    const sibling = "artifacts/deep-scan.backup/checkpoint.json";
+    assert.equal(
+      (
+        await saveCodexSecurityArtifact(
+          context,
+          { storage: "persistent", path: sibling, content: "synthetic state" },
+          run,
+        )
+      ).relativePath,
+      sibling,
+    );
+  });
+
   await test(
     "temporary artifact operations reject a collection owned by another user",
     { skip: typeof process.geteuid !== "function" },

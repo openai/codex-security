@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, cp, readFile, writeFile } from "node:fs/promises";
+import { chmod, cp, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
@@ -18,13 +18,16 @@ export const INTEGRATION_TARGET = hasMonorepoSdk
 let bundledRuntime: Promise<string> | undefined;
 
 export function loadBundledRuntime(): Promise<string> {
-  return (bundledRuntime ??= Promise.all(
-    ["000", "001"].map((part) =>
-      readFile(new URL(`mcp/server.mjs.br.part-${part}`, bundledPlugin)),
-    ),
-  ).then((parts) =>
-    brotliDecompressSync(Buffer.concat(parts)).toString("utf8"),
-  ));
+  return (bundledRuntime ??= (async () => {
+    const directory = new URL("mcp/", bundledPlugin);
+    const names = (await readdir(directory))
+      .filter((name) => /^server\.mjs\.br\.part-\d+$/.test(name))
+      .sort();
+    const parts = await Promise.all(
+      names.map((name) => readFile(new URL(name, directory))),
+    );
+    return brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+  })());
 }
 
 export const copyCompletedScanFixture = (destination: string) =>

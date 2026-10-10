@@ -1,3 +1,7 @@
+import {
+  mcpSmokeInput,
+  mcpSmokeResponses,
+} from "../scripts/fixtures/mcp-smoke.mjs";
 import { execFile } from "node:child_process";
 import {
   chmod,
@@ -10,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, delimiter, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -89,7 +93,28 @@ describe("bundled plugin build", () => {
       const plugin = fileURLToPath(
         new URL("../../../plugins/codex-security/", import.meta.url),
       );
-      const source = join(root, "plugin");
+      const source = join(root, "plugins", "codex-security");
+      const packageRoot = join(root, "sdk", "typescript");
+      await cp(new URL("../src/", import.meta.url), join(packageRoot, "src"), {
+        recursive: true,
+      });
+      await cp(
+        new URL("../package.json", import.meta.url),
+        join(packageRoot, "package.json"),
+      );
+      await writeFixture(
+        packageRoot,
+        "tests-ts/helpers/semantic-scan.ts",
+        await readFile(
+          new URL("./helpers/semantic-scan.ts", import.meta.url),
+          "utf8",
+        ),
+      );
+      await symlink(
+        fileURLToPath(new URL("../node_modules/", import.meta.url)),
+        join(packageRoot, "node_modules"),
+        "junction",
+      );
       await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
         recursive: true,
         filter: (path) =>
@@ -212,26 +237,21 @@ describe("bundled plugin build", () => {
       ]);
       expect(helper.stdout).toBe("[]\n");
       expect(helper.stderr).toBe("");
-      const preflight = await execFileAsync(
+      const execution = execFileAsync(
         "node",
-        [
-          "--input-type=module",
-          "--eval",
-          `const runtime = await import(process.argv[1]);
-         console.log(JSON.stringify({
-           preflight: typeof runtime.preflightDeepScanWorkerPermissionProfile,
-           profileId: runtime.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-         }));`,
-          pathToFileURL(join(destination, "permission-profile-preflight.mjs"))
-            .href,
-        ],
-        { cwd: root },
+        [join(destination, "server.mjs"), "--stdio"],
+        { cwd: root, timeout: 10_000 },
       );
-      expect(JSON.parse(preflight.stdout)).toEqual({
-        preflight: "function",
-        profileId: "codex_security_deep_scan_worker",
-      });
-      expect(preflight.stderr).toBe("");
+      execution.child.stdin?.end(mcpSmokeInput);
+      const standalone = await execution;
+      const responses = mcpSmokeResponses(standalone.stdout);
+      expect(
+        responses.find((response) => response.id === 2)?.result.tools,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "start_codex_security_deep_scan" }),
+        ]),
+      );
     },
   );
 

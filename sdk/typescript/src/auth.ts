@@ -1,10 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { parse } from "smol-toml";
-import type { JsonObject } from "./config.js";
+import { inlineToml, type JsonObject } from "./config.js";
 import {
   CodexSecurityError,
   PluginBootstrapError,
@@ -12,7 +11,6 @@ import {
 } from "./errors.js";
 import {
   executablePathForSpawn,
-  expandHome,
   runCodexCommand,
   type CodexCommand,
   type ProcessEnvironment,
@@ -20,18 +18,9 @@ import {
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 
+import { configuredCodexHome } from "./codex-home.js";
 /** @internal */
-export function environmentEntry(
-  environment: ProcessEnvironment,
-  requested: string,
-): string | undefined {
-  const exact = environment[requested];
-  if (exact !== undefined || process.platform !== "win32") return exact;
-  const upper = requested.toUpperCase();
-  return Object.entries(environment).find(
-    ([name]) => name.toUpperCase() === upper,
-  )?.[1];
-}
+export { configuredCodexHome, environmentEntry } from "./codex-home.js";
 
 /** @internal */
 export function withoutOpenAiApiKeys<Value>(
@@ -41,17 +30,6 @@ export function withoutOpenAiApiKeys<Value>(
     Object.entries(environment).filter(
       ([name]) =>
         !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-    ),
-  );
-}
-
-/** @internal */
-export function configuredCodexHome(environment: ProcessEnvironment): string {
-  const configured = environmentEntry(environment, "CODEX_HOME");
-  return resolve(
-    expandHome(
-      configured?.trim() ? configured : join(homedir(), ".codex"),
-      environment,
     ),
   );
 }
@@ -281,10 +259,19 @@ export async function accountStatus(
   command: CodexCommand,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
+  config: Readonly<JsonObject> = {},
 ): Promise<AccountStatus> {
   const result = await runCodexCommand(
     command,
-    ["login", "status"],
+    [
+      ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
+        config[key] === undefined
+          ? []
+          : ["--config", `${key}=${inlineToml(config[key])}`],
+      ),
+      "login",
+      "status",
+    ],
     environment,
     undefined,
     signal,
