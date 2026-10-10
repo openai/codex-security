@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { zstdCompressSync } from "node:zlib";
 import { afterEach, expect, test } from "bun:test";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-scan-logs-node-",
@@ -16,6 +17,13 @@ afterEach(cleanup);
 test.each(["native", "without zstd"])(
   "reads saved logs with Node's %s capabilities",
   async (capabilities) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `reads saved logs with Node's ${capabilities} capabilities`,
+      )
+    )
+      return;
     const root = await temporaryDirectory();
     const home = join(root, "home");
     const sessions = join(home, "sessions");
