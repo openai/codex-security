@@ -8,6 +8,7 @@ import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { DEFAULT_CODEX_CONFIG, type JsonObject } from "../src/config.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { checkpointWorkbench } from "./support/workbench-fakes.js";
@@ -17,19 +18,120 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
 import { isReviewRefusal } from "../src/deduplication/refusal.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import type { CodexSecuritySurface } from "../src/api.js";
+import { VERSION } from "../src/version.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
+import { readCodexHomeConfig } from "../src/auth.js";
+import { CodexDeduplicationReviewer } from "../src/deduplication/deduplication-reviewer.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
+);
+
+test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
+  "dedupe respects %s configuration and keeps review policy attached to stage",
+  async (selection) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME);
+    const config = {
+      mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+      ...(selection === "defaults"
+        ? {}
+        : {
+            model:
+              selection === "luna-model"
+                ? "gpt-5.6-luna"
+                : "synthetic-review-model",
+            model_reasoning_effort: "medium",
+          }),
+      ...(selection === "legacy-profile"
+        ? {
+            profile: "review",
+            profiles: {
+              review: { model: "gpt-5.6-luna", model_reasoning_effort: "low" },
+            },
+          }
+        : {}),
+    };
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify(config),
+    );
+    const environment = {
+      ...f.environment,
+      OPENAI_API_KEY: "synthetic-review-key",
+    };
+    const findings = [f.document.findings[0]!, f.document.findings[0]!];
+    for (const stage of ["screening", "pair-review"] as const) {
+      const transcript = join(f.root, `${stage}.jsonl`);
+      const runner = new CodexReviewRunner(
+        environment,
+        (_command, _args, options) =>
+          spawn(
+            process.execPath,
+            [fixture, "configured-model", transcript, f.repository, stage],
+            options,
+          ),
+        undefined,
+        f.repository,
+      );
+      const reviewer = new CodexDeduplicationReviewer(
+        runner,
+        await readCodexHomeConfig(environment),
+      );
+      if (selection === "legacy-profile") {
+        await expect(reviewer.screen(findings)).rejects.toThrow(
+          "legacy `profile =",
+        );
+        expect(existsSync(transcript)).toBe(false);
+        break;
+      }
+      if (stage === "screening") await reviewer.screen(findings);
+      else await reviewer.reviewPair(findings);
+      const messages = parseJsonLines<{
+        method?: string;
+        params?: Record<string, unknown>;
+      }>(await readFile(transcript, "utf8"));
+      const model =
+        selection === "defaults"
+          ? stage === "screening"
+            ? "gpt-5.6-luna"
+            : "gpt-5.6-sol"
+          : selection === "luna-model"
+            ? "gpt-5.6-luna"
+            : "synthetic-review-model";
+      const effort =
+        selection === "defaults"
+          ? stage === "screening"
+            ? "xhigh"
+            : "high"
+          : "medium";
+      expect(
+        messages.find((m) => m.method === "thread/start")?.params,
+      ).toMatchObject({
+        model,
+        approvalPolicy: stage === "screening" ? "never" : "on-request",
+      });
+      expect(
+        messages.find((m) => m.method === "turn/start")?.params,
+      ).toMatchObject({ model, effort });
+    }
+  },
 );
 
 const failureReasons: Record<string, string> = {
   "policy-turn-code": "Request blocked.",
   "policy-request-code": "Request blocked.",
   "policy-turn": "Request flagged for possible cybersecurity risk.",
+  "policy-accordance-turn":
+    "This request was refused in accordance with the safety policy.",
+  "policy-terse-turn": "Refused due to the safety policy",
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-suffix-text": "Request refused: safety policy.",
+  "policy-causal-refusal-text":
+    "This request was refused because it violates the safety policy.",
   "policy-refusal-text":
     "This request was refused because of the safety policy.",
   "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
@@ -50,6 +152,14 @@ const failureReasons: Record<string, string> = {
   "invalid-submission": "Review validation failed: Invalid decision",
   "required-source-error-policy-file":
     "Required review check could not be completed: Connection refused while fetching content-policy.ts",
+  "required-source-error-upload-policy":
+    "Required review check could not be completed: Artifact upload was blocked by the content policy.",
+  "required-source-error-publication-policy":
+    "Required review check could not be completed: Artifact publication was refused due to the content policy.",
+  "required-source-error-publication-refusal":
+    "Required review check could not be completed: Artifact publication refusal due to the content policy.",
+  "required-source-error-policy-requires-refusal":
+    "Required review check could not be completed: Artifact upload failed because the content policy requires refusal of unsupported media",
   "required-source-error":
     "Required review check could not be completed: Required source revision could not be read.",
   "required-source-error-after-verdict":
@@ -59,6 +169,8 @@ const failureReasons: Record<string, string> = {
   "invalid-review-error":
     "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
+  "exit-diagnostic":
+    "Permission profile synthetic_profile was rejected: café 🔒\n",
 };
 const retriedFailures = new Set([
   "text-only",
@@ -69,6 +181,7 @@ const retriedFailures = new Set([
   "invalid-json",
   "invalid-submission",
   "exit",
+  "exit-diagnostic",
 ]);
 const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
@@ -83,6 +196,8 @@ const recoveredScenarios: Record<string, string> = {
 const modelFailures = new Set([
   "policy-turn-code",
   "policy-turn",
+  "policy-accordance-turn",
+  "policy-terse-turn",
   "failed-turn",
   "server-error",
   "service-unavailable",
@@ -99,18 +214,34 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
   commandAuth?: "direct" | "ambient";
+  windowsConfig?: JsonObject;
+  expectedWindowsSandbox?: string;
+  surface?: CodexSecuritySurface;
 }[] = [
+  {
+    scenario: "recover-server-error",
+    name: "CLI attribution survives a retried review session",
+    surface: "cli",
+  },
   {
     scenario: "correction",
     name: "command auth without an API key",
     commandAuth: "direct",
+    windowsConfig: { features: { elevated_windows_sandbox: false } },
+    expectedWindowsSandbox: "unelevated",
   },
   {
     scenario: "correction",
     name: "command auth with ambient API key and relative home",
     commandAuth: "ambient",
+    windowsConfig: { windows: { sandbox: "unelevated" } },
+    expectedWindowsSandbox: "unelevated",
   },
-  { scenario: "retry-correction" },
+  {
+    scenario: "retry-correction",
+    windowsConfig: { features: { elevated_windows_sandbox: true } },
+    expectedWindowsSandbox: "elevated",
+  },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
   { scenario: "accepted-no-replay" },
@@ -157,6 +288,9 @@ for (const {
   extraEnvironment,
   windowsOnly = false,
   commandAuth,
+  windowsConfig,
+  expectedWindowsSandbox,
+  surface,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
@@ -181,6 +315,12 @@ for (const {
       };
       const configuration = stringify({
         mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        responses_api_metadata: {
+          synthetic_caller: "preserved",
+          codex_security_surface: "previous",
+          codex_security_command: "previous",
+        },
+        ...windowsConfig,
         ...(commandAuth
           ? {
               model_provider: "synthetic.provider",
@@ -224,8 +364,11 @@ for (const {
               : selected,
           );
           args = commandArgs;
-          directory = options.env!["CODEX_SQLITE_HOME"];
-          expect(options.cwd).toBe(directory);
+          directory = options.cwd as string;
+          expect(options.env!["CODEX_SQLITE_HOME"]).toBeUndefined();
+          expect(
+            commandArgs.some((arg) => arg.startsWith("sqlite_home=")),
+          ).toBe(false);
           expect(environmentEntry(options.env!, "CODEX_HOME")).toBe(modelHome);
           child = spawn(
             process.execPath,
@@ -265,6 +408,8 @@ for (const {
             }
           },
         },
+        undefined,
+        surface,
       );
       const validate = mock((value: unknown) => {
         if (
@@ -434,6 +579,13 @@ for (const {
         expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
+      expect(
+        parse(args.find((value) => value.startsWith("windows="))!)["windows"],
+      ).toEqual({
+        sandbox:
+          expectedWindowsSandbox ??
+          (DEFAULT_CODEX_CONFIG["windows"] as { sandbox: string }).sandbox,
+      });
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
       );
@@ -446,7 +598,10 @@ for (const {
       if (scenario !== "cancel") {
         const messages = parseJsonLines<{
           method?: string;
-          params?: { apiKey?: string };
+          params?: {
+            apiKey?: string;
+            config?: { responses_api_metadata?: Record<string, string> };
+          };
         }>(await readFile(transcript, "utf8"));
         const loginRequest = messages.find(
           (message) => message.method === "account/login/start",
@@ -454,6 +609,16 @@ for (const {
         expect(
           messages.filter((message) => message.method === "thread/start"),
         ).toHaveLength(sessions);
+        for (const message of messages.filter(
+          (message) => message.method === "thread/start",
+        )) {
+          expect(message.params?.config?.responses_api_metadata).toEqual({
+            synthetic_caller: "preserved",
+            codex_security_surface: surface ?? "sdk",
+            codex_security_command: "dedupe",
+            codex_security_package_version: VERSION,
+          });
+        }
         expect(
           messages.filter((message) => message.method === "turn/start"),
         ).toHaveLength(
@@ -499,8 +664,222 @@ for (const {
 }
 
 test.each([
+  "default",
+  "environment",
+  "configuration",
+  "relative-environment",
+  "relative-configuration",
+  "configuration-over-environment",
+])(
+  "concurrent ephemeral reviews reuse %s native SQLite without deleting it",
+  async (selection) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME, { recursive: true });
+    const sqliteHome =
+      selection === "default"
+        ? f.environment.CODEX_HOME
+        : join(f.root, "native-sqlite");
+    await mkdir(sqliteHome, { recursive: true });
+    const marker = join(sqliteHome, "existing-state");
+    const configured = selection.includes("configuration");
+    const inherited = selection.endsWith("environment");
+    const environmentHome =
+      selection === "configuration-over-environment"
+        ? join(f.root, "ignored-environment-state")
+        : sqliteHome;
+    await writeFile(marker, "Existing native state");
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify({
+        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...(configured
+          ? {
+              sqlite_home: selection.startsWith("relative")
+                ? relative(f.environment.CODEX_HOME, sqliteHome)
+                : sqliteHome,
+            }
+          : {}),
+      }),
+    );
+    const environment = {
+      ...f.environment,
+      OPENAI_API_KEY: "synthetic-review-key",
+      ...(inherited
+        ? {
+            CODEX_SQLITE_HOME: selection.startsWith("relative")
+              ? relative(process.cwd(), sqliteHome)
+              : environmentHome,
+          }
+        : {}),
+    };
+    const originalEnvironment = { ...environment };
+    const scratch: string[] = [];
+    let starts = 0;
+    const runner = new CodexReviewRunner(
+      environment,
+      (_command, args, options) => {
+        scratch.push(options.cwd as string);
+        expect(args.some((arg) => arg.startsWith("sqlite_home="))).toBe(false);
+        expect(
+          args.find((arg) =>
+            arg.startsWith("permissions.codex_security_review="),
+          ),
+        ).toContain(`${JSON.stringify(sqliteHome)}="deny"`);
+        expect(options.env!["CODEX_HOME"]).toBe(f.environment.CODEX_HOME);
+        expect(options.env!["CODEX_SQLITE_HOME"]).toBe(
+          inherited ? environmentHome : undefined,
+        );
+        return spawn(
+          process.execPath,
+          [
+            fixture,
+            "accepted-no-replay",
+            join(f.root, `sqlite-${starts++}.jsonl`),
+            f.repository,
+          ],
+          options,
+        );
+      },
+      undefined,
+      f.repository,
+    );
+    const review = {
+      stage: "pair-review" as const,
+      model: "synthetic-model",
+      effort: "high",
+      prompt: "Compare synthetic findings",
+      schema: {},
+      validate: () => ({ decision: "SAME" }),
+    };
+    await Promise.all([runner.run(review), runner.run(review)]);
+    expect(environment).toEqual(originalEnvironment);
+    expect(new Set(scratch).size).toBe(2);
+    expect(scratch.every((path) => !existsSync(path))).toBe(true);
+    expect(await readFile(marker, "utf8")).toBe("Existing native state");
+  },
+);
+
+test.each(["capture", "throw", "reject", "pending"])(
+  "native review diagnostics preserve messages and IDs without blocking on %s observers",
+  async (behavior) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME);
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify({
+        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+      }),
+    );
+    const events: import("../src/deduplication/diagnostics.js").DeduplicationDiagnostic[] =
+      [];
+    const runner = new CodexReviewRunner(
+      { ...f.environment, OPENAI_API_KEY: "synthetic-review-key" },
+      (_command, _args, options) =>
+        spawn(
+          process.execPath,
+          [
+            fixture,
+            "diagnostics",
+            join(f.root, "diagnostics.jsonl"),
+            f.repository,
+          ],
+          options,
+        ),
+      undefined,
+      f.repository,
+      undefined,
+      (event) => {
+        events.push(event);
+        if (behavior === "throw") throw new Error("Observer failed");
+        if (behavior === "reject")
+          return Promise.reject(new Error("Observer rejected"));
+        if (behavior === "pending") return new Promise<void>(() => {});
+      },
+    );
+    expect(
+      await runner.run({
+        stage: "pair-review",
+        model: "synthetic-model",
+        effort: "high",
+        prompt: "Compare synthetic findings",
+        schema: {},
+        validate: () => ({ decision: "SAME" }),
+      }),
+    ).toEqual({ decision: "SAME" });
+    expect(events[0]).toMatchObject({
+      event: "review.started",
+      stage: "pair-review",
+      model: "synthetic-model",
+      effort: "high",
+      attempt: 1,
+    });
+    expect(events.at(-1)?.event).toBe("review.completed");
+    expect(new Set(events.map((event) => event.reviewId)).size).toBe(1);
+    expect(
+      events
+        .filter((event) => event.event === "review.stderr")
+        .map((event) => event.message)
+        .join(""),
+    ).toBe("Native diagnostic: Bearer synthetic-review-key\n");
+    expect(
+      events
+        .filter((event) => event.event === "review.warning")
+        .map((event) => event.details),
+    ).toEqual([
+      {
+        method: "configWarning",
+        message: "Configured model fallback: synthetic-review-key",
+      },
+      {
+        method: "warning",
+        message: "Source lookup warning",
+        threadId: "review-thread",
+      },
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "review.event",
+        details: {
+          method: "item/completed",
+          threadId: "review-thread",
+          turnId: "review-turn-1",
+          item: {
+            id: "command-1",
+            type: "commandExecution",
+            status: "completed",
+            exitCode: 7,
+            aggregatedOutput: "Source lookup failed: synthetic-review-key",
+          },
+        },
+      }),
+    );
+    expect(
+      events
+        .filter(
+          (event) => event.details?.["method"] === "thread/tokenUsage/updated",
+        )
+        .map((event) => event.details?.["threadId"]),
+    ).toEqual(["nested-review", "review-thread"]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "review.submission",
+        details: expect.objectContaining({
+          threadId: "review-thread",
+          turnId: "review-turn-1",
+          accepted: true,
+        }),
+      }),
+    );
+  },
+);
+
+test.each([
   "cyber_policy",
   "Request blocked by a safety policy violation.",
+  "This request was blocked by the content policy.",
+  "The review has been blocked under the safety policy.",
+  "Review blocked because it violates the safety policy.",
+  "The review was refused due to the content policy.",
   "This request was refused under the safety policy",
   "This request was refused under the content policy",
   "Request flagged for potentially high-risk cyber activity.",
@@ -510,8 +889,15 @@ test.each([
   "Request refusal due to the safety policy.",
   "Request was refused because of the safety policy.",
   "Request was refused: safety policy.",
+  "Review refusal due to the content policy.",
+  "Refusal due to the content policy.",
+  "Refused due to the safety policy",
   "This request was refused because of the safety policy.",
+  "This request was refused in accordance with the safety policy.",
+  "This request was refused because it violates the safety policy.",
   "The content policy requires refusal of this request.",
+  "The content policy requires refusal of review.",
+  "The safety policy requires a refusal of your review.",
   "Under the safety policy, this request is refused.",
   "Cybersecurity policy: this request is refused.",
   "Content policy: your request has been blocked.",
@@ -542,6 +928,11 @@ test.each([
   "Ordinary safety policy documentation",
   "Network request failed due to connectivity policy.",
   "Connection refused while fetching content-policy.ts",
+  "Artifact upload was blocked by the content policy.",
+  "Artifact publication was refused due to the content policy.",
+  "Artifact publication refusal due to the content policy.",
+  "Artifact upload failed because the content policy requires refusal of unsupported media",
+  "The review failed because the content policy requires refusal of unsupported media",
   "git fetch was refused by the remote for the cybersecurity-platform repository",
   "Cybersecurity policy: this request is invalid.",
   "Content policy: connection refused while fetching the source.",

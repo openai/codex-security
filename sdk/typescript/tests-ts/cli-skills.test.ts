@@ -12,6 +12,9 @@ import {
   skillCommandFailure,
 } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
+import { pluginMetadata } from "../src/runtime.js";
+import { VERSION } from "../src/version.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { capture, dependencies, type OnCodex } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -103,6 +106,12 @@ describe("CLI skill commands", () => {
           'approval_policy="never"',
           "--config",
           'responses_api_metadata.codex_security_surface="cli"',
+          "--config",
+          `responses_api_metadata.codex_security_command=${JSON.stringify(command)}`,
+          "--config",
+          `responses_api_metadata.codex_security_package_version=${JSON.stringify(VERSION)}`,
+          "--config",
+          `responses_api_metadata.codex_security_plugin_version=${JSON.stringify((await pluginMetadata(PLUGIN_ROOT)).version)}`,
           ...(command === "patch"
             ? []
             : [
@@ -1300,11 +1309,11 @@ process.stdout.write(JSON.stringify({
 
   test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
-      ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
       ["invalid.api.key", "Authentication failed"],
       ["token.expired", "Authentication failed"],
       ["model.not.found", "selected model is unavailable"],
       ["model.access", "selected model is unavailable"],
+      ["HTTP 401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
       [
         "403 model access denied /private/repository",
         "selected model is unavailable",
@@ -1341,6 +1350,40 @@ process.stdout.write(JSON.stringify({
     }
   });
 
+  test("escapes native validation launch failures at the CLI boundary", async () => {
+    const directory = await temporaryDirectory("validation-launch-failure-");
+    try {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const command = join(
+        directory,
+        "missing-codex\u001b[31m\rnext\nline-café",
+      );
+      expect(
+        await runCli(
+          ["validate", "Synthetic finding"],
+          dependencies({
+            currentDirectory: directory,
+            environment: {
+              PATH: process.env["PATH"],
+              CODEX_HOME: join(directory, "home"),
+              CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+              OPENAI_API_KEY: "synthetic-validation-key",
+            },
+            onCodex: (_args, output, environment) =>
+              runCodexSkillCommand([], output, { command }, environment),
+          }),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("missing-codex");
+      expect(stderr.text()).toContain("line-café");
+      expect(stderr.text()).not.toContain("\u001b");
+      expect(stderr.text()).not.toContain("\r");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     "Failed after 1401 bytes",
     "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
@@ -1348,12 +1391,124 @@ process.stdout.write(JSON.stringify({
     "permission denied opening model cache",
     "line 1429 could not be parsed",
     "count_tokens_per_minute_limit is undefined",
+    "token_expired_cache is undefined",
+    "ModelAccessDeniedCache is undefined",
   ])("does not misclassify an operational skill failure: %s", (detail) => {
     const message = skillCommandFailure("patch", 1, detail);
     expect(message).toContain(detail);
     expect(message).not.toContain("Authentication failed");
     expect(message).not.toContain("selected model is unavailable");
     expect(message).not.toContain("rate limited");
+  });
+
+  const diagnosticAdviceCases = [
+    ...(
+      [
+        ["invalid api key", "Authentication failed"],
+        ["token expired", "Authentication failed"],
+        ["model not found", "selected model is unavailable"],
+        ["model access denied", "selected model is unavailable"],
+        ["access denied to model", "selected model is unavailable"],
+        ["access to model denied", "selected model is unavailable"],
+        ["rate limit", "rate limited"],
+        ["rate limited", "rate limited"],
+        ["rate limit exceeded", "rate limited"],
+        ["tokens per minute", "rate limited"],
+        ["timed out", "could not connect"],
+        ["timeout error", "could not connect"],
+        ["network error", "could not connect"],
+        ["network timeout", "could not connect"],
+      ] as const
+    ).flatMap(([words, advice]) =>
+      [" ", "_", "-", "."].map((separator) => {
+        const code = words.replaceAll(" ", separator);
+        return [
+          words === "timed out" ? `request ${code}` : code,
+          advice,
+        ] as const;
+      }),
+    ),
+    ...(
+      [
+        ["401", "Authentication failed"],
+        ["403", "selected model is unavailable"],
+        ["429", "rate limited"],
+      ] as const
+    ).flatMap(([status, advice]) => [
+      ...[
+        `HTTP ${status}`,
+        `HTTP/1.1 ${status}`,
+        `HTTP code: ${status}`,
+        `HTTPError:${status}`,
+        `HTTP error code: ${status}`,
+        `status code ${status}`,
+        `status_code=${status}`,
+        `{"status":${status}}`,
+        `{"status":"${status}"}`,
+        `status code: "${status}"`,
+        `status='${status}'`,
+      ].map((detail) => [detail, advice] as const),
+      ...[
+        `parse failed on line ${status}`,
+        `parse failed on line "${status}"`,
+        `failed after ${status} bytes`,
+        `error code: ${status}`,
+        `${status} bytes read`,
+        status,
+      ].map((detail) => [detail, null] as const),
+    ]),
+    ["401 Unauthorized", "Authentication failed"],
+    ["403 Forbidden", "selected model is unavailable"],
+    ["429 Too Many Requests", "rate limited"],
+    ["ThrottlingException", "rate limited"],
+    ["ExpiredTokenException", "Authentication failed"],
+    ["HTTP 403 ExpiredTokenException", "Authentication failed"],
+    ["HTTP 401; parsed 429 bytes", "Authentication failed"],
+    ["HTTP request failed while parsing line 429", null],
+    ["permission denied opening /synthetic/403/cache", null],
+    ["401 sk-proj-SYNTHETIC_SECRET", null],
+    ["NetworkError", "could not connect"],
+    ["TimeoutError", "could not connect"],
+    ["RequestTimeout", "could not connect"],
+    ["ModelAccessDenied", "selected model is unavailable"],
+    ["accessDeniedToModel", "selected model is unavailable"],
+    ["accessToModelDenied", "selected model is unavailable"],
+  ] as const;
+
+  test.each(
+    (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      diagnosticAdviceCases.map(
+        ([detail, advice]) => [command, detail, advice] as const,
+      ),
+    ),
+  )(
+    "preserves diagnostic advice from %s for %s",
+    async (command, detail, advice) => {
+      const stdout = capture();
+      const stderr = capture();
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      if (advice === null) {
+        expect(stderr.text()).not.toContain("Authentication failed");
+        expect(stderr.text()).not.toContain("selected model is unavailable");
+        expect(stderr.text()).not.toContain("rate limited");
+      } else {
+        expect(stderr.text()).toContain(advice);
+      }
+      expect(stderr.text()).toContain(detail);
+    },
+  );
+
+  test("retains raw diagnostic lines until the terminal boundary", () => {
+    const detail = "raw detail \u001b[31m\rnext\nline café C1 \u009b2J";
+    expect(skillCommandFailure("validate", 7, detail)).toContain(detail);
   });
 
   test("keeps unknown credential failures neutral", () => {
@@ -1400,12 +1555,33 @@ process.stdout.write(JSON.stringify({
       {
         source:
           'process.stderr.write("/private/repository sk-proj-SYNTHETIC_SECRET\\n");' +
-          'process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"401 sk-proj-SYNTHETIC_SECRET"}})+"\\n");' +
+          'process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"HTTP 401 sk-proj-SYNTHETIC_SECRET"}})+"\\n");' +
           "process.exitCode=7",
         status: 7,
         stdout: "",
-        stderr: "Authentication failed",
+        stderr: "HTTP 401 sk-proj-SYNTHETIC_SECRET",
       },
+      {
+        source:
+          'process.stderr.write("EACCES: synthetic permission denial\\n" + "é🔒".repeat(25000));process.exitCode=7;',
+        status: 7,
+        stdout: "",
+        stderr: "EACCES: synthetic permission denial\n" + "é🔒".repeat(25000),
+      },
+      ...["stderr", "turn.failed"].map((transport) => {
+        const detail =
+          "EACCES: permission denied, open /synthetic/output/report.json\u001b[31m\rnext\nline café 🔒 sk-proj-SYNTHETIC_SECRET\u001b]52;c;U1lOVEhFVElD\u0007 C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end";
+        return {
+          source:
+            transport === "stderr"
+              ? `process.stderr.write(${JSON.stringify(detail)}); process.exitCode=7;`
+              : `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n"); process.exitCode=7;`,
+          status: 7,
+          stdout: "",
+          stderr:
+            "EACCES: permission denied, open /synthetic/output/report.json [31m next\nline café 🔒 sk-proj-SYNTHETIC_SECRET ]52;c;U1lOVEhFVElD  C1   2J H 52;c;U1lOVEhFVElD   end",
+        };
+      }),
       {
         source:
           'process.stdout.write(JSON.stringify({type:"turn.completed"})+"\\n")',
@@ -1431,8 +1607,6 @@ process.stdout.write(JSON.stringify({
       } else {
         expect(stderr.text()).toContain(scenario.stderr);
       }
-      if (scenario.status === 7)
-        expect(stderr.text()).toContain("401 sk-proj-SYNTHETIC_SECRET");
     }
   });
 
@@ -1713,7 +1887,7 @@ lines.on("line", (line) => {
       'const readline=require("node:readline");',
       "const lines=readline.createInterface({input:process.stdin});",
       "lines.once('line',()=>process.stdout.write(JSON.stringify({",
-      'id:1,error:{code:-1,message:"401 sk-proj-SYNTHETIC_SECRET /private/repository"}',
+      'id:1,error:{code:-1,message:"HTTP 401 sk-proj-SYNTHETIC_SECRET /private/repository"}',
       '})+"\\n"));',
     ].join("");
     const stdout = capture();
@@ -1738,7 +1912,7 @@ lines.on("line", (line) => {
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Authentication failed");
     expect(stderr.text()).toContain(
-      "401 sk-proj-SYNTHETIC_SECRET /private/repository",
+      "HTTP 401 sk-proj-SYNTHETIC_SECRET /private/repository",
     );
   });
 

@@ -103,7 +103,9 @@ describe("CLI diagnostics", () => {
         },
       );
       expect(result.status, result.stderr).toBe(2);
-      expect(result.stderr).toContain("Could not read Codex configuration");
+      expect(result.stderr).toContain(
+        "Could not read the configured Codex provider from",
+      );
       expect(result.stderr).toContain("token=SYNTHETIC_VALUE");
       expect(result.stderr).not.toMatch(/[\u001b\u009b]/u);
     } finally {
@@ -147,7 +149,9 @@ describe("CLI diagnostics", () => {
           }),
         });
         expect(await runCli(args, deps)).toBe(2);
-        expect(stderr.text()).toContain("Could not read Codex configuration");
+        expect(stderr.text()).toContain(
+          "Could not read the configured Codex provider from",
+        );
         expect(stderr.text()).toContain("token=SYNTHETIC_VALUE");
         expect(stderr.text()).not.toMatch(/[\u001b\u009b]/u);
       } finally {
@@ -179,7 +183,9 @@ describe("CLI diagnostics", () => {
         });
 
         expect(await runCli(["validate", "Synthetic finding"], deps)).toBe(2);
-        expect(stderr.text()).toContain("Could not read Codex configuration");
+        expect(stderr.text()).toContain(
+          "Could not read the configured Codex provider from",
+        );
         expect(stderr.text()).toContain("token=SYNTHETIC_VALUE-home");
         expect(stderr.text()).not.toMatch(/[\u001b\u009b]/u);
       } finally {
@@ -305,8 +311,9 @@ describe("CLI diagnostics", () => {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(await runCli(args, deps)).toBe(2);
+      const separator = command === "validate" ? "\n" : " ";
       expect(stderr.text()).toContain(
-        "codex-security: Operation failed: token=SYNTHETIC_VALUE [2J continued  tail 2J 0;title \n",
+        `codex-security: Operation failed: token=SYNTHETIC_VALUE [2J${separator}continued  tail 2J 0;title \n`,
       );
       expect(stderr.text()).not.toContain("\u001b");
       if (structured) {

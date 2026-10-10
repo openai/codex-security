@@ -7,7 +7,7 @@ For every reportable finding in `findings.json`, preserve the validated reasonin
 - Lead the title and `summary` with the user action and product impact.
 - Use `attackPath.summary` to briefly explain how to reproduce the issue.
 - Explain how the code causes that product behavior in `rootCause.summary`. Use plain language and avoid repetition.
-- Wrap RPC names, functions, types, fields, parameters, configuration keys, literal identifiers, and short expressions in single backticks. For example: `environment/add`, `environmentId`, `execServerUrl`, and `EnvironmentManager::upsert_environment()`.
+- Wrap RPC names, functions, types, fields, parameters, configuration keys, literal identifiers, and short expressions in single backticks. For example: `item/rename`, `itemId`, `title`, and `ItemStore.rename()`.
 - Keep code out of prose. Put source snippets in `codeEvidence[].code`, then reference them from the section that explains why the snippet matters. The workspace consolidates those referenced snippets under **Root cause** so the violated invariant and its source proof stay together.
 - Root cause must be a source-backed walkthrough, not a verdict paragraph. Start with the code where user-controlled data is declared, decoded, or read; follow each meaningful call, transformation, or state transition; then show the missing control, dangerous operation, and later consumer when it affects impact.
 - Give each code-evidence item a stable `id`, a concise `label`, an exact source location, the smallest useful snippet, a `role`, and an `explanation`. Supported roles include `user_input`, `entrypoint`, `propagation`, `root_control`, `sink`, `outcome`, and `expected_control`.
@@ -34,130 +34,138 @@ The workspace **Evidence** section is an artifact navigator, not another source-
 
 ## Structured Example
 
-The following shape shows how to encode the `environment/add` reserved-environment overwrite finding:
+This fictional item-service fixture illustrates the field shape. Its paths, identifiers, snippets and scenario were invented for this example; they are not taken from a scan target or finding. Use the shape with your own validated source evidence.
 
 ```json
 {
-  "summary": "The runtime `environment/add` method forwards caller-controlled `environmentId` and `execServerUrl` to `EnvironmentManager::upsert_environment()`. Startup rejects the reserved `local` identifier, but the runtime mutation path accepts it and replaces the map entry used by default environment lookup.",
+  "summary": "In this fictional item service, an authenticated caller can change another tenant's item title by supplying its item identifier. The write route never checks tenant ownership.",
   "codeEvidence": [
     {
-      "id": "rpc-input",
-      "label": "Caller-controlled environment fields",
-      "path": "codex-rs/app-server-protocol/src/protocol/v2/environment.rs",
-      "startLine": 6,
-      "endLine": 12,
-      "language": "rust",
+      "id": "request-fields",
+      "label": "Caller-controlled item fields",
+      "path": "example_service/items.py",
+      "startLine": 1,
+      "endLine": 2,
+      "language": "python",
       "role": "user_input",
-      "code": "#[serde(rename_all = \"camelCase\")]\npub struct EnvironmentAddParams {\n    pub environment_id: String,\n    pub exec_server_url: String,\n}",
-      "explanation": "`environmentId` and `execServerUrl` are accepted as caller-controlled strings."
+      "code": "def rename_fields(body):\n    return body[\"itemId\"], body[\"title\"]",
+      "explanation": "The fictional request body selects both the item and its replacement title."
     },
     {
-      "id": "rpc-forward",
-      "label": "RPC forwards both fields without validation",
-      "path": "codex-rs/app-server/src/request_processors/environment_processor.rs",
-      "startLine": 15,
-      "endLine": 22,
-      "language": "rust",
+      "id": "route-forward",
+      "label": "Write route omits tenant ownership",
+      "path": "example_service/items.py",
+      "startLine": 7,
+      "endLine": 9,
+      "language": "python",
       "role": "entrypoint",
-      "code": "self.environment_manager\n    .upsert_environment(params.environment_id, params.exec_server_url)\n    .map_err(|err| invalid_request(err.to_string()))?;",
-      "explanation": "The handler passes both values directly to `upsert_environment()` and performs no reserved-ID check."
+      "code": "def rename_item(request, store):\n    item_id, title = rename_fields(request.body)\n    store.rename(item_id, title)",
+      "explanation": "The route passes the item identifier and title to the store without binding the authenticated tenant to that item."
     },
     {
-      "id": "startup-reserved-check",
-      "label": "Startup protects the reserved local identifier",
-      "path": "codex-rs/exec-server/src/environment.rs",
-      "startLine": 167,
-      "endLine": 176,
-      "language": "rust",
-      "role": "expected_control",
-      "code": "if id == LOCAL_ENVIRONMENT_ID {\n    return Err(ExecServerError::Protocol(format!(\n        \"environment id `{LOCAL_ENVIRONMENT_ID}` is reserved for EnvironmentManager\"\n    )));\n}",
-      "explanation": "Initial environment construction enforces the invariant that `local` belongs to `EnvironmentManager`."
-    },
-    {
-      "id": "runtime-upsert",
-      "label": "Runtime upsert omits the reserved-ID check",
-      "path": "codex-rs/exec-server/src/environment.rs",
-      "startLine": 253,
-      "endLine": 281,
-      "language": "rust",
+      "id": "store-write",
+      "label": "Store writes the selected item",
+      "path": "example_service/items.py",
+      "startLine": 13,
+      "endLine": 14,
+      "language": "python",
       "role": "root_control",
-      "code": "if environment_id.is_empty() {\n    return Err(ExecServerError::Protocol(\n        \"environment id cannot be empty\".to_string(),\n    ));\n}\n// ... build remote environment ...\nself.environments\n    .write()\n    .unwrap_or_else(std::sync::PoisonError::into_inner)\n    .insert(environment_id, Arc::new(environment));",
-      "explanation": "`upsert_environment()` rejects only an empty ID before inserting into the shared map. Passing `local` replaces the protected entry."
+      "code": "def rename(self, item_id, title):\n    self.items[item_id].title = title",
+      "explanation": "The store updates the selected object without an ownership check. A caller can select another tenant's fictional item."
     },
     {
-      "id": "default-lookup",
-      "label": "Default selection reads the overwritten map entry",
-      "path": "codex-rs/exec-server/src/environment.rs",
-      "startLine": 205,
-      "endLine": 210,
-      "language": "rust",
+      "id": "item-title",
+      "label": "Later reads observe the replacement",
+      "path": "example_service/items.py",
+      "startLine": 17,
+      "endLine": 18,
+      "language": "python",
       "role": "outcome",
-      "code": "pub fn default_environment(&self) -> Option<Arc<Environment>> {\n    self.default_environment\n        .as_deref()\n        .and_then(|environment_id| self.get_environment(environment_id))\n}",
-      "explanation": "Default lookup resolves the stored `local` ID through the mutable environment map, so the replacement affects later operations."
+      "code": "def item_title(self, item_id):\n    return self.items[item_id].title",
+      "explanation": "Later reads return the title written through the unchecked update."
+    },
+    {
+      "id": "read-owner-check",
+      "label": "Read route checks tenant ownership",
+      "path": "example_service/items.py",
+      "startLine": 21,
+      "endLine": 25,
+      "language": "python",
+      "role": "expected_control",
+      "code": "def read_item(request, store, item_id):\n    item = store.items[item_id]\n    if item.tenant_id != request.tenant_id:\n        raise PermissionError(\"Item belongs to another tenant\")\n    return item",
+      "explanation": "The fictional read route compares the stored owner with the authenticated tenant. The write route needs the same invariant."
     }
   ],
   "rootCause": {
-    "summary": "The violated invariant is that `local` must always identify the manager-owned local runtime. Startup enforces that invariant, but `EnvironmentManager::upsert_environment()` does not reuse the reserved-ID check and inserts a remote `Environment` under the caller-supplied key.",
+    "summary": "The read route enforces tenant ownership, but the rename route forwards caller-selected fields to a store operation that writes the item without that check.",
     "evidenceRefs": [
-      "rpc-input",
-      "rpc-forward",
-      "runtime-upsert",
-      "default-lookup",
-      "startup-reserved-check"
+      "request-fields",
+      "route-forward",
+      "store-write",
+      "item-title",
+      "read-owner-check"
     ]
   },
   "validation": {
-    "method": "static source trace",
-    "summary": "The source trace confirms that an `environment/add` caller controls both inputs, the RPC forwards them unchanged, and runtime insertion accepts `local`.",
-    "evidenceRefs": ["rpc-input", "rpc-forward", "runtime-upsert"],
+    "method": "static trace of the fictional fixture",
+    "summary": "The illustrated request controls the item identifier. Neither the route nor the store checks its owner before replacing the title.",
+    "evidenceRefs": [
+      "request-fields",
+      "route-forward",
+      "store-write"
+    ],
     "assertions": [
-      "The runtime path lacks the reserved-ID check present during startup.",
-      "Inserting `local` replaces the existing `HashMap` entry."
+      "The write route does not compare the authenticated tenant with the item owner.",
+      "The store updates the caller-selected item."
     ],
     "limitations": [
-      "The finding was validated by source review; no live JSON-RPC reproduction was run."
+      "This example is invented to demonstrate the field shape; it is not a scan result."
     ]
   },
   "attackPath": {
-    "summary": "A lower-trust app-server client opts into the experimental API, calls `environment/add` with `environmentId: \"local\"`, and points `execServerUrl` at an attacker-controlled executor. Later default environment selection resolves the replaced map entry.",
+    "summary": "A fictional authenticated caller submits item/rename with another tenant's item identifier and a replacement title.",
     "dataflow": {
-      "summary": "`environment/add` parameters -> `environment_add()` -> `upsert_environment()` -> shared environment map -> `default_environment()`",
-      "source": "caller-controlled `environmentId` and `execServerUrl`",
-      "sink": "the shared environment map",
-      "outcome": "default `local` selection resolves to the attacker-controlled remote executor",
+      "summary": "request body -> rename_fields() -> rename_item() -> ItemStore.rename() -> item_title()",
+      "source": "caller-selected item identifier and title",
+      "sink": "the selected item's title",
+      "outcome": "the other tenant's item title changes",
       "evidenceRefs": [
-        "rpc-input",
-        "rpc-forward",
-        "runtime-upsert",
-        "default-lookup"
+        "request-fields",
+        "route-forward",
+        "store-write",
+        "item-title"
       ]
     },
     "reachability": {
-      "summary": "The attacker must be able to act as an app-server client and enable `experimentalApi`; default stdio and private Unix-socket transports reduce exposure.",
-      "attacker": "lower-trust app-server client",
-      "entrypoint": "experimental `environment/add` RPC",
-      "outcome": "future operations selected for `local` are routed to the remote executor"
+      "summary": "The fictional caller needs access to the authenticated rename route and an item identifier belonging to another tenant.",
+      "attacker": "authenticated caller in the invented service",
+      "entrypoint": "item/rename",
+      "outcome": "unauthorized modification of a fictional item"
     },
-    "evidenceRefs": ["rpc-forward", "runtime-upsert", "default-lookup"],
+    "evidenceRefs": [
+      "route-forward",
+      "store-write",
+      "item-title"
+    ],
     "impact": {
       "level": "medium",
-      "why": "Later commands and filesystem requests selected for `local` can be routed to the attacker-controlled remote executor."
+      "why": "The fictional failure permits cross-tenant modification of an item title."
     },
     "likelihood": {
       "level": "medium",
-      "why": "Exploitation requires access to the app-server client boundary and the experimental method."
+      "why": "The invented route accepts an item identifier from the caller."
     },
     "limitations": [
-      "This overwrite does not directly execute code on the victim host."
+      "No real service, repository, scan target or finding is represented."
     ]
   },
-  "remediation": "Reuse the startup reserved-ID check inside `EnvironmentManager::upsert_environment()` so the runtime mutation path rejects the reserved `local` identifier.",
+  "remediation": "Check the selected item's tenant against the authenticated tenant before writing it; reuse the same ownership check on read and write routes.",
   "remediationTests": [
-    "Assert that `environment/add` with `environmentId: \"local\"` returns a protocol error.",
-    "Assert that `default_environment()` still resolves the manager-owned local runtime after a rejected upsert."
+    "Reject a rename when the selected fictional item belongs to another tenant.",
+    "Allow an owner to rename its own fictional item."
   ],
   "preventiveControls": [
-    "Centralize reserved-identifier validation so every environment mutation path shares one guard."
+    "Keep the tenant ownership invariant in a shared item-access operation."
   ]
 }
 ```

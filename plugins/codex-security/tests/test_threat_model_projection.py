@@ -439,7 +439,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 source = Path(directory).resolve()
                 path = source / filename
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(body)
+                path.write_bytes(body.encode())
                 self.assertEqual(FINALIZER.build_threat_model_export(source), body.encode())
                 self.assertEqual(path.read_text(), body)
                 description = FINALIZER.describe_threat_model(source)
@@ -489,6 +489,15 @@ class ThreatModelProjectionTest(unittest.TestCase):
             )
             self.assertEqual(outside_lookups, [])
 
+    def test_exports_legacy_document_with_crlf_bytes_unchanged(self) -> None:
+        body = b"# Existing Model\r\n\r\n    Preserve indentation.\r\n"
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory).resolve()
+            path = source / "threatmodel.md"
+            path.write_bytes(body)
+            self.assertEqual(FINALIZER.build_threat_model_export(source), body)
+            self.assertEqual(path.read_bytes(), body)
+
     def test_malformed_canonical_model_does_not_export_a_stale_legacy_document(self) -> None:
         body = "# Earlier model\n\nEarlier service boundaries.\n"
         for filename in ("scan-manifest.json", "policy-draft.json"):
@@ -508,7 +517,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
                     original = json.dumps(manifest)
                     path.write_text(original)
                     legacy = source / "threatmodel.md"
-                    legacy.write_text(body)
+                    legacy.write_bytes(body.encode())
                     for read_model in (
                         FINALIZER.describe_threat_model,
                         FINALIZER.build_threat_model_export,
@@ -597,7 +606,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
         FINALIZER.finalize_scan(self.scan_dir)
         legacy_path = self.scan_dir / "artifacts" / "01_context" / "threat_model.md"
         legacy_path.parent.mkdir(parents=True)
-        legacy_path.write_text(body)
+        legacy_path.write_bytes(body.encode())
         manifest = self.read_json("scan-manifest.json")
         manifest["scan"]["artifacts"].append(
             FINALIZER._artifact_record(
@@ -636,7 +645,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
                     }
                 )
             )
-            (source / "THREAT_MODEL.md").write_text(body)
+            (source / "THREAT_MODEL.md").write_bytes(body.encode())
             description = FINALIZER.describe_threat_model(source)
             self.assertEqual(description["provenance"]["source"], "policy")
             self.assertEqual(description["provenance"]["revision"], "abc123")

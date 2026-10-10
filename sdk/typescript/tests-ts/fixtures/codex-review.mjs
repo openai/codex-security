@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-const [scenario, transcript, checkout] = process.argv.slice(2);
+const [scenario, transcript, checkout, stage = "pair-review"] =
+  process.argv.slice(2);
 const refusalMessages = {
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-suffix-text": "Request refused: safety policy.",
+  "policy-causal-refusal-text":
+    "This request was refused because it violates the safety policy.",
   "policy-refusal-text":
     "This request was refused because of the safety policy.",
   "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
@@ -19,6 +22,14 @@ const turnFailures = {
   "policy-turn": {
     message: "Request flagged for possible cybersecurity risk.",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "policy-accordance-turn": {
+    message: "This request was refused in accordance with the safety policy.",
+    codexErrorInfo: "other",
+  },
+  "policy-terse-turn": {
+    message: "Refused due to the safety policy",
+    codexErrorInfo: "other",
   },
   "failed-turn": {
     message: "Rate limit exceeded",
@@ -115,7 +126,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     assert.equal(message.params.ephemeral, true);
     assert.equal(message.params.permissions, "codex_security_review");
-    assert.equal(message.params.approvalPolicy, "on-request");
+    assert.equal(
+      message.params.approvalPolicy,
+      stage === "screening" ? "never" : "on-request",
+    );
+    if (stage === "screening") {
+      assert.equal(message.params.config.features.multi_agent, false);
+      assert.equal(message.params.config.features.multi_agent_v2, false);
+    }
     assert.equal(message.params.approvalsReviewer, "auto_review");
     assert.equal(message.params.config.mcp_servers.synthetic.enabled, false);
     assert.deepEqual(
@@ -170,7 +188,59 @@ for await (const line of createInterface({ input: process.stdin })) {
       });
     }
     if (scenario === "exit") process.exit(1);
-    if (scenario === "invalid-json") {
+    if (scenario === "exit-diagnostic") {
+      process.stdout.end();
+      process.stderr.write(
+        "Permission profile synthetic_profile was rejected: café 🔒\n",
+        () => process.exit(7),
+      );
+      continue;
+    }
+    if (scenario === "diagnostics") {
+      process.stderr.write("Native diagnostic: Bearer synthetic-review-key\n");
+      send({
+        method: "configWarning",
+        params: { message: "Configured model fallback: synthetic-review-key" },
+      });
+      send({
+        method: "warning",
+        params: { message: "Source lookup warning", threadId: "review-thread" },
+      });
+      send({
+        method: "item/completed",
+        params: {
+          threadId: "review-thread",
+          turnId,
+          item: {
+            id: "command-1",
+            type: "commandExecution",
+            status: "completed",
+            exitCode: 7,
+            aggregatedOutput: "Source lookup failed: synthetic-review-key",
+          },
+        },
+      });
+      for (const threadId of ["nested-review", "review-thread"])
+        send({
+          method: "thread/tokenUsage/updated",
+          params: {
+            threadId,
+            turnId,
+            tokenUsage: {
+              total: { inputTokens: 12, outputTokens: 3, totalTokens: 15 },
+            },
+          },
+        });
+      submit("valid", { decision: "SAME" });
+    } else if (scenario === "configured-model") {
+      const decision = { decision: "DISTINCT", rationale: "Independent fixes" };
+      submit(
+        "valid",
+        stage === "screening"
+          ? { decisions: { "pair-1": decision } }
+          : decision,
+      );
+    } else if (scenario === "invalid-json") {
       process.stdout.write("Synthetic private response data\n");
     } else if (
       scenario === "invalid-submission" ||
@@ -227,7 +297,16 @@ for await (const line of createInterface({ input: process.stdin })) {
               ? "Request refusal due to the safety policy."
               : scenario === "required-source-error-policy-file"
                 ? "Connection refused while fetching content-policy.ts"
-                : "Required source revision could not be read.",
+                : scenario === "required-source-error-upload-policy"
+                  ? "Artifact upload was blocked by the content policy."
+                  : scenario === "required-source-error-publication-policy"
+                    ? "Artifact publication was refused due to the content policy."
+                    : scenario === "required-source-error-publication-refusal"
+                      ? "Artifact publication refusal due to the content policy."
+                      : scenario ===
+                          "required-source-error-policy-requires-refusal"
+                        ? "Artifact upload failed because the content policy requires refusal of unsupported media"
+                        : "Required source revision could not be read.",
         },
         { tool: "submit_error" },
       );

@@ -13,7 +13,13 @@ with access to the selected model. For Amazon Bedrock, see the separate
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
 Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full SHA of an Action commit.
+The matching `action-vX.Y.Z` tag and distribution commit are listed in each
+product release after the CLI and Action have both passed release checks.
 When using a fork, replace `openai` with the fork owner.
+
+This example requests Daybreak Blue. Use an API key from a project with Blue
+enabled; without Daybreak access, omit `cyber-access-program` or set it to
+`standard`. See [Daybreak access and refusals](#daybreak-access-and-refusals).
 
 ```yaml
 name: Codex Security repository
@@ -29,6 +35,12 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
+      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
+      - name: Set up the Ubuntu sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -36,6 +48,7 @@ jobs:
         with:
           model: gpt-5.6-sol
           effort: high
+          cyber-access-program: daybreak_blue
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
@@ -45,6 +58,48 @@ The workflow runs weekly on Mondays at 07:23 UTC. To run it manually, use
 Findings are report-only by default. Valid partial results produce a warning;
 scanner and required reporting errors fail the job. Set `fail-on-severity` to
 fail on findings at or above a selected severity when the scan is complete.
+
+### Ubuntu sandbox setup
+
+Codex Security runs commands inside a sandbox to limit their filesystem and
+network access. On the Ubuntu 24.04 runner used above, that sandbox uses
+Bubblewrap (`bwrap`), and Ubuntu's AppArmor policy must allow it to create the
+required isolated environment.
+
+The setup step installs `bubblewrap` and `apparmor-profiles`, then uses
+`apparmor_parser -r` to load the supplied `bwrap-userns-restrict` profile. The
+profile permits Bubblewrap's sandbox setup while retaining Ubuntu's broader
+AppArmor restrictions. Keep this step before the Action: the CLI checks that
+its sandbox works before scanning and fails if it cannot start, for example
+with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.
+
+This setup is specific to the Linux runner. Local macOS scans use the built-in
+Seatbelt sandbox and do not need Bubblewrap. See the
+[sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
+
+## Daybreak access and refusals
+
+Daybreak is optional. You can use the Action with a general-purpose model your
+API key can access under standard safeguards. Some security tasks may trigger
+model refusals or API cybersecurity safety blocks. **If a refusal or safety
+block aborts the scan, the Action fails**, even with `fail-on-severity: none`.
+That setting controls failures caused by findings; it does not suppress scanner
+errors. Check the job summary and logs for the reason. A failed scan does not
+mean the repository has no vulnerabilities.
+
+For authorized security work that needs reduced refusals,
+[request Daybreak access](https://openai.com/form/enterprise-trusted-access-for-cyber/).
+After organization approval, enable the required program for the API project
+and use a key from that project. Daybreak reduces some refusals but does not
+remove every safeguard or guarantee that a scan will complete.
+
+To explicitly select an approved Cyber access program, add
+`cyber-access-program: daybreak_blue` to the scan step's `with` settings.
+The input also accepts `standard` and `daybreak_red`; choose a program supported
+by your model and API project. Leaving it unset preserves CLI defaults.
+Selecting `standard` does not require Daybreak approval. Selecting a Daybreak
+program does not grant access; an unavailable program or incompatible model
+causes the scan to fail.
 
 ## Scan pull requests
 
@@ -71,6 +126,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
+      - name: Set up the Ubuntu sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -198,8 +259,13 @@ for code scanning availability and permissions.
 
 The Action installs a pinned CLI release from npm using a committed dependency
 lock. It runs on Linux x64 with Node 24 and Python 3.11 or later; the Ubuntu 24.04
-runner supplies these prerequisites. npm and Python are found on the runner's
-`PATH`; `actions/setup-node` and `actions/setup-python` can select installations.
+runner supplies Node and Python. The setup step above installs Bubblewrap and
+loads Ubuntu's `bwrap-userns-restrict` AppArmor profile. This profile lets
+Bubblewrap create the sandbox's user namespace and denies capabilities to its
+child processes. It is loaded into the running kernel for the job's runner.
+Codex uses the system Bubblewrap from `PATH`.
+
+npm and Python are found on the runner's `PATH`; `actions/setup-node` and `actions/setup-python` can select installations.
 Python helpers preserve the selected virtual environment and library settings.
 The runner's process tracking marker is retained by the scan coordinator and Deep Scan workers.
 Authentication uses `OPENAI_API_KEY`.
@@ -215,6 +281,11 @@ report paths empty; it does not recover unvalidated partial files from disk.
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`
   for PRs, and `persist-credentials: false`.
 - **Authentication errors:** check the repository secret and model access.
+- **Sandbox startup errors:** on Ubuntu 24.04, include the sandbox setup step
+  shown above. Installing Bubblewrap alone does not load the AppArmor profile.
+  A `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` error means
+  the sandbox could not configure its network namespace. Check that the profile
+  loaded successfully before running the Action.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
 - **Incomplete scans:** inspect the warning and coverage report before adjusting
@@ -245,9 +316,29 @@ Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
 SARIF exporter using synthetic scans, runs the packaged Linux smoke test, and
 audits the Action and CLI dependency locks. The `@openai/codex-security` dependency in
-`runtime/package.json` is the CLI version source. To upgrade, update that exact
-pin and regenerate `runtime/package-lock.json`, rebuild the bundles, and run
-validation. Verify report compatibility when adopting a new release.
+`runtime/package.json` is the installed CLI version source. Main keeps the last
+published CLI pin so its checks remain runnable while a release PR prepares the
+next product version. To upgrade that development pin, update it and regenerate
+`runtime/package-lock.json`, rebuild the bundles, and run validation.
+
+Releases use the product version from `sdk/typescript/package.json`. Before npm
+publication, the release workflow exercises the Action's compatibility suite
+against the packed CLI candidate. After publication and provenance verification,
+the Action release workflow starts from that exact CLI source commit, updates
+the runtime pin and integrity lock, and fetches the locked runtime through
+Socket Firewall with an empty cache before running the CLI. The lock keeps
+public npm URLs for Action consumers. The workflow rebuilds the bundles and
+runs the Action checks in a job with read-only repository permissions.
+A fresh publisher takes only the tested runtime lock, rebuilds
+from the same source, and verifies the bundle hashes without executing the CLI.
+It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
+same version as `npm-vX.Y.Z`.
+
+The Action distribution commit differs from the CLI source commit because the
+registry integrity lock is finalized after publication. Release metadata records
+both commits, both tags, and the verified CLI integrity. A failed Action stage
+can be rerun without republishing npm. Existing version tags are never moved.
+See [the release process](../RELEASING.md) for the orchestration and recovery flow.
 
 <!-- prettier-ignore-start -->
 
@@ -257,25 +348,26 @@ validation. Verify report compatibility when adopting a new release.
 
 Inputs are strings. Quote booleans and use newline-separated literal paths for lists.
 
-| Input              | Default                   | Meaning                                                                                                                                  |
-| ------------------ | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `repository`       | `${{ github.workspace }}` | Checkout root. Use paths to select folders within the checkout.                                                                          |
-| `scope`            | `repository`              | repository or diff. Select diff for PR changes only; repository scans the full checkout.                                                 |
-| `paths`            | Unset                     | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion.                            |
-| `diff-base`        | Unset                     | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.                                              |
-| `mode`             | `standard`                | standard or deep. Deep supports repository scans, including selected paths; not diff scans.                                              |
-| `model`            | `gpt-5.6-sol`             | Model with access through your API key. Cost limits require CLI pricing support for the model.                                           |
-| `effort`           | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                  |
-| `max-cost`         | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                       |
-| `max-time-hours`   | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.              |
-| `fail-on-severity` | `none`                    | none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail. |
-| `verbose`          | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                           |
-| `dry-run`          | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job. |
-| `summary`          | `true`                    | Write a human-readable job summary.                                                                                                      |
-| `annotations`      | `true`                    | Emit up to 50 source finding annotations; complete findings remain in reports.                                                           |
-| `upload-artifacts` | `false`                   | Upload an allowlist of validated reports. Reports may contain source and vulnerability details.                                          |
-| `artifact-name`    | `codex-security`          | Report artifact name; choose distinct names for matrix jobs and multiple invocations.                                                    |
-| `retention-days`   | `7`                       | Artifact retention, 1–90 days (subject to repository limits).                                                                            |
+| Input                  | Default                   | Meaning                                                                                                                                                                                                                      |
+| ---------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repository`           | `${{ github.workspace }}` | Checkout root. Use paths to select folders within the checkout.                                                                                                                                                              |
+| `scope`                | `repository`              | repository or diff. Select diff for PR changes only; repository scans the full checkout.                                                                                                                                     |
+| `paths`                | Unset                     | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion.                                                                                                                |
+| `diff-base`            | Unset                     | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.                                                                                                                                  |
+| `mode`                 | `standard`                | standard or deep. Deep supports repository scans, including selected paths; not diff scans.                                                                                                                                  |
+| `model`                | `gpt-5.6-sol`             | Model with access through your API key. Cost limits require CLI pricing support for the model.                                                                                                                               |
+| `cyber-access-program` | Unset                     | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
+| `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
+| `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |
+| `max-time-hours`       | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.                                                                                                  |
+| `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail.                                                                                     |
+| `verbose`              | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                                                                                                               |
+| `dry-run`              | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job.                                                                                     |
+| `summary`              | `true`                    | Write a human-readable job summary.                                                                                                                                                                                          |
+| `annotations`          | `true`                    | Emit up to 50 source finding annotations; complete findings remain in reports.                                                                                                                                               |
+| `upload-artifacts`     | `false`                   | Upload an allowlist of validated reports. Reports may contain source and vulnerability details.                                                                                                                              |
+| `artifact-name`        | `codex-security`          | Report artifact name; choose distinct names for matrix jobs and multiple invocations.                                                                                                                                        |
+| `retention-days`       | `7`                       | Artifact retention, 1–90 days (subject to repository limits).                                                                                                                                                                |
 
 ## Outputs
 

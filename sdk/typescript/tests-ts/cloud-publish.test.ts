@@ -1,10 +1,13 @@
-import { findingFingerprint, sha256 } from "./support/finding-identity.js";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
+import { VERSION } from "../src/version.js";
+import type { FindingsDocument, ScanManifest } from "../src/models.js";
 import { responding } from "./support/responses.js";
 import { once } from "node:events";
 import { rejecting } from "./support/errors.js";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -74,10 +77,10 @@ async function csvFixture(contents = `${csvHeader}\n${csvRow}\n`) {
 
 afterEach(cleanup);
 
-async function fixture() {
+async function fixture(homeName = "home") {
   const root = await temporaryDirectory("codex-security-cloud-");
   const scan = join(root, "scan");
-  const home = join(root, "home");
+  const home = join(root, homeName);
   await copyCompletedScanFixture(scan);
   if (process.platform !== "win32") await chmod(scan, 0o700);
   await mkdir(home, { mode: 0o700 });
@@ -101,32 +104,16 @@ async function fixture() {
 async function addSecondFinding(scan: string): Promise<void> {
   const findingsPath = join(scan, "findings.json");
   const manifestPath = join(scan, "scan-manifest.json");
-  const findings = JSON.parse(await readFile(findingsPath, "utf8")) as {
-    findings: Array<{
-      findingId: string;
-      occurrenceId: string;
-      ruleId: string;
-      identity: { anchor: string; instance?: string };
-      fingerprints: { primary: string };
-      title: string;
-    }>;
-  };
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-    scan: {
-      id: string;
-      target: { targetId: string };
-      artifacts: Array<{ path: string; sha256: string }>;
-    };
-  };
+  const findings = JSON.parse(
+    await readFile(findingsPath, "utf8"),
+  ) as FindingsDocument;
+  const manifest = JSON.parse(
+    await readFile(manifestPath, "utf8"),
+  ) as ScanManifest;
   const second = structuredClone(findings.findings[0]!);
   second.identity.instance = "second-instance";
   second.title = "A second synthetic finding";
-  const fingerprint = findingFingerprint(manifest.scan.target.targetId, second);
-  second.findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
-  second.occurrenceId = `occ_${sha256(
-    [manifest.scan.id, fingerprint].join("\0"),
-  ).slice(0, 24)}`;
-  second.fingerprints.primary = fingerprint;
+  setFindingIdentity(manifest.scan, second);
   findings.findings.push(second);
   await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
   const artifact = manifest.scan.artifacts.find(
@@ -137,6 +124,79 @@ async function addSecondFinding(scan: string): Promise<void> {
 }
 
 describe("Cloud publication", () => {
+  test("rejects invalid CSV UTF-8 before credentials or upload", async () => {
+    const path = await csvFixture();
+    const { environment } = await fixture();
+    const [prefix, suffix] = `${csvHeader}\n${csvRow}\n`.split(
+      "including nested entries",
+    );
+    const fetchMock = mock(rejecting("unexpected request"));
+    const reading = spyOn(fs, "readFile");
+    try {
+      for (const bytes of [Buffer.from([0xff]), Buffer.from([0xe2, 0x82])]) {
+        let decodeError: Error | undefined;
+        try {
+          new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch (error) {
+          decodeError = error as Error;
+        }
+        expect(decodeError).toBeInstanceOf(TypeError);
+        await writeFile(
+          path,
+          Buffer.concat([Buffer.from(prefix!), bytes, Buffer.from(suffix!)]),
+        );
+        await expect(
+          publishFindingsCsvToCloud(path, { environment, fetch: fetchMock }),
+        ).rejects.toMatchObject({
+          name: "CodexSecurityError",
+          message: `Could not read findings CSV. ${decodeError!.message}`,
+          cause: expect.objectContaining({ message: decodeError!.message }),
+        });
+      }
+      expect(reading.mock.calls.map(([file]) => file)).toEqual([path, path]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      reading.mockRestore();
+    }
+  });
+
+  test("preserves the filesystem cause when the selected CSV is missing", async () => {
+    const path = join(await temporaryDirectory(), "missing.csv");
+    const fetchMock = mock(rejecting("unexpected request"));
+    await expect(
+      publishFindingsCsvToCloud(path, { dryRun: true, fetch: fetchMock }),
+    ).rejects.toMatchObject({
+      name: "CodexSecurityError",
+      message: expect.stringContaining("ENOENT"),
+      cause: expect.objectContaining({ code: "ENOENT" }),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("preserves valid Unicode and BOM-bearing CSV source identities", async () => {
+    const path = await csvFixture();
+    const fetchMock = mock(rejecting("unexpected request"));
+    for (const marker of ["�", "😀"]) {
+      for (const bom of ["", "\uFEFF"]) {
+        const source = `${bom}${csvHeader}\n${csvRow.replace("including nested entries", marker)}\n`;
+        await writeFile(path, source);
+        const result = await publishFindingsCsvToCloud(path, {
+          dryRun: true,
+          fetch: fetchMock,
+        });
+        expect(result.findings?.[0]?.title).toBe(
+          `Unsafe archive extraction, ${marker}`,
+        );
+        expect(result.scanId).toBe(
+          `scan_csv_${sha256(
+            ["codex-security-csv-import/v1", VERSION, source].join("\0"),
+          ).slice(0, 24)}`,
+        );
+      }
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test("previews a validated findings export CSV without credentials or network access", async () => {
     const path = await csvFixture();
     const fetchMock = mock(rejecting("unexpected request"));
@@ -168,6 +228,50 @@ describe("Cloud publication", () => {
       ],
     });
     expect(fetchMock).toHaveBeenCalledTimes(0);
+  });
+
+  test("publishes separate CSV occurrences with distinct canonical identities", async () => {
+    const secondOccurrence = "occ_000000000000000000000002";
+    const secondRow = csvRow.replace(
+      "occ_e79cb19591e696572a1c22be",
+      secondOccurrence,
+    );
+    const path = await csvFixture(`${csvHeader}\n${csvRow}\n${secondRow}\n`);
+    const { environment } = await fixture();
+    const preview = await publishFindingsCsvToCloud(path, { dryRun: true });
+    const findings = preview.findings!;
+    expect(new Set(findings.map((finding) => finding.findingId)).size).toBe(2);
+    expect(new Set(findings.map((finding) => finding.occurrenceId)).size).toBe(
+      2,
+    );
+    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
+      "occ_e79cb19591e696572a1c22be",
+      secondOccurrence,
+    ]);
+    for (const finding of findings) {
+      expect(finding.findingId).toBe(
+        `csf_${sha256(finding.fingerprints.primary).slice(0, 24)}`,
+      );
+      expect(finding.occurrenceId).toBe(
+        `occ_${sha256([preview.scanId, finding.fingerprints.primary].join("\0")).slice(0, 24)}`,
+      );
+    }
+    const result = await publishFindingsCsvToCloud(path, {
+      environment,
+      fetch: async (_url, options) => {
+        const payload = JSON.parse(String(options.body));
+        expect(payload.findings).toEqual(findings);
+        return Response.json(
+          {
+            status: "accepted",
+            finding_ids: ["first", "second"],
+            finding_count: 2,
+          },
+          { status: 201 },
+        );
+      },
+    });
+    expect(result.findingCount).toBe(2);
   });
 
   test("posts CSV findings with generated scan provenance", async () => {
@@ -237,7 +341,7 @@ describe("Cloud publication", () => {
       `${csvHeader.replace("finding_id,", "finding_id,candidate_id,")}\n${csvRow.replace("csf_852f90d6e1177502ff113d4a,", "csf_852f90d6e1177502ff113d4a,candidate-001,")}\n`,
     );
     const result = await publishFindingsCsvToCloud(path, { dryRun: true });
-    expect(result.findings?.[0]?.extensions).toEqual({
+    expect(result.findings?.[0]?.extensions).toMatchObject({
       candidateId: "candidate-001",
     });
   });
@@ -381,7 +485,24 @@ describe("Cloud publication", () => {
   });
 
   test("posts validated findings and scan provenance with only ChatGPT access credentials", async () => {
-    const { scan, environment } = await fixture();
+    const { scan, home, environment } = await fixture(
+      process.platform === "win32" ? "home" : " home ",
+    );
+    if (home !== home.trim()) {
+      await mkdir(home.trim(), { mode: 0o700 });
+      await writeFile(
+        join(home.trim(), "config.toml"),
+        'cli_auth_credentials_store = "file"\n',
+      );
+      await writeFile(
+        join(home.trim(), "auth.json"),
+        JSON.stringify({
+          ...login,
+          tokens: { ...login.tokens, access_token: "wrong-trimmed-home-token" },
+        }),
+        { mode: 0o600 },
+      );
+    }
     const manifest = JSON.parse(
       await readFile(join(scan, "scan-manifest.json"), "utf8"),
     );
