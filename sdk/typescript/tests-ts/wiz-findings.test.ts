@@ -875,6 +875,52 @@ test("custom GitHub Enterprise binding preserves branch case and exact source ev
   expect(evidence.source_data).toEqual(record);
 });
 
+test.each([
+  ["sastFindings", "Team/Project", "team/project"],
+  ["sastFindings", "team/project", "Team/Project"],
+  ["secretInstances", "Team/Project", "team/project"],
+  ["secretInstances", "team/project", "Team/Project"],
+  ["iacFindings", "Team/Project", "team/project"],
+  ["iacFindings", "team/project", "Team/Project"],
+])(
+  "%s custom GitHub URL-only branch qualifiers preserve suffix case (%s, %s)",
+  async (collection, repositoryPath, qualifier) => {
+    const sourceRepository = {
+      id: "wiz-repository",
+      url: `https://github.example.test/${repositoryPath}`,
+    };
+    const branch = {
+      id: "wiz-branch",
+      name: `${qualifier}/Feature/Parser/More`,
+    };
+    const record =
+      collection === "secretInstances"
+        ? {
+            ...secret,
+            resource: {
+              ...secret.resource,
+              name: branch.name,
+              typedProperties: { repository: sourceRepository },
+            },
+          }
+        : collection === "iacFindings"
+          ? { ...iac, repository: sourceRepository, branch }
+          : { ...sast, repository: sourceRepository, repositoryBranch: branch };
+    const f = await cloudFixture(envelope(collection!, [record], false));
+    f.destination.url = "https://github.example.test/team/project";
+    const prepared = await prepareExternalPublication(
+      f.file,
+      { ...f.options, repository: f.destination.id },
+      f.deps,
+    );
+    expect((await prepared.publish()).verified).toBe(1);
+    const evidence = f.posts[0]!.items[0]!.evidence;
+    expect(evidence.branch).toBe("Feature/Parser/More");
+    expect(evidence.details!.repository.url).toBe(sourceRepository.url);
+    expect(evidence.source_data).toEqual(record);
+  },
+);
+
 test("unidentified source hosts still require exact supplied and inventory URL paths", async () => {
   const record = {
     ...sast,
