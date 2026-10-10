@@ -12,7 +12,9 @@ const {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
 } = await importSource(
-  fileURLToPath(new URL("../src/artifact-candidate-ledger.ts", import.meta.url)),
+  fileURLToPath(
+    new URL("../src/artifact-candidate-ledger.ts", import.meta.url),
+  ),
 );
 
 const scanId = "11111111-1111-4111-8111-111111111111";
