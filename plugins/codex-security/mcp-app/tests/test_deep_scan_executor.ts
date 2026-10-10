@@ -1,4 +1,5 @@
 import { rm } from "node:fs/promises";
+import { testHome } from "./deep_scan_home_case.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import {
   assertConfigOverrides,
@@ -117,6 +118,13 @@ try {
     await testRuntimePermissionProfileFallbackStopsAndDiscards();
     await testWorkerLaunchesWithoutGlobalCodex();
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
+    await testHome(
+      CodexSdkWorkerExecutor,
+      captureDeepScanExecutionSettings,
+      restoredDeepScanWorkerSettings,
+      withWorkerFixture,
+      trustedParentSandbox,
+    );
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();

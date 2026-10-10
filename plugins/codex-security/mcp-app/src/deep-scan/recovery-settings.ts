@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, win32 } from "node:path";
+import { isAbsolute, join, sep, win32 } from "node:path";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { scanPreflightCodexConfig } from "../../../../../sdk/typescript/src/preflight-config.js";
@@ -49,9 +49,16 @@ export async function captureDeepScanExecutionSettings(
   environment: NodeJS.ProcessEnv = process.env,
   parent?: { threadId: string; startedAt?: string },
 ): Promise<DeepScanExecutionSettings> {
-  const codexHome = environment.CODEX_HOME || join(homedir(), ".codex");
+  const configuredHome = environment.CODEX_HOME || join(homedir(), ".codex");
+  const codexHome =
+    !isAbsolute(configuredHome) ||
+    (process.platform === "win32" &&
+      ["\\", "/"].includes(win32.parse(configuredHome).root))
+      ? await fs.realpath(configuredHome)
+      : configuredHome;
+  // Preserve symlink/.. traversal in an absolute home instead of joining lexically.
   const configPath =
-    environment.CODEX_SECURITY_CONFIG_PATH ?? join(codexHome, "config.toml");
+    environment.CODEX_SECURITY_CONFIG_PATH ?? `${codexHome}${sep}config.toml`;
   let config: JsonObject;
   try {
     config = parseToml(await fs.readFile(configPath, "utf8")) as JsonObject;
@@ -83,12 +90,7 @@ export async function captureDeepScanExecutionSettings(
       process.arch,
       process.cwd(),
     ),
-    codexHome:
-      !isAbsolute(codexHome) ||
-      (process.platform === "win32" &&
-        ["\\", "/"].includes(win32.parse(codexHome).root))
-        ? await fs.realpath(codexHome)
-        : codexHome,
+    codexHome,
     model:
       original.model ?? (selected.model as string | undefined) ?? native.model,
     reasoningEffort:
