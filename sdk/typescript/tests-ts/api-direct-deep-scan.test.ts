@@ -1,3 +1,4 @@
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { hash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -220,6 +221,13 @@ test.each(["configured", "managed"] as const)(
 );
 
 test("Node retains the direct Deep Scan capability", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "Node retains the direct Deep Scan capability",
+    )
+  )
+    return;
   const root = await temporaryDirectory();
   const source = new URL("../src/deep-scan.ts", import.meta.url);
   const built = await Bun.build({
