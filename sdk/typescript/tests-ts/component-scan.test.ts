@@ -1660,6 +1660,23 @@ test.each([
   },
 );
 
+test("default scan clients use the component scan environment", async () => {
+  const paths = await fixture();
+  const summary = await scan(paths, {
+    components: components.slice(0, 1),
+    createSecurity: undefined,
+    environment: { ...process.env, GIT_DIR: join(paths.root, "synthetic.git") },
+  });
+  expect(summary.failed).toBe(1);
+  expect(await json(summary.summaryPath!)).toMatchObject({
+    components: [
+      expect.objectContaining({
+        error: "GIT_DIR is not supported for Codex Security scans.",
+      }),
+    ],
+  });
+});
+
 test("CLI requires an explicitly selected API key before automatic planning", async () => {
   const paths = await fixture();
   const planComponentsMock = mock(resolving({ components }));

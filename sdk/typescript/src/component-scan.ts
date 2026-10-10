@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join, relative, sep } from "node:path";
 import {
   CodexSecurity,
+  DEFAULT_DEPENDENCIES,
   scanAuthentication,
   selectedScanEnvironment,
   type CodexSecuritySurface,
@@ -194,9 +195,14 @@ export async function runComponentScans(
       const security = (
         options.createSecurity ??
         ((config) =>
-          new CodexSecurity(config, undefined, {
-            surface: options.surface ?? "sdk",
-          }))
+          new CodexSecurity(
+            config,
+            {
+              ...DEFAULT_DEPENDENCIES,
+              environment: options.environment ?? process.env,
+            },
+            { surface: options.surface ?? "sdk" },
+          ))
       )(options.config ?? {});
       try {
         while (!options.signal?.aborted) {

@@ -499,7 +499,8 @@ interface ClientDependencies {
   supportsDirectDeepScan?: typeof supportsDirectDeepScan;
 }
 
-const DEFAULT_DEPENDENCIES: ClientDependencies = {
+/** @internal */
+export const DEFAULT_DEPENDENCIES: ClientDependencies = {
   createCodex: ({ nativeProfile, ...options }) =>
     nativeProfile === undefined
       ? new Codex(options)
