@@ -1890,7 +1890,10 @@ function parseSemanticScanDraft(
   schema: z.ZodType<ScanDraftInput>,
 ): ScanDraftInput {
   const parsed = schema.parse(input);
-  validateFindingSemantics(parsed.findings);
+  validateFindingSemantics(
+    parsed.findings,
+    schema !== canonicalScanDraftInputSchema,
+  );
   validateCoverageSemantics(parsed.coverage);
   return parsed;
 }
@@ -2474,7 +2477,10 @@ function inventoryStrategy(
   return "repository";
 }
 
-function validateFindingSemantics(findings: JsonObject[]): void {
+function validateFindingSemantics(
+  findings: JsonObject[],
+  enforceLegacyEvidenceBounds: boolean,
+): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity as JsonObject;
     if (
@@ -2516,6 +2522,7 @@ function validateFindingSemantics(findings: JsonObject[]): void {
         }
         evidenceIds.add(id);
         if (
+          (evidenceName === "codeEvidence" || enforceLegacyEvidenceBounds) &&
           typeof evidence.endLine === "number" &&
           evidence.endLine < (evidence.startLine as number)
         ) {

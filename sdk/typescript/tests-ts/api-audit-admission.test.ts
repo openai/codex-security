@@ -5,8 +5,10 @@ import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runScanEvents } from "../src/api.js";
+import { loadContract } from "../src/contract.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
 import { completedEvents } from "./support/api-events.js";
+import { sha256 } from "./support/finding-identity.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -493,6 +495,98 @@ test.each([
     }
   },
 );
+
+test("canonical admission preserves legacy evidence coordinates", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const file = join(scanDir, "findings.json");
+  const findings = JSON.parse(await readFile(file, "utf8"));
+  const evidence = {
+    id: "legacy-reversed-end",
+    code: "read(input)",
+    path: "src/legacy.py",
+    startLine: 48,
+    endLine: 47,
+  };
+  findings.findings[0].code_evidence = [evidence];
+  const saved = JSON.stringify(findings);
+  await writeFile(file, saved);
+  const manifestFile = join(scanDir, "scan-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  manifest.scan.artifacts.find(
+    (artifact: { path: string }) => artifact.path === "findings.json",
+  ).sha256 = sha256(saved);
+  await writeFile(manifestFile, JSON.stringify(manifest));
+  const expectation = {
+    repository: "/repository",
+    repositoryRevision: "deadbeef",
+    target: { kind: "repository" as const, paths: [] },
+    mode: "standard" as const,
+    pluginVersion: "0.1.0",
+  };
+  let finalizations = 0;
+  const result = await runScanEvents({
+    thread: { id: null },
+    events: completedEvents(),
+    signal: new AbortController().signal,
+    scanDir,
+    pluginRoot: PLUGIN_ROOT,
+    expectation,
+    workbenchValidated: true,
+    onFinalize: async () => {
+      const contract = await loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation,
+        workbenchValidated: true,
+      });
+      expect(contract.findings.findings[0]?.["code_evidence"]).toEqual([
+        evidence,
+      ]);
+      finalizations++;
+    },
+  });
+  expect(finalizations).toBe(1);
+  expect(result.turnResult.status).toBe("completed");
+  expect(await readFile(file, "utf8")).toBe(saved);
+
+  const coverage = JSON.parse(
+    await readFile(join(scanDir, "coverage.json"), "utf8"),
+  );
+  const draft = parseCanonicalScanDraft({
+    scanId: manifest.scan.id,
+    manifest,
+    findings,
+    coverage,
+  });
+  draft.coverage.surfaces[0].id = "archive-extraction";
+  expect(() => parseScanDraft({ ...draft, scanId })).toThrow(
+    "code_evidence[0].endLine must not precede startLine",
+  );
+});
+
+test("canonical admission still rejects reversed typed evidence bounds", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const file = join(scanDir, "findings.json");
+  const findings = JSON.parse(await readFile(file, "utf8"));
+  findings.findings[0].codeEvidence = [
+    {
+      id: "typed-reversed-end",
+      label: "Source read",
+      code: "read(input)",
+      explanation: "The input reaches a read.",
+      path: "src/typed.py",
+      startLine: 48,
+      endLine: 47,
+    },
+  ];
+  await writeFile(file, JSON.stringify(findings));
+  const outcome = await observeStandardAdmission("/repository", scanDir);
+  expect(outcome.error).toMatchObject({
+    message: expect.stringContaining(
+      "codeEvidence[0].endLine must not precede startLine",
+    ),
+  });
+  expect(outcome.finalizations).toBe(0);
+});
 
 async function observeStandardAdmission(
   repository: string,
