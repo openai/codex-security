@@ -85,17 +85,36 @@ export function scanProgressUpdatesFromEvent(
 
 export function scanProgressUpdatesFromText(output: string): ScanProgress[] {
   const updates: ScanProgress[] = [];
-  let codeFence = false;
-  for (const line of output.split(/\r?\n/u)) {
-    if (/^\s*```/u.test(line)) {
-      codeFence = !codeFence;
-      continue;
-    }
-    if (codeFence || !line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
+  for (const line of linesOutsideFences(output)) {
+    if (!line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
     const progress = scanProgressFromMarker(line);
     if (progress !== null) updates.push(progress);
   }
   return updates;
+}
+
+/** Return lines outside Markdown fences so quoted markers are not read as live. */
+function linesOutsideFences(text: string): string[] {
+  const lines: string[] = [];
+  let fence: { marker: string; length: number } | null = null;
+  for (const line of text.split(/\r?\n/u)) {
+    const delimiter = /^\s*(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (delimiter !== null) {
+      const run = delimiter[1]!;
+      if (fence === null) {
+        fence = { marker: run[0]!, length: run.length };
+      } else if (
+        run[0] === fence.marker &&
+        run.length >= fence.length &&
+        delimiter[2]!.trim() === ""
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fence === null) lines.push(line);
+  }
+  return lines;
 }
 
 function scanProgressFromMarker(marker: string): ScanProgress | null {
@@ -160,7 +179,6 @@ function preflightStatus(
   if (capacity.length > 1) return null;
   const capacityResult = capacity[0];
   const configuredSlots =
-    capacity.length === 1 &&
     capacityResult !== undefined &&
     isSafeNonNegativeInteger(capacityResult["actual"])
       ? capacityResult["actual"]
@@ -172,9 +190,9 @@ function dispatchStatus(
   item: Readonly<Record<string, unknown>>,
 ): ScanWorkerStatus | null {
   if (typeof item["text"] !== "string") return null;
-  const markers = item["text"]
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith(WORKER_STATUS_PREFIX));
+  const markers = linesOutsideFences(item["text"]).filter((line) =>
+    line.startsWith(WORKER_STATUS_PREFIX),
+  );
   const marker = markers[0];
   if (markers.length !== 1 || marker === undefined) return null;
   const payload = parseJson(() => marker.slice(WORKER_STATUS_PREFIX.length));

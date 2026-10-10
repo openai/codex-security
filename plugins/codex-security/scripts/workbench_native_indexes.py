@@ -14,7 +14,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
 from workbench_constants import DEFAULT_PAGE_SIZE, FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES
-from workbench_validation import bounded_output_text
+from workbench_validation import bounded_output_text, timestamp_key
 
 
 def list_global_findings(
@@ -194,7 +194,7 @@ def _indexed_findings(
             COALESCE(scans.target_id, scans.target_path) AS indexed_target_id,
             COALESCE(targets.current_path, scans.target_path) AS target_path,
             scans.scope,
-            MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
+            scans.updated_at,
             triage.status AS decision_status,
             triage.close_reason,
             triage.updated_at AS decision_updated_at,
@@ -237,7 +237,11 @@ def _indexed_findings(
     for occurrences in grouped.values():
         latest = max(
             occurrences,
-            key=lambda row: (row["scan_sequence"], row["created_at"], row["occurrence_id"]),
+            key=lambda row: (
+                row["scan_sequence"],
+                timestamp_key(row["created_at"]),
+                row["occurrence_id"],
+            ),
         )
         decision = max(
             (row for row in occurrences if row["decision_status"] is not None),
@@ -253,7 +257,8 @@ def _indexed_findings(
                 if decision["decision_scan_sequence"] is not None
                 else (
                     latest["scan_sequence"] > decision["scan_sequence"]
-                    and latest["scan_started_at"] > decision["decision_updated_at"]
+                    and timestamp_key(latest["scan_started_at"])
+                    > timestamp_key(decision["decision_updated_at"])
                 )
             )
         ):
@@ -275,9 +280,14 @@ def _indexed_findings(
                 "occurrence_count": len(occurrences),
                 "occurrence_ids": {row["occurrence_id"] for row in occurrences},
                 "status": status,
-                "updated_at": max(
-                    latest["updated_at"],
-                    decision["decision_updated_at"] if decision is not None else "",
+                "updated_at": (
+                    max(
+                        latest["updated_at"],
+                        decision["decision_updated_at"],
+                        key=lambda value: (timestamp_key(value), value),
+                    )
+                    if decision is not None
+                    else latest["updated_at"]
                 ),
             }
         )
@@ -291,7 +301,7 @@ def _sorted_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key=lambda finding: (
             finding["status"] == "open",
             -scan_history.SEVERITY_ORDER.get(finding["severity"], 5),
-            finding["created_at"],
+            timestamp_key(finding["created_at"]),
         ),
         reverse=True,
     )

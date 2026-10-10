@@ -1,4 +1,4 @@
-import type { ScanOptions } from "../src/index.js";
+import type { JsonObject, ScanOptions } from "../src/index.js";
 import {
   mkdir,
   mkdtemp,
@@ -57,16 +57,30 @@ async function fixture() {
 test("mock scans seal real artifacts and index shared and unique findings without Codex", async () => {
   const { repository, client, environment, python } = await fixture();
   const callbacks: string[] = [];
+  const registrations: Array<
+    Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0]
+  > = [];
   try {
     const first = await client.run(repository, {
       mock: true,
       auth: "api-key",
       maxCostUsd: 0.01,
+      failureSeverity: "informational",
       onAuthentication: () => callbacks.push("authentication"),
+      onScanRegistered: (scan) => {
+        callbacks.push("registered");
+        registrations.push(scan);
+      },
       onScanStarted: () => callbacks.push("started"),
     });
     const second = await client.run(repository, { mock: true });
-    expect(callbacks).toEqual(["started"]);
+    expect(callbacks).toEqual(["registered", "started"]);
+    expect(registrations).toEqual([
+      {
+        scanId: first.manifest.scan.id,
+        scanDir: first.scanDir,
+      },
+    ]);
     expect(first.findings.findings).toHaveLength(12);
     expect(first.coverage.completeness).toBe("complete");
     expect(first.manifest.scan.status).toBe("completed");
@@ -151,6 +165,27 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       ["list-scans", "--repository", repository],
     );
     expect(history["scans"]).toHaveLength(2);
+    const saved = await runWorkbench(
+      { python, pluginRoot: PLUGIN_ROOT, environment },
+      ["get-scan", "--scan-id", first.manifest.scan.id],
+    );
+    const savedScan = saved["scan"] as JsonObject;
+    expect(typeof savedScan["updatedAt"]).toBe("string");
+    const showOutput = capture(true);
+    const showDiagnostics = capture();
+    expect(
+      await main(
+        ["scans", "show", first.manifest.scan.id],
+        showOutput.stream,
+        showDiagnostics.stream,
+        dependencies({ onWorkbench: async () => saved }),
+      ),
+    ).toBe(0);
+    expect(showDiagnostics.text()).toContain(
+      `updated ${savedScan["updatedAt"]}`,
+    );
+    expect(showOutput.text()).toContain("UPDATED");
+    expect(showOutput.text()).toContain(savedScan["updatedAt"] as string);
     const recipe = await runWorkbench(
       { python, pluginRoot: PLUGIN_ROOT, environment },
       ["get-scan-recipe", "--scan-id", first.manifest.scan.id],
@@ -169,6 +204,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       ),
     ).toBe(0);
     expect(onTurn.mock.results.at(-1)?.value).toBe(true);
+    expect(onTurn.mock.lastCall?.[1].failureSeverity).toBe("informational");
   } finally {
     await client.close();
   }
@@ -184,11 +220,13 @@ test("mock scans preserve output protection and archive existing completed resul
       }),
     ).rejects.toThrow();
     const outputDir = join(root, "results");
-    const first = await client.run(repository, {
+    const firstOptions = {
       mock: true,
       outputDir,
       target: ["example.ts"],
-    });
+      workflowId: "synthetic-archived-workflow",
+    };
+    const first = await client.run(repository, firstOptions);
     const original = await readFile(first.manifestPath, "utf8");
     await expect(
       client.run(repository, { mock: true, outputDir }),
@@ -208,6 +246,10 @@ test("mock scans preserve output protection and archive existing completed resul
     expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
     expect(first.coverage.mode).toBe("scoped_path");
     expect(first.coverage.includePaths).toEqual(["example.ts"]);
+    const resumed = await client.run(repository, firstOptions);
+    expect(resumed.manifest).toEqual(first.manifest);
+    expect(resumed.scanDir).toBe(archive);
+    expect(resumed.sarifPath).toBe(join(archive, "exports", "results.sarif"));
   } finally {
     await client.close();
   }

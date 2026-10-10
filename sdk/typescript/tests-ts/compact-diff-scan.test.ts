@@ -1,8 +1,8 @@
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { git } from "./git-fixture.js";
-import { initializeMcpClient } from "./support/mcp-client.js";
+import { startMcpClient } from "../../../plugins/codex-security/mcp-app/tests/support/mcp-client.js";
 import { writeSource } from "./support/shell.js";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -45,23 +45,18 @@ function candidate(path: string): JsonObject {
 }
 
 async function startMcp(root: string) {
-  const child = spawn(
-    process.execPath,
-    [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+  const { request, close } = await startMcpClient(
     {
+      command: process.execPath,
+      args: [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
       env: {
         ...process.env,
         CODEX_SECURITY_SCAN_ROOT: join(root, "scans"),
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
         PYTHONDONTWRITEBYTECODE: "1",
-      },
-      stdio: ["pipe", "pipe", "pipe"],
+      } as Record<string, string>,
     },
-  );
-  const { request, close } = await initializeMcpClient(
-    child,
     "compact-diff-test",
-    true,
   );
 
   return {
@@ -136,7 +131,7 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/handler.py", "value = 2\n");
     writeSource(repository, "src/new handler.py", "created = True\n");
     writeSource(repository, "src/binary.py", Buffer.from([0, 255, 1]));
-    writeSource(repository, "tests/ignored.py", "ignored = True\n");
+    writeSource(repository, "tests/example.py", "test_setup = True\n");
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "selected changes");
     const head = git(repository, "rev-parse", "HEAD");
@@ -162,6 +157,7 @@ describe("compact diff scan", () => {
       "src/guard.py",
       "src/handler.py",
       "src/new handler.py",
+      "tests/example.py",
     ]);
   });
 

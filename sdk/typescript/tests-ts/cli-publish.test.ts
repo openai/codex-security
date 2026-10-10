@@ -1,10 +1,23 @@
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  chmod,
+  cp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
-import type { CheckScanPublicationResult } from "../src/publish.js";
+import {
+  checkScanPublicationInternal,
+  type CheckScanPublicationResult,
+} from "../src/publish.js";
+import { ContractValidationError } from "../src/errors.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
@@ -27,6 +40,83 @@ const { temporaryDirectory: publicationDirectory, cleanup } =
   createApiTestFixtures("codex-security-cli-publication-", false);
 
 afterEach(cleanup);
+
+test.each(["linear", "custom"] as const)(
+  "interactive %s selection preserves scan identity and cancellation",
+  async (destination) => {
+    const [scanDir] = await publicationScanDirectories(1);
+    for (const cancel of [false, true]) {
+      const signals = new FakeSignals();
+      const deps = dependencies({
+        signals,
+        onWorkbench: () => ({
+          scans: [
+            {
+              scanId: "selected-scan",
+              scanDir: scanDir!,
+              targetSummary: "repository",
+              progress: { status: "complete" },
+            },
+          ],
+        }),
+      });
+      deps.publishPrompt = {
+        isInteractive: () => true,
+        select: async (_message, choices, _presentation, signal) => {
+          expect(signal).toBeInstanceOf(AbortSignal);
+          if (cancel) {
+            signals.emit("SIGINT");
+            signal!.throwIfAborted();
+          }
+          return choices[0]!.value;
+        },
+      };
+      let published = false;
+      deps.publishScan = async (_directory, options) => {
+        published = true;
+        expect(options.expectedScanId).toBe("selected-scan");
+        return publicationResult();
+      };
+      deps.publishScanToCustom = async (_directory, options) => {
+        published = true;
+        expect(options.expectedScanId).toBe("selected-scan");
+        return {
+          scanId: "selected-scan",
+          repositoryId: "repository",
+          findingIds: [],
+          findingCount: 0,
+        };
+      };
+      const args =
+        destination === "linear"
+          ? [...DESTINATION_OPTIONS]
+          : ["--to", "custom", "--findings-url", "http://localhost:3000"];
+      const { runCli } = createCliTest(main);
+      expect(await runCli(["publish", "scan", ...args, "--json"], deps)).toBe(
+        cancel ? 130 : 0,
+      );
+      expect(published).toBe(!cancel);
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    }
+  },
+);
+
+test("prints completed publication when an interrupt arrives with its result", async () => {
+  const signals = new FakeSignals();
+  const deps = dependencies({ signals });
+  deps.publishScan = async () => {
+    signals.emit("SIGINT");
+    return publicationResult();
+  };
+  const { runCli, stdout } = createCliTest(main);
+  expect(
+    await runCli(
+      ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+      deps,
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+});
 
 async function publicationScanDirectories(count: number): Promise<string[]> {
   const root = await publicationDirectory("codex-security-publish-picker-");
@@ -242,48 +332,65 @@ describe("publish scan to custom", () => {
 });
 
 describe("publish check", () => {
-  test("resolves the shared destination options without invoking publication", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    const currentDirectory = join(tmpdir(), "codex-security-check-current");
-    const result: CheckScanPublicationResult = {
-      scanId: "scan-example",
-      destination: {
-        type: "linear",
-        teamId: "team-from-flags",
-        projectId: "project-from-flags",
-      },
-      recorded: [],
-      counts: { findings: 2, recorded: 0, pending: 2 },
-      access: {
-        transport: "linear-api",
-        authentication: "verified",
-        team: "verified",
-        project: "verified",
-        assignee: "verified",
-        issueCreation: "not-tested",
-      },
-    };
-    const deps = dependencies({
-      currentDirectory,
-      environment: {
-        CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
-        CODEX_SECURITY_LINEAR_TEAM: "environment-team",
-      },
+  test("escapes contract property controls at the CLI boundary without changing the SDK error", async () => {
+    const scanDir = join(await publicationDirectory(), "scan");
+    await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+      recursive: true,
     });
-    deps.publishScan = async () => fail("Check must not publish.");
+    if (process.platform !== "win32") await chmod(scanDir, 0o700);
+    const file = join(scanDir, "findings.json");
+    const finding = JSON.parse(await readFile(file, "utf8"));
+    const key =
+      "source\u009b2J\u009dtitle\u009c\u0085\u2028\u2029 café token=SYNTHETIC_VALUE";
+    finding.extensions = { [key]: Number.MAX_SAFE_INTEGER + 1 };
+    await writeFile(file, JSON.stringify(finding));
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    let sdkError: unknown;
     deps.checkScanPublication = async (directory, options) => {
-      expect(directory).toBe(resolve(currentDirectory, "completed-scan"));
-      expect(options).toEqual({
-        destination: "linear",
-        teamId: "team-from-flags",
-        projectId: "project-from-flags",
-        linearApiKey: "explicit-key",
-        assigneeId: "teammate@example.com",
-        signal: expect.any(AbortSignal),
-      });
-      return result;
+      try {
+        return await checkScanPublicationInternal(directory, options, {
+          environment: { CODEX_SECURITY_LINEAR_API_KEY: "" },
+          inspectPublicationStore: async () =>
+            fail("Invalid artifacts must not reach history."),
+          linearClient: () => fail("Invalid artifacts must not reach Linear."),
+        });
+      } catch (error) {
+        sdkError = error;
+        throw error;
+      }
     };
+    deps.publishScan = async () => fail("Check must not publish.");
+    expect(
+      await runCli(
+        ["publish", "check", scanDir, ...DESTINATION_OPTIONS, "--json"],
+        deps,
+      ),
+    ).toBe(2);
+    expect(sdkError).toBeInstanceOf(ContractValidationError);
+    expect((sdkError as Error).message).toContain(key);
+    expect((sdkError as Error).message).toContain(
+      "unsafe integer-valued JSON numbers",
+    );
+    expect(stderr.text()).not.toMatch(
+      /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/u,
+    );
+    expect(stderr.text()).toContain("source 2J title");
+    expect(stderr.text()).toContain("café token=SYNTHETIC_VALUE");
+    expect(stderr.text()).toContain("unsafe integer-valued JSON numbers");
+    expect(stdout.text().trim()).toBe("");
+  });
+
+  test("preserves multiline publication-check diagnostics and their original cause", async () => {
+    const cause = new Error("Synthetic original cause.");
+    const message =
+      "First café token=SYNTHETIC_VALUE\u001b[2J\r\nSecond 日本語\u009b2J\tend";
+    const failure = new Error(message, { cause });
+    const deps = dependencies();
+    deps.checkScanPublication = async () => {
+      throw failure;
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
     expect(
       await runCli(
         [
@@ -291,20 +398,91 @@ describe("publish check", () => {
           "check",
           "completed-scan",
           ...DESTINATION_OPTIONS,
-          "--linear-api-key",
-          "explicit-key",
-          "--linear-assignee",
-          "teammate@example.com",
           "--json",
         ],
         deps,
       ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(result);
-    expect(stderr.text()).toBe("");
-    expect(stdout.text()).not.toContain("explicit-key");
-    expect(stdout.text()).not.toContain("teammate@example.com");
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "First café token=SYNTHETIC_VALUE [2J \nSecond 日本語 2J end\n",
+    );
+    expect(stderr.text()).not.toMatch(/[\u001b\u009b\r\t]/u);
+    expect(failure.message).toBe(message);
+    expect(failure.cause).toBe(cause);
+    expect(stdout.text().trim()).toBe("");
   });
+
+  test.each(["completed-scan", "~/completed-scan"])(
+    "resolves %s and shared options without invoking publication",
+    async (scanDir) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const currentDirectory = join(tmpdir(), "codex-security-check-current");
+      const result: CheckScanPublicationResult = {
+        scanId: "scan-example",
+        destination: {
+          type: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+        },
+        recorded: [],
+        counts: { findings: 2, recorded: 0, pending: 2 },
+        access: {
+          transport: "linear-api",
+          authentication: "verified",
+          team: "verified",
+          project: "verified",
+          assignee: "verified",
+          issueCreation: "not-tested",
+        },
+      };
+      const deps = dependencies({
+        currentDirectory,
+        environment: {
+          CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
+          CODEX_SECURITY_LINEAR_TEAM: "environment-team",
+        },
+      });
+      deps.publishScan = async () => fail("Check must not publish.");
+      deps.checkScanPublication = async (directory, options) => {
+        expect(directory).toBe(
+          resolve(
+            scanDir.startsWith("~/") ? homedir() : currentDirectory,
+            "completed-scan",
+          ),
+        );
+        expect(options).toEqual({
+          destination: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+          linearApiKey: "explicit-key",
+          assigneeId: "teammate@example.com",
+          signal: expect.any(AbortSignal),
+        });
+        return result;
+      };
+      expect(
+        await runCli(
+          [
+            "publish",
+            "check",
+            scanDir,
+            ...DESTINATION_OPTIONS,
+            "--linear-api-key",
+            "explicit-key",
+            "--linear-assignee",
+            "teammate@example.com",
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(result);
+      expect(stderr.text()).toBe("");
+      expect(stdout.text()).not.toContain("explicit-key");
+      expect(stdout.text()).not.toContain("teammate@example.com");
+    },
+  );
 
   test("reports a failed check without publishing or returning a successful result", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -2001,8 +2179,8 @@ describe("publish scan", () => {
       await runCli(["publish", "scan", ...DESTINATION_OPTIONS, "--json"], deps),
     ).toBe(0);
     expect(offered.map(({ value }) => value)).toEqual([
-      firstDirectory,
-      "selected-completed-scan",
+      "first-scan",
+      "selected-scan",
     ]);
     expect(offered.map(({ label }) => label)).toEqual([
       expect.stringContaining("first-scan"),
@@ -2372,4 +2550,70 @@ const publishWithProgress: ReturnType<
 
 async function successfulPublication<Args extends unknown[]>(..._args: Args) {
   return publicationResult();
+}
+
+for (const [selection, expectedCommand] of [
+  [["--scan", "saved-scan"], "get-scan"],
+  [["--scan", "latest"], "list-scans"],
+  [["--workflow-id", "saved-workflow"], "finding-workflow"],
+  [[], "list-scans"],
+] as const) {
+  for (const [signalName, expectedCode] of [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const) {
+    test(`publication ${selection.join(" ") || "picker"} cancels lookup on ${signalName}`, async () => {
+      const signals = new FakeSignals();
+      const started = Promise.withResolvers<AbortSignal | undefined>();
+      const cleanup = Promise.withResolvers<void>();
+      let published = false;
+      let command: string | undefined;
+      const deps = dependencies({
+        signals,
+        onWorkbench: async (args, _input, signal) => {
+          command = args[0];
+          started.resolve(signal);
+          await cleanup.promise;
+          signal?.throwIfAborted();
+          throw new Error("Lookup finished without cancellation.");
+        },
+      });
+      deps.publishPrompt = {
+        isInteractive: () => true,
+        select: async () => {
+          throw new Error("Unexpected picker.");
+        },
+      };
+      deps.publishScan = async () => {
+        published = true;
+        throw new Error("Unexpected publication.");
+      };
+      deps.publishScanToCustom = async () => {
+        published = true;
+        throw new Error("Unexpected publication.");
+      };
+      const { runCli, stdout } = createCliTest(main);
+      const destination =
+        selection[0] === "--workflow-id"
+          ? ["--to", "custom", "--findings-url", "https://example.invalid"]
+          : ["--to", "linear", "--linear-team", "synthetic-team"];
+      const running = runCli(
+        ["publish", "scan", ...selection, ...destination, "--json"],
+        deps,
+      );
+      const signal = await started.promise;
+      signals.emit(signalName);
+      const aborted = signal?.aborted;
+      cleanup.resolve();
+      const exitCode = await running;
+      expect(command).toBe(expectedCommand);
+      expect(aborted).toBe(true);
+      expect(signal?.reason).toBe(signalName);
+      expect(exitCode).toBe(expectedCode);
+      expect(published).toBe(false);
+      expect(stdout.text()).toBe("");
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    });
+  }
 }

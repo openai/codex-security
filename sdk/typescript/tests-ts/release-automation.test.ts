@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,9 +9,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "bun:test";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { publishGitHubRelease } from "../scripts/publish-github-release.mjs";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { bashCommand, runCommand } from "./support/shell.js";
 
 import {
@@ -44,6 +47,9 @@ const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
 const releaseWorkflowTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
+const directories = createTemporaryDirectoriesSync();
+afterEach(directories.cleanup);
+
 const bash = bashCommand();
 
 function runShell(
@@ -55,6 +61,173 @@ function runShell(
     ...options,
     env: { ...process.env, ...env },
   });
+}
+
+function runPublisher({
+  existingLookup = "existing",
+  existingNotes = "Generated release notes",
+  generatedNotes = "Generated release notes\n",
+
+  latestTag = "npm-v0.1.3",
+  makeLatest = false,
+  releaseConfiguration = true,
+  releaseSummary = "__missing__",
+  tagType = "commit",
+  tagObject = releaseCommit,
+  peeledCommit = "",
+  downloadedArchive = archive,
+} = {}) {
+  const workspace = mkdtempSync(join(tmpdir(), "github release "));
+  const archivePath = join(workspace, "verified archive.tgz");
+  writeFileSync(archivePath, archive);
+  const calls: string[][] = [];
+  let stdout = "",
+    stderr = "",
+    status = 0;
+  const logs = spyOn(console, "log").mockImplementation((text) => {
+    stdout += `${text}\n`;
+  });
+  const errors = spyOn(console, "error").mockImplementation((text) => {
+    stderr += `${text}\n`;
+  });
+  const response = (code: number, body: unknown) => ({
+    status: code === 200 ? 0 : 1,
+    stdout: `HTTP/2.0 ${code} Response\r\ncontent-type: application/json\r\n\r\n${JSON.stringify(body)}\n`,
+  });
+  const lookup = (kind: string) => {
+    if (kind === "network" || kind === "__network__")
+      return { status: 1, stdout: "" };
+    if (kind === "malformed" || kind === "__malformed_missing__")
+      return { status: 1, stdout: "HTTP/2.0 404 Not Found\n\nnot-json" };
+    return response(
+      kind === "unauthorized"
+        ? 401
+        : kind === "unavailable" || kind === "__error__"
+          ? 500
+          : 404,
+      { message: "Unavailable" },
+    );
+  };
+  try {
+    publishGitHubRelease(
+      {
+        GITHUB_REPOSITORY: "test/codex-security",
+        RELEASE_TAG: "npm-v0.1.2",
+        RELEASE_VERSION: "0.1.2",
+        RELEASE_SHA: releaseCommit,
+        RELEASE_ARCHIVE: archivePath,
+        PREVIOUS_TAG: "npm-v0.1.1",
+        MAKE_LATEST: String(makeLatest),
+      },
+      workspace,
+      (program: string, args: string[]) => {
+        calls.push([program, ...args]);
+        const endpoint = args.find((argument) => argument.startsWith("repos/"));
+        if (program === "gh" && args[0] === "api") {
+          switch (endpoint) {
+            case "repos/test/codex-security/releases/tags/npm-v0.1.2":
+              return existingLookup !== "existing"
+                ? lookup(existingLookup)
+                : response(200, {
+                    tag_name: "npm-v0.1.2",
+                    draft: false,
+                    prerelease: false,
+                    body: existingNotes,
+                    assets: [{ name: "verified archive.tgz", digest }],
+                  });
+            case "repos/test/codex-security/releases/latest":
+              return latestTag.startsWith("__")
+                ? lookup(latestTag)
+                : response(200, { tag_name: latestTag });
+            case "repos/test/codex-security/git/ref/tags/npm-v0.1.2":
+              return {
+                status: tagType === "missing" ? 1 : 0,
+                stdout: `${tagType}\t${tagObject}\n`,
+              };
+            case `repos/test/codex-security/git/tags/${tagObject}`:
+              return { status: 0, stdout: `${peeledCommit}\n` };
+            case "repos/test/codex-security/releases/generate-notes":
+              expect(args).toContain("previous_tag_name=npm-v0.1.1");
+              expect(
+                args.includes("configuration_file_path=.github/release.yml"),
+              ).toBe(releaseConfiguration);
+              return {
+                status: 0,
+                stdout: JSON.stringify({
+                  body: generatedNotes,
+                }),
+              };
+          }
+        }
+        if (program === "git" && args[0] === "cat-file")
+          return { status: releaseConfiguration ? 0 : 1, stdout: "" };
+        if (program === "git" && args[0] === "show")
+          return {
+            status: releaseSummary === "__missing__" ? 1 : 0,
+            stdout: `${releaseSummary}\n`,
+          };
+        if (program === "gh" && args[0] === "release") {
+          const value = (flag: string) => args[args.indexOf(flag) + 1]!;
+          if (args[1] === "download")
+            writeFileSync(
+              join(value("--dir"), value("--pattern")),
+              downloadedArchive,
+            );
+          else if (args[1] === "edit" || args[1] === "create") {
+            expect(args).toContain(`--latest=${makeLatest}`);
+            expect(args.includes("--verify-tag")).toBe(args[1] === "create");
+            if (args[1] === "create")
+              console.log("created verified GitHub release");
+            else {
+              console.log(`updated latest: ${makeLatest}`);
+              if (args.includes("--notes-file"))
+                console.log(
+                  `updated release notes: ${readFileSync(value("--notes-file"), "utf8")}`,
+                );
+            }
+          } else throw new Error(`Unexpected release command: ${args}`);
+          return { status: 0, stdout: "" };
+        }
+        throw new Error(`Unexpected publication command: ${program} ${args}`);
+      },
+    );
+  } catch (error) {
+    if (error instanceof Error) {
+      status = 1;
+      stderr += error.message;
+    } else status = (error as { status: number }).status;
+  } finally {
+    logs.mockRestore();
+    errors.mockRestore();
+    rmSync(workspace, { recursive: true, force: true });
+  }
+  return { status, stdout, stderr, calls };
+}
+
+function releaseLabelGhMock(handlers: readonly string[], shiftEndpoint = true) {
+  return [
+    "gh() {",
+    '  if [[ "$1" != "api" ]]; then return 64; fi',
+    "  shift",
+    "  local method=GET",
+    '  if [[ "${1:-}" == "--method" ]]; then',
+    '    method="$2"',
+    "    shift 2",
+    "  fi",
+    '  local endpoint="$1"',
+    ...(shiftEndpoint ? ["  shift"] : []),
+    '  case "$method $endpoint" in',
+    ...handlers,
+    '    "GET repos/test/codex-security/issues/17")',
+    "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+    "      ;;",
+    '    "POST repos/test/codex-security/issues/17/labels")',
+    "      printf '%s\\n' \"$@\"",
+    "      ;;",
+    "    *) return 65 ;;",
+    "  esac",
+    "}",
+  ].join("\n");
 }
 
 const jqMock = [
@@ -319,57 +492,83 @@ function verifySignatureFixture(options: SignatureAuditFixture = {}) {
 }
 
 function workflowStepShell(workflow: string, stepName: string): string {
-  const stepMarker = `      - name: ${stepName}\n`;
-  const stepStart = workflow.indexOf(stepMarker);
-  if (stepStart === -1) {
+  const parsed = Bun.YAML.parse(workflow) as {
+    jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
+  };
+  const step = Object.values(parsed.jobs)
+    .flatMap((job) => job.steps ?? [])
+    .find((step) => step.name === stepName);
+  if (step === undefined) {
     throw new Error(`Workflow step is missing: ${stepName}`);
   }
-
-  const nextStep = workflow.indexOf("\n      - name: ", stepStart + 1);
-  const following = workflow.slice(stepStart + 1);
-  const nextJobOffset = following.search(/\n  [a-z0-9_-]+:\n/u);
-  const nextJob = nextJobOffset === -1 ? -1 : stepStart + 1 + nextJobOffset;
-  const stepEnd = [nextStep, nextJob]
-    .filter((index) => index !== -1)
-    .reduce((earlier, index) => Math.min(earlier, index), workflow.length);
-  const step = workflow.slice(stepStart, stepEnd);
-  const runMarker = "        run: |\n";
-  const runStart = step.indexOf(runMarker);
-  if (runStart === -1) {
+  if (typeof step.run !== "string") {
     throw new Error(`Workflow step has no shell script: ${stepName}`);
   }
-
-  return step
-    .slice(runStart + runMarker.length)
-    .split("\n")
-    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
-    .join("\n");
+  return step.run;
 }
 
-function evaluateWorkflowCondition(
+function runReleaseLabels(
+  title: string,
+  routes: readonly string[],
+  setup: readonly string[] = [],
+  shiftEndpoint = true,
+) {
+  const mock = [...setup, releaseLabelGhMock(routes, shiftEndpoint)].join("\n");
+  const script = workflowStepShell(
+    releaseLabelsWorkflow,
+    "Categorize pull request without checking out its code",
+  );
+  return runShell(`${mock}\n${script}`, {
+    GITHUB_REPOSITORY: "test/codex-security",
+    MOCK_PR_TITLE: title,
+    PR_NUMBER: "17",
+  });
+}
+
+async function evaluateWorkflowCondition(
   condition: string,
   values: Record<string, string>,
-): boolean {
-  let expression = condition
-    .replace(/^\$\{\{\s*/u, "")
-    .replace(/\s*\}\}$/u, "");
-  for (const [identifier, value] of Object.entries(values).sort(
-    ([left], [right]) => right.length - left.length,
-  )) {
-    if (!/^[a-z0-9_/-]+$/u.test(value)) {
-      throw new Error(`Unsafe workflow test value: ${value}`);
-    }
-    expression = expression.replaceAll(identifier, `'${value}'`);
-  }
-  if (!/^[\s()'/a-z0-9_!=&|-]+$/u.test(expression)) {
-    throw new Error(`Unsupported workflow condition: ${condition}`);
-  }
+): Promise<boolean> {
+  return (await evaluateWorkflowConditions([{ condition, values }]))[0]!;
+}
 
-  const result = spawnSync(bash, ["-c", `[[ ${expression} ]]`]);
-  if (result.status !== 0 && result.status !== 1) {
-    throw new Error(`Could not evaluate workflow condition: ${condition}`);
+async function evaluateWorkflowConditions(
+  conditions: Array<{ condition: string; values: Record<string, string> }>,
+): Promise<boolean[]> {
+  const expressions = conditions.map(({ condition, values }) => {
+    let expression = condition
+      .replace(/^\$\{\{\s*/u, "")
+      .replace(/\s*\}\}$/u, "");
+    for (const [identifier, value] of Object.entries(values).sort(
+      ([left], [right]) => right.length - left.length,
+    )) {
+      if (!/^[a-z0-9_/-]+$/u.test(value)) {
+        throw new Error(`Unsafe workflow test value: ${value}`);
+      }
+      expression = expression.replaceAll(identifier, `'${value}'`);
+    }
+    if (!/^[\s()'/a-z0-9_!=&|-]+$/u.test(expression)) {
+      throw new Error(`Unsupported workflow condition: ${condition}`);
+    }
+    return `[[ ${expression} ]]
+result=$?
+if [[ $result != 0 && $result != 1 ]]; then exit "$result"; fi
+printf '%s\n' "$result"`;
+  });
+  const result = await runCommand(bash, [], {
+    input: expressions.join("\n"),
+    timeout: 30_000,
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `Could not evaluate workflow conditions (status ${result.status}, signal ${result.signal}):\n${result.stderr}`,
+      { cause: result.error },
+    );
   }
-  return result.status === 0;
+  return result.stdout
+    .trimEnd()
+    .split("\n")
+    .map((status) => status === "0");
 }
 
 describe("reviewed release note helpers", () => {
@@ -402,32 +601,28 @@ describe("reviewed release note helpers", () => {
   });
 
   test("rejects NUL bytes before shell composition", async () => {
-    const workspace = mkdtempSync(join(tmpdir(), "release-notes-nul-"));
-    try {
-      const taggedNotes = join(workspace, "tagged-notes.md");
-      const generatedNotes = join(workspace, "generated-notes.md");
-      writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
-      writeFileSync(generatedNotes, "Generated release notes\n");
+    const workspace = directories.create("release-notes-nul-");
+    const taggedNotes = join(workspace, "tagged-notes.md");
+    const generatedNotes = join(workspace, "generated-notes.md");
+    writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
+    writeFileSync(generatedNotes, "Generated release notes\n");
 
-      const result = await runShell(
-        [
-          "set -euo pipefail",
-          'published_notes="$(node "$AUTOMATION_SCRIPT" compose-release-notes 1.2.3 "$GENERATED_NOTES" --tagged-notes-file "$TAGGED_NOTES")"',
-          'printf "%s" "$published_notes"',
-        ].join("\n"),
-        {
-          AUTOMATION_SCRIPT: fileURLToPath(automationScript),
-          GENERATED_NOTES: generatedNotes,
-          TAGGED_NOTES: taggedNotes,
-        },
-      );
+    const result = await runShell(
+      [
+        "set -euo pipefail",
+        'published_notes="$(node "$AUTOMATION_SCRIPT" compose-release-notes 1.2.3 "$GENERATED_NOTES" --tagged-notes-file "$TAGGED_NOTES")"',
+        'printf "%s" "$published_notes"',
+      ].join("\n"),
+      {
+        AUTOMATION_SCRIPT: fileURLToPath(automationScript),
+        GENERATED_NOTES: generatedNotes,
+        TAGGED_NOTES: taggedNotes,
+      },
+    );
 
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain("include a reviewed summary");
-      expect(result.stderr).not.toContain("ignored null byte");
-    } finally {
-      rmSync(workspace, { recursive: true, force: true });
-    }
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("include a reviewed summary");
+    expect(result.stderr).not.toContain("ignored null byte");
   });
 
   test.each([
@@ -1613,12 +1808,12 @@ describe("GitHub release workflow safeguards", () => {
       headBranch: "none",
       expected: true,
     },
-  ])("gates release cutting for $name", (scenario) => {
+  ])("gates release cutting for $name", async (scenario) => {
     const workflow = Bun.YAML.parse(releaseCutWorkflow) as {
       jobs: { cut: { if: string } };
     };
     expect(
-      evaluateWorkflowCondition(workflow.jobs.cut.if, {
+      await evaluateWorkflowCondition(workflow.jobs.cut.if, {
         "github.event.workflow_run.conclusion": scenario.conclusion,
         "github.event.workflow_run.head_branch": scenario.headBranch,
         "github.event.workflow_run.event": scenario.sourceEvent,
@@ -1776,45 +1971,39 @@ describe("GitHub release workflow safeguards", () => {
         "}",
         "npm() { printf '%s\\n' \"$MOCK_PUBLISHED_VERSIONS\"; }",
       ].join("\n");
-      const workspace = mkdtempSync(
-        join(tmpdir(), "codex-security-release-cut-"),
+      const workspace = directories.create("codex-security-release-cut-");
+
+      const outputPath = join(workspace, "outputs");
+      const result = await runShell(
+        `${mocks}\n${script}`,
+        {
+          GITHUB_EVENT_NAME: event,
+          GITHUB_OUTPUT: outputPath,
+          GITHUB_REF: "refs/heads/main",
+          GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          MOCK_PREVIOUS_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          MOCK_PREVIOUS_VERSION: previousVersion,
+          MOCK_PUBLISHED_VERSIONS: JSON.stringify(publishedVersions),
+          MOCK_RELEASE_VERSION: currentVersion,
+          MOCK_TAGGED_SHA: taggedSha,
+          MOCK_TAGGED_VERSION: taggedVersion,
+          MOCK_TAGGED_ANCESTOR: String(taggedAncestor),
+          RELEASE_SHA: releaseCommit,
+        },
+        { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
-      try {
-        const outputPath = join(workspace, "outputs");
-        const result = await runShell(
-          `${mocks}\n${script}`,
-          {
-            GITHUB_EVENT_NAME: event,
-            GITHUB_OUTPUT: outputPath,
-            GITHUB_REF: "refs/heads/main",
-            GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            MOCK_PREVIOUS_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            MOCK_PREVIOUS_VERSION: previousVersion,
-            MOCK_PUBLISHED_VERSIONS: JSON.stringify(publishedVersions),
-            MOCK_RELEASE_VERSION: currentVersion,
-            MOCK_TAGGED_SHA: taggedSha,
-            MOCK_TAGGED_VERSION: taggedVersion,
-            MOCK_TAGGED_ANCESTOR: String(taggedAncestor),
-            RELEASE_SHA: releaseCommit,
-          },
-          { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
-        );
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
 
-        expect(result.stderr).toBe("");
-        expect(result.status).toBe(0);
-
-        const outputs = readFileSync(outputPath, "utf8");
-        expect(outputs).toContain(`changed=${changed}`);
-        if (changed) {
-          expect(outputs).toContain(`version=${currentVersion}`);
-          expect(outputs).toContain(`tag=npm-v${currentVersion}`);
-        } else {
-          expect(outputs).not.toContain("version=");
-          expect(outputs).not.toContain("tag=");
-        }
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
+      const outputs = readFileSync(outputPath, "utf8");
+      expect(outputs).toContain(`changed=${changed}`);
+      if (changed) {
+        expect(outputs).toContain(`version=${currentVersion}`);
+        expect(outputs).toContain(`tag=npm-v${currentVersion}`);
+      } else {
+        expect(outputs).not.toContain("version=");
+        expect(outputs).not.toContain("tag=");
       }
     },
   );
@@ -2384,47 +2573,43 @@ describe("GitHub release workflow safeguards", () => {
         githubReleaseWorkflow,
         "Wait for the published npm package",
       );
-      const workspace = mkdtempSync(
-        join(tmpdir(), "codex-security-release-visibility-"),
+      const workspace = directories.create(
+        "codex-security-release-visibility-",
       );
       const callLog = join(workspace, "calls.log");
       writeFileSync(callLog, "");
-      try {
-        const mocks = [
-          "npm() {",
-          '  if [[ "$1" != "view" || "$2" != "@openai/codex-security@0.1.2" ]]; then return 64; fi',
-          '  printf "query\\n" >> "$MOCK_CALL_LOG"',
-          "  if (( attempt <= MOCK_MISSING_ATTEMPTS )); then",
-          '    printf \'{"error":{"code":"%s","summary":"synthetic registry diagnostic"}}\\n\' "$MOCK_ERROR_CODE"',
-          "    return 1",
-          "  fi",
-          "  printf '\"0.1.2\"\\n'",
-          "}",
-          "sleep() {",
-          '  if [[ "$1" != "30" ]]; then return 65; fi',
-          '  printf "wait\\n" >> "$MOCK_CALL_LOG"',
-          "}",
-        ].join("\n");
-        const result = await runShell(
-          `${mocks}\n${script}`,
-          {
-            MOCK_CALL_LOG: callLog,
-            MOCK_MISSING_ATTEMPTS: String(missingAttempts),
-            MOCK_ERROR_CODE: errorCode,
-            RELEASE_VERSION: "0.1.2",
-          },
-          { timeout: releaseWorkflowTimeout },
-        );
-        const events = readFileSync(callLog, "utf8").split("\n");
-        expect(result.status).toBe(status);
-        expect(events.filter((event) => event === "query")).toHaveLength(calls);
-        expect(events.filter((event) => event === "wait")).toHaveLength(waits);
-        if (missingAttempts > 0) {
-          expect(result.stderr).toContain("synthetic registry diagnostic");
-          expect(result.stderr).toContain(errorCode);
-        }
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
+      const mocks = [
+        "npm() {",
+        '  if [[ "$1" != "view" || "$2" != "@openai/codex-security@0.1.2" ]]; then return 64; fi',
+        '  printf "query\\n" >> "$MOCK_CALL_LOG"',
+        "  if (( attempt <= MOCK_MISSING_ATTEMPTS )); then",
+        '    printf \'{"error":{"code":"%s","summary":"synthetic registry diagnostic"}}\\n\' "$MOCK_ERROR_CODE"',
+        "    return 1",
+        "  fi",
+        "  printf '\"0.1.2\"\\n'",
+        "}",
+        "sleep() {",
+        '  if [[ "$1" != "30" ]]; then return 65; fi',
+        '  printf "wait\\n" >> "$MOCK_CALL_LOG"',
+        "}",
+      ].join("\n");
+      const result = await runShell(
+        `${mocks}\n${script}`,
+        {
+          MOCK_CALL_LOG: callLog,
+          MOCK_MISSING_ATTEMPTS: String(missingAttempts),
+          MOCK_ERROR_CODE: errorCode,
+          RELEASE_VERSION: "0.1.2",
+        },
+        { timeout: releaseWorkflowTimeout },
+      );
+      const events = readFileSync(callLog, "utf8").split("\n");
+      expect(result.status).toBe(status);
+      expect(events.filter((event) => event === "query")).toHaveLength(calls);
+      expect(events.filter((event) => event === "wait")).toHaveLength(waits);
+      if (missingAttempts > 0) {
+        expect(result.stderr).toContain("synthetic registry diagnostic");
+        expect(result.stderr).toContain(errorCode);
       }
     },
   );
@@ -2487,7 +2672,9 @@ describe("GitHub release workflow safeguards", () => {
         githubReleaseWorkflow,
         "Resolve the successful protected release",
       );
-      const root = mkdtempSync(join(tmpdir(), "codex-security-release-wait-"));
+      const root = directories.create(
+        "codex-security-release-wait-$(echo literal)-'-",
+      );
       const state = join(root, "release-state");
       const sleeps = join(root, "release-sleeps");
       const mocks = [
@@ -2509,23 +2696,20 @@ describe("GitHub release workflow safeguards", () => {
         "    *) return 65 ;;",
         "  esac",
         "}",
-        `sleep() { printf '%s\\n' "$1" >> "${sleeps}"; }`,
+        'sleep() { printf "%s\\n" "$1" >> "$MOCK_SLEEP_LOG"; }',
       ].join("\n");
 
-      try {
-        const result = await runShell(`${mocks}\n${script}`, {
-          GITHUB_OUTPUT: "/dev/null",
-          GITHUB_REPOSITORY: releaseRepository,
-          INPUT_RUN_ID: releaseRun,
-          INPUT_TAG: "npm-v0.1.2",
-          MOCK_RUN_STATE: state,
-        });
+      const result = await runShell(`${mocks}\n${script}`, {
+        GITHUB_OUTPUT: "/dev/null",
+        GITHUB_REPOSITORY: releaseRepository,
+        INPUT_RUN_ID: releaseRun,
+        INPUT_TAG: "npm-v0.1.2",
+        MOCK_RUN_STATE: state,
+        MOCK_SLEEP_LOG: sleeps,
+      });
 
-        expect(result.status).toBe(0);
-        expect(readFileSync(sleeps, "utf8")).toBe("2\n");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
+      expect(result.status).toBe(0);
+      expect(readFileSync(sleeps, "utf8")).toBe("2\n");
     },
   );
 
@@ -2789,75 +2973,19 @@ describe("GitHub release workflow safeguards", () => {
       peeledCommit = "",
       status,
     }) => {
-      const script = workflowStepShell(
-        githubReleaseWorkflow,
-        "Publish GitHub Release and generated notes",
-      );
-      const mocks = [
-        "gh() {",
-        '  if [[ "$1" == "api" ]]; then',
-        "    shift",
-        '    if [[ "${1:-}" == "--include" ]]; then shift; fi',
-        '    if [[ "${1:-}" == "--method" ]]; then shift 2; fi',
-        '    case "$1" in',
-        '      "repos/test/codex-security/releases/tags/npm-v0.1.2")',
-        '        case "$MOCK_EXISTING_LOOKUP" in',
-        "          missing)",
-        "            printf '%s\\n' 'HTTP/2.0 404 Not Found' 'content-type: application/json' '' '{\"message\":\"Not Found\"}'",
-        "            ;;",
-        "          unavailable)",
-        "            printf '%s\\n' 'HTTP/2.0 500 Internal Server Error' 'content-type: application/json' '' '{\"message\":\"Unavailable\"}'",
-        "            ;;",
-        "          unauthorized)",
-        "            printf '%s\\n' 'HTTP/2.0 401 Unauthorized' 'content-type: application/json' '' '{\"message\":\"Bad credentials\"}'",
-        "            ;;",
-        "          network) ;;",
-        "          malformed)",
-        "            printf '%s\\n' 'HTTP/2.0 404 Not Found' 'content-type: application/json' '' 'not-json'",
-        "            ;;",
-        "        esac",
-        "        return 1",
-        "        ;;",
-        '      "repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
-        '        if [[ "$MOCK_TAG_TYPE" == "missing" ]]; then return 1; fi',
-        '        printf \'%s\\t%s\\n\' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
-        "        ;;",
-        '      "repos/test/codex-security/git/tags/"*)',
-        "        printf '%s\\n' \"$MOCK_PEELED_COMMIT\"",
-        "        ;;",
-        '      "repos/test/codex-security/releases/generate-notes")',
-        "        printf '%s\\n' '{\"body\":\"Generated release notes\"}'",
-        "        ;;",
-        "      *) return 65 ;;",
-        "    esac",
-        '  elif [[ "$1" == "release" && "$2" == "create" ]]; then',
-        "    printf '%s\\n' 'created verified GitHub release'",
-        "  else",
-        "    return 64",
-        "  fi",
-        "}",
-      ].join("\n");
-      const result = await runCommand(bash, [], {
-        input: `${mocks}\n${script}`,
-        cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        env: {
-          ...process.env,
-          GITHUB_REPOSITORY: "test/codex-security",
-          MAKE_LATEST: "false",
-          MOCK_EXISTING_LOOKUP: existingLookup,
-          MOCK_PEELED_COMMIT: peeledCommit,
-          MOCK_TAG_OBJECT: tagObject,
-          MOCK_TAG_TYPE: tagType,
-          PREVIOUS_TAG: "npm-v0.1.1",
-          RELEASE_ARCHIVE: "/tmp/openai-codex-security-0.1.2.tgz",
-          RELEASE_SHA: releaseCommit,
-          RELEASE_TAG: "npm-v0.1.2",
-          RELEASE_VERSION: "0.1.2",
-        },
-        timeout: 10_000,
+      const result = runPublisher({
+        existingLookup,
+        tagType,
+        tagObject,
+        peeledCommit,
       });
 
       expect(result.status).toBe(status);
+      expect(
+        result.calls.some(
+          (call) => call[1] === "release" && call[2] === "create",
+        ),
+      ).toBe(status === 0);
       if (status === 0) {
         expect(result.stdout).toContain("created verified GitHub release");
       } else {
@@ -2871,14 +2999,75 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
+  test.each([0, 17, 143])(
+    "runs publication and cleans up after exit %p",
+    async (exit) => {
+      const workspace = mkdtempSync(join(tmpdir(), "publish boundary "));
+      const preload = join(workspace, "commands.mjs");
+      const receipt = join(workspace, "notes-path");
+      writeFileSync(
+        preload,
+        `
+      import childProcess from "node:child_process";
+      import { syncBuiltinESMExports } from "node:module";
+      import { readFileSync, writeFileSync } from "node:fs";
+      childProcess.spawnSync = (program, args, options) => {
+        if (program === "git") return { status: 1, stdout: "" };
+        if (program !== "gh") throw new Error("Unexpected command: " + program);
+        if (args.includes("repos/test/codex-security/releases/tags/npm-v0.1.2")) {
+          return { status: 1, stdout: 'HTTP/2.0 404 Not Found\\n\\n{"message":"Not Found"}' };
+        }
+        if (args.includes("repos/test/codex-security/releases/generate-notes")) {
+          return { status: 0, stdout: '{"body":"Generated notes"}' };
+        }
+        if (args.includes("repos/test/codex-security/git/ref/tags/npm-v0.1.2")) {
+          return { status: 0, stdout: "commit\\t${releaseCommit}\\n" };
+        }
+        if (args[0] !== "release" || args[1] !== "create" || options.stdio[1] !== "inherit") {
+          throw new Error("Unexpected command: " + args);
+        }
+        const notes = args[args.indexOf("--notes-file") + 1];
+        if (readFileSync(notes, "utf8") !== "Generated notes") throw new Error("Wrong notes");
+        writeFileSync(${JSON.stringify(receipt)}, notes);
+        process.stdout.write("release output\\n");
+        return { status: ${exit === 143 ? "null" : exit}, signal: ${JSON.stringify(exit === 143 ? "SIGTERM" : null)} };
+      };
+      syncBuiltinESMExports();
+    `,
+      );
+      try {
+        const result = await runShell(
+          workflowStepShell(
+            githubReleaseWorkflow,
+            "Publish GitHub Release and generated notes",
+          ),
+          {
+            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            GH_TOKEN: "synthetic-unused-token",
+            GITHUB_REPOSITORY: "test/codex-security",
+            RELEASE_TAG: "npm-v0.1.2",
+            RELEASE_VERSION: "0.1.2",
+            RELEASE_SHA: releaseCommit,
+            RELEASE_ARCHIVE: join(workspace, "verified archive.tgz"),
+            PREVIOUS_TAG: "",
+            MAKE_LATEST: "false",
+          },
+          { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
+        );
+        expect(result.status).toBe(exit);
+        expect(result.stdout).toContain("release output");
+        expect(result.stderr).toBe("");
+        expect(existsSync(readFileSync(receipt, "utf8"))).toBe(false);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("explicitly prevents historical releases becoming latest", () => {
-    expect(githubReleaseWorkflow).toContain(
-      '"repos/$GITHUB_REPOSITORY/releases/generate-notes"',
-    );
-    expect(githubReleaseWorkflow).toContain(
-      '--notes-file "$published_notes_file"',
-    );
-    expect(githubReleaseWorkflow).toContain('--latest="$MAKE_LATEST"');
+    const result = runPublisher({ existingLookup: "missing" });
+    expect(result.status).toBe(0);
+    expect(result.calls.at(-1)).toContain("--latest=false");
     expect(githubReleaseWorkflow).toContain("release-history");
   });
 
@@ -2889,9 +3078,12 @@ describe("GitHub release workflow safeguards", () => {
     expect(githubReleaseWorkflow).toContain(
       "steps.history.outputs.previous-tag",
     );
-    expect(githubReleaseWorkflow).toContain(
-      'notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")',
-    );
+    const result = runPublisher({ existingLookup: "missing" });
+    expect(
+      result.calls.find((call) =>
+        call.includes("repos/test/codex-security/releases/generate-notes"),
+      ),
+    ).toContain("previous_tag_name=npm-v0.1.1");
   });
 
   test("recovers a public npm tarball after release artifacts expire", () => {
@@ -2903,12 +3095,17 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test("downloads and verifies existing GitHub release asset bytes", () => {
-    expect(githubReleaseWorkflow).toContain(
-      'gh release download "$RELEASE_TAG"',
+    const result = runPublisher({
+      downloadedArchive: Buffer.from("wrong archive"),
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Existing GitHub Release asset must match the verified npm artifact.",
     );
-    expect(githubReleaseWorkflow).toContain(
-      'verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG"',
-    );
+    expect(result.calls.map((call) => call.slice(0, 3))).toEqual([
+      ["gh", "api", "--include"],
+      ["gh", "release", "download"],
+    ]);
   });
 
   test.each([
@@ -2954,85 +3151,81 @@ describe("GitHub release workflow safeguards", () => {
         githubReleaseWorkflow,
         "Verify the public npm package and signed provenance",
       );
-      const workspace = mkdtempSync(
-        join(tmpdir(), "codex-security-release-provenance-"),
+      const workspace = directories.create(
+        "codex-security-release-provenance-",
       );
       mkdirSync(join(workspace, "dist"));
       writeFileSync(join(workspace, "dist", "release.tgz"), "verified archive");
 
-      try {
-        const mocks = [
-          "npm() {",
-          '  case "$1" in',
-          "    view) printf '%s\\n' '{}' ;;",
-          "    install) return 0 ;;",
-          "    audit) printf '%s\\n' '{\"verified\":[]}' ;;",
-          "    *) return 65 ;;",
-          "  esac",
-          "}",
-          "node() {",
-          '  if [[ "${1:-}" == "sdk/typescript/scripts/release-automation.mjs" ]]; then',
-          "    cat >/dev/null",
-          '    case "$2" in',
-          "      verify-github-publication)",
-          '        if [[ -z "${CODEX_SECURITY_VERIFIED_PROVENANCE:-}" ||',
-          '              "$6" != "$GITHUB_REPOSITORY" ]]; then return 69; fi',
-          "        printf '%s\\n' 'verified published artifact'",
-          "        ;;",
-          "      verify-provenance)",
-          '        if [[ "$MOCK_EXACT_PROVENANCE" != "1" || "$7" != "$RELEASE_RUN_ID" ]]; then',
-          "          return 68",
-          "        fi",
-          '        printf \'{"runId":"%s"}\\n\' "$RELEASE_RUN_ID"',
-          "        ;;",
-          "      verify-recovered-provenance)",
-          '        printf \'{"runId":"%s"}\\n\' "$MOCK_ORIGINAL_RUN_ID"',
-          "        ;;",
-          "      *) return 66 ;;",
-          "    esac",
-          "    return 0",
-          "  fi",
-          '  command node "$@"',
-          "}",
-          "gh() {",
-          '  if [[ "$1" != "api" ]]; then return 64; fi',
-          "  shift",
-          '  case "$1" in',
-          `    "repos/test/codex-security/actions/runs/${releaseRun}/jobs?per_page=100")`,
-          "      printf '%s\\n' \"$MOCK_RECOVERY_CONCLUSION\"",
-          "      ;;",
-          '    "repos/test/codex-security/actions/runs/30481596228")',
-          "      printf '%s\\t%s\\t%s\\t%s\\n' node-release completed \"$MOCK_ORIGINAL_COMMIT\" npm-v0.1.2",
-          "      ;;",
-          "    *) return 67 ;;",
-          "  esac",
-          "}",
-        ].join("\n");
-        const result = await runShell(
-          `${mocks}\n${script}`,
-          {
-            GITHUB_OUTPUT: "/dev/null",
-            GITHUB_REPOSITORY: "test/codex-security",
-            MOCK_EXACT_PROVENANCE: exact ? "1" : "0",
-            MOCK_ORIGINAL_COMMIT: originalCommit,
-            MOCK_ORIGINAL_RUN_ID: "30481596228",
-            MOCK_RECOVERY_CONCLUSION: recoveryConclusion,
-            RELEASE_RUN_ID: releaseRun,
-            RELEASE_SHA: releaseCommit,
-            RELEASE_TAG: "npm-v0.1.2",
-            RELEASE_VERSION: "0.1.2",
-          },
-          { cwd: workspace },
-        );
+      const mocks = [
+        "npm() {",
+        '  case "$1" in',
+        "    view) printf '%s\\n' '{}' ;;",
+        "    install) return 0 ;;",
+        "    audit) printf '%s\\n' '{\"verified\":[]}' ;;",
+        "    *) return 65 ;;",
+        "  esac",
+        "}",
+        "node() {",
+        '  if [[ "${1:-}" == "sdk/typescript/scripts/release-automation.mjs" ]]; then',
+        "    cat >/dev/null",
+        '    case "$2" in',
+        "      verify-github-publication)",
+        '        if [[ -z "${CODEX_SECURITY_VERIFIED_PROVENANCE:-}" ||',
+        '              "$6" != "$GITHUB_REPOSITORY" ]]; then return 69; fi',
+        "        printf '%s\\n' 'verified published artifact'",
+        "        ;;",
+        "      verify-provenance)",
+        '        if [[ "$MOCK_EXACT_PROVENANCE" != "1" || "$7" != "$RELEASE_RUN_ID" ]]; then',
+        "          return 68",
+        "        fi",
+        '        printf \'{"runId":"%s"}\\n\' "$RELEASE_RUN_ID"',
+        "        ;;",
+        "      verify-recovered-provenance)",
+        '        printf \'{"runId":"%s"}\\n\' "$MOCK_ORIGINAL_RUN_ID"',
+        "        ;;",
+        "      *) return 66 ;;",
+        "    esac",
+        "    return 0",
+        "  fi",
+        '  command node "$@"',
+        "}",
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        '  case "$1" in',
+        `    "repos/test/codex-security/actions/runs/${releaseRun}/jobs?per_page=100")`,
+        "      printf '%s\\n' \"$MOCK_RECOVERY_CONCLUSION\"",
+        "      ;;",
+        '    "repos/test/codex-security/actions/runs/30481596228")',
+        "      printf '%s\\t%s\\t%s\\t%s\\n' node-release completed \"$MOCK_ORIGINAL_COMMIT\" npm-v0.1.2",
+        "      ;;",
+        "    *) return 67 ;;",
+        "  esac",
+        "}",
+      ].join("\n");
+      const result = await runShell(
+        `${mocks}\n${script}`,
+        {
+          GITHUB_OUTPUT: "/dev/null",
+          GITHUB_REPOSITORY: "test/codex-security",
+          MOCK_EXACT_PROVENANCE: exact ? "1" : "0",
+          MOCK_ORIGINAL_COMMIT: originalCommit,
+          MOCK_ORIGINAL_RUN_ID: "30481596228",
+          MOCK_RECOVERY_CONCLUSION: recoveryConclusion,
+          RELEASE_RUN_ID: releaseRun,
+          RELEASE_SHA: releaseCommit,
+          RELEASE_TAG: "npm-v0.1.2",
+          RELEASE_VERSION: "0.1.2",
+        },
+        { cwd: workspace },
+      );
 
-        expect(result.status).toBe(status);
-        if (status === 0) {
-          expect(result.stdout).toContain(message);
-        } else {
-          expect(result.stderr).toContain(message);
-        }
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
+      expect(result.status).toBe(status);
+      if (status === 0) {
+        expect(result.stdout).toContain(message);
+      } else {
+        expect(result.stderr).toContain(message);
       }
     },
   );
@@ -3055,7 +3248,7 @@ describe("GitHub release workflow safeguards", () => {
     {
       description: "stale generated notes with a marked historical summary",
       existingNotes:
-        "<!-- codex-security-release-summary:start -->\\n## Highlights\\nPreserved historical summary\\n<!-- codex-security-release-summary:end -->\\n\\nStale generated notes",
+        "<!-- codex-security-release-summary:start -->\n## Highlights\nPreserved historical summary\n<!-- codex-security-release-summary:end -->\n\nStale generated notes",
       expectedSummary: "Preserved historical summary",
       updated: true,
       latestUpdated: false,
@@ -3064,7 +3257,7 @@ describe("GitHub release workflow safeguards", () => {
     {
       description: "CRLF historical summary marker block",
       existingNotes:
-        "<!-- codex-security-release-summary:start -->\\r\\nPreserved historical summary\\r\\n<!-- codex-security-release-summary:end -->\\r\\n\\r\\nStale generated notes",
+        "<!-- codex-security-release-summary:start -->\r\nPreserved historical summary\r\n<!-- codex-security-release-summary:end -->\r\n\r\nStale generated notes",
       expectedSummary: "Preserved historical summary",
       updated: true,
       latestUpdated: false,
@@ -3073,7 +3266,7 @@ describe("GitHub release workflow safeguards", () => {
     {
       description: "CRLF marker-only body with a terminal line ending",
       existingNotes:
-        "<!-- codex-security-release-summary:start -->\\r\\nPreserved historical summary\\r\\n<!-- codex-security-release-summary:end -->\\r\\n",
+        "<!-- codex-security-release-summary:start -->\r\nPreserved historical summary\r\n<!-- codex-security-release-summary:end -->\r\n",
       expectedSummary: "Preserved historical summary",
       updated: true,
       latestUpdated: false,
@@ -3091,7 +3284,7 @@ describe("GitHub release workflow safeguards", () => {
     {
       description: "standalone marker pair outside the canonical prefix",
       existingNotes:
-        "* fix: generated title\\n<!-- codex-security-release-summary:start -->\\nUnreviewed injected highlight\\n<!-- codex-security-release-summary:end -->",
+        "* fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
       excludedSummary: "Unreviewed injected highlight",
       updated: true,
       latestUpdated: false,
@@ -3100,7 +3293,7 @@ describe("GitHub release workflow safeguards", () => {
     {
       description: "duplicate standalone marker pair after a blank line",
       existingNotes:
-        "<!-- codex-security-release-summary:start -->\\nFirst\\n<!-- codex-security-release-summary:end -->\\n\\n<!-- codex-security-release-summary:start -->\\nSecond\\n<!-- codex-security-release-summary:end -->",
+        "<!-- codex-security-release-summary:start -->\nFirst\n<!-- codex-security-release-summary:end -->\n\n<!-- codex-security-release-summary:start -->\nSecond\n<!-- codex-security-release-summary:end -->",
       expectedError: "Existing release summary markers are malformed.",
       updated: false,
       latestUpdated: false,
@@ -3109,7 +3302,7 @@ describe("GitHub release workflow safeguards", () => {
     {
       description: "NUL-bearing historical summary",
       existingNotes:
-        "<!-- codex-security-release-summary:start -->\\nReviewed\\u0000summary\\n<!-- codex-security-release-summary:end -->",
+        "<!-- codex-security-release-summary:start -->\nReviewed\u0000summary\n<!-- codex-security-release-summary:end -->",
       expectedError: "Existing release summary is empty.",
       updated: false,
       latestUpdated: false,
@@ -3127,7 +3320,7 @@ describe("GitHub release workflow safeguards", () => {
     {
       description: "malformed historical summary markers",
       existingNotes:
-        "<!-- codex-security-release-summary:start -->\\nIncomplete summary",
+        "<!-- codex-security-release-summary:start -->\nIncomplete summary",
       expectedError: "Existing release summary markers are malformed.",
       updated: false,
       latestUpdated: false,
@@ -3141,14 +3334,14 @@ describe("GitHub release workflow safeguards", () => {
     },
     {
       description: "already current with trailing line feeds",
-      existingNotes: "Generated release notes\\n\\n",
+      existingNotes: "Generated release notes\n\n",
       updated: false,
       latestUpdated: false,
       status: 0,
     },
     {
       description: "already current with CRLF-equivalent generated notes",
-      existingNotes: "Generated release notes\\r\\n",
+      existingNotes: "Generated release notes\r\n",
       generatedNotes: "Generated release notes\r\n",
       updated: false,
       latestUpdated: false,
@@ -3156,8 +3349,16 @@ describe("GitHub release workflow safeguards", () => {
     },
     {
       description: "already current with NUL-bearing generated notes",
-      existingNotes: "Generated release notes\\u0000",
-      generatedNotesBase64: "R2VuZXJhdGVkIHJlbGVhc2Ugbm90ZXMA",
+      existingNotes: "Generated release notes\u0000",
+      generatedNotes: "Generated release notes\0",
+      updated: false,
+      latestUpdated: false,
+      status: 0,
+    },
+    {
+      description: "different strings encoding to the same UTF-8 bytes",
+      existingNotes: "\ud800",
+      generatedNotes: "\ufffd",
       updated: false,
       latestUpdated: false,
       status: 0,
@@ -3256,7 +3457,7 @@ describe("GitHub release workflow safeguards", () => {
     async ({
       existingNotes = "Generated release notes",
       generatedNotes = "Generated release notes\n",
-      generatedNotesBase64,
+
       updated,
       latestTag = "npm-v0.1.3",
       makeLatest = false,
@@ -3271,175 +3472,33 @@ describe("GitHub release workflow safeguards", () => {
       peeledCommit = "",
       status,
     }) => {
-      const script = workflowStepShell(
-        githubReleaseWorkflow,
-        "Publish GitHub Release and generated notes",
-      );
-      const mocks = [
-        "gh() {",
-        '  if [[ "$1" == "api" ]]; then',
-        "    shift",
-        "    local method=GET",
-        "    local include=false",
-        '    if [[ "${1:-}" == "--include" ]]; then',
-        "      include=true",
-        "      shift",
-        "    fi",
-        '    if [[ "${1:-}" == "--method" ]]; then',
-        '      method="$2"',
-        "      shift 2",
-        "    fi",
-        '    case "$method $1" in',
-        '      "GET repos/test/codex-security/releases/tags/npm-v0.1.2")',
-        '        if [[ "$include" != "true" ]]; then return 71; fi',
-        '        printf \'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n{"tag_name":"npm-v0.1.2","draft":false,"prerelease":false,"body":"%s","assets":[]}\\n\' "$MOCK_EXISTING_NOTES"',
-        "        ;;",
-        '      "GET repos/test/codex-security/releases/latest")',
-        '        if [[ "$include" != "true" ]]; then return 71; fi',
-        '        if [[ "$MOCK_LATEST_TAG" == "__missing__" ]]; then',
-        "          printf '%s\\n' 'HTTP/2.0 404 Not Found' 'content-type: application/json' '' '{\"message\":\"Not Found\"}'",
-        "          return 1",
-        "        fi",
-        '        if [[ "$MOCK_LATEST_TAG" == "__error__" ]]; then',
-        "          printf '%s\\n' 'HTTP/2.0 500 Internal Server Error' 'content-type: application/json' '' '{\"message\":\"Unavailable\"}'",
-        "          return 1",
-        "        fi",
-        '        if [[ "$MOCK_LATEST_TAG" == "__network__" ]]; then return 1; fi',
-        '        if [[ "$MOCK_LATEST_TAG" == "__malformed_missing__" ]]; then',
-        "          printf '%s\\n' 'HTTP/2.0 404 Not Found' 'content-type: application/json' '' 'not-json'",
-        "          return 1",
-        "        fi",
-        '        printf \'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n{"tag_name":"%s"}\\n\' "$MOCK_LATEST_TAG"',
-        "        ;;",
-        '      "GET repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
-        '        printf \'%s\\t%s\\n\' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
-        "        ;;",
-        '      "GET repos/test/codex-security/git/tags/"*)',
-        "        printf '%s\\n' \"$MOCK_PEELED_COMMIT\"",
-        "        ;;",
-        '      "POST repos/test/codex-security/releases/generate-notes")',
-        '        if [[ "$MOCK_RELEASE_CONFIGURATION" == "missing" &&',
-        '              "$*" == *"configuration_file_path=.github/release.yml"* ]]; then',
-        "          printf '%s\\n' 'Could not find a configuration file at .github/release.yml' >&2",
-        "          return 1",
-        "        fi",
-        "        printf '%s' \"$MOCK_GENERATED_NOTES_RESPONSE\"",
-        "        ;;",
-        "      *) return 65 ;;",
-        "    esac",
-        '  elif [[ "$1" == "release" ]]; then',
-        "    shift",
-        '    case "$1" in',
-        "      download)",
-        "        shift",
-        "        local destination= pattern=",
-        "        while (( $# > 0 )); do",
-        '          case "$1" in',
-        '            --dir) destination="$2"; shift 2 ;;',
-        '            --pattern) pattern="$2"; shift 2 ;;',
-        "            --repo) shift 2 ;;",
-        "            *) shift ;;",
-        "          esac",
-        "        done",
-        "        printf '%s\\n' 'verified archive' > \"$destination/$pattern\"",
-        "        ;;",
-        "      edit)",
-        "        shift",
-        "        local edit_latest= notes_file= next_is_notes_file=false",
-        '        for argument in "$@"; do',
-        '          if [[ "$next_is_notes_file" == true ]]; then',
-        '            notes_file="$argument"',
-        "            next_is_notes_file=false",
-        "            continue",
-        "          fi",
-        '          if [[ "$argument" == "--verify-tag" ]]; then',
-        "            printf '%s\\n' 'unknown flag: --verify-tag' >&2",
-        "            return 67",
-        "          fi",
-        '          if [[ "$argument" == --latest=* ]]; then',
-        '            edit_latest="${argument#--latest=}"',
-        "          fi",
-        '          if [[ "$argument" == "--notes-file" ]]; then',
-        "            next_is_notes_file=true",
-        "          fi",
-        "        done",
-        '        if [[ "$edit_latest" != "$MOCK_MAKE_LATEST" ]]; then return 68; fi',
-        "        printf 'updated latest: %s\\n' \"$edit_latest\"",
-        '        if [[ -n "$notes_file" ]]; then',
-        "          printf '%s: ' 'updated release notes'",
-        '          cat "$notes_file"',
-        "        fi",
-        "        ;;",
-        "      create) return 70 ;;",
-        "      *) return 66 ;;",
-        "    esac",
-        "  else",
-        "    return 64",
-        "  fi",
-        "}",
-        "git() {",
-        '  if [[ "$1" == "cat-file" && "$2" == "-e" &&',
-        '        "$3" == "$RELEASE_SHA:.github/release.yml" ]]; then',
-        '    [[ "$MOCK_RELEASE_CONFIGURATION" == "present" ]]',
-        "    return",
-        "  fi",
-        '  if [[ "$1" == "cat-file" && "$2" == "-e" &&',
-        '        "$3" == "$RELEASE_SHA:.github/release-notes.md" ]]; then',
-        '    [[ "$MOCK_RELEASE_SUMMARY" != "__missing__" ]]',
-        "    return",
-        "  fi",
-        '  if [[ "$1" == "show" &&',
-        '        "$2" == "$RELEASE_SHA:.github/release-notes.md" ]]; then',
-        '    if [[ "$MOCK_RELEASE_SUMMARY" == "__missing__" ]]; then return 1; fi',
-        "    printf '%s\\n' \"$MOCK_RELEASE_SUMMARY\"",
-        "    return",
-        "  fi",
-        '  command git "$@"',
-        "}",
-        "node() {",
-        '  if [[ "${1:-}" == "sdk/typescript/scripts/release-automation.mjs" &&',
-        '        "${2:-}" == "verify-github-release" ]]; then',
-        "    cat >/dev/null",
-        "    printf '%s\\n' 'verified existing GitHub release asset'",
-        "    return 0",
-        "  fi",
-        '  command node "$@"',
-        "}",
-      ].join("\n");
-      const result = await runCommand(bash, [], {
-        input: `${mocks}\n${script}`,
-        cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        env: {
-          ...process.env,
-          GITHUB_REPOSITORY: "test/codex-security",
-          MAKE_LATEST: String(makeLatest),
-          MOCK_GENERATED_NOTES_RESPONSE: JSON.stringify({
-            body:
-              generatedNotesBase64 === undefined
-                ? generatedNotes
-                : Buffer.from(generatedNotesBase64, "base64").toString("utf8"),
-          }),
-          MOCK_EXISTING_NOTES: existingNotes,
-          MOCK_LATEST_TAG: latestTag,
-          MOCK_MAKE_LATEST: String(makeLatest),
-          MOCK_PEELED_COMMIT: peeledCommit,
-          MOCK_RELEASE_CONFIGURATION: releaseConfiguration
-            ? "present"
-            : "missing",
-          MOCK_RELEASE_SUMMARY: releaseSummary,
-          MOCK_TAG_OBJECT: tagObject,
-          MOCK_TAG_TYPE: tagType,
-          PREVIOUS_TAG: "npm-v0.1.1",
-          RELEASE_ARCHIVE: "/tmp/openai-codex-security-0.1.2.tgz",
-          RELEASE_SHA: releaseCommit,
-          RELEASE_TAG: "npm-v0.1.2",
-          RELEASE_VERSION: "0.1.2",
-        },
-        timeout: releaseWorkflowTimeout,
+      const result = runPublisher({
+        existingNotes,
+        generatedNotes,
+
+        latestTag,
+        makeLatest,
+        releaseConfiguration,
+        releaseSummary,
+        tagType,
+        tagObject,
+        peeledCommit,
       });
 
+      expect(
+        result.calls.some(
+          (call) => call[1] === "release" && call[2] === "edit",
+        ),
+      ).toBe(updated || latestUpdated);
+      if (updated || latestUpdated) {
+        expect(result.calls.at(-2)).toContain(
+          tagType === "tag"
+            ? `repos/test/codex-security/git/tags/${tagObject}`
+            : "repos/test/codex-security/git/ref/tags/npm-v0.1.2",
+        );
+      }
       expect(result.status).toBe(status);
-      expect(result.stdout).toContain("verified existing GitHub release asset");
+      expect(result.stdout).toContain(`"digest":"${digest}"`);
       if (status !== 0) {
         if (expectedError !== undefined) {
           expect(result.stderr).toContain(expectedError);
@@ -3490,69 +3549,41 @@ describe("GitHub release workflow safeguards", () => {
   test("routes release-note validation through the shared helper", () => {
     expect(protectedReleaseWorkflow).toContain("validate-release-notes");
     expect(releaseCutWorkflow).toContain("validate-release-notes");
-    expect(githubReleaseWorkflow).toContain("compose-release-notes");
+    expect(githubReleaseWorkflow).toContain("publishGitHubRelease");
     expect(protectedReleaseWorkflow).not.toContain("summary_header=");
     expect(releaseCutWorkflow).not.toContain("summary_header=");
     expect(githubReleaseWorkflow).not.toContain("CODEX_SECURITY_SUMMARY_START");
   });
 
-  test.each([
-    {
-      description: "no optional note files",
-      arraySetup: "release_note_args=()",
-      optionalArguments: [],
-    },
-    {
-      description: "quoted note-file paths",
-      arraySetup: [
-        'tagged_notes_file="/tmp/tagged notes.md"',
-        'existing_notes_file="/tmp/existing notes.md"',
-        "release_note_args=(",
-        '  --tagged-notes-file "$tagged_notes_file"',
-        '  --existing-notes-file "$existing_notes_file"',
-        ")",
-      ].join("\n"),
-      optionalArguments: [
-        "--tagged-notes-file",
-        "/tmp/tagged notes.md",
-        "--existing-notes-file",
-        "/tmp/existing notes.md",
-      ],
-    },
-  ])(
-    "passes $description to release-note composition under nounset",
-    async ({ arraySetup, optionalArguments }) => {
-      const publishStep = workflowStepShell(
-        githubReleaseWorkflow,
-        "Publish GitHub Release and generated notes",
-      );
-      const composeCommand = publishStep.match(
-        /(?<command>node sdk\/typescript\/scripts\/release-automation\.mjs \\\n\s+compose-release-notes \\\n[\s\S]*?) \\\n\s*> "\$published_notes_file"/u,
-      )?.groups?.["command"];
-      expect(composeCommand).toBeDefined();
-
-      const result = await runCommand(bash, [], {
-        input: [
-          "set -u",
-          arraySetup,
-          'generated_notes_file="/tmp/generated notes.md"',
-          "node() { printf '<%s>\\n' \"$@\"; }",
-          composeCommand ?? "exit 70",
-        ].join("\n"),
-        env: { ...process.env, RELEASE_VERSION: "0.1.2" },
-        timeout: 10_000,
-      });
-
-      expect(result.status).toBe(0);
-      expect(result.stdout.trim().split("\n")).toEqual(
-        [
-          "sdk/typescript/scripts/release-automation.mjs",
+  test.each([false, true])(
+    "composes notes with optional files: %p",
+    async (optional) => {
+      const workspace = mkdtempSync(join(tmpdir(), "release notes "));
+      const generated = join(workspace, "generated notes.md");
+      const tagged = join(workspace, "tagged notes.md");
+      const existing = join(workspace, "existing notes.md");
+      try {
+        writeFileSync(generated, "Generated notes\n");
+        writeFileSync(
+          tagged,
+          "<!-- release-version: 0.1.2 -->\nReviewed summary",
+        );
+        writeFileSync(existing, "Old generated notes");
+        const result = await runCommand("node", [
+          fileURLToPath(automationScript),
           "compose-release-notes",
           "0.1.2",
-          "/tmp/generated notes.md",
-          ...optionalArguments,
-        ].map((argument) => `<${argument}>`),
-      );
+          generated,
+          ...(optional
+            ? ["--tagged-notes-file", tagged, "--existing-notes-file", existing]
+            : []),
+        ]);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain("Generated notes");
+        expect(result.stdout.includes("Reviewed summary")).toBe(optional);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
     },
   );
 
@@ -3613,7 +3644,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(nodeCiWorkflow).toContain("needs: validate-title");
   });
 
-  test("keeps required contexts stable for every change", () => {
+  test("keeps required contexts stable for every change", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3671,6 +3702,12 @@ describe("GitHub release workflow safeguards", () => {
           name ===
           `Require every ${job === "windows" ? "Windows" : "Unix"} coverage job`,
       );
+    const conditionCases: Array<{
+      condition: string;
+      values: Record<string, string>;
+      expected: boolean;
+      message: string;
+    }> = [];
     for (const [validation, upstream, gateFailure] of [
       ["success", "success", false],
       ["success", "skipped", true],
@@ -3689,10 +3726,12 @@ describe("GitHub release workflow safeguards", () => {
         "needs.windows-verify.result": upstream,
       };
       for (const job of ["required-test", "windows"]) {
-        expect(
-          evaluateWorkflowCondition(coverageGate(job)?.if ?? "", values),
-          `${job}: ${validation}/${upstream}`,
-        ).toBe(gateFailure);
+        conditionCases.push({
+          condition: coverageGate(job)?.if ?? "",
+          values,
+          expected: gateFailure,
+          message: `${job}: ${validation}/${upstream}`,
+        });
       }
     }
 
@@ -3716,8 +3755,9 @@ describe("GitHub release workflow safeguards", () => {
     })) {
       for (const dependency of dependencies) {
         for (const result of ["failure", "cancelled", "skipped"]) {
-          expect(
-            evaluateWorkflowCondition(coverageGate(gate)?.if ?? "", {
+          conditionCases.push({
+            condition: coverageGate(gate)?.if ?? "",
+            values: {
               "needs.validate-title.result": "success",
               ...Object.fromEntries(
                 dependencies.map((job) => [
@@ -3725,12 +3765,18 @@ describe("GitHub release workflow safeguards", () => {
                   job === dependency ? result : "success",
                 ]),
               ),
-            }),
-            `${gate}: ${dependency}/${result}`,
-          ).toBe(true);
+            },
+            expected: true,
+            message: `${gate}: ${dependency}/${result}`,
+          });
         }
       }
       expect(coverageGate(gate)?.run).toBe("exit 1");
+    }
+
+    const conditions = await evaluateWorkflowConditions(conditionCases);
+    for (const [index, item] of conditionCases.entries()) {
+      expect(conditions[index], item.message).toBe(item.expected);
     }
 
     const renderName = (template: string, values: Record<string, string>) => {
@@ -3831,27 +3877,15 @@ describe("GitHub release workflow safeguards", () => {
     "fix: preserve a trailing line feed\n",
     "fix: preserve a trailing carriage return\r",
   ])("rejects nonconventional pull request title %s", async (title) => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      '  if [[ "$1" == "repos/test/codex-security/issues/17" ]]; then',
-      "    printf '%s' \"$MOCK_PR_TITLE\" | base64",
-      "    return 0",
-      "  fi",
-      "  printf '%s\\n' 'unexpected label mutation'",
-      "  return 70",
-      "}",
-    ].join("\n");
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: "test/codex-security",
-      MOCK_PR_TITLE: title,
-      PR_NUMBER: "17",
-    });
+    const result = await runReleaseLabels(title, [
+      '    "GET repos/test/codex-security/issues/17")',
+      "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+      "      ;;",
+      "    *)",
+      "      printf '%s\\n' 'unexpected label mutation'",
+      "      return 70",
+      "      ;;",
+    ]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
@@ -3871,56 +3905,32 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "preserves a manually excluded release and reconciles its category after retitling to $title",
     async ({ title, expectedLabel }) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
+      const result = await runReleaseLabels(
+        title,
+        [
+          '    "GET repos/test/codex-security/issues/17/labels")',
+          "      printf '%s\\n' enhancement skip-release-notes",
+          "      ;;",
+          '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
+          "      printf '%b\\n' 'enhancement\\tgithub-actions[bot]' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\ttrusted-reviewer'",
+          "      ;;",
+          '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
+          "      printf '%s\\n' 'removed a stale managed category'",
+          "      ;;",
+          '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
+          "      printf '%s\\n' 'removed a manually excluded release label'",
+          "      return 70",
+          "      ;;",
+        ],
+        [
+          "base64() {",
+          '  if [[ "${1:-}" == "--decode" ]]; then',
+          "    return 64",
+          "  fi",
+          '  command base64 "$@"',
+          "}",
+        ],
       );
-      const mock = [
-        "base64() {",
-        '  if [[ "${1:-}" == "--decode" ]]; then',
-        "    return 64",
-        "  fi",
-        '  command base64 "$@"',
-        "}",
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        "  local method=GET",
-        '  if [[ "${1:-}" == "--method" ]]; then',
-        '    method="$2"',
-        "    shift 2",
-        "  fi",
-        '  local endpoint="$1"',
-        "  shift",
-        '  case "$method $endpoint" in',
-        '    "GET repos/test/codex-security/issues/17")',
-        "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-        "      ;;",
-        '    "GET repos/test/codex-security/issues/17/labels")',
-        "      printf '%s\\n' enhancement skip-release-notes",
-        "      ;;",
-        '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%s\\n' 'github-actions[bot]' 'trusted-reviewer'",
-        "      ;;",
-        '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
-        "      printf '%s\\n' 'removed a stale managed category'",
-        "      ;;",
-        '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
-        "      printf '%s\\n' 'removed a manually excluded release label'",
-        "      return 70",
-        "      ;;",
-        '    "POST repos/test/codex-security/issues/17/labels")',
-        "      printf '%s\\n' \"$@\"",
-        "      ;;",
-        "    *) return 65 ;;",
-        "  esac",
-        "}",
-      ].join("\n");
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(
@@ -3944,22 +3954,7 @@ describe("GitHub release workflow safeguards", () => {
   );
 
   test("preserves the latest unattributed skip label after earlier automation", async () => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      "  local method=GET",
-      '  if [[ "${1:-}" == "--method" ]]; then',
-      '    method="$2"',
-      "    shift 2",
-      "  fi",
-      '  local endpoint="$1"',
-      "  shift",
-      '  case "$method $endpoint" in',
+    const result = await runReleaseLabels("feat: customer-visible change", [
       '    "GET repos/test/codex-security/issues/17")',
       "      printf '%s' 'feat: customer-visible change' | base64",
       "      ;;",
@@ -3968,26 +3963,16 @@ describe("GitHub release workflow safeguards", () => {
       "      ;;",
       '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
       '      if [[ "$*" == *"__unattributed__"* ]]; then',
-      "        printf '%s\\n' 'github-actions[bot]' '__unattributed__'",
+      "        printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\t__unattributed__'",
       "      else",
-      "        printf '%s\\n' 'github-actions[bot]' ''",
+      "        printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\t'",
       "      fi",
       "      ;;",
       '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
       "      printf '%s\\n' 'removed an unattributed release exclusion'",
       "      return 70",
       "      ;;",
-      '    "POST repos/test/codex-security/issues/17/labels")',
-      "      printf '%s\\n' \"$@\"",
-      "      ;;",
-      "    *) return 65 ;;",
-      "  esac",
-      "}",
-    ].join("\n");
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: "test/codex-security",
-      PR_NUMBER: "17",
-    });
+    ]);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
@@ -4008,46 +3993,17 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "reconciles an automatic skip label after retitling to $title",
     async ({ title, label }) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
-      );
-      const mock = [
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        "  local method=GET",
-        '  if [[ "${1:-}" == "--method" ]]; then',
-        '    method="$2"',
-        "    shift 2",
-        "  fi",
-        '  local endpoint="$1"',
-        "  shift",
-        '  case "$method $endpoint" in',
-        '    "GET repos/test/codex-security/issues/17")',
-        "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-        "      ;;",
+      const result = await runReleaseLabels(title, [
         '    "GET repos/test/codex-security/issues/17/labels")',
         "      printf '%s\\n' skip-release-notes",
         "      ;;",
         '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%s\\n' 'github-actions[bot]'",
+        "      printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]'",
         "      ;;",
         '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
         "      printf '%s\\n' 'removed automatically applied skip-release-notes'",
         "      ;;",
-        '    "POST repos/test/codex-security/issues/17/labels")',
-        "      printf '%s\\n' \"$@\"",
-        "      ;;",
-        "    *) return 65 ;;",
-        "  esac",
-        "}",
-      ].join("\n");
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
+      ]);
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(
@@ -4082,43 +4038,14 @@ describe("GitHub release workflow safeguards", () => {
       label: "breaking-change",
     },
   ])("categorizes breaking-change title $title", async ({ title, label }) => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      "  local method=GET",
-      '  if [[ "${1:-}" == "--method" ]]; then',
-      '    method="$2"',
-      "    shift 2",
-      "  fi",
-      '  local endpoint="$1"',
-      "  shift",
-      '  case "$method $endpoint" in',
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-      "      ;;",
+    const result = await runReleaseLabels(title, [
       '    "GET repos/test/codex-security/issues/17/labels")',
       "      return 0",
       "      ;;",
       '    "GET repos/test/codex-security/labels/breaking-change")',
       "      return 0",
       "      ;;",
-      '    "POST repos/test/codex-security/issues/17/labels")',
-      "      printf '%s\\n' \"$@\"",
-      "      ;;",
-      "    *) return 65 ;;",
-      "  esac",
-      "}",
-    ].join("\n");
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: "test/codex-security",
-      MOCK_PR_TITLE: title,
-      PR_NUMBER: "17",
-    });
+    ]);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`labels[]=${label}`);
@@ -4131,48 +4058,31 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "excludes %s and recovers from concurrent skip-label creation",
     async (title) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
+      const result = await runReleaseLabels(
+        title,
+        [
+          '    "GET repos/test/codex-security/issues/17")',
+          "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+          "      ;;",
+          '    "GET repos/test/codex-security/issues/17/labels")',
+          "      return 0",
+          "      ;;",
+          '    "GET repos/test/codex-security/labels/skip-release-notes")',
+          '      [[ "$skip_label_exists" == 1 ]]',
+          "      ;;",
+          '    "POST repos/test/codex-security/labels")',
+          "      skip_label_exists=1",
+          "      return 1",
+          "      ;;",
+          '    "POST repos/test/codex-security/issues/17/labels")',
+          '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
+          "      printf '%s\\n' 'applied skip-release-notes'",
+          "      ;;",
+          "    *) return 66 ;;",
+        ],
+        ["skip_label_exists=0"],
+        false,
       );
-      const mock = [
-        "skip_label_exists=0",
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        "  local method=GET",
-        '  if [[ "${1:-}" == "--method" ]]; then',
-        '    method="$2"',
-        "    shift 2",
-        "  fi",
-        '  local endpoint="$1"',
-        '  case "$method $endpoint" in',
-        '    "GET repos/test/codex-security/issues/17")',
-        "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-        "      ;;",
-        '    "GET repos/test/codex-security/issues/17/labels")',
-        "      return 0",
-        "      ;;",
-        '    "GET repos/test/codex-security/labels/skip-release-notes")',
-        '      [[ "$skip_label_exists" == 1 ]]',
-        "      ;;",
-        '    "POST repos/test/codex-security/labels")',
-        "      skip_label_exists=1",
-        "      return 1",
-        "      ;;",
-        '    "POST repos/test/codex-security/issues/17/labels")',
-        '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
-        "      printf '%s\\n' 'applied skip-release-notes'",
-        "      ;;",
-        "    *) return 66 ;;",
-        "  esac",
-        "}",
-      ].join("\n");
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("applied skip-release-notes");
@@ -4192,3 +4102,122 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stderr).toContain("GitHub release JSON from stdin");
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "preserves manual release categories while replacing stale automated labels",
+  async () => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const fixture = `gh() {
+    case "$*" in
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' 'feat: synthetic feature' | base64 ;;
+      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' breaking-change bug ;;
+      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%b\\n' 'breaking-change\\tsynthetic-reviewer' 'bug\\tgithub-actions[bot]' ;;
+      "api --method DELETE repos/test/codex-security/issues/17/labels/bug --silent") echo removed-stale-bug ;;
+      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
+      "api --method POST repos/test/codex-security/issues/17/labels "*) printf '%s\\n' "$*" ;;
+      "api repos/test/codex-security/labels/enhancement --silent") return 0 ;;
+      *) echo "Unexpected request: $*" >&2; return 65 ;;
+    esac
+  }`;
+    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+      },
+      timeout: 10_000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "Preserving existing breaking-change label.",
+    );
+    expect(result.stdout).toContain("removed-stale-bug");
+    expect(result.stdout).not.toContain("labels[]=enhancement");
+    expect(result.stdout).not.toContain("removed-manual-label");
+  },
+);
+
+test("imports maintainer utilities from Node stdin and eval modules", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "maintainer-stdin-"));
+  const packageRoot = resolve(import.meta.dir, "..");
+  try {
+    const build = await runCommand(
+      "node",
+      [
+        join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+        "--project",
+        join(packageRoot, "tsconfig.ci.json"),
+        "--outDir",
+        workspace,
+      ],
+      { timeout: 30_000 },
+    );
+    expect(build.status, build.stdout + build.stderr).toBe(0);
+    const checker = pathToFileURL(
+      join(workspace, "plugins/codex-security/native/check.mjs"),
+    ).href;
+    const source = `import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from ${JSON.stringify(checker)}; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);`;
+    for (const args of [
+      ["--input-type=module", "-"],
+      ["--input-type=module", "--eval", source, "synthetic-virtual-entrypoint"],
+    ]) {
+      const result = spawnSync("node", args, {
+        cwd: packageRoot,
+        input: source,
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("function function function function");
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32").each([
+  {
+    title: "fix: synthetic correction",
+    manual: "documentation",
+    stale: "enhancement",
+  },
+  { title: "feat: synthetic feature", manual: "bug", stale: "documentation" },
+  { title: "feat: synthetic feature", manual: "bug", stale: "enhancement" },
+])(
+  "uses the manual $manual release category over stale $stale after retitling to $title",
+  async ({ title, manual, stale }) => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const fixture = `gh() {
+    case "$*" in
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' "$MOCK_PR_TITLE" | base64 ;;
+      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;
+      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;
+      "api --method DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL --silent") echo removed-stale-label ;;
+      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
+      "api --method POST "*) echo added-automatic-category ;;
+      *) return 65 ;;
+    esac
+  }`;
+    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+        MOCK_PR_TITLE: title,
+        MANUAL_LABEL: manual,
+        STALE_LABEL: stale,
+      },
+      timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(`Preserving existing ${manual} label.`);
+    expect(result.stdout).toContain("removed-stale-label");
+    expect(result.stdout).not.toContain("removed-manual-label");
+    expect(result.stdout).not.toContain("added-automatic-category");
+  },
+);

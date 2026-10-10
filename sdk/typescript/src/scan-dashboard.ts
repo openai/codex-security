@@ -1,4 +1,6 @@
 import { basename, isAbsolute } from "node:path";
+import { emitKeypressEvents } from "node:readline";
+import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { isRecord } from "./record.js";
@@ -150,12 +152,112 @@ export class ScanDashboard {
   #noteCount = 0;
   #observingStreamErrors = false;
   readonly #onStreamError = (): void => {};
+  #keyInput: PassThrough | null = null;
+  #inputKeys: {
+    keys: string[];
+    continued: boolean;
+    replay: boolean | string;
+    text: string;
+  } | null = null;
   readonly #onInput = (chunk: string | Uint8Array): void => {
-    const input =
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    const batch = {
+      keys: [] as string[],
+      continued: false,
+      replay: false as boolean | string,
+      text: "",
+    };
+    let current = chunk;
+    do {
+      batch.replay = false;
+      this.#inputKeys = batch;
+      try {
+        this.#keyInput?.write(current);
+      } finally {
+        this.#inputKeys = null;
+      }
+      if (typeof batch.replay === "string") current = batch.replay;
+    } while (batch.replay);
+    this.#handleKeys(batch.keys);
+  };
+
+  #setKeyInput(input: PassThrough | null): void {
+    const previous = this.#keyInput;
+    if (previous !== null) {
+      previous.removeAllListeners("keypress");
+      previous.on("keypress", () => {});
+      // Readline clears its Escape timer on input, after the active keypress returns.
+      queueMicrotask(() => {
+        previous.write(" ");
+        previous.removeAllListeners();
+        previous.destroy();
+      });
+    }
+    this.#keyInput = input;
+    if (input === null) return;
+    let pending = 0;
+    input.setEncoding("utf8");
+    input.on("data", (text: string) => {
+      if (this.#inputKeys !== null) {
+        this.#inputKeys.continued = pending > 0;
+        this.#inputKeys.text = text;
+      }
+      pending += text.length;
+    });
+    emitKeypressEvents(input);
+    input.on(
+      "keypress",
+      (
+        _text: unknown,
+        key: { sequence: string; meta?: boolean; code?: string },
+      ) => {
+        pending -= key.sequence.length;
+        const escapes =
+          key.code === undefined
+            ? undefined
+            : key.sequence.match(/^\u001B+(?=\u001B)/u)?.[0];
+        const keys =
+          (key.meta && key.code === undefined) ||
+          key.sequence.includes("\u0003")
+            ? Array.from(key.sequence)
+            : escapes !== undefined
+              ? [...escapes, key.sequence.slice(escapes.length)]
+              : [key.sequence];
+        const batch = this.#inputKeys;
+        const continued = batch?.continued === true;
+        if (batch !== null) batch.continued = false;
+        if (batch === null) this.#handleKeys(keys);
+        else if (
+          this.#budget === null &&
+          keys.length > 1 &&
+          keys.every((key) => key === "\u001B")
+        ) {
+          // Readline can consume a following key's Escape as a repeated Escape.
+          // Keep that introducer with the remaining decoded text for replay.
+          const remaining =
+            key.sequence + (pending ? batch.text.slice(-pending) : "");
+          const prefix = remaining.match(/^\u001B+/u)![0];
+          for (const escape of prefix.slice(0, -1)) batch.keys.push(escape);
+          this.#setKeyInput(new PassThrough());
+          batch.replay = remaining.slice(prefix.length - 1);
+        } else if (
+          this.#budget !== null &&
+          batch.keys.length === 0 &&
+          keys.length > 1 &&
+          keys[0] === "\u001B" &&
+          continued
+        ) {
+          // The buffered Escape belongs to the prior chunk's budget dismissal.
+          // Decode this chunk again after that transition, retaining its own keys.
+          this.#handleKeys(["\u001B"]);
+          batch.replay = true;
+        } else batch.keys.push(...keys);
+      },
+    );
+  }
+
+  #handleKeys(keys: string[]): void {
     if (this.#budget !== null) {
-      for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
-        []) {
+      for (const key of keys) {
         const budget = this.#budget;
         if (budget === null) break;
         if (key === "\u0003" || key === "\u0004") {
@@ -187,13 +289,11 @@ export class ScanDashboard {
       return;
     }
     if (this.#options.presentation === "components") {
-      this.#componentInput(input);
+      this.#componentInput(keys);
       return;
     }
     let lines = 0;
-    for (const key of input.match(
-      /[\u0003\u0004\u0015dam1-9]|\u001B\[(?:[ABHF]|[1456]~)/gu,
-    ) ?? []) {
+    for (const key of keys) {
       if (key === "\u0003") {
         if (lines !== 0) this.scroll(lines);
         this.#options.onInterrupt?.();
@@ -227,7 +327,9 @@ export class ScanDashboard {
         lines += this.#activityRows();
       } else if (key === "\u001B[6~") {
         lines -= this.#activityRows();
-      } else {
+      } else if (
+        ["\u001B[H", "\u001B[F", "\u001B[1~", "\u001B[4~"].includes(key)
+      ) {
         if (lines !== 0) this.scroll(lines);
         this.scroll(
           key === "\u001B[H" || key === "\u001B[1~"
@@ -238,7 +340,7 @@ export class ScanDashboard {
       }
     }
     if (lines !== 0) this.scroll(lines);
-  };
+  }
 
   public constructor(stream: DashboardStream, options: ScanDashboardOptions) {
     this.#stream = stream;
@@ -260,12 +362,13 @@ export class ScanDashboard {
       }
       this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
       if (input?.isTTY === true) {
+        this.#setKeyInput(new PassThrough());
         input.setRawMode?.(true);
         input.resume?.();
         input.on("data", this.#onInput);
         this.#stream.write(ENABLE_ALTERNATE_SCROLL);
       }
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch (error) {
       try {
         this.stop();
@@ -289,6 +392,7 @@ export class ScanDashboard {
     try {
       if (input?.isTTY === true) {
         input.off("data", this.#onInput);
+        this.#setKeyInput(null);
         input.setRawMode?.(this.#inputWasRaw);
         input.pause?.();
       }
@@ -434,11 +538,13 @@ export class ScanDashboard {
     ) {
       return Promise.resolve(undefined);
     }
+    this.#setKeyInput(new PassThrough());
     return new Promise((resolve) => {
       const abort = () => finish();
       const finish = (limit?: number) => {
         request.signal.removeEventListener("abort", abort);
         this.#budget = null;
+        if (this.#timer !== null) this.#setKeyInput(new PassThrough());
         this.#refresh();
         resolve(limit);
       };
@@ -537,12 +643,8 @@ export class ScanDashboard {
   #refresh(): void {
     if (this.#timer === null) return;
     try {
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch {}
-  }
-
-  #render(): void {
-    this.#stream.write(this.#frame());
   }
 
   #frame(): string {
@@ -568,7 +670,9 @@ export class ScanDashboard {
     const files =
       this.#files === null
         ? "waiting for inventory"
-        : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
+        : this.#files.filesCompleted > 0
+          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
+          : `${formatCount(this.#files.filesTotal)} in scope`;
     const history = this.#activityLines(width);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
@@ -662,15 +766,16 @@ export class ScanDashboard {
     );
   }
 
-  #componentInput(input: string): void {
-    for (const key of input.match(
-      /\u001B\[(?:[ABHF]|[1456]~)|[\u0003\u0004\u0015\r\n\u001Bbdam1-9]/gu,
-    ) ?? []) {
+  #componentInput(keys: string[]): void {
+    for (const key of keys) {
       if (key === "\u0003") {
         this.#options.onInterrupt?.();
       } else if (this.#showComponent) {
         if (key === "\u001B" || key === "b") this.#showComponent = false;
-        else this.#components[this.#selectedComponent]!.dashboard.#onInput(key);
+        else
+          this.#components[this.#selectedComponent]!.dashboard.#handleKeys([
+            key,
+          ]);
       } else if (
         (key === "\r" || key === "\n") &&
         this.#components.length > 0

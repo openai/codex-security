@@ -1,5 +1,6 @@
 import { pythonExecutable } from "./support/python.js";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { runNodePython } from "./support/python-probe.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,20 +49,14 @@ function runPreflight(
 ): { status: number | null; payload: Record<string, unknown> } {
   const interpreter = pythonExecutable(false);
   expect(interpreter).not.toBeNull();
-  const result = spawnSync(
-    interpreter!,
-    [
-      "-I",
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-      "--profile",
-      profile,
-      "--config",
-      config,
-      ...options,
-    ],
-    { encoding: "utf8" },
-  );
+  const result = runNodePython(interpreter!, [
+    join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+    "--profile",
+    profile,
+    "--config",
+    config,
+    ...options,
+  ]);
   expect(result.error).toBeUndefined();
   return {
     status: result.status,
@@ -70,6 +65,46 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test.each([
+    ["model", { model: null }, true],
+    ["reasoning effort", { model_reasoning_effort: null }, true],
+    ["both", { model: null, model_reasoning_effort: null }, true],
+    ["defaults", { model: null, model_reasoning_effort: null }, false],
+  ] as const)(
+    "inherits %s when selected profile settings are null",
+    async (_name, profile, explicitRoot) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            ...(explicitRoot
+              ? { model: "gpt-5.6-terra", model_reasoning_effort: "low" }
+              : {}),
+            profile: "review",
+            profiles: { review: profile },
+          },
+        },
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+          prepareRuntime: async () => {
+            throw new Error("Local preflight must not start the runtime");
+          },
+        },
+      );
+      for (const mode of ["standard", "deep"] as const) {
+        await expect(
+          client.preflight(repository, { mode }),
+        ).resolves.toMatchObject({
+          mode,
+          model: explicitRoot ? "gpt-5.6-terra" : "gpt-5.6-sol",
+          reasoningEffort: explicitRoot ? "low" : "xhigh",
+        });
+      }
+    },
+  );
+
   test.each([
     ["standard", "openai.gpt-daybreak-blue-5.6-sol"],
     ["deep", "openai.gpt-daybreak-blue-5.6-sol"],
@@ -134,21 +169,16 @@ describe("CodexSecurity preflight configuration", () => {
 
       const interpreter = pythonExecutable();
       expect(interpreter).not.toBeNull();
-      const result = spawnSync(
+      const result = runNodePython(
         interpreter!,
         [
-          "-I",
-          "-B",
           join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
           "--profile",
           "security_scan",
           "--cwd",
           repository,
         ],
-        {
-          encoding: "utf8",
-          env: { PATH: process.env["PATH"], CODEX_HOME: codexHome },
-        },
+        { env: { PATH: process.env["PATH"], CODEX_HOME: codexHome } },
       );
       expect(result.error).toBeUndefined();
       const payload = JSON.parse(result.stdout) as Record<string, unknown>;
@@ -575,6 +605,8 @@ describe("CodexSecurity preflight configuration", () => {
     const sanitized = scanPreflightCodexConfig({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "high",
+      openai_base_url:
+        "https://synthetic-user:synthetic-password@gateway.example.test/v1?token=synthetic-root-token",
       features: {
         plugins: true,
         goals: true,
@@ -586,6 +618,8 @@ describe("CodexSecurity preflight configuration", () => {
       profiles: {
         review: {
           model: "profile-model",
+          openai_base_url:
+            "https://synthetic-user:synthetic-password@profile.example.test/v1?token=synthetic-profile-token",
           features: { goals: true, secret: "PROFILE_SECRET" },
           agents: { max_threads: 4, token: "PROFILE_AGENT_TOKEN" },
           shell_environment_policy: { set: { SECRET: "PROFILE_ENV_SECRET" } },

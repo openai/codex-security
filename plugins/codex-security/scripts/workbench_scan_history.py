@@ -20,7 +20,7 @@ from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, DEFAULT_PAGE_SIZE
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
-from workbench_validation import reject_non_finite_json
+from workbench_validation import reject_non_finite_json, timestamp_key
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -701,15 +701,15 @@ def list_scans(
             clauses.append("scans.status = ? AND scans.canceled_at IS NULL")
             values.append(args.status)
     if args is not None and args.query:
+        connection.create_function("codex_security_casefold", 1, str.casefold, deterministic=True)
         query = args.query.strip().casefold()
         if query:
-            connection.create_function("codex_security_casefold", 1, str.casefold)
             clauses.append(
-                "(instr(lower(scans.target_path), ?) > 0 "
+                "(instr(codex_security_casefold(scans.target_path), ?) > 0 "
                 "OR instr(codex_security_casefold(COALESCE(scans.name, '')), ?) > 0 "
-                "OR instr(lower(COALESCE(scans.target_summary, '')), ?) > 0 "
-                "OR instr(lower(scans.scope), ?) > 0 "
-                "OR instr(lower(scans.mode), ?) > 0)"
+                "OR instr(codex_security_casefold(COALESCE(scans.target_summary, '')), ?) > 0 "
+                "OR instr(codex_security_casefold(scans.scope), ?) > 0 "
+                "OR instr(codex_security_casefold(scans.mode), ?) > 0)"
             )
             values.extend((query, query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -791,7 +791,11 @@ def list_scans(
                 ),
                 "targetRevision": row["target_revision"],
                 "targetSummary": row["target_summary"],
-                "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
+                "updatedAt": max(
+                    row["updated_at"],
+                    row["progress_updated_at"],
+                    key=lambda value: (timestamp_key(value), value),
+                ),
                 **(
                     {"warnings": json.loads(row["completion_warnings_json"])}
                     if row["completion_warnings_json"] != "[]"
@@ -1086,7 +1090,7 @@ def _saved_finding_links(connection: sqlite3.Connection, scan_ids: set[str]) -> 
             FROM scan_comparison_matches AS matches
             JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
             JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
-            WHERE matches.before_scan_id IN ({placeholders})
+            WHERE matches.before_scan_id IN (SELECT value FROM json_each(?))
             ORDER BY matches.before_scan_id, after.scan_id, before.finding_id, after.finding_id
             """,
             sorted(scan_ids),
@@ -1466,14 +1470,8 @@ def _rows_for_ids(
     connection: sqlite3.Connection, query: str, ids: Iterable[str]
 ) -> Iterator[sqlite3.Row]:
     values = tuple(dict.fromkeys(ids))
-    getlimit = getattr(connection, "getlimit", None)
-    # Python 3.10 lacks getlimit; 999 is SQLite's older host-parameter limit.
-    limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if getlimit else 999
-    for start in range(0, len(values), limit):
-        batch = values[start : start + limit]
-        yield from connection.execute(
-            query.format(placeholders=", ".join("?" for _ in batch)), batch
-        )
+    if values:
+        yield from connection.execute(query, (json.dumps(values),))
 
 
 # Stable finding IDs already include the target identity. Follow their indexed
@@ -1493,7 +1491,7 @@ _LINKED_FINDINGS_SQL = f"""
     WITH RECURSIVE linked(finding_id) AS (
         SELECT occurrences.finding_id
         FROM finding_occurrences AS occurrences
-        WHERE occurrences.id IN ({{placeholders}})
+        WHERE occurrences.id IN (SELECT value FROM json_each(?))
         UNION
         SELECT neighbor.finding_id
         {_FINDING_NEIGHBORS_SQL}
@@ -1562,7 +1560,7 @@ def finding_relations(
         for row in _rows_for_ids(
             connection,
             "SELECT id, finding_id, scan_id, title FROM finding_occurrences "
-            "WHERE id IN ({placeholders})",
+            "WHERE id IN (SELECT value FROM json_each(?))",
             (pair[key] for pair in pairs for key in ("beforeOccurrenceId", "afterOccurrenceId")),
         )
     }
@@ -1718,6 +1716,9 @@ def finding_occurrence_rows(
         status=status,
         aggregate_status=aggregate_status,
     )
+    severity_order = " ".join(
+        f"WHEN '{level}' THEN {rank}" for level, rank in SEVERITY_ORDER.items()
+    )
     return connection.execute(
         f"""
         SELECT
@@ -1734,14 +1735,7 @@ def finding_occurrence_rows(
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         WHERE {conditions}
         ORDER BY
-            CASE occurrences.severity
-                WHEN 'critical' THEN 0
-                WHEN 'high' THEN 1
-                WHEN 'medium' THEN 2
-                WHEN 'low' THEN 3
-                WHEN 'informational' THEN 4
-                ELSE 5
-            END,
+            CASE occurrences.severity {severity_order} ELSE 5 END,
             occurrences.created_at,
             occurrences.id
         LIMIT ? OFFSET ?

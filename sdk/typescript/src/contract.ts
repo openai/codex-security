@@ -1,3 +1,4 @@
+import { isDeepStrictEqual as sameArray } from "node:util";
 import { createHash, hash } from "node:crypto";
 import { isNonEmptyString } from "./value.js";
 import { constants, type BigIntStats, type Stats } from "node:fs";
@@ -33,17 +34,6 @@ const DOCUMENTS = {
   "coverage.json": "coverage.schema.json",
 } as const;
 const PRODUCER_NAME = "codex-security-plugin";
-const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
-  "scan",
-  "target",
-  "remote",
-  "completedAt",
-  "sealedAt",
-  "artifacts",
-  "findings",
-  "coverage",
-  "scope",
-]);
 interface CheckedScanFile {
   path: string;
   metadata: Stats;
@@ -91,29 +81,16 @@ export async function loadContractWithScanDirectory(
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
-  const payloads = {
-    "scan-manifest.json": await readScanJson(
+  const payloads: Record<string, unknown> = {};
+  for (const filename of Object.keys(DOCUMENTS)) {
+    payloads[filename] = await readScanJson(
       scanDir,
-      "scan-manifest.json",
+      filename as keyof typeof DOCUMENTS,
       documentDigests,
       options.signal,
       scanRoot,
-    ),
-    "findings.json": await readScanJson(
-      scanDir,
-      "findings.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-    "coverage.json": await readScanJson(
-      scanDir,
-      "coverage.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-  };
+    );
+  }
   throwIfAborted(options.signal);
   let findingsPayload: unknown = payloads["findings.json"];
 
@@ -129,9 +106,7 @@ export async function loadContractWithScanDirectory(
     try {
       validate = ajv.compile(schema);
       payload =
-        filename === "findings.json"
-          ? findingsPayload
-          : payloads[filename as keyof typeof payloads];
+        filename === "findings.json" ? findingsPayload : payloads[filename];
       const validatePayload = (payload: unknown) => {
         const result = validate(payload);
         if (typeof result !== "boolean") {
@@ -219,17 +194,12 @@ export function normalizePersistedFindings(payload: unknown): unknown {
     if (!isRecord(finding)) continue;
     const legacyEvidence = finding["code_evidence"];
     if (Array.isArray(legacyEvidence)) {
-      const compatibleEvidence: JsonRecord[] = [];
-      for (const evidence of legacyEvidence) {
-        if (!isRecord(evidence)) continue;
-        const id = evidence["id"];
-        const code = evidence["code"];
-        if (!isNonEmptyString(id) || !isNonEmptyString(code)) {
-          continue;
-        }
-        compatibleEvidence.push(evidence);
-      }
-      finding["code_evidence"] = compatibleEvidence;
+      finding["code_evidence"] = legacyEvidence.filter(
+        (evidence) =>
+          isRecord(evidence) &&
+          isNonEmptyString(evidence["id"]) &&
+          isNonEmptyString(evidence["code"]),
+      );
     } else if ("code_evidence" in finding && legacyEvidence !== null) {
       delete finding["code_evidence"];
     }
@@ -283,10 +253,7 @@ export function normalizePersistedFindings(payload: unknown): unknown {
 
     const validation = finding["validation"];
     if (isRecord(validation)) {
-      if (
-        typeof validation["evidence"] !== "string" ||
-        validation["evidence"].length === 0
-      ) {
+      if (!isNonEmptyString(validation["evidence"])) {
         normalizeLegacyStringLists(validation, ["evidence"]);
       }
       removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
@@ -303,16 +270,8 @@ export function normalizePersistedFindings(payload: unknown): unknown {
     removeUnsupportedLegacyStrings(attackPath, ["summary"]);
     for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
       const detail = attackPath[field];
-      if (detail === null) {
-        delete attackPath[field];
-        continue;
-      }
-      if (typeof detail === "string") {
-        if (detail.length === 0) delete attackPath[field];
-        continue;
-      }
       if (!isRecord(detail)) {
-        if (field in attackPath) delete attackPath[field];
+        if (!isNonEmptyString(detail)) delete attackPath[field];
         continue;
       }
       removeUnsupportedLegacyStrings(detail, [
@@ -367,10 +326,7 @@ function removeUnsupportedLegacyStrings(
   fields: string[],
 ): void {
   for (const field of fields) {
-    if (
-      field in section &&
-      (typeof section[field] !== "string" || section[field].length === 0)
-    ) {
+    if (field in section && !isNonEmptyString(section[field])) {
       delete section[field];
     }
   }
@@ -647,21 +603,32 @@ async function validateSeal(
     }
   }
 
+  const requireSealedReference = (reference: unknown, context: string) => {
+    throwIfAborted(signal);
+    if (typeof reference !== "string") {
+      throw new ContractValidationError(`${context}: expected a string.`);
+    }
+    const normalized = portableRelativePath(reference, context.toLowerCase());
+    if (!normalized.startsWith("artifacts/")) {
+      throw new ContractValidationError(
+        `${context} must be under artifacts/: ${reference}`,
+      );
+    }
+    if (!artifactPaths.has(normalized)) {
+      throw new ContractValidationError(
+        `${context} is missing from sealed artifacts: ${reference}`,
+      );
+    }
+  };
   for (const surface of coverage.surfaces) {
     for (const receipt of surface.receiptRefs) {
-      throwIfAborted(signal);
-      const normalized = portableRelativePath(receipt, "coverage receipt");
-      if (!normalized.startsWith("artifacts/")) {
-        throw new ContractValidationError(
-          `Coverage receipt must be under artifacts/: ${receipt}`,
-        );
-      }
-      if (!artifactPaths.has(normalized)) {
-        throw new ContractValidationError(
-          `Coverage receipt is missing from sealed artifacts: ${receipt}`,
-        );
-      }
+      requireSealedReference(receipt, "Coverage receipt");
     }
+  }
+  const extensions = scan["extensions"];
+  const imported = isRecord(extensions) ? extensions["import"] : undefined;
+  if (isRecord(imported) && "sourceRef" in imported) {
+    requireSealedReference(imported["sourceRef"], "Import source");
   }
 
   for (const [index, finding] of findings.findings.entries()) {
@@ -1002,7 +969,7 @@ function validateParsedJson(value: unknown, context: string): void {
           `${context}: expected well-formed Unicode JSON keys.`,
         );
       }
-      validateParsedJson(item, `${context}.<property>`);
+      validateParsedJson(item, `${context}[${JSON.stringify(key)}]`);
     }
   }
 }
@@ -1175,29 +1142,13 @@ function schemaError(
   errors: readonly ErrorObject[],
 ): ContractValidationError {
   const first = errors[0];
-  const segments = first?.instancePath.split("/").filter(Boolean) ?? [];
-  const location =
-    segments.length === 0
-      ? "<root>"
-      : segments
-          .map((segment) => {
-            if (/^(?:0|[1-9]\d{0,9})$/.test(segment)) return segment;
-            return SAFE_SCHEMA_ERROR_PROPERTIES.has(segment)
-              ? segment
-              : "<property>";
-          })
-          .join(".");
+  const location = first?.instancePath
+    ? JSON.stringify(first.instancePath)
+    : "<root>";
   const keyword = first?.keyword ?? "unknown";
   const count = errors.length;
   return new ContractValidationError(
-    `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"}).`,
-  );
-}
-
-function sameArray(left: readonly string[], right: readonly string[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every((value, index) => value === right[index])
+    `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"})${first?.message ? `: ${first.message}` : ""}.`,
   );
 }
 

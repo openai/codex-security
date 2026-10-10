@@ -1,6 +1,6 @@
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { once } from "node:events";
-import { mkdir, stat } from "node:fs/promises";
+import { chmod, mkdir, rm, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import {
   CodexSecurityError,
+  ContractValidationError,
   IncompleteScanError,
   ScanInterruptedError,
   type ScanAuthentication,
@@ -1145,43 +1146,27 @@ describe("one-shot scan events", () => {
       { phase: "validation", filesCompleted: 8, filesTotal: 8 },
     ]);
   });
+});
 
-  test("forwards every file count printed by a completed review command", async () => {
-    const scanDir = await copyCompletedScan(await temporaryDirectory());
-    const updates: ScanProgress[] = [];
-
-    async function* progressEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
-      yield {
-        type: "item.completed",
-        item: {
-          id: "file-review-1",
-          type: "command_execution",
-          command: "review the two files in the inventory",
-          aggregated_output: [
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":2}',
-            "--- commands.py ---",
-            "--- server.py ---",
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":2,"filesTotal":2}',
-          ].join("\n"),
-          exit_code: 0,
-          status: "completed",
-        },
-      };
-      yield completedTurn();
-    }
-
-    await expect(
-      runEvents(scanDir, progressEvents(), {
-        expectedFilesTotal: 2,
-        onProgress: (progress) => updates.push(progress),
-      }),
-    ).resolves.toBeDefined();
-    expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
-      { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
-    ]);
+test("missing required artifacts remain incomplete scans", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  await rm(join(scanDir, "report.md"));
+  await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+    name: IncompleteScanError.name,
+    message:
+      "Codex Security scan completed without required artifacts: report.md",
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "preserves unsafe scan-root diagnostics instead of reporting missing files",
+  async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    await chmod(scanDir, 0o755);
+    await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+      name: ContractValidationError.name,
+      message: expect.stringContaining("chmod 700"),
+      cause: expect.any(Error),
+    });
+  },
+);

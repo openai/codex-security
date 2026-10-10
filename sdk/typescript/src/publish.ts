@@ -1,4 +1,4 @@
-import { findingEntry } from "./value.js";
+import { findingEntry, notify } from "./value.js";
 import {
   spawn,
   spawnSync,
@@ -204,6 +204,7 @@ type PublicationHandoffEvidence = {
   ownerFindingId?: string;
   resolution: ClaimResolution;
   possibleMutation?: boolean;
+  cause?: unknown;
 } & (
   | { status: "success" }
   | { status: "failure"; error: string }
@@ -216,18 +217,6 @@ type PublicationHandoffEvidence = {
 
 type PublicationEvidence =
   PublicationEventEvidence | PublicationHandoffEvidence;
-
-interface IndexedPublicationEvidence {
-  byOwner: Map<string, PublicationEvidence[]>;
-  unowned: PublicationEvidence[];
-  claimLedger: Map<
-    string,
-    {
-      kinds: Set<PublicationClaim["kind"]>;
-      owners: Set<string | undefined>;
-    }
-  >;
-}
 
 interface ReconciledPublication {
   created: PublishedScanIssue[];
@@ -383,7 +372,6 @@ export async function publishScanInternal(
       if (
         dependencies.runCodex === undefined &&
         error instanceof CodexSecurityError &&
-        error.message === "Could not start Codex for Linear publication." &&
         isRecord(cause) &&
         typeof cause["syscall"] === "string" &&
         cause["syscall"].startsWith("spawn ")
@@ -403,14 +391,30 @@ export async function publishScanInternal(
       : invocation!.exitCode === 0
         ? "Codex did not create a Linear issue for this finding."
         : codexFailureMessage(invocation!.stderr, invocation!.exitCode);
-  const evidence: PublicationEvidence[] = [
-    ...collectPublicationEvents(
-      invocation?.stdout ?? "",
-      prepared,
-      failureMessage,
-    ),
-    ...(await collectPublicationHandoffEvidence(handoff.file, prepared)),
-  ];
+  const events = collectPublicationEvents(
+    invocation?.stdout ?? "",
+    prepared,
+    failureMessage,
+  );
+  const connectorEvents = events.map((item) => item.rawLine);
+  let eventLogNotice: string | undefined;
+  const preserveConnectorEvents = async (): Promise<void> => {
+    if (eventLogNotice !== undefined || connectorEvents.length === 0) return;
+    try {
+      const file = await (dependencies.writeEvents ?? writePublicationEvents)(
+        handoff.directory,
+        connectorEvents,
+      );
+      eventLogNotice = `Linear connector-event evidence remains at ${file}.`;
+    } catch (error) {
+      eventLogNotice = `Could not preserve Linear connector-event evidence: ${errorMessage(error)}.`;
+    }
+  };
+  const handoffEvidence = await collectPublicationHandoffEvidence(
+    handoff.file,
+    prepared,
+  );
+  const evidence = [...events, ...handoffEvidence];
   const handoffResults = reconcilePublicationEvidence(
     prepared,
     evidence,
@@ -442,26 +446,17 @@ export async function publishScanInternal(
     }
   }
   const recoveryMessage = `The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`;
-  const connectorEvents = evidence.flatMap((item) =>
-    item.source === "event" ? [item.rawLine] : [],
-  );
-  let eventLogNotice: string | undefined;
-  const preserveConnectorEvents = async (): Promise<void> => {
-    if (eventLogNotice !== undefined || connectorEvents.length === 0) return;
-    try {
-      const file = await (dependencies.writeEvents ?? writePublicationEvents)(
-        handoff.directory,
-        connectorEvents,
-      );
-      eventLogNotice = `Linear connector-event evidence remains at ${file}.`;
-    } catch (error) {
-      eventLogNotice = `Could not preserve Linear connector-event evidence: ${errorMessage(error)}.`;
-    }
-  };
   if (handoffResults.indeterminate) {
     result.indeterminate = true;
     result.warnings = [
       `The Linear publication outcome is indeterminate; local history may not include every created issue. ${recoveryMessage}`,
+      ...evidence.flatMap((item) =>
+        item.source === "handoff" &&
+        item.status === "invalid" &&
+        item.ownerFindingId === undefined
+          ? [item.error]
+          : [],
+      ),
     ];
     await preserveConnectorEvents();
     if (eventLogNotice !== undefined) result.warnings.push(eventLogNotice);
@@ -511,7 +506,9 @@ export async function publishScanInternal(
         : `Could not persist created Linear issues: ${persistenceFailure.detail}`;
     const cause =
       persistenceFailure === undefined
-        ? options.signal?.reason
+        ? options.signal?.aborted
+          ? options.signal.reason
+          : handoffEvidence.find((item) => item.cause !== undefined)?.cause
         : persistenceFailure.cause;
     if (persistenceFailure !== undefined && !result.indeterminate) {
       throw new CodexSecurityError(`${reason}. ${recoveryDetails}`, { cause });
@@ -539,7 +536,6 @@ export async function publishScanInternal(
       `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
     ];
   }
-  options.signal?.throwIfAborted();
   reportPublicationProgress(progressObserver, {
     type: "completed",
     created: result.counts.created,
@@ -816,11 +812,7 @@ function reportPublicationProgress(
   event: PublishScanProgress,
 ): void {
   if (observer === undefined) return;
-  try {
-    observer(event);
-  } catch {
-    // Optional progress reporting must not stop issue publication.
-  }
+  notify(() => observer(event));
 }
 
 function publicationPrompt(
@@ -920,159 +912,168 @@ async function createPublicationHandoff(
   return { directory, file, publicationFile };
 }
 
+async function readPublicationHandoff(file: string): Promise<string> {
+  try {
+    return await readFile(file, "utf8");
+  } catch (error) {
+    if (isRecord(error) && error["code"] === "ENOENT") return "";
+    throw new CodexSecurityError(
+      `Could not read the publication handoff: ${errorMessage(error)}. The publication handoff remains at ${file}; recover it before retrying to avoid creating duplicate issues.`,
+      { cause: error },
+    );
+  }
+}
+
 async function collectPublicationHandoffEvidence(
   file: string,
   publication: PreparedScanPublication,
 ): Promise<PublicationHandoffEvidence[]> {
   let content: string;
   try {
-    content = await readFile(file, "utf8");
-  } catch {
-    return [];
-  }
-
-  const evidence: PublicationHandoffEvidence[] = [];
-  const expectedIssues = new Map(publication.issues.map(findingEntry));
-  for (const rawLine of content.split(/\r?\n/)) {
-    if (rawLine.trim().length === 0) continue;
-    let record: unknown;
-    try {
-      record = JSON.parse(rawLine) as unknown;
-    } catch {
-      evidence.push({
+    content = await readPublicationHandoff(file);
+  } catch (error) {
+    return [
+      {
         source: "handoff",
         status: "invalid",
+        possibleMutation: true,
         resolution: resolveClaims([]),
-        error: "Codex wrote an invalid Linear publication handoff.",
-      });
-      continue;
-    }
-
-    const resolution = resolvePublicationClaims(record);
-    const possibleMutation =
-      isRecord(record) && record["possibleMutation"] === true
-        ? { possibleMutation: true as const }
-        : {};
-    if (!isRecord(record) || typeof record["findingId"] !== "string") {
-      evidence.push({
-        source: "handoff",
-        status: "invalid",
-        resolution,
-        ...possibleMutation,
-        error: "Codex wrote an unexpected Linear publication handoff.",
-      });
-      continue;
-    }
-    const issue = expectedIssues.get(record["findingId"]);
-    if (issue === undefined) {
-      evidence.push({
-        source: "handoff",
-        status: "invalid",
-        resolution,
-        ...possibleMutation,
-        error: "Codex wrote a Linear publication for an unknown finding.",
-      });
-      continue;
-    }
-
-    const argumentsValid = hasExpectedPublicationArguments(
-      publication,
-      issue,
-      record["arguments"],
-    );
-    const mutationPossible =
-      record["possibleMutation"] === true ||
-      (!Object.hasOwn(record, "error") && argumentsValid);
-    const base = {
-      source: "handoff" as const,
-      ownerFindingId: issue.findingId,
-      resolution,
-      ...(mutationPossible ? { possibleMutation: true as const } : {}),
-    };
-    if (
-      record["scanId"] !== publication.scanId ||
-      record["occurrenceId"] !== issue.occurrenceId
-    ) {
-      evidence.push({
-        ...base,
-        status: "invalid",
-        error:
-          "Codex wrote a Linear publication with an unexpected scan or finding occurrence.",
-      });
-      continue;
-    }
-
-    const identityNames = ["issueIdentifier", "identifier", "key", "id"].filter(
-      (name) => Object.hasOwn(record, name),
-    );
-    if (Object.hasOwn(record, "error")) {
-      const error = record["error"];
-      const hasInvalidPossibleMutation =
-        Object.hasOwn(record, "possibleMutation") &&
-        record["possibleMutation"] !== true;
-      if (
-        identityNames.length === 0 &&
-        !Object.hasOwn(record, "url") &&
-        resolution.claims.length === 0 &&
-        !hasInvalidPossibleMutation &&
-        typeof error === "string" &&
-        error.trim().length > 0
-      ) {
-        evidence.push({ ...base, status: "failure", error });
-      } else {
-        evidence.push({
-          ...base,
-          status: "invalid",
-          error: "Codex wrote an invalid Linear publication failure.",
-        });
-      }
-      continue;
-    }
-
-    if (resolution.state === "conflicting") {
-      evidence.push({
-        ...base,
-        status: "invalid",
-        error:
-          "Codex wrote conflicting Linear publication issue identifiers or URLs.",
-      });
-      continue;
-    }
-    const topLevelResolution = resolveTopLevelPublicationClaims(record);
-    const hasInvalidIdentityField = identityNames.some((name) => {
-      const value = record[name];
-      return typeof value !== "string" || value.trim().length === 0;
-    });
-    const topLevelUrl = record["url"];
-    if (
-      resolution.state !== "resolved" ||
-      topLevelResolution.state !== "resolved" ||
-      topLevelResolution.issueIdentifier !== resolution.issueIdentifier ||
-      hasInvalidIdentityField ||
-      (topLevelUrl !== undefined &&
-        (typeof topLevelUrl !== "string" || topLevelUrl.trim().length === 0))
-    ) {
-      evidence.push({
-        ...base,
-        status: "invalid",
-        error:
-          "Codex wrote a Linear publication without a valid created issue identifier.",
-      });
-      continue;
-    }
-    if (!argumentsValid) {
-      evidence.push({
-        ...base,
-        status: "invalid",
-        recoverableWithEvent: true,
-        error:
-          "Codex wrote a Linear publication with unexpected arguments or destination.",
-      });
-      continue;
-    }
-    evidence.push({ ...base, status: "success" });
+        error: errorMessage(error),
+        cause: error,
+      },
+    ];
   }
-  return evidence;
+
+  const expectedIssues = new Map(publication.issues.map(findingEntry));
+  return content
+    .split(/\r?\n/)
+    .flatMap((rawLine): PublicationHandoffEvidence | [] => {
+      if (rawLine.trim().length === 0) return [];
+      let record: unknown;
+      try {
+        record = JSON.parse(rawLine) as unknown;
+      } catch {
+        return {
+          source: "handoff",
+          status: "invalid",
+          resolution: resolveClaims([]),
+          error: "Codex wrote an invalid Linear publication handoff.",
+        };
+      }
+
+      const resolution = resolvePublicationClaims(record);
+      const possibleMutation =
+        isRecord(record) && record["possibleMutation"] === true
+          ? { possibleMutation: true as const }
+          : {};
+      if (!isRecord(record) || typeof record["findingId"] !== "string") {
+        return {
+          source: "handoff",
+          status: "invalid",
+          resolution,
+          ...possibleMutation,
+          error: "Codex wrote an unexpected Linear publication handoff.",
+        };
+      }
+      const issue = expectedIssues.get(record["findingId"]);
+      if (issue === undefined) {
+        return {
+          source: "handoff",
+          status: "invalid",
+          resolution,
+          ...possibleMutation,
+          error: "Codex wrote a Linear publication for an unknown finding.",
+        };
+      }
+
+      const argumentsValid = hasExpectedPublicationArguments(
+        publication,
+        issue,
+        record["arguments"],
+      );
+      const mutationPossible =
+        record["possibleMutation"] === true ||
+        (!Object.hasOwn(record, "error") && argumentsValid);
+      const base = {
+        source: "handoff" as const,
+        ownerFindingId: issue.findingId,
+        resolution,
+        ...(mutationPossible ? { possibleMutation: true as const } : {}),
+      };
+      const invalid = (
+        error: string,
+        recoverableWithEvent?: true,
+      ): PublicationHandoffEvidence => ({
+        ...base,
+        status: "invalid",
+        ...(recoverableWithEvent === undefined ? {} : { recoverableWithEvent }),
+        error,
+      });
+      if (
+        record["scanId"] !== publication.scanId ||
+        record["occurrenceId"] !== issue.occurrenceId
+      ) {
+        return invalid(
+          "Codex wrote a Linear publication with an unexpected scan or finding occurrence.",
+        );
+      }
+
+      const identityNames = [
+        "issueIdentifier",
+        "identifier",
+        "key",
+        "id",
+      ].filter((name) => Object.hasOwn(record, name));
+      if (Object.hasOwn(record, "error")) {
+        const error = record["error"];
+        const hasInvalidPossibleMutation =
+          Object.hasOwn(record, "possibleMutation") &&
+          record["possibleMutation"] !== true;
+        if (
+          identityNames.length === 0 &&
+          !Object.hasOwn(record, "url") &&
+          resolution.claims.length === 0 &&
+          !hasInvalidPossibleMutation &&
+          typeof error === "string" &&
+          error.trim().length > 0
+        ) {
+          return { ...base, status: "failure", error };
+        } else {
+          return invalid("Codex wrote an invalid Linear publication failure.");
+        }
+      }
+
+      if (resolution.state === "conflicting") {
+        return invalid(
+          "Codex wrote conflicting Linear publication issue identifiers or URLs.",
+        );
+      }
+      const topLevelResolution = resolveTopLevelPublicationClaims(record);
+      const hasInvalidIdentityField = identityNames.some((name) => {
+        const value = record[name];
+        return typeof value !== "string" || value.trim().length === 0;
+      });
+      const topLevelUrl = record["url"];
+      if (
+        resolution.state !== "resolved" ||
+        topLevelResolution.state !== "resolved" ||
+        topLevelResolution.issueIdentifier !== resolution.issueIdentifier ||
+        hasInvalidIdentityField ||
+        (topLevelUrl !== undefined &&
+          (typeof topLevelUrl !== "string" || topLevelUrl.trim().length === 0))
+      ) {
+        return invalid(
+          "Codex wrote a Linear publication without a valid created issue identifier.",
+        );
+      }
+      if (!argumentsValid) {
+        return invalid(
+          "Codex wrote a Linear publication with unexpected arguments or destination.",
+          true,
+        );
+      }
+      return { ...base, status: "success" };
+    });
 }
 
 function resolveTopLevelPublicationClaims(
@@ -1092,20 +1093,36 @@ function reconcilePublicationEvidence(
   evidence: readonly PublicationEvidence[],
   failureMessage: string,
 ): ReconciledPublication {
-  const indexed = indexPublicationEvidence(evidence);
-  const outcomes = publication.issues.map((issue) =>
-    reconcileFindingEvidence(issue, indexed.byOwner.get(issue.findingId)),
-  );
-  let indeterminate = outcomes.some((outcome) => outcome.indeterminate);
-
+  const byOwner = Map.groupBy(evidence, (item) => item.ownerFindingId);
+  const claimLedger = new Map<
+    string,
+    { kind: PublicationClaim["kind"]; owner: string | undefined }
+  >();
   const collidingOwners = new Set<string>();
-  for (const reservation of indexed.claimLedger.values()) {
-    if (reservation.kinds.size > 1 || reservation.owners.size > 1) {
-      for (const owner of reservation.owners) {
-        if (owner !== undefined) collidingOwners.add(owner);
+  for (const item of evidence) {
+    for (const claim of item.resolution.claims) {
+      for (const alias of publicationClaimAliases(claim)) {
+        const reservation = claimLedger.get(alias.value);
+        const owner = item.ownerFindingId;
+        if (reservation === undefined) {
+          claimLedger.set(alias.value, { kind: alias.kind, owner });
+        } else if (
+          reservation.kind !== alias.kind ||
+          reservation.owner !== owner
+        ) {
+          if (reservation.owner !== undefined)
+            collidingOwners.add(reservation.owner);
+          if (owner !== undefined) collidingOwners.add(owner);
+        }
       }
     }
   }
+
+  const outcomes = publication.issues.map((issue) =>
+    reconcileFindingEvidence(issue, byOwner.get(issue.findingId)),
+  );
+  let indeterminate = outcomes.some((outcome) => outcome.indeterminate);
+
   for (const outcome of outcomes) {
     if (!collidingOwners.has(outcome.issue.findingId)) continue;
     outcome.created = undefined;
@@ -1114,7 +1131,7 @@ function reconcilePublicationEvidence(
     indeterminate = true;
   }
 
-  const unowned = indexed.unowned;
+  const unowned = byOwner.get(undefined) ?? [];
   if (
     unowned.some(
       (item) =>
@@ -1157,39 +1174,6 @@ function reconcilePublicationEvidence(
         : [{ findingId: outcome.issue.findingId, error: outcome.error }],
     ),
   };
-}
-
-function indexPublicationEvidence(
-  evidence: readonly PublicationEvidence[],
-): IndexedPublicationEvidence {
-  const byOwner = new Map<string, PublicationEvidence[]>();
-  const unowned: PublicationEvidence[] = [];
-  const claimLedger: IndexedPublicationEvidence["claimLedger"] = new Map();
-
-  for (const item of evidence) {
-    for (const claim of item.resolution.claims) {
-      for (const alias of publicationClaimAliases(claim)) {
-        const key = alias.value;
-        const reservation = claimLedger.get(key) ?? {
-          kinds: new Set<PublicationClaim["kind"]>(),
-          owners: new Set<string | undefined>(),
-        };
-        reservation.kinds.add(alias.kind);
-        reservation.owners.add(item.ownerFindingId);
-        claimLedger.set(key, reservation);
-      }
-    }
-
-    if (item.ownerFindingId === undefined) {
-      unowned.push(item);
-      continue;
-    }
-    const bucket = byOwner.get(item.ownerFindingId) ?? [];
-    bucket.push(item);
-    byOwner.set(item.ownerFindingId, bucket);
-  }
-
-  return { byOwner, unowned, claimLedger };
 }
 
 function reconcileFindingEvidence(
@@ -1377,12 +1361,7 @@ async function preserveVerifiedHandoff(
   publication: PreparedScanPublication,
   issues: readonly PublishedScanIssue[],
 ): Promise<void> {
-  let current: string;
-  try {
-    current = await readFile(file, "utf8");
-  } catch {
-    current = "";
-  }
+  const current = await readPublicationHandoff(file);
   const planned = new Map(publication.issues.map(findingEntry));
   const verified = new Map(issues.map(findingEntry));
   const recorded = new Set<string>();
@@ -1529,7 +1508,7 @@ async function runPublicationCodex(
       cleanup();
       reject(
         new CodexSecurityError(
-          "Could not start Codex for Linear publication.",
+          `Could not start Codex for Linear publication: ${errorMessage(error)}`,
           {
             cause: error,
           },
