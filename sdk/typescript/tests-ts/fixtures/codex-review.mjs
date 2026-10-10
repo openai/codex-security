@@ -4,6 +4,16 @@ import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout, stage = "pair-review"] =
   process.argv.slice(2);
+const refusalMessages = {
+  "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-prefix-text": "Safety policy: request refused.",
+  "policy-suffix-text": "Request refused: safety policy.",
+  "policy-causal-refusal-text":
+    "This request was refused because it violates the safety policy.",
+  "policy-refusal-text":
+    "This request was refused because of the safety policy.",
+  "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
+};
 const turnFailures = {
   "policy-turn-code": {
     message: "Request blocked.",
@@ -27,6 +37,10 @@ const turnFailures = {
   },
   "server-error": {
     message: "Provider temporarily unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "service-unavailable": {
+    message: "Connection refused: safety policy service unavailable",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
   "connection-error": {
@@ -235,10 +249,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (
       scenario === "text-only" ||
-      scenario === "refusal-text" ||
-      scenario === "policy-causal-refusal-text" ||
-      scenario === "policy-refusal-text" ||
-      scenario === "policy-first-refusal-text" ||
+      Object.hasOwn(refusalMessages, scenario) ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -253,16 +264,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           turnId,
           item: {
             type: "agentMessage",
-            text:
-              scenario === "refusal-text"
-                ? "I'm sorry, but I can't assist with that request."
-                : scenario === "policy-first-refusal-text"
-                  ? "Cybersecurity policy: this request is refused."
-                  : scenario === "policy-causal-refusal-text"
-                    ? "This request was refused because it violates the safety policy."
-                    : scenario === "policy-refusal-text"
-                      ? "This request was refused because of the safety policy."
-                      : '{"decision":"SAME"}',
+            text: refusalMessages[scenario] ?? '{"decision":"SAME"}',
           },
         },
       });

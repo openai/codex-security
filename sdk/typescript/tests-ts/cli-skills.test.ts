@@ -1263,11 +1263,28 @@ process.stdout.write(JSON.stringify({
     expect(stderr.text()).toBe("");
   });
 
-  test.each(["validate", "patch", "verify-fix"] as const)(
-    "retains model permission advice from the %s child",
-    async (command) => {
-      const detail =
-        "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP";
+  test.each([
+    ...(["validate", "patch", "verify-fix"] as const).map(
+      (command) =>
+        [
+          command,
+          "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP",
+          "The selected model is unavailable for the current credentials.",
+        ] as const,
+    ),
+    [
+      "validate",
+      "Provider configured in config.toml returned 401 Unauthorized",
+      "Authentication failed.",
+    ],
+    [
+      "validate",
+      "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
+      null,
+    ],
+  ] as const)(
+    "retains failure advice and diagnostics from the %s child: %s",
+    async (command, detail, advice) => {
       const stdout = capture();
       const stderr = capture();
       const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
@@ -1279,15 +1296,23 @@ process.stdout.write(JSON.stringify({
         ),
       ).toBe(7);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(
-        "The selected model is unavailable for the current credentials.",
-      );
+      if (advice === null) {
+        expect(stderr.text()).toBe(
+          `codex-security: ${command} failed with exit code 7.\n${detail}\n`,
+        );
+      } else {
+        expect(stderr.text()).toContain(advice);
+      }
       expect(stderr.text()).toContain(detail);
     },
   );
 
   test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
+      ["invalid.api.key", "Authentication failed"],
+      ["token.expired", "Authentication failed"],
+      ["model.not.found", "selected model is unavailable"],
+      ["model.access", "selected model is unavailable"],
       ["HTTP 401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
       [
         "403 model access denied /private/repository",
@@ -1308,12 +1333,14 @@ process.stdout.write(JSON.stringify({
       ],
       ["tokens-per-minute limit exceeded", "rate limited"],
       ["tokens_per_minute limit exceeded", "rate limited"],
+      ["tokens.per.minute", "rate limited"],
       [
         "models cache supports_reasoning_summaries /private/home",
         "model metadata",
       ],
       ["ENOTFOUND /private/repository", "could not connect"],
       ["ECONNABORTED sk-proj-SYNTHETIC_SECRET", "could not connect"],
+      ["timed_out", "could not connect"],
       ["unknown sk-proj-SYNTHETIC_SECRET /private/repository", "exit code 7"],
     ];
     for (const [detail, expected] of cases) {
@@ -1359,6 +1386,7 @@ process.stdout.write(JSON.stringify({
 
   test.each([
     "Failed after 1401 bytes",
+    "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
     "permission denied opening cache",
     "permission denied opening model cache",
     "line 1429 could not be parsed",

@@ -850,6 +850,7 @@ describe("CodexSecurity orchestration", () => {
       "sqlite3.OperationalError: unable to open database file\nwith closing(connect()) as connection:",
       "Could not save the Codex Security scan: database connection failed",
       "Codex Security workbench: permission denied",
+      "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
     ]) {
       expect(classifyConnectionFailure(message)).toBe("unknown");
     }
@@ -871,8 +872,19 @@ describe("CodexSecurity orchestration", () => {
     ["HTTP 401 NotAuthorized", "forbidden"],
     ["OptInRequired", "forbidden"],
     ["ThrottlingException", "rate_limited"],
+    [
+      "Provider configured in config.toml returned 401 Unauthorized",
+      "unauthorized",
+    ],
+    ["Provider configured in config.toml returned 403 Forbidden", "forbidden"],
+    [
+      "Provider configured in config.toml returned 429 Too Many Requests",
+      "rate_limited",
+    ],
+    ["Provider configured in config.toml returned ECONNRESET", "network_error"],
+    ["Provider configured in config.toml timed out", "timeout"],
   ] as const)(
-    "classifies Bedrock error %s as %s",
+    "classifies provider error %s as %s",
     (message, classification) => {
       expect(classifyConnectionFailure(new Error(message))).toBe(
         classification,

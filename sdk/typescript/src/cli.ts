@@ -8103,7 +8103,7 @@ export function skillCommandFailure(
       detail,
     ) ||
     (classification === "forbidden" &&
-      /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
+      /\b403\b|\bforbidden\b|\bmodel[ ._-]?(?:not[ ._-]?found|access)\b|\baccess.*model\b/iu.test(
         classificationDetail,
       ))
   ) {
