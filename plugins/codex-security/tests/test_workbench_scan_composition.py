@@ -2373,3 +2373,107 @@ def test_stopped_parent_keeps_writeup_and_colliding_evidence(tmp_path: Path) -> 
     assert (
         parent_dir / "findings" / child["scanId"] / "check-3/check-3.md"
     ).read_text() == "# Another finding\n"
+
+
+@pytest.mark.parametrize(
+    ("child_state", "action"),
+    [("complete", "cancel-scan"), ("checkpoint", "cancel-scan"), ("complete", "fail-scan")],
+)
+@pytest.mark.parametrize("with_model", [False, True])
+def test_stopped_composition_retains_child_context_and_export(
+    tmp_path, workbench_api, child_state, action, with_model
+):
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
+    parent = register(state, target, tmp_path / "parent", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    model = {
+        "format": "markdown",
+        "content": "# Synthetic model\n\nQueue producers cross the trust boundary.\n",
+        "origin": "generated",
+    }
+    scope = {"summary": "Queue processing", "assumptions": ["Producer input is untrusted."]}
+    manifest_path = child_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if with_model:
+        manifest["scan"]["threatModel"] = model
+    manifest["scan"]["scope"].update(scope)
+    manifest_path.write_text(json.dumps(manifest))
+    if child_state == "complete":
+        run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    else:
+        write_checkpoint(
+            child_dir / "checkpoints",
+            {
+                "scanId": child["scanId"],
+                "complete": False,
+                **({"threatModel": model} if with_model else {}),
+                "scope": scope,
+                "findings": json.loads((child_dir / "findings.json").read_text())["findings"],
+                "coverage": json.loads((child_dir / "coverage.json").read_text()),
+            },
+        )
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (child_dir / name).unlink()
+    original_child = {
+        path.relative_to(child_dir): path.read_bytes()
+        for path in child_dir.rglob("*")
+        if path.is_file()
+    }
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {
+                "directory": child_dir.relative_to(parent_dir).as_posix(),
+                "scanId": child["scanId"],
+            }
+        ],
+    )
+    extra = ("--message", "Synthetic interrupted composition.") if action == "fail-scan" else ()
+    run_workbench(state, action, "--scan-id", parent["scanId"], *extra)
+    stopped = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert stopped["findingCount"] == 1
+    assert stopped["threatModelAvailable"] is with_model
+    saved = json.loads((parent_dir / "scan-manifest.json").read_text())["scan"]
+    if with_model:
+        assert saved["threatModel"]["content"] == model["content"]
+    assert saved["scope"]["summary"] == scope["summary"]
+    assert saved["scope"]["assumptions"] == scope["assumptions"]
+    assert saved["scope"]["sourceScans"] == [
+        {
+            "scanId": child["scanId"],
+            "scope": scope,
+            **({"threatModel": model} if with_model else {}),
+        }
+    ]
+    if with_model:
+        exported = run_workbench(
+            state, "export-findings", "--scan-id", parent["scanId"], "--artifact", "threat-model"
+        )
+        assert model["content"] in Path(exported["export"]["path"]).read_text()
+    original_parent = (parent_dir / "scan-manifest.json").read_bytes()
+    repeated_command = "recover-scan-results" if action == "fail-scan" else "get-scan"
+    recovered = run_workbench(state, repeated_command, "--scan-id", parent["scanId"])["scan"]
+    assert recovered["threatModelAvailable"] is with_model
+    assert (parent_dir / "scan-manifest.json").read_bytes() == original_parent
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
+        connection.row_factory = sqlite3.Row
+        record = workbench_api["require_scan"](connection, parent["scanId"])
+        replayed = workbench_api["saved_results"].merge_saved_results(
+            parent_dir,
+            parent["scanId"],
+            workbench_api["workbench_completion_binding"](record, saved["completedAt"]),
+            [],
+            [],
+            stopped=True,
+            reason="Synthetic frozen-source replay.",
+            frozen_source_digests=saved["preservedSources"],
+        )
+    assert replayed is not None
+    assert replayed[0]["scan"]["scope"] == saved["scope"]
+    if with_model:
+        assert replayed[0]["scan"]["threatModel"] == saved["threatModel"]
+    assert {path: (child_dir / path).read_bytes() for path in original_child} == original_child

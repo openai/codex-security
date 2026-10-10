@@ -909,6 +909,24 @@ def preserve_parent_head_on_error(scan_dir: Path) -> Iterator[None]:
         raise
 
 
+def _retain_missing_scope(
+    scan: dict[str, Any], draft: dict[str, Any], binding: dict[str, Any]
+) -> None:
+    semantic_scope = draft.get("scope")
+    if not isinstance(semantic_scope, dict):
+        return
+    scope = copy.deepcopy(scan.get("scope", {}))
+    scan["scope"] = scope
+    for key, value in semantic_scope.items():
+        if key == "sourceScans" and isinstance(value, list) and isinstance(scope.get(key), list):
+            for context in value:
+                if context not in scope[key]:
+                    scope[key].append(copy.deepcopy(context))
+        else:
+            scope.setdefault(key, copy.deepcopy(value))
+    scope.update(copy.deepcopy(binding["scope"]))
+
+
 def merge_saved_results(
     scan_dir: Path,
     scan_id: str,
@@ -1301,6 +1319,7 @@ def merge_saved_results(
         model = drafts_by_path.get(frozen_model_source, {}).get("threatModel")
         if not isinstance(model, dict):
             raise ContractError("Frozen stopped-scan model source is unavailable.")
+        _retain_missing_scope(manifest["scan"], drafts_by_path[frozen_model_source], binding)
         manifest["scan"]["threatModel"] = copy.deepcopy(model)
         if paths[frozen_model_source] is not None:
             manifest["scan"]["threatModel"]["origin"] = "recovered"
@@ -1745,6 +1764,7 @@ def merge_saved_results(
         )
         if skip_superseded_findings and not selected_candidates and not retain_pending:
             continue
+        scope_draft = draft
         if (
             not skip_superseded_findings
             and "threatModel" not in manifest["scan"]
@@ -1775,11 +1795,14 @@ def merge_saved_results(
                     if prefer_worker_head:
                         model = current["threatModel"]
                         model_path = head_path
+                        scope_draft = current
             manifest["scan"]["threatModel"] = copy.deepcopy(model)
             if worker_id is not None:
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
             if selected_model_source is not None and worker_id is not None:
                 selected_model_source[:] = [model_path]
+        if not skip_superseded_findings:
+            _retain_missing_scope(manifest["scan"], scope_draft, binding)
         for value in draft["findings"]:
             if skip_superseded_findings and not (
                 isinstance(value, dict)
@@ -2148,7 +2171,7 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
         provenance["sourceFindings"] = [
             {"id": f"{child['id']}:{index}", "finding": projected["sourceFindings"][index]}
         ]
-    return {"findings": draft["findings"], "coverage": draft["coverage"]}
+    return draft
 
 
 def save_composed_checkpoint(
@@ -2186,6 +2209,20 @@ def save_composed_checkpoint(
             if not represented.intersection(finding["provenance"]["sourceFindingIds"])
         )
         merge_coverage(aggregate.setdefault("coverage", {}), draft["coverage"])
+        if draft.get("scope") or draft.get("threatModel"):
+            scope = aggregate.setdefault("scope", copy.deepcopy(draft.get("scope", {})))
+            scope.setdefault("sourceScans", []).append(
+                {
+                    "scanId": child["id"],
+                    **{
+                        key: copy.deepcopy(draft[key])
+                        for key in ("scope", "threatModel")
+                        if key in draft
+                    },
+                }
+            )
+        if "threatModel" in draft:
+            aggregate.setdefault("threatModel", copy.deepcopy(draft["threatModel"]))
     aggregate["scanId"] = scan["id"]
     aggregate["complete"] = False
     coverage = aggregate.setdefault("coverage", {})
