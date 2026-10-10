@@ -29,6 +29,22 @@ const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
   next: 4096,
 };
 
+/** Compare repository URLs without changing the retained vendor evidence.
+ * GitHub repository paths are case-insensitive; unknown VCS hosts stay strict.
+ * Keep protocols and explicit ports distinct, matching the Cloud URL contract. */
+export function repositoryUrlKey(value: string): string {
+  const normalized = value.replace(/\/$/u, "").replace(/\.git$/u, "");
+  const parts = /^(https?):\/\/([^/?#]+)([^?#]*)(.*)$/iu.exec(normalized);
+  if (!parts) return normalized;
+  const authority = parts[2]!.toLowerCase();
+  const hostname = authority.replace(/:\d+$/u, "");
+  const path =
+    hostname === "github.com" || hostname.endsWith(".ghe.com")
+      ? parts[3]!.toLowerCase()
+      : parts[3]!;
+  return `${parts[1]!.toLowerCase()}://${authority}${path}${parts[4]!}`;
+}
+
 // These model constraints are not represented by JSON Schema character limits.
 function validateModelStrings(input: unknown): void {
   if (input === null || typeof input !== "object") return;

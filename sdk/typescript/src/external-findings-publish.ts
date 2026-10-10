@@ -17,6 +17,7 @@ import {
 } from "./runtime.js";
 import { readVendorFindings, type VendorFindings } from "./wiz-findings.js";
 import {
+  repositoryUrlKey,
   validateImportRequest,
   validateImportReceipt,
   validateRepositories,
@@ -126,10 +127,6 @@ async function readInBatches<T, U>(
     }
   }
   return output;
-}
-
-function repositoryUrl(value: string): string {
-  return value.replace(/\/$/u, "").replace(/\.git$/u, "");
 }
 
 function canonicalJson(value: unknown): string {
@@ -309,7 +306,7 @@ export async function prepareExternalPublication(
       ...result.data.filter(
         (item) =>
           item.id === options.repository ||
-          repositoryUrl(item.url) === repositoryUrl(options.repository),
+          repositoryUrlKey(item.url) === repositoryUrlKey(options.repository),
       ),
     );
     page = result.next;
@@ -413,7 +410,8 @@ export async function prepareExternalPublication(
       const sourceRepository = finding.evidence.details?.repository;
       if (
         sourceRepository &&
-        repositoryUrl(sourceRepository.url) !== repositoryUrl(destination.url)
+        repositoryUrlKey(sourceRepository.url) !==
+          repositoryUrlKey(destination.url)
       )
         throw new CodexSecurityError(
           `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository.url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
