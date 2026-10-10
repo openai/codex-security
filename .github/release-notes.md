@@ -198,6 +198,7 @@
 - share Codex response handling across scan modes ([#917](https://github.com/openai/codex-security/pull/917))
 - preserve scoped Git inventories and directory snapshots ([#1280](https://github.com/openai/codex-security/pull/1280))
 - keep scan identity visible in results and failures ([#1554](https://github.com/openai/codex-security/pull/1554))
+- explain connected repository review workflows ([#1553](https://github.com/openai/codex-security/pull/1553))
 
 <!-- release-section: highlights:end -->
 
