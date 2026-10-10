@@ -106,6 +106,7 @@ import {
 import { z } from "incur";
 import { readThreatModelPath } from "./artifact-export.js";
 import { isRecord } from "./record.js";
+import { providerPreflightCommand } from "./provider-profile.js";
 
 import {
   CODEX_AUTH_CONFIG_KEYS,
@@ -4090,15 +4091,19 @@ export class CodexSecurity {
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
+      const startupCommand = await providerPreflightCommand(
+        source.command,
+        requestedConfig,
+      );
       throwIfAborted(signal);
       await (this.#dependencies.probeCodexSandbox ?? probeCodexSandbox)(
-        source.command,
+        startupCommand,
         { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },
         signal,
       );
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
         isolateSelection: true,
-        codexCommand: source.command,
+        codexCommand: startupCommand,
         environment: withoutCodexHome(processEnvironment),
         signal,
       });

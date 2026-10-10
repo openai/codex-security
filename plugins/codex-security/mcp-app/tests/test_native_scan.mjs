@@ -286,6 +286,7 @@ else {
   const selectedProvider = effective.model_providers?.[effective.model_provider];
   fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
     kind: process.argv.includes("login") ? "login" : "exec", argv, home: process.env.CODEX_HOME,
+    providerAuth: selectedProvider?.auth,
     providerToken: selectedProvider && (selectedProvider.experimental_bearer_token ?? process.env[selectedProvider.env_key]),
     providerHeaders: selectedProvider && {...selectedProvider.http_headers, ...Object.fromEntries(Object.entries(selectedProvider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]]))},
     literalCredentialInEnvironment: ["synthetic-provider-token", "synthetic-provider-header"].some(value => Object.values(process.env).includes(value)),
@@ -488,8 +489,13 @@ else {
                   false,
                 );
               } else {
-                assert.equal(provider.auth.command, "synthetic-auth");
-                assert.deepEqual(provider.auth.args, ["synthetic-account"]);
+                assert.equal(provider.auth, undefined);
+                if (row.kind === "exec") {
+                  assert.equal(row.providerAuth.command, "synthetic-auth");
+                  assert.deepEqual(row.providerAuth.args, [
+                    "synthetic-account",
+                  ]);
+                }
                 assert.equal(provider.env_key, undefined);
               }
             }
@@ -819,6 +825,12 @@ test("native preparation excludes scan output and knowledge sources from executa
       await mkdir(directory, { recursive: true });
     }
     await mkdir(join(knowledgeRoot, ".git"));
+    await writeFile(
+      join(documents, "architecture.md"),
+      "Synthetic architecture.",
+    );
+    const snapshot = await readKnowledgeBaseSnapshot([documents]);
+    await saveScanKnowledge(scanDir, snapshot);
     for (const directory of [scanDir, knowledgeRoot, external]) {
       await writeFile(join(directory, name), "inert executable fixture");
       await chmod(join(directory, name), 0o700);
@@ -837,6 +849,10 @@ test("native preparation excludes scan output and knowledge sources from executa
               recipe: {
                 auth: "api-key",
                 knowledgeBasePaths: [documents],
+                scanInputs: scanInputIdentity(
+                  input().scan.userContext,
+                  snapshot,
+                ),
                 config: {},
               },
             }

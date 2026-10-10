@@ -554,6 +554,24 @@ def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> N
     finding["identity"] = {"anchor": anchor}
 
 
+def _retain_missing_scope(
+    scan: dict[str, Any], draft: dict[str, Any], binding: dict[str, Any]
+) -> None:
+    semantic_scope = draft.get("scope")
+    if not isinstance(semantic_scope, dict):
+        return
+    scope = copy.deepcopy(scan.get("scope", {}))
+    scan["scope"] = scope
+    for key, value in semantic_scope.items():
+        if key == "sourceScans" and isinstance(value, list) and isinstance(scope.get(key), list):
+            for context in value:
+                if context not in scope[key]:
+                    scope[key].append(copy.deepcopy(context))
+        else:
+            scope.setdefault(key, copy.deepcopy(value))
+    scope.update(copy.deepcopy(binding["scope"]))
+
+
 def merge_saved_results(
     scan_dir: Path,
     scan_id: str,
@@ -1152,6 +1170,8 @@ def merge_saved_results(
             continue
         if relative in pending_paths:
             pending_work.update(_encoded(item) for item in _deferred_rows(draft["coverage"]))
+        if not superseded or relative == frozen_model_source:
+            _retain_missing_scope(manifest["scan"], draft, binding)
         if isinstance(draft.get("threatModel"), dict) and (
             relative == frozen_model_source
             or "threatModel" not in manifest["scan"]
@@ -1776,6 +1796,22 @@ def save_composed_checkpoint(
         coverage = aggregate.setdefault("coverage", {})
         _reconcile_child_coverage(coverage, draft["coverage"], child["id"])
         union_coverage(coverage, draft["coverage"])
+        if draft.get("scope") or draft.get("threatModel"):
+            scope = aggregate.setdefault("scope", {})
+            for key, value in draft.get("scope", {}).items():
+                if key != "sourceScans":
+                    scope.setdefault(key, copy.deepcopy(value))
+            context = {
+                "scanId": child["id"],
+                **{
+                    key: copy.deepcopy(draft[key])
+                    for key in ("scope", "threatModel")
+                    if key in draft
+                },
+            }
+            source_scans = scope.setdefault("sourceScans", [])
+            if isinstance(source_scans, list) and context not in source_scans:
+                source_scans.append(context)
         if "threatModel" not in aggregate and isinstance(draft.get("threatModel"), dict):
             aggregate["threatModel"] = {
                 **copy.deepcopy(draft["threatModel"]),

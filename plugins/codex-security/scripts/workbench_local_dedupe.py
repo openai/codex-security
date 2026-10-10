@@ -115,7 +115,10 @@ def prepare(
             "WHERE EXISTS (SELECT 1 FROM finding_repositories WHERE finding_id = findings.id "
             "AND repository_id = ?) "
             if repository_id is not None
-            else ""
+            # Deep child placeholders have neither a published body nor a
+            # repository association. Keep them outside the global corpus.
+            else "WHERE findings.details_json IS NOT NULL OR EXISTS "
+            "(SELECT 1 FROM finding_repositories WHERE finding_id = findings.id) "
         )
         + "ORDER BY findings.created_at, findings.id",
         (repository_id,) if repository_id is not None else (),

@@ -940,10 +940,14 @@ test.each([
             .mode === "deep",
       ),
     ).toBe(true);
+    const { auth: _privateAuth, ...transportProvider } = replayProvider;
     for (const launch of h.launches) {
+      expect(
+        (launch.options.config!["model_providers"] as JsonObject)["synthetic"],
+      ).not.toHaveProperty("auth");
       expect(launch.options.config).toMatchObject({
         model_provider: "synthetic",
-        model_providers: { synthetic: replayProvider },
+        model_providers: { synthetic: transportProvider },
         service_tier: expected,
         ...contextLimits,
       });
