@@ -83,7 +83,7 @@ assertPasses(
   outputFor({
     inputId: "input-001",
     verdict: "confirmed",
-  }),
+  }).replace('"evidence": []', '"evidence": ["Inline ``` fence in source."]'),
   {
     vars: {
       case_id: "case-001",
