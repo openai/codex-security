@@ -27,6 +27,8 @@ async function run() {
   const args = process.argv.slice(2);
   if (args.includes("app-server")) {
     await trace({ phase: "preflight", args });
+    const threadId = "package-sdk-owner";
+    const sessionPath = join(process.env.CODEX_HOME, `${threadId}.jsonl`);
     for await (const line of createInterface({ input: process.stdin })) {
       const message = JSON.parse(line);
       if (message.id === undefined) continue;
@@ -36,23 +38,20 @@ async function run() {
           result = { userAgent: "package-fixture" };
           break;
         case "thread/start":
+          assert.equal(message.params.threadSource, "security_scan");
+          assert.equal(message.params.ephemeral, false);
           result = {
-            thread: {
-              id: process.env.PACKAGE_DEEP_PARENT_THREAD,
-              path: process.env.PACKAGE_DEEP_TRACE + ".session.jsonl",
-            },
+            thread: { id: threadId, path: sessionPath },
             model: "gpt-5.5",
             reasoningEffort: "high",
           };
           break;
         case "thread/inject_items":
-          assert.equal(
-            message.params.threadId,
-            process.env.PACKAGE_DEEP_PARENT_THREAD,
-          );
+          assert.equal(message.params.threadId, threadId);
+          assert.equal(message.params.items[0].role, "user");
           await writeFile(
-            process.env.PACKAGE_DEEP_TRACE + ".session.jsonl",
-            JSON.stringify({
+            sessionPath,
+            `${JSON.stringify({
               type: "turn_context",
               payload: {
                 permission_profile: {
@@ -69,7 +68,7 @@ async function run() {
                   network: "restricted",
                 },
               },
-            }) + "\n",
+            })}\n`,
             { mode: 0o600 },
           );
           result = {};

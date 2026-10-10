@@ -136,9 +136,11 @@ import {
 } from "./errors.js";
 import {
   prepareKnowledgeBase,
+  readKnowledgeBaseSnapshot,
   type PreparedKnowledgeBase,
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
+import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
   ScanResult,
@@ -298,7 +300,7 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
-  /** @internal Reuse the knowledge inputs bound to a bulk campaign manifest. */
+  /** @internal Reuse captured knowledge inputs for related operations or resume. */
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
@@ -1297,8 +1299,25 @@ export class CodexSecurity {
         );
       }
       if (options.knowledgeBasePaths?.length) {
+        if (
+          options.resumeScanId !== undefined &&
+          options.knowledgeBaseSnapshot === undefined
+        ) {
+          throw new CodexSecurityError(
+            "Resuming a scan requires its saved knowledge-base snapshot. Use scans resume with the original scan state, or start a new scan.",
+          );
+        }
+        options = {
+          ...options,
+          knowledgeBaseSnapshot:
+            options.knowledgeBaseSnapshot ??
+            (await readKnowledgeBaseSnapshot(
+              options.knowledgeBasePaths,
+              signal,
+            )),
+        };
         knowledgeBase = await prepareKnowledgeBase(
-          options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
+          options.knowledgeBaseSnapshot!,
           signal,
         );
       }
@@ -1648,6 +1667,8 @@ export class CodexSecurity {
         onError: reportTrackingError,
       });
       costTracker = tracker;
+      const scanKnowledge =
+        knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;
       const recipe = scanRecipe({
         repository: repo,
         target: normalized,
@@ -1663,6 +1684,10 @@ export class CodexSecurity {
         cyberAccessProgram: options.cyberAccessProgram,
       });
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
+      recipe["scanInputs"] = scanInputIdentity(
+        options.scanPrompt,
+        scanKnowledge,
+      );
       if (options.safetyIdentifier !== undefined)
         recipe["safetyIdentifier"] = options.safetyIdentifier;
       if (options.postScanPrompt !== undefined)
@@ -1744,6 +1769,18 @@ export class CodexSecurity {
         if (typeof registration["sealedProducerVersion"] === "string") {
           expectation.pluginVersion = registration["sealedProducerVersion"];
         }
+        const savedInputs = savedRecipe["scanInputs"];
+        if (
+          isRecord(savedInputs) &&
+          workflowDigest(savedInputs["knowledgeBase"]) !==
+            workflowDigest(
+              (recipe["scanInputs"] as JsonObject)["knowledgeBase"],
+            )
+        ) {
+          throw new CodexSecurityError(
+            "The supplied knowledge base differs from this scan's original context. Restore the saved snapshot or start a new scan.",
+          );
+        }
       }
       const targetId = registration["targetId"];
       const contract = registration["contract"];
@@ -1819,6 +1856,9 @@ export class CodexSecurity {
           ? { startedAt: registration["startedAt"] }
           : {}),
       });
+      if (options.resumeScanId === undefined && scanKnowledge !== undefined) {
+        await saveScanKnowledge(scanDir, scanKnowledge);
+      }
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           options,
