@@ -161,25 +161,22 @@ export function reconcileDeepReduction(
         "Deep reduction source is only a checkpoint, not a complete result.",
       );
   }
-  validateRetainedFindings(
+  validateReductionHasFindings(
     result,
     discoveries.map((discovery) => discovery.result),
     previous ?? undefined,
   );
   retainSourceFindings(result, { discoveries, previous });
-  for (const [index, finding] of (previous?.findings ?? []).entries()) {
-    const previousRefs = retainedFindingSources(finding, index).map(
-      (source) => source.id,
-    );
-    const retained = result.findings.find((current) =>
-      findingSourceIds(current).some((ref) => previousRefs.includes(ref)),
-    );
-    if (retained) {
-      const sourceIds = findingSourceIds(retained);
+  for (const [retained, previousFindings] of previousFindingAssignments(
+    result,
+    previous,
+  )) {
+    const sourceIds = findingSourceIds(retained);
+    for (const finding of previousFindings) {
       preserveFindingDetails(retained, finding);
-      (retained.provenance as Record<string, unknown>).sourceFindingIds =
-        sourceIds;
     }
+    (retained.provenance as Record<string, unknown>).sourceFindingIds =
+      sourceIds;
   }
   retainSourceFindings(result, { discoveries, previous });
   for (const [field, label] of [
@@ -226,6 +223,7 @@ function retainedFindingSources(
 function retainSourceFindings(
   result: DeepReductionInput,
   inputs: DeepReductionSources,
+  requireComplete = true,
 ): void {
   type Finding = Record<string, unknown>;
   const sources = new Map<string, Finding>();
@@ -280,14 +278,14 @@ function retainSourceFindings(
     }));
   }
   const missing = [...sources.keys()].filter((id) => !claimed.has(id));
-  if (missing.length)
+  if (requireComplete && missing.length) {
     throw new Error(
       `Deep reduction left unaccounted source findings: ${missing.join(", ")}.`,
     );
+  }
 }
 
-/** Preserve previously accepted identities and never discard every reported finding. */
-export function validateRetainedFindings(
+function validateReductionHasFindings(
   result: DeepReductionInput,
   sources: DeepReductionInput[],
   previous?: DeepReductionInput,
@@ -301,19 +299,71 @@ export function validateRetainedFindings(
       "Deep reduction discarded every accepted Standard scan finding.",
     );
   }
+}
 
-  const currentFindingIds = new Set(result.findings.map(scanFindingIdentity));
-  for (const finding of previous?.findings ?? []) {
-    if (currentFindingIds.has(scanFindingIdentity(finding))) continue;
-    throw Object.assign(
-      new Error(
-        "Deep reduction discarded or changed a previously accepted finding identity.",
-      ),
-      {
-        code: "merge_traceability_unstable_candidate_id",
-      },
+function previousFindingAssignments(
+  result: DeepReductionInput,
+  previous?: DeepReductionInput | null,
+): Map<DeepReductionInput["findings"][number], DeepReductionInput["findings"]> {
+  const assignments = new Map<
+    DeepReductionInput["findings"][number],
+    DeepReductionInput["findings"]
+  >();
+  for (const [index, finding] of (previous?.findings ?? []).entries()) {
+    const previousRefs = retainedFindingSources(finding, index).map(
+      (source) => source.id,
     );
+    const lineageMatches = result.findings.filter((current) => {
+      const currentRefs = new Set(findingSourceIds(current));
+      return previousRefs.every((ref) => currentRefs.has(ref));
+    });
+    const hasExplicitLineage = result.findings.some(
+      (current) => findingSourceIds(current).length > 0,
+    );
+    const matches =
+      lineageMatches.length > 0 || hasExplicitLineage
+        ? lineageMatches
+        : result.findings.filter(
+            (current) =>
+              scanFindingIdentity(current) === scanFindingIdentity(finding),
+          );
+    if (matches.length !== 1) {
+      throw Object.assign(
+        new Error(
+          "Deep reduction discarded, split, or ambiguously reassigned a previously accepted finding.",
+        ),
+        {
+          code: "merge_traceability_unstable_candidate_id",
+        },
+      );
+    }
+    const retained = matches[0]!;
+    if (
+      previousRefs.some((ref) => ref.startsWith("previous:")) &&
+      scanFindingIdentity(retained) !== scanFindingIdentity(finding)
+    ) {
+      throw Object.assign(
+        new Error(
+          "Deep reduction changed a previously accepted finding identity.",
+        ),
+        { code: "merge_traceability_unstable_candidate_id" },
+      );
+    }
+    const assigned = assignments.get(retained) ?? [];
+    assigned.push(finding);
+    assignments.set(retained, assigned);
   }
+  return assignments;
+}
+
+/** Preserve previously accepted identities and never discard every finding. */
+export function validateRetainedFindings(
+  result: DeepReductionInput,
+  sources: DeepReductionInput[],
+  previous?: DeepReductionInput,
+): void {
+  validateReductionHasFindings(result, sources, previous);
+  previousFindingAssignments(result, previous);
 }
 
 export function parseStoredScanDraft<Result extends DeepReductionInput>(
