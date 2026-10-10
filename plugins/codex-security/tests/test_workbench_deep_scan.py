@@ -273,7 +273,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         schema_version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-        assert schema_version == (45,)
+        assert schema_version == (49,)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
