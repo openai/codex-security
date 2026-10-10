@@ -467,7 +467,7 @@ test("migration preserves assessments for unindexed scan directories", async () 
   await query(environment, "DROP TABLE scan_severity_assessments");
   await query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (50, 52, 54)",
+    "DELETE FROM schema_migrations WHERE version IN (43, 52, 54)",
   );
   expect(
     await readScanSeverityClassification(
@@ -481,7 +481,7 @@ test("migration preserves assessments for unindexed scan directories", async () 
   expect(
     await query(
       environment,
-      "SELECT version FROM schema_migrations WHERE version = 50",
+      "SELECT version FROM schema_migrations WHERE version = 43",
     ),
   ).toEqual([]);
   await classifyScanDirectorySeverity(second.scanDirectory, { environment });
@@ -501,9 +501,9 @@ test("migration preserves assessments for unindexed scan directories", async () 
   expect(
     await query(
       environment,
-      "SELECT version FROM schema_migrations WHERE version = 50",
+      "SELECT version FROM schema_migrations WHERE version = 43",
     ),
-  ).toEqual([{ version: 50 }]);
+  ).toEqual([{ version: 43 }]);
   expect(
     await query(
       environment,
@@ -813,7 +813,7 @@ test("migrates existing databases without changing findings and reads older stat
   await query(environment, "DROP TABLE scan_severity_classifications");
   await query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (41, 50, 52)",
+    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52)",
   );
   expect(
     (

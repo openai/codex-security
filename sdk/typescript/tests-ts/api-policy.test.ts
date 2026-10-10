@@ -32,7 +32,11 @@ import {
   type PluginPythonOptions,
 } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
-import { codexConfigOverrides, type JsonObject } from "../src/config.js";
+import {
+  codexConfigOverrides,
+  deepMerge,
+  type JsonObject,
+} from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
@@ -770,11 +774,13 @@ describe("CodexSecurity policy API", () => {
         path: scope,
         outputDir: f.outputDir,
       });
-      const overrides = f
-        .configuration()!
-        .configOverrides!.map((override) => parseToml(override));
-      expect(overrides).toHaveLength(1);
-      expect(overrides[0]).toMatchObject({
+      const configuration = f.configuration()!;
+      const effective = configuration.configOverrides!.reduce(
+        (config, override) =>
+          deepMerge(config, parseToml(override) as JsonObject),
+        configuration.config as JsonObject,
+      );
+      expect(effective).toMatchObject({
         permissions: {
           codex_security_policy: {
             filesystem: { ":minimal": "read", ":workspace_roots": "read" },
@@ -791,7 +797,7 @@ describe("CodexSecurity policy API", () => {
         bareAlternate,
         commonAlternate,
       ]) {
-        expect(overrides[0]).toMatchObject({
+        expect(effective).toMatchObject({
           permissions: {
             codex_security_policy: { filesystem: { [path]: { ".": "deny" } } },
           },
@@ -1211,9 +1217,16 @@ describe("CodexSecurity policy API", () => {
       web_search: "disabled",
       sandbox_workspace_write: { network_access: false },
     });
-    expect(f.configuration()?.config?.["responses_api_metadata"]).toMatchObject(
-      { codex_security_surface: "cli", codex_security_command: "policy" },
+    const configuration = f.configuration()!;
+    const effective = configuration.configOverrides!.reduce(
+      (config, override) =>
+        deepMerge(config, parseToml(override) as JsonObject),
+      configuration.config as JsonObject,
     );
+    expect(effective["responses_api_metadata"]).toMatchObject({
+      codex_security_surface: "cli",
+      codex_security_command: "policy",
+    });
     expect(f.configuration()?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
       f.repository,
     );

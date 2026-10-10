@@ -49,6 +49,7 @@ import { fail } from "./support/errors.js";
 import { planComponents } from "../src/component-plan.js";
 import { VERSION } from "../src/version.js";
 import { nodeCommand } from "./support/shell.js";
+import * as executionProfiles from "../src/execution-profile.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -1140,7 +1141,15 @@ process.exit(0);
           expect(ordinary.openai).toBeNull();
           expect(ordinary.codex).toBeNull();
           for (const capture of [native, ordinary]) {
-            expect(argvConfig(capture.argv)["model_providers"]).toMatchObject({
+            const configured = argvConfig(capture.argv)[
+              "model_providers"
+            ] as JsonObject;
+            expect(
+              (configured["custom"] as JsonObject)["auth"],
+            ).toBeUndefined();
+            expect(
+              parse(capture.configContents)["model_providers"],
+            ).toMatchObject({
               custom: {
                 ...provider,
                 auth: {
@@ -1374,6 +1383,14 @@ process.exit(0);
         CODEX_API_KEY: "synthetic-other-key",
       };
       let captured: CodexOptions | undefined;
+      let privateConfiguration: JsonObject | undefined;
+      const profileClient = spyOn(
+        executionProfiles,
+        "createExecutionProfileCodex",
+      ).mockImplementation((options, _home, configuration) => {
+        privateConfiguration = configuration;
+        return new Codex(options);
+      });
       let threadOptions: ThreadOptions | undefined;
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
       const startThread = spyOn(
@@ -1435,7 +1452,7 @@ process.exit(0);
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
           expect(captured?.apiKey).toBeUndefined();
-          expect(launchConfig(captured!.configOverrides!)).toMatchObject({
+          expect(privateConfiguration).toMatchObject({
             model_providers: {
               "synthetic.provider": {
                 ...provider,
@@ -1466,6 +1483,7 @@ process.exit(0);
         );
       } finally {
         startThread.mockRestore();
+        profileClient.mockRestore();
       }
     },
   );
@@ -1514,6 +1532,10 @@ process.exit(0);
         workingDirectory: home,
       };
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const profileClient = spyOn(
+        executionProfiles,
+        "createExecutionProfileCodex",
+      ).mockImplementation((options) => new Codex(options));
       const startThread = spyOn(
         Codex.prototype,
         "startThread",
@@ -1577,6 +1599,7 @@ process.exit(0);
         }
       } finally {
         startThread.mockRestore();
+        profileClient.mockRestore();
       }
     },
   );

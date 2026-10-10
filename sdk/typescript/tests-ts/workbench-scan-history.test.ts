@@ -573,7 +573,7 @@ from workbench_scan_history import finding_matches
 connection = migrated_connection()
 scans = [('a', 'a'), ('b', 'b'), ('c', 'c'), ('a-repeat', 'a'), ('c-repeat', 'c'), ('unlinked', 'unlinked')]
 for index, (scan, finding) in enumerate(scans):
-    seed(connection, 'scans', ('id', 'started_at'), (scan, str(index)))
+    seed(connection, 'scans', ('id', 'started_at'), (scan, f"2026-01-01T00:00:0{index}Z"))
     seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'title'), (scan, finding, scan, scan))
 seed_many(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 'before_occurrence_id', 'after_occurrence_id', 'reason'), [
     ('a', 'b', 'a', 'b', 'First confirmed link.'),
@@ -582,7 +582,7 @@ seed_many(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_
 def collect_history():
     result = {}
     for index, (scan, finding) in enumerate(scans):
-        matches, first, bounds = finding_matches(connection, scan, scan, str(index))
+        matches, first, bounds = finding_matches(connection, scan, scan, f"2026-01-01T00:00:0{index}Z")
         result[scan] = {'linked': [match['occurrenceId'] for match in matches], 'first': first, 'bounds': bounds}
         for match in matches:
             assert match['reason']
@@ -597,38 +597,62 @@ print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
     withLinks: {
       a: {
         linked: ["a-repeat", "b", "c", "c-repeat"],
-        first: "0",
+        first: "2026-01-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       b: {
         linked: ["a", "a-repeat", "c", "c-repeat"],
-        first: "0",
+        first: "2026-01-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       c: {
         linked: ["a", "a-repeat", "b", "c-repeat"],
-        first: "0",
+        first: "2026-01-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       "a-repeat": {
         linked: ["a", "b", "c", "c-repeat"],
-        first: "0",
+        first: "2026-01-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       "c-repeat": {
         linked: ["a", "a-repeat", "b", "c"],
-        first: "0",
+        first: "2026-01-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
-      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+      unlinked: {
+        linked: [],
+        first: "2026-01-01T00:00:05Z",
+        bounds: ["unlinked"],
+      },
     },
     withoutLinks: {
-      a: { linked: ["a-repeat"], first: "0", bounds: ["a", "a-repeat"] },
-      "a-repeat": { linked: ["a"], first: "0", bounds: ["a", "a-repeat"] },
-      b: { linked: [], first: "1", bounds: ["b"] },
-      c: { linked: ["c-repeat"], first: "2", bounds: ["c", "c-repeat"] },
-      "c-repeat": { linked: ["c"], first: "2", bounds: ["c", "c-repeat"] },
-      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+      a: {
+        linked: ["a-repeat"],
+        first: "2026-01-01T00:00:00Z",
+        bounds: ["a", "a-repeat"],
+      },
+      "a-repeat": {
+        linked: ["a"],
+        first: "2026-01-01T00:00:00Z",
+        bounds: ["a", "a-repeat"],
+      },
+      b: { linked: [], first: "2026-01-01T00:00:01Z", bounds: ["b"] },
+      c: {
+        linked: ["c-repeat"],
+        first: "2026-01-01T00:00:02Z",
+        bounds: ["c", "c-repeat"],
+      },
+      "c-repeat": {
+        linked: ["c"],
+        first: "2026-01-01T00:00:02Z",
+        bounds: ["c", "c-repeat"],
+      },
+      unlinked: {
+        linked: [],
+        first: "2026-01-01T00:00:05Z",
+        bounds: ["unlinked"],
+      },
     },
   });
 });
