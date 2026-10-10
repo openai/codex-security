@@ -24,7 +24,10 @@ import type {
   FindingImportRequest,
   SourceReport,
 } from "../src/external-import-models.js";
-import { readVendorFindings } from "../src/wiz-findings.js";
+import {
+  readVendorFindings,
+  readVendorFindingsForPublication,
+} from "../src/wiz-findings.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import roundtripFixtures from "./fixtures/wiz-details-roundtrip.json" with { type: "json" };
@@ -1010,9 +1013,9 @@ test("Node reads a large complete named collection without a function argument l
   });
 });
 
-test.each([false, true])(
-  "Unicode readback resumes historical checkpoints (canonical present: %j)",
-  async (keepCanonical) => {
+test.each(["migrate", "distinct", "duplicate"])(
+  "Unicode readback resumes historical checkpoints (%s)",
+  async (scenario) => {
     const input = {
       source_finding_id: "unicode-evidence",
       evidence: {
@@ -1039,7 +1042,10 @@ test.each([false, true])(
       failure = error as ExternalPublicationError;
     }
     const pendingPath = failure!.result.savedSubmission!;
-    const saved = await readFile(pendingPath, "utf8");
+    const historical = JSON.parse(await readFile(pendingPath, "utf8"));
+    delete historical.inputProjection;
+    const saved = JSON.stringify(historical);
+    await writeFile(pendingPath, saved);
     // Frozen from the original publisher's production checkpoint format.
     const historicalPath = join(
       f.environment.CODEX_SECURITY_STATE_DIR,
@@ -1047,10 +1053,12 @@ test.each([false, true])(
       "ddeb8ec0be8765f89ef5aeb759dde7753d7ff72f8b8bb25f89a591b045ad40ae.pending.json",
     );
     expect(pendingPath).not.toBe(historicalPath);
-    if (keepCanonical) {
+    if (scenario !== "migrate") {
       const legacy = JSON.parse(saved);
-      legacy.requests[0].request_id = "synthetic-older-request";
-      legacy.receipts = [];
+      if (scenario === "distinct") {
+        legacy.requests[0].request_id = "synthetic-older-request";
+        legacy.receipts = [];
+      }
       await writeFile(historicalPath, JSON.stringify(legacy));
     } else {
       await rename(pendingPath, historicalPath);
@@ -1074,12 +1082,17 @@ test.each([false, true])(
           ),
         )
       ).includes(historicalPath.split(/[\\/]/u).at(-1)!),
-    ).toBe(keepCanonical);
+    ).toBe(scenario === "distinct");
     expect((await retry.publish()).verified).toBe(1);
     expect(f.posts).toHaveLength(1);
     expect(f.posts[0]!.items[0]!.evidence.source_data).toEqual(
       input.evidence.source_data,
     );
+    if (scenario === "duplicate")
+      expect(
+        (await prepareExternalPublication(f.file, f.options, deps)).preview
+          .resumed,
+      ).toBe(false);
   },
 );
 
@@ -1489,17 +1502,67 @@ test("equivalent inventory rows preserve publication identity when reordered", a
   expect(f.posts).toHaveLength(1);
 });
 
-test.each(["resume", "reset", "coverage", "rebind"])(
+test.each(["raw", "normalized"])(
+  "publication identity retains explicit branch changes (%s)",
+  async (kind) => {
+    const record = structuredClone(sast);
+    const normalized = {
+      source_finding_id: "explicit-branch",
+      evidence: {
+        title: "Synthetic finding",
+        severity: "high",
+        branch: "main",
+        source_data: { id: "unchanged-source" },
+      },
+    };
+    const input =
+      kind === "raw" ? envelope("sastFindings", [record]) : [normalized];
+    const f = await cloudFixture(input);
+    const original = await prepareExternalPublication(
+      f.file,
+      f.options,
+      f.deps,
+    );
+    f.state.failReadback = true;
+    await expect(original.publish()).rejects.toBeInstanceOf(
+      ExternalPublicationError,
+    );
+    if (kind === "raw")
+      record.repositoryBranch.name = "example/project/changed";
+    else normalized.evidence.branch = "changed";
+    await writeFile(f.file, JSON.stringify(input));
+    const changed = await prepareExternalPublication(f.file, f.options, f.deps);
+    expect(changed.preview.resumed).toBe(false);
+    expect(changed.preview.requests[0]!.request_id).not.toBe(
+      original.preview.requests[0]!.request_id,
+    );
+    expect(changed.preview.findings[0]!.evidence.branch).toBe("changed");
+  },
+);
+
+test.each(["resume", "reset", "coverage", "rebind", "prepend", "excluded"])(
   "inventory normalization upgrades saved immutable requests and receipts (%s)",
   async (scenario) => {
-    const record = { ...sast, repository: { id: repository.id } };
+    const record = {
+      ...sast,
+      vendorMetadata: { z: 1, ä: 2 },
+      repository: { id: repository.id },
+    };
     const selected =
       scenario === "coverage"
         ? [
             { ...record, id: "already-ready", repository },
             { ...record, id: "newly-ready" },
           ]
-        : [record];
+        : scenario === "excluded"
+          ? [
+              record,
+              {
+                source_finding_id: "sast:occurrence-1",
+                evidence: { title: "Excluded input", severity: "invalid" },
+              },
+            ]
+          : [record];
     const nodes = [
       {
         ...inventoryNode("GITHUB"),
@@ -1547,6 +1610,8 @@ test.each(["resume", "reset", "coverage", "rebind"])(
         .savedSubmission!;
     }
     const saved = JSON.parse(await readFile(originalPath, "utf8"));
+    delete saved.inputProjection;
+    await writeFile(originalPath, JSON.stringify(saved));
     expect(saved.receipts).toHaveLength(1);
     const identity = [
       original.preview.accountId,
@@ -1611,7 +1676,7 @@ test.each(["resume", "reset", "coverage", "rebind"])(
     const migratedData = JSON.parse(migrated);
     expect(migratedData.requests).toEqual(saved.requests);
     expect(migratedData.receipts).toEqual(saved.receipts);
-    nodes.reverse();
+    if (scenario !== "prepend" && scenario !== "excluded") nodes.reverse();
     await writeFile(f.file, JSON.stringify(payload));
     const reordered = await prepareExternalPublication(f.file, f.options, deps);
     expect(reordered.preview.resumed).toBe(true);
@@ -1631,7 +1696,7 @@ test.each(["resume", "reset", "coverage", "rebind"])(
     ).rejects.toThrow("Saved import evidence");
     await writeFile(migratedPath, migrated);
     let replay = reordered;
-    if (scenario === "rebind") {
+    if (["rebind", "prepend", "excluded"].includes(scenario)) {
       nodes.unshift({
         ...nodes[1]!,
         repository: { ...nodes[1]!.repository, name: "EXAMPLE/PROJECT" },
@@ -1792,8 +1857,8 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
   const oldPath = join(directory, `${oldKey}.pending.json`);
   if (oldPath !== originalPath) await rename(originalPath, oldPath);
   await writeFile(f.file, JSON.stringify(payload));
-  const current = await readVendorFindings(f.file);
-  const key = hash("sha256", encode([...identity, current.findings], false));
+  const { currentIdentity } = await readVendorFindingsForPublication(f.file);
+  const key = hash("sha256", encode([...identity, currentIdentity], false));
   const pendingPath = join(directory, `${key}.pending.json`);
   const lockPath = join(directory, `${key}.lock.sqlite`);
   expect(pendingPath).not.toBe(oldPath);

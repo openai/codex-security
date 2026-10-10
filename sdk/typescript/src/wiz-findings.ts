@@ -468,14 +468,45 @@ export async function readVendorFindings(
 export async function readVendorFindingsForPublication(path: string): Promise<{
   current: VendorFindings;
   legacy: VendorFindings;
+  currentIdentity: unknown[];
+  legacyIdentity: unknown[];
 }> {
   const input = await readFindingInput(path);
-  const current = normalizeFindings(input);
+  const normalized = new WeakSet<VendorFinding>();
+  const current = normalizeFindings(input, normalized);
+  const legacy = input.legacyRepositories
+    ? normalizeFindings(
+        { ...input, repositories: input.legacyRepositories },
+        normalized,
+      )
+    : current;
+  const identity = (parsed: VendorFindings) =>
+    parsed.findings.map((finding) => {
+      if (normalized.has(finding)) return finding;
+      const repository = finding.evidence.details?.repository;
+      return {
+        source_finding_id: finding.source_finding_id,
+        evidence: {
+          // Raw vendor records retain every original branch/ref and source field.
+          // Inventory display aliases must not change an outstanding request's identity.
+          source_data: finding.evidence.source_data,
+          repository: repository
+            ? {
+                id: repository.id,
+                url: inventoryRepositoryUrlKey(
+                  repository.url,
+                  input.repositories.get(repository.id ?? "")?.platform,
+                ),
+              }
+            : null,
+        },
+      };
+    });
   return {
     current,
-    legacy: input.legacyRepositories
-      ? normalizeFindings({ ...input, repositories: input.legacyRepositories })
-      : current,
+    legacy,
+    currentIdentity: identity(current),
+    legacyIdentity: identity(legacy),
   };
 }
 
@@ -508,7 +539,10 @@ async function readFindingInput(path: string): Promise<FindingInput> {
   }
 }
 
-function normalizeFindings(input: FindingInput): VendorFindings {
+function normalizeFindings(
+  input: FindingInput,
+  normalized?: WeakSet<VendorFinding>,
+): VendorFindings {
   const result: VendorFindings = {
     read: input.records.length,
     findings: [],
@@ -559,6 +593,7 @@ function normalizeFindings(input: FindingInput): VendorFindings {
       }
       identities.add(finding.source_finding_id);
       result.findings.push(finding);
+      if ("source_finding_id" in record) normalized?.add(finding);
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
       result.excluded.push({

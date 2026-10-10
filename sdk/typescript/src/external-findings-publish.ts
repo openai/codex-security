@@ -166,6 +166,17 @@ function sameSubmission(
   );
 }
 
+function submissionFindings(
+  requests: readonly FindingImportRequest[],
+): VendorFindings["findings"] {
+  return requests.flatMap((batch) =>
+    batch.items.map(({ source_finding_id, evidence }) => ({
+      source_finding_id,
+      evidence,
+    })),
+  );
+}
+
 function sameFindingSelection(
   left: VendorFindings["findings"],
   right: VendorFindings["findings"],
@@ -271,8 +282,12 @@ export async function prepareExternalPublication(
     );
   }
   progress({ phase: "reading", completed: 0 });
-  const { current: parsed, legacy: legacyParsed } =
-    await readVendorFindingsForPublication(path);
+  const {
+    current: parsed,
+    legacy: legacyParsed,
+    currentIdentity,
+    legacyIdentity,
+  } = await readVendorFindingsForPublication(path);
   if (parsed.findings.length === 0) {
     throw new CodexSecurityError(
       `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}`,
@@ -371,7 +386,8 @@ export async function prepareExternalPublication(
     destination.repo_connector_id,
     source,
   ];
-  const inputDigest = hash("sha256", canonicalJson(parsed.findings));
+  const inputDigest = hash("sha256", canonicalJson(currentIdentity));
+  const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
   function validateSaved(serialized: string, legacy = false): SavedSubmission {
     const content = JSON.parse(serialized) as SavedSubmission;
     if (
@@ -381,19 +397,14 @@ export async function prepareExternalPublication(
     )
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
-    const savedFindings = content.requests.flatMap((batch) =>
-      batch.items.map(({ source_finding_id, evidence }) => ({
-        source_finding_id,
-        evidence,
-      })),
-    );
+    const savedFindings = submissionFindings(content.requests);
     const savedEvidence = canonicalJson(savedFindings);
     const expected = legacy ? legacyParsed.findings : parsed.findings;
     const matches =
       content.inputProjection !== undefined
         ? sameFindingSelection(savedFindings, expected) &&
           content.inputProjection?.inputDigest ===
-            hash("sha256", canonicalJson(expected)) &&
+            (legacy ? legacyInputDigest : inputDigest) &&
           content.inputProjection?.savedEvidenceDigest ===
             hash("sha256", savedEvidence)
         : savedEvidence === canonicalJson(expected);
@@ -414,10 +425,10 @@ export async function prepareExternalPublication(
   }
   const key = hash(
     "sha256",
-    canonicalJson([...checkpointIdentity, parsed.findings]),
+    canonicalJson([...checkpointIdentity, currentIdentity]),
   );
   const pendingPath = join(state, `${key}.pending.json`);
-  const legacyKey = hash(
+  const historicalKey = hash(
     "sha256",
     canonicalJson(
       [...checkpointIdentity, legacyParsed.findings],
@@ -425,7 +436,11 @@ export async function prepareExternalPublication(
     ),
   );
   let recovered: SavedSubmission | undefined;
-  if (legacyKey !== key) {
+  for (const legacyKey of new Set([
+    hash("sha256", canonicalJson([...checkpointIdentity, legacyIdentity])),
+    historicalKey,
+  ])) {
+    if (legacyKey === key) continue;
     const legacyPath = join(state, `${legacyKey}.pending.json`);
     const captured = await readFile(legacyPath, "utf8").catch(
       (error: NodeJS.ErrnoException) => {
@@ -444,16 +459,32 @@ export async function prepareExternalPublication(
               throw error;
             },
           );
-          if (current !== undefined) {
-            recovered = validateSaved(current);
-            return;
-          }
           const serialized = await readFile(legacyPath, "utf8").catch(
             (error: NodeJS.ErrnoException) => {
               if (error.code === "ENOENT") return undefined;
               throw error;
             },
           );
+          if (current !== undefined) {
+            recovered = validateSaved(current);
+            if (serialized !== undefined) {
+              // A crash may leave both copies after installing the canonical file.
+              // Retire only an identical immutable submission, never another request.
+              let duplicate: SavedSubmission | null = null;
+              try {
+                duplicate = JSON.parse(serialized) as SavedSubmission | null;
+              } catch (error) {
+                if (!(error instanceof SyntaxError)) throw error;
+              }
+              if (
+                duplicate !== null &&
+                typeof duplicate === "object" &&
+                sameSubmission(duplicate, recovered)
+              )
+                await rm(legacyPath);
+            }
+            return;
+          }
           // A competing resumer may have completed and removed both paths while
           // this caller waited. Retain its observed immutable request and receipts.
           const content = validateSaved(serialized ?? captured, true);
@@ -625,9 +656,13 @@ export async function prepareExternalPublication(
     accountId: credentials.account_id,
     requests,
     receipts: saved?.receipts,
-    ...(saved?.inputProjection
-      ? { inputProjection: saved.inputProjection }
-      : {}),
+    inputProjection: saved?.inputProjection ?? {
+      inputDigest,
+      savedEvidenceDigest: hash(
+        "sha256",
+        canonicalJson(submissionFindings(requests)),
+      ),
+    },
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,
