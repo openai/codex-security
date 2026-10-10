@@ -6,13 +6,13 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
+_SHARED = Path(__file__).resolve().parents[1] / "shared"
+_HISTORY = json.loads((_SHARED / "workbench-migrations.json").read_text(encoding="utf-8"))
+_REPAIR_HISTORY = json.dumps(_HISTORY)
+_REPAIR_PLAN = json.loads((_SHARED / "workbench-history-repairs.json").read_text(encoding="utf-8"))
 MIGRATIONS = tuple(
     (migration["version"], migration["name"], "\n".join(migration["statements"]))
-    for migration in json.loads(
-        (Path(__file__).resolve().parents[1] / "shared" / "workbench-migrations.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    for migration in _HISTORY
 )
 
 
@@ -98,232 +98,19 @@ def apply_migrations(
             backfill_security_targets(connection)
 
 
-def normalize_pre_release_execution_profile_migrations(
-    connection: sqlite3.Connection, timestamp: str
-) -> None:
-    scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
-    workspace_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")}
-    legacy_columns = {"execution_model", "reasoning_effort"}
-    renamed_columns = {
-        "legacy_execution_model",
-        "legacy_reasoning_effort",
-    }
-    execution_migrations = {
-        row["version"]: row["name"]
-        for row in connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 25)"
-        )
-    }
-    supported_execution_migrations = {
-        11: {"deep scan orchestration state", "scan execution profiles"},
-        12: {
-            "scan continuation threads",
-            "scan execution profiles",
-            "dynamic scan execution profiles",
-        },
-    }
-    model_migration_name = "persist scan model settings"
-    if execution_migrations.get(25) == "dynamic scan execution profiles":
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 25 AND name = ?",
-            (model_migration_name, "dynamic scan execution profiles"),
-        )
-        execution_migrations[25] = model_migration_name
-    has_legacy_profile_history = any(
-        execution_migrations.get(version) in legacy_names
-        for version, legacy_names in (
-            (11, {"scan execution profiles"}),
-            (12, {"scan execution profiles", "dynamic scan execution profiles"}),
-        )
-    )
-    has_legacy_profile_columns = any(
-        column in columns
-        for column, columns in (
-            ("execution_model", scan_columns),
-            ("execution_model", workspace_columns),
-            ("reasoning_effort", workspace_columns),
-        )
-    )
-    if not (has_legacy_profile_history or has_legacy_profile_columns):
-        return
-
-    if any(
-        execution_migrations.get(version) not in ({None} | supported_names)
-        for version, supported_names in supported_execution_migrations.items()
-    ):
-        raise SystemExit(
-            "The Codex Security database has an unsupported execution-profile migration history."
-        )
-
-    if has_legacy_profile_columns and not (
-        legacy_columns <= scan_columns
-        and legacy_columns <= workspace_columns
-        and not renamed_columns.intersection(scan_columns | workspace_columns)
-    ):
-        raise SystemExit(
-            "The Codex Security database has an unsupported execution-profile migration history."
-        )
-    if has_legacy_profile_history and not has_legacy_profile_columns:
-        raise SystemExit(
-            "The Codex Security database has an unsupported execution-profile migration history."
-        )
-
-    if execution_migrations.get(25) not in (None, model_migration_name):
-        raise SystemExit(
-            "The Codex Security database has an unsupported execution-profile migration history."
-        )
-
-    # Keep the historical values and constraints for recovery while moving
-    # them out of the namespace used by the current independent scan settings.
-    for table in ("workspaces", "scans"):
-        connection.execute(
-            f"ALTER TABLE {table} RENAME COLUMN execution_model TO legacy_execution_model"
-        )
-        connection.execute(
-            f"ALTER TABLE {table} RENAME COLUMN reasoning_effort TO legacy_reasoning_effort"
-        )
-    repair_additive_migration(connection, 25)
-    connection.execute(
-        """
-        UPDATE scans
-        SET model = COALESCE(model, legacy_execution_model),
-            reasoning_effort = COALESCE(reasoning_effort, legacy_reasoning_effort)
-        """
-    )
-    for version, name in (
-        (11, "scan execution profiles"),
-        (12, "scan execution profiles"),
-        (12, "dynamic scan execution profiles"),
-    ):
-        connection.execute(
-            "DELETE FROM schema_migrations WHERE version = ? AND name = ?",
-            (version, name),
-        )
-    if execution_migrations.get(25) is None:
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-            (25, model_migration_name, timestamp),
-        )
-
-
-def move_pre_release_migration(
-    connection: sqlite3.Connection, old_version: int, new_version: int, name: str
-) -> None:
-    if (
-        connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = ? AND name = ?", (old_version, name)
-        ).fetchone()
-        is None
-    ):
-        return
-    connection.execute(
-        "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
-        (new_version, old_version, name),
-    )
-
-
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
-    normalize_mirror_lineage_migrations(connection)
-    move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
-
-    move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")
-    move_pre_release_migration(connection, 12, 20, "phase-specific scan progress")
-
-    normalize_pre_release_execution_profile_migrations(connection, timestamp)
-
-    move_pre_release_migration(connection, 13, 21, "current scan preflight state")
-
-    for version, legacy_names in (
-        (18, {"scan target summaries"}),
-        (19, {"structured scan guidance context", "idempotent scan lifecycle requests"}),
-        (20, {"retain superseded scan lifecycle requests", "threat model publication receipts"}),
-        (21, {"scan progress projection and activity", "deep coordinator manifest receipts"}),
-        (22, {"dynamic scan execution profiles"}),
-    ):
-        migration = connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = ?", (version,)
-        ).fetchone()
-        if migration is None or migration["name"] not in legacy_names:
-            continue
-        _, name, sql = next(migration for migration in MIGRATIONS if migration[0] == version)
-        if version == 18:
-            connection.execute(
-                "UPDATE scans SET handoff_claimed_at = NULL, handoff_claim_token = NULL "
-                "WHERE handoff_status = 'delivered'"
-            )
-        elif version == 19:
-            for statement in sql_statements(sql):
-                connection.execute(
-                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
-                )
-        else:
-            repair_additive_migration(connection, version)
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = ? AND name = ?",
-            (name, version, migration["name"]),
-        )
-
-    migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 2"
-    ).fetchone()
-    if migration is None or migration["name"] != "finding management schema":
-        return
-
-    legacy_versions = {
-        row["version"]: row["name"]
-        for row in connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version BETWEEN 2 AND 5"
-        )
-    }
-    expected = {
-        2: "finding management schema",
-        3: "scan handoff delivery claims",
-        4: "finding remediation action claims",
-        5: "scan target snapshot digests",
-    }
-    for version, name in legacy_versions.items():
-        if expected.get(version) != name:
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-
-    connection.execute(
-        "DELETE FROM schema_migrations WHERE version = 5 AND name = ?",
-        (expected[5],),
-    )
-    for old_version, new_version in ((4, 5), (3, 4), (2, 3)):
-        connection.execute(
-            "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
-            (new_version, old_version, expected[old_version]),
-        )
-    repair_additive_migration(connection, 2)
-    add_column_if_missing(connection, "scans", "target_snapshot_digest", "TEXT")
-    connection.execute(
-        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        (2, "persist capability preflight summaries", timestamp),
-    )
-
-
-def normalize_mirror_lineage_migrations(connection: sqlite3.Connection) -> None:
-    mirror_names = {
-        29: "freeze stopped scan source digests",
-        30: "separate deep scan publication failures",
-    }
-    migrations = {
-        row["version"]: row["name"]
-        for row in connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version BETWEEN 29 AND 32"
-        )
-    }
-    if not any(migrations.get(version) == name for version, name in mirror_names.items()):
-        return
-    if migrations != mirror_names:
-        raise SystemExit("The Codex Security database has an unsupported mirror migration history.")
-    for old_version, new_version in ((30, 32), (29, 31)):
-        connection.execute(
-            "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
-            (new_version, old_version, mirror_names[old_version]),
-        )
+    for query in _REPAIR_PLAN:
+        actions = connection.execute("\n".join(query), {"history": _REPAIR_HISTORY}).fetchall()
+        for action in actions:
+            operation, value = action["operation"], action["value"]
+            if operation == "error":
+                raise SystemExit(value)
+            if operation == "additive":
+                repair_additive_migration(connection, value)
+            elif operation == "column":
+                add_migration_column(connection, value)
+            else:
+                connection.execute(value, (timestamp,) if operation == "timestamp" else ())
 
 
 def repair_deep_scan_migration(connection: sqlite3.Connection) -> None:

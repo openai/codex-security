@@ -21,15 +21,46 @@ fixing security vulnerabilities in your code.
 Requires Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, and Python 3.10+.
 Python 3.10 also requires `tomli`.
 
-This example explicitly requests Daybreak Blue and requires the corresponding
-access. Without Daybreak access, omit `--cyber-access-program daybreak_blue`
-or use `--cyber-access-program standard`.
+Install the CLI globally and sign in:
 
 ```bash
-npm install @openai/codex-security
-npx @openai/codex-security login
-npx @openai/codex-security scan /path/to/repository \
-  --cyber-access-program daybreak_blue
+npm install --global @openai/codex-security
+cs login
+```
+
+`cs` is a short alias for `codex-security`; both commands run the same CLI.
+The installation creates both commands in npm's global executable directory,
+which must be on your `PATH`. If `cs` already resolves to another tool, use
+`codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
+`npx @openai/codex-security` without a global installation.
+
+From your repository directory, optionally draft security guidance before your
+first scan:
+
+```bash
+cs policy .
+```
+
+The command saves a draft outside the checkout. Review the proposed diff and
+notes, edit the draft as needed, then copy it to the displayed `Policy target`
+so future scans use it. Generating the draft alone does not install it.
+Skip this step to keep an existing policy or scan without one.
+
+Run your scan from the repository directory:
+
+```bash
+cs scan .
+```
+
+If you have Daybreak Blue access, add `--cyber-access-program daybreak_blue`
+to the scan command. Otherwise, omit the flag or use
+`--cyber-access-program standard`.
+
+To run without a global installation, replace `cs` in these examples with
+`npx @openai/codex-security`, for example:
+
+```bash
+npx @openai/codex-security scan .
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
@@ -45,19 +76,32 @@ Choose a scope and scan mode:
 
 ```bash
 # Scan selected paths.
-npx @openai/codex-security scan . --path src --path tests
+cs scan . --path src --path tests
 
 # Scan committed changes from a base revision to HEAD.
-npx @openai/codex-security scan . --diff origin/main
+cs scan . --diff origin/main
 
 # Run a deep scan of the repository.
-npx @openai/codex-security scan . --mode deep
+cs scan . --mode deep
 ```
 
-Use `npx @openai/codex-security --help` to browse commands, or `scan --help`
+Use `cs --help` to browse commands, or `cs scan --help`
 for scan options, cost limits, and patching after a scan.
 
+For an application spread across repositories, see
+[review one system across repositories](sdk/typescript/docs/cli.md#review-one-system-across-repositories).
+Use [bulk scans](sdk/typescript/docs/cli.md#bulk-scans) for independent repository
+reviews in one resumable campaign.
+
 ## TypeScript SDK
+
+Install the package locally in your TypeScript project:
+
+```bash
+npm install @openai/codex-security
+```
+
+Then import it:
 
 ```ts
 import { CodexSecurity } from "@openai/codex-security";
@@ -80,8 +124,8 @@ validation, severity classification, owner suggestions, and result handling.
 Draft security guidance for a repository or one of its components:
 
 ```bash
-npx @openai/codex-security policy .
-npx @openai/codex-security policy . --path services/api --knowledge-base architecture.md
+cs policy .
+cs policy . --path services/api --knowledge-base architecture.md
 ```
 
 The command saves a draft outside the checkout. Review it before installing it
@@ -94,7 +138,7 @@ Scans and policy generation save threat models with their results. Export a save
 model without starting another analysis:
 
 ```bash
-npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 ```
 
 Omit `--scan` to use the current repository's latest completed scan. The
@@ -159,23 +203,13 @@ which keeps results and authentication between runs. See the
 The [workflow runner](docker/README.md#workflow-runner) runs individual CLI stages
 in containers and can connect to a separately deployed findings service.
 
-## Findings service (preview)
+## Findings storage and deduplication
 
-Store findings, browse them in a dashboard, and review potential duplicates.
-Start the local service with:
-
-```bash
-npx @openai/codex-security serve
-```
-
-Publish a completed scan with `publish scan --to custom`, then use `dedupe` to
-review potential duplicates and save accepted groups. Point both commands at the
-service with `--findings-url`. The [service guide](sdk/typescript/docs/findings-service.md)
-covers setup, publishing, deduplication, and Docker deployment.
-
-The API has no built-in authentication. Imports send complete finding JSON to
-the configured embeddings endpoint and need an embedding API key, even after
-ChatGPT login.
+The [findings guide](sdk/typescript/docs/findings-service.md) covers local
+storage, deduplication, and compatibility with independently operated endpoints
+through `publish scan --to custom` and explicit `--findings-url`. The local
+`serve` command and browser dashboard have been removed; existing databases and
+scan artifacts remain available.
 
 ## Other providers
 

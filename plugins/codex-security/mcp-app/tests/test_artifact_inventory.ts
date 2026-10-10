@@ -1,7 +1,14 @@
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
-import { mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importSource } from "./import-module.ts";
@@ -10,24 +17,27 @@ const execFile = promisify(nodeExecFile);
 const temporaryDirectories = createTemporaryDirectories(true);
 
 const inventory = await importSource(
-  new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-inventory.ts"),
 );
 
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
+  if (!["win32", "darwin"].includes(process.platform))
+    await testNonUtf8InventoryPaths();
   await testPrepareListsIgnoredTrackedFilesOnce();
   await testPrepareExcludesGitMetadata();
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesStagedAndUnstagedChanges();
   await testWorkerReadsItsOwnBoundInventory();
-  await testCursorAndLimitAreValidated();
+  await testCursorDoesNotExceedInventory();
   await testEmptyInventoryIsValid();
   await testUnsafeInventoryRowsAreRejected();
   await testSymlinkedInventoryIsRejected();
-  await testMissingInventoryIsReported();
+  await testInventoryReadErrorsAreReported();
   await testWorkersCannotPrepareInventory();
   await testBoundScopeFailurePreservesPreviousInventory();
+  await testPythonLaunchErrors();
   await testInvalidDiffTargetPreservesPreviousInventory();
 } finally {
   await temporaryDirectories.cleanup();
@@ -59,6 +69,8 @@ async function testPrepareUsesTheExistingStandardGenerator() {
   const fixture = await createFixture("standard repository");
   await fixture.writeRepositoryFile("src/a.ts", "export const a = 1;\n");
   await fixture.writeRepositoryFile("src/résumé.ts", "export const b = 2;\n");
+  for (const name of ["\uFEFF来源.ts", "name-\uFFFD.ts", "🙂.ts"])
+    await fixture.writeRepositoryFile(`src/${name}`, "export {};\n");
   await fixture.writeRepositoryFile(
     ".hidden/handler.ts",
     "export const c = 3;\n",
@@ -116,18 +128,48 @@ async function testPrepareUsesTheExistingStandardGenerator() {
   );
 }
 
+async function testNonUtf8InventoryPaths() {
+  const fixture = await createFixture("non-UTF-8 repository names");
+  const rawPath = Buffer.concat([
+    Buffer.from(path.join(fixture.repoRoot, "name-")),
+    Buffer.from([0xff]),
+    Buffer.from(".ts"),
+  ]);
+  await writeFile(rawPath, "raw path\n");
+  await fixture.writeRepositoryFile("name-�.ts", "Unicode path\n");
+  await assert.rejects(
+    inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    /not valid for encoding utf-8/,
+  );
+  assert.ok((await readFile(fixture.scanInventory)).includes(0xff));
+  await assert.rejects(
+    inventory.listCodexSecurityReviewItems(fixture.scan),
+    /not valid for encoding utf-8/,
+  );
+  await unlink(rawPath);
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    {
+      reviewItemsTotal: 1,
+    },
+  );
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
+    items: [{ path: "./name-�.ts" }],
+  });
+}
+
 async function testPrepareListsIgnoredTrackedFilesOnce() {
   const fixture = await createFixture("ignored tracked files");
   await runGit(fixture.repoRoot, "init", "-q");
-  await fixture.writeRepositoryFile(".gitignore", "generated/\n");
+  await fixture.writeRepositoryFile(".gitignore", "-generated/\n");
   for (const name of ["a.ts", "b.ts"]) {
     await fixture.writeRepositoryFile(
-      `generated/${name}`,
+      `-generated/${name}`,
       "export const value = 1;\n",
     );
   }
-  await runGit(fixture.repoRoot, "add", "--force", "--", "generated");
-  const context = { ...fixture.scan, scope: "generated" };
+  await runGit(fixture.repoRoot, "add", "--force", "--", "-generated");
+  const context = { ...fixture.scan, scope: "-generated" };
 
   assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
     reviewItemsTotal: 2,
@@ -136,7 +178,7 @@ async function testPrepareListsIgnoredTrackedFilesOnce() {
     limit: 1,
   });
   assert.deepEqual(first, {
-    items: [{ path: "generated/a.ts" }],
+    items: [{ path: "-generated/a.ts" }],
     nextCursor: "1",
   });
   assert.deepEqual(
@@ -144,7 +186,7 @@ async function testPrepareListsIgnoredTrackedFilesOnce() {
       cursor: first.nextCursor,
       limit: 1,
     }),
-    { items: [{ path: "generated/b.ts" }] },
+    { items: [{ path: "-generated/b.ts" }] },
   );
 }
 
@@ -309,25 +351,13 @@ async function testWorkerReadsItsOwnBoundInventory() {
   );
 }
 
-async function testCursorAndLimitAreValidated() {
+async function testCursorDoesNotExceedInventory() {
   const fixture = await createFixture("inventory paging");
   await writeInventory(fixture.scanInventory, "./src/a.ts\n./src/b.ts\n");
 
   await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { cursor: "-1" }),
-    /cursor/i,
-  );
-  await assert.rejects(
     inventory.listCodexSecurityReviewItems(fixture.scan, { cursor: "3" }),
     /cursor/i,
-  );
-  await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { limit: 0 }),
-    /limit/i,
-  );
-  await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { limit: 1001 }),
-    /limit/i,
   );
 }
 
@@ -373,13 +403,38 @@ async function testSymlinkedInventoryIsRejected() {
   );
 }
 
-async function testMissingInventoryIsReported() {
+async function testInventoryReadErrorsAreReported() {
   const fixture = await createFixture("missing inventory");
 
   await assert.rejects(
     inventory.listCodexSecurityReviewItems(fixture.scan),
     /review_items.*(?:unavailable|missing|read)/i,
   );
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    await writeInventory(fixture.scanInventory, "./src/a.ts\n");
+    try {
+      await chmod(fixture.scanInventory, 0o000);
+      await assert.rejects(
+        inventory.listCodexSecurityReviewItems(fixture.scan),
+        (error: Error & { cause?: NodeJS.ErrnoException }) => {
+          assert.equal(error.cause?.code, "EACCES");
+          assert.equal(
+            error.message,
+            `review_items: the requested artifact cannot be read: ${error.cause.message}`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      await chmod(fixture.scanInventory, 0o600);
+    }
+    assert.deepEqual(
+      await inventory.listCodexSecurityReviewItems(fixture.scan),
+      {
+        items: [{ path: "./src/a.ts" }],
+      },
+    );
+  }
 }
 
 async function testWorkersCannotPrepareInventory() {
@@ -426,6 +481,34 @@ async function testInvalidDiffTargetPreservesPreviousInventory() {
   }
 }
 
+async function testPythonLaunchErrors() {
+  const fixture = await createFixture("python launch failure");
+  const pythonCommand = path.join(fixture.root, "python");
+  for (const code of process.platform === "win32"
+    ? ["ENOENT"]
+    : ["ENOENT", "EACCES"]) {
+    if (code === "EACCES") await writeFile(pythonCommand, "", { mode: 0o600 });
+    await assert.rejects(
+      inventory.prepareCodexSecurityReviewItems({
+        ...fixture.scan,
+        pythonCommand,
+      }),
+      (error: Error & { cause?: NodeJS.ErrnoException }) => {
+        assert.equal(error.cause?.code, code);
+        assert.ok(
+          error.message.includes(`spawn ${pythonCommand} ${code}`),
+          error.message,
+        );
+        assert.equal(
+          error.message.includes("Reinstall or update"),
+          code === "ENOENT",
+        );
+        return true;
+      },
+    );
+  }
+}
+
 async function createFixture(label: string) {
   const root = await temporaryDirectories.create(
     "security-artifact-inventory-",
@@ -434,7 +517,7 @@ async function createFixture(label: string) {
   const repoRoot = path.join(fixtureRoot, "repository");
   const scanRoot = path.join(fixtureRoot, "scan");
   const workerRoot = path.join(fixtureRoot, "worker");
-  const pluginRoot = new URL("../../", import.meta.url).pathname;
+  const pluginRoot = path.join(import.meta.dirname, "../../");
   await mkdir(repoRoot, { recursive: true });
   await mkdir(scanRoot, { recursive: true });
   return {

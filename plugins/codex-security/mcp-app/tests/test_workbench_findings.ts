@@ -17,6 +17,9 @@ const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
 const { parseJson, stringifyJson } = await importSource("src/helpers/json.ts");
+const { findPotentialDuplicates, listDedupeGroups } = (await importSource(
+  "src/workbench/duplicates.ts",
+)) as typeof import("../src/workbench/duplicates.ts");
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 
@@ -124,7 +127,8 @@ test("finding helper help exits without reading stdin", async () => {
     "find-potential-duplicates",
     "store-dedupe-groups",
     "list-dedupe-groups",
-    "dashboard",
+    "severity-classification",
+    "read-severity-classification",
   ];
   for (const command of commands) {
     // execFile leaves stdin open; help must exit without waiting for JSON.
@@ -200,6 +204,50 @@ test("import batches preserve identity, repository memberships and stable pages"
     error: "finding_conflict",
   });
   assert.equal(listStoredFindings(database, { limit: 10, offset: 0 }).total, 2);
+});
+
+test("timestamp ordering keeps time zones, page boundaries, and stable ties", (t) => {
+  const database = open(t);
+  const timestamps = [
+    ["middle-b", "2026-10-08t01:00:01.123z"],
+    ["first", "2026-10-08T03:00:00+02:00"],
+    ["last", "2026-10-08T01:00:02.000001Z"],
+    ["middle-a", "2026-10-08T03:00:01.123000+02:00"],
+  ];
+  const expected = ["first", "middle-a", "middle-b", "last"];
+  for (const [id, timestamp] of timestamps) {
+    storeFindings(database, [entry(id)], timestamp, "repository");
+  }
+  for (const [id, timestamp] of timestamps) {
+    database
+      .prepare("INSERT INTO finding_dedupe_groups VALUES (?, ?)")
+      .run(id, timestamp);
+    database
+      .prepare("INSERT INTO finding_dedupe_group_members VALUES (?, 'first')")
+      .run(id);
+  }
+  assert.deepEqual(
+    expected.flatMap((_, offset) =>
+      listStoredFindings(database, { limit: 1, offset }).findings.map(
+        (finding) => finding.findingId,
+      ),
+    ),
+    expected,
+  );
+  assert.deepEqual(
+    listDedupeGroups(database, "first").groups.map((group) => group.groupId),
+    expected,
+  );
+  for (const repository of [undefined, "repository"]) {
+    const result = findPotentialDuplicates(database, "first", repository);
+    assert.ok(result.potentialDuplicates);
+    assert.deepEqual(
+      result.potentialDuplicates.map(
+        (finding) => (finding as Findings.Finding).findingId,
+      ),
+      expected.slice(1),
+    );
+  }
 });
 
 test("mixed writers retain unchanged Python embeddings and replace supplied Node embeddings", async (t) => {
