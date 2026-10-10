@@ -2,7 +2,7 @@ import type { JsonObject } from "./types.js";
 import { isRecord as isObject, isNonEmptyString } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
@@ -160,16 +160,18 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       ["drafts", `${randomUUID()}.json`],
       "staged scan draft",
     );
+    const acceptanceName = `${basename(draftPath, ".json")}.accepted.json`;
     try {
       const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
+      const stagedDraft = {
+        ...draft,
+        ...(publication === undefined
+          ? {}
+          : { deepScanPublication: publication }),
+      };
       await Promise.all([
         replaceArtifactJson(checkpointPath, snapshot),
-        replaceArtifactJson(draftPath, {
-          ...draft,
-          ...(publication === undefined
-            ? {}
-            : { deepScanPublication: publication }),
-        }),
+        replaceArtifactJson(draftPath, stagedDraft),
       ]);
       const arguments_ = [
         "write-scan-draft",
@@ -186,22 +188,49 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       if (context.handoffClaimToken) {
         arguments_.push("--claim-token", context.handoffClaimToken);
       }
-      try {
+      const publish = async () => {
         const result = await runWorkbench(arguments_);
-        documentWarnings = Array.isArray(result?.warnings)
+        return Array.isArray(result?.warnings)
           ? result.warnings.filter(
               (warning): warning is string => typeof warning === "string",
             )
           : undefined;
+      };
+      try {
+        documentWarnings = await publish();
       } catch (error) {
-        if (!workbenchScanDraftConflict(error)) throw error;
-        signal?.throwIfAborted();
-        continue;
+        const accepted =
+          context.mode === "deep" && publication !== undefined
+            ? await readArtifactJsonObject(
+                context,
+                ["drafts", acceptanceName],
+                "accepted scan draft",
+              ).catch(() => undefined)
+            : undefined;
+        if (
+          accepted?.status === "draft_written" &&
+          isDeepStrictEqual(
+            accepted.input,
+            JSON.parse(
+              JSON.stringify({ ...stagedDraft, checkpoint: snapshot }),
+            ),
+          )
+        ) {
+          signal?.throwIfAborted();
+          documentWarnings = await publish();
+        } else {
+          if (!workbenchScanDraftConflict(error)) throw error;
+          signal?.throwIfAborted();
+          continue;
+        }
       }
     } finally {
       await Promise.all([
         fs.rm(checkpointPath, { force: true }),
         fs.rm(draftPath, { force: true }),
+        fs
+          .rm(join(dirname(draftPath), acceptanceName), { force: true })
+          .catch(() => {}),
       ]);
     }
     return {

@@ -20,6 +20,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    ScanLocalIOError,
     _finding_strength,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
@@ -2458,13 +2459,6 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 "The scan stopped; its saved checkpoint was retained without replacing sealed results."
             )
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-        if (
-            args.expected_draft_digest is not None
-            and args.expected_draft_digest != _scan_draft_digest(scan_dir)
-        ):
-            raise SystemExit(
-                "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
-            )
         try:
             relative = Path(args.draft_path).relative_to(scan_dir).as_posix()
         except ValueError as exc:
@@ -2474,6 +2468,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
             raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
+        accepted_input = copy.deepcopy(draft)
+        accepted_checkpoint = None
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
         # Save scan IDs without sealing the draft.
@@ -2496,6 +2492,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             checkpoint, checkpoint_contents = _read_scan_local_json_bytes(
                 scan_dir, checkpoint_relative, "Staged scan checkpoint"
             )
+            accepted_checkpoint = checkpoint
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
         checkpoint_only = (
@@ -2511,6 +2508,36 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if scan["mode"] == "deep" and not checkpoint_only:
             _require_current_deep_publication(db, connection, scan, draft)
+        acceptance_input = {**accepted_input, "checkpoint": accepted_checkpoint}
+        acceptance_relative = Path(relative).with_suffix(".accepted.json").as_posix()
+        acknowledge = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is not None
+            and db.deep_scan.require_deep_scan_run(connection, scan_id)["workflow_version"]
+            in {"deep-scan-mcp/v1", "deep-security-scan/v1"}
+        )
+        if acknowledge and (scan_dir / acceptance_relative).exists():
+            accepted = _read_scan_local_json(scan_dir, acceptance_relative, "Accepted scan draft")
+            if (
+                accepted.get("status") == "draft_written"
+                and accepted.get("input") == acceptance_input
+            ):
+                if accepted.get("draftDigest") != _scan_draft_digest(scan_dir):
+                    raise SystemExit(
+                        "scan_draft_conflict: canonical scan results changed after publication."
+                    )
+                return {
+                    "scanId": scan_id,
+                    "status": "draft_written",
+                    **({"warnings": accepted["warnings"]} if accepted.get("warnings") else {}),
+                }
+        if (
+            args.expected_draft_digest is not None
+            and args.expected_draft_digest != _scan_draft_digest(scan_dir)
+        ):
+            raise SystemExit(
+                "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
+            )
         if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             write_scan_local_bytes(
@@ -2531,16 +2558,16 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         write_scan_local_bytes(
             scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint_name})
         )
-        for filename, document in (
-            ("findings.json", findings),
-            ("coverage.json", coverage),
-            ("scan-manifest.json", manifest),
-        ):
-            write_scan_local_bytes(
-                scan_dir,
-                filename,
-                (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
+        documents = {
+            filename: (json.dumps(document, allow_nan=False, indent=2) + "\n").encode()
+            for filename, document in (
+                ("findings.json", findings),
+                ("coverage.json", coverage),
+                ("scan-manifest.json", manifest),
             )
+        }
+        for filename, contents in documents.items():
+            write_scan_local_bytes(scan_dir, filename, contents)
         if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
             # Select the accepted final publication before releasing the write lock.
             with connection:
@@ -2550,6 +2577,19 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                     (str(scan_dir / "scan-manifest.json"), scan_id),
                 )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
+        if acknowledge:
+            # Optional recovery evidence is written only after the publication succeeds.
+            try:
+                acceptance = {
+                    "status": "draft_written",
+                    "input": acceptance_input,
+                    "draftDigest": _scan_draft_contents_digest(documents),
+                    **({"warnings": [model_warning]} if model_warning else {}),
+                }
+                write_scan_local_bytes(scan_dir, acceptance_relative, _encoded(acceptance))
+            except (OSError, ScanLocalIOError):
+                # A missing receipt prevents recovery but does not undo accepted results.
+                pass
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.
         model_only_checkpoint = (
@@ -2588,20 +2628,31 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def _scan_draft_digest(scan_dir: Path) -> str:
+    documents: dict[str, bytes | None] = {}
+    for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
+        try:
+            (scan_dir / filename).lstat()
+        except FileNotFoundError:
+            documents[filename] = None
+            continue
+        descriptor = open_scan_local_file_descriptor(scan_dir, filename, filename)
+        with os.fdopen(descriptor, "rb") as handle:
+            documents[filename] = handle.read()
+    return _scan_draft_contents_digest(documents)
+
+
+def _scan_draft_contents_digest(documents: dict[str, bytes | None]) -> str:
     digest = hashlib.sha256()
     for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
         digest.update(filename.encode())
         digest.update(b"\0")
-        try:
-            (scan_dir / filename).lstat()
-        except FileNotFoundError:
+        contents = documents[filename]
+        if contents is None:
             digest.update(b"missing\0")
-            continue
-        digest.update(b"present\0")
-        descriptor = open_scan_local_file_descriptor(scan_dir, filename, filename)
-        with os.fdopen(descriptor, "rb") as handle:
-            digest.update(handle.read())
-        digest.update(b"\0")
+        else:
+            digest.update(b"present\0")
+            digest.update(contents)
+            digest.update(b"\0")
     return digest.hexdigest()
 
 

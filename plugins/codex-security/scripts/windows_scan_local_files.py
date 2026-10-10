@@ -40,6 +40,10 @@ class WindowsScanLocalFileError(OSError):
     """Raised when a scan-local operation cannot be completed securely."""
 
 
+class WindowsScanLocalPathError(WindowsScanLocalFileError):
+    """Raised when a scan-local path fails an integrity check."""
+
+
 # CreateFile access and sharing flags.
 _DELETE = 0x00010000
 _FILE_READ_ATTRIBUTES = 0x00000080
@@ -240,8 +244,8 @@ def _raise_last_error(operation: str, path: Path | None = None) -> None:
     raise WindowsScanLocalFileError(error, f"{operation}{target}: {detail}", str(path or ""))
 
 
-def _invalid_path(path: Path | str, reason: str) -> WindowsScanLocalFileError:
-    return WindowsScanLocalFileError(errno.EINVAL, reason, str(path))
+def _invalid_path(path: Path | str, reason: str) -> WindowsScanLocalPathError:
+    return WindowsScanLocalPathError(errno.EINVAL, reason, str(path))
 
 
 def _validated_parts(relative_path: str) -> tuple[str, ...]:
@@ -408,6 +412,8 @@ def _canonical_scan_directory(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
         expected = absolute.lstat()
         canonical = absolute.resolve(strict=True)
     except OSError as exc:
+        if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            raise
         raise _invalid_path(scan_dir, "expected an existing scan directory") from exc
     if _normalized_windows_path(absolute) != _normalized_windows_path(canonical):
         raise _invalid_path(scan_dir, "scan directory must be canonical and non-reparse")

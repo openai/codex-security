@@ -95,6 +95,10 @@ class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
 
 
+class ScanLocalIOError(ContractError):
+    """Raised when scan-local storage I/O fails, distinct from path validation."""
+
+
 class RecoverableContractError(ContractError):
     """Raised when scan completion can safely be retried before publication."""
 
@@ -445,18 +449,28 @@ def _windows_unsafe_path_component(value: str) -> bool:
     return WINDOWS_UNSAFE_PATH_COMPONENT_RE.search(value) is not None
 
 
+def _scan_local_directory_error(message: str, error: OSError) -> ContractError:
+    if error.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+        return ContractError(message)
+    return ScanLocalIOError(message)
+
+
 def _require_scan_directory(scan_dir: Path) -> Path:
     scan_dir = scan_dir.absolute()
     try:
         metadata = scan_dir.lstat()
     except OSError as exc:
-        raise ContractError("scan directory: expected an existing non-symlink directory") from exc
+        raise _scan_local_directory_error(
+            "scan directory: expected an existing non-symlink directory", exc
+        ) from exc
     if not stat.S_ISDIR(metadata.st_mode):
         raise ContractError("scan directory: expected an existing non-symlink directory")
     try:
         resolved = scan_dir.resolve(strict=True)
     except OSError as exc:
-        raise ContractError("scan directory: expected an existing non-symlink directory") from exc
+        raise _scan_local_directory_error(
+            "scan directory: expected an existing non-symlink directory", exc
+        ) from exc
     if os.path.normcase(resolved) != os.path.normcase(scan_dir):
         raise ContractError("scan directory: expected a canonical non-symlink directory")
     return resolved
@@ -511,7 +525,9 @@ def _open_verified_scan_directory(
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError as exc:
-        raise ContractError("scan directory: expected an existing non-symlink directory") from exc
+        raise _scan_local_directory_error(
+            "scan directory: expected an existing non-symlink directory", exc
+        ) from exc
     opened = os.fstat(descriptor)
     opened_identity = (opened.st_dev, opened.st_ino)
     if opened_identity != observed_identity or (
@@ -743,15 +759,18 @@ def write_scan_local_bytes(
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local output requires descriptor-relative file operations")
+        backend = _windows_scan_local_files()
         try:
-            _windows_scan_local_files().atomic_write(
+            backend.atomic_write(
                 scan_dir,
                 relative_path,
                 payload,
                 expected_root_identity=expected_root_identity,
             )
-        except OSError as exc:
+        except backend.WindowsScanLocalPathError as exc:
             raise ContractError(f"{relative_path}: {exc}") from exc
+        except OSError as exc:
+            raise ScanLocalIOError(f"{relative_path}: {exc}") from exc
         return
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -762,8 +781,8 @@ def write_scan_local_bytes(
         try:
             parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=True)
         except OSError as exc:
-            raise ContractError(
-                f"{relative_path}: expected a path inside the scan directory"
+            raise _scan_local_directory_error(
+                f"{relative_path}: expected a path inside the scan directory", exc
             ) from exc
         # The held descriptor is the authority for the validated parent. A
         # concurrent rename cannot redirect later operations through a
