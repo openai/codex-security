@@ -5058,6 +5058,29 @@ function dependencyPermissions(
   });
   const privatePaths = [
     ...codexSecurityPrivatePaths(environment),
+    ...[
+      homedir(),
+      resolve(workingDirectory, expandHome("~", environment)),
+    ].flatMap((home) => [
+      join(home, ".git-credentials"),
+      join(home, ".config", "git", "credentials"),
+      join(home, ".pypirc"),
+      join(home, ".m2", "settings.xml"),
+      join(home, ".m2", "settings-security.xml"),
+      join(home, ".aws"),
+    ]),
+    ...[process.env, environment].flatMap((source) => {
+      const xdg = environmentEntry(source, "XDG_CONFIG_HOME");
+      return [
+        ...(xdg ? [join(xdg, "git", "credentials")] : []),
+        ...["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"].flatMap(
+          (name) => {
+            const file = environmentEntry(source, name);
+            return file ? [file] : [];
+          },
+        ),
+      ].map((file) => resolve(workingDirectory, expandHome(file, source)));
+    }),
     join(homedir(), ".npmrc"),
     resolve(workingDirectory, expandHome("~", environment), ".npmrc"),
     join(npmHome, ".npmrc"),
@@ -5071,6 +5094,11 @@ function dependencyPermissions(
     join(ambientHome, "auth.json"),
     join(ambientHome, ".credentials.json"),
     join(ambientHome, "config.toml"),
+    ...[defaultHome, ambientHome].flatMap((home) =>
+      ["sessions", "archived_sessions", "history.jsonl"].map((name) =>
+        join(home, name),
+      ),
+    ),
   ];
   return {
     extends: ":read-only",

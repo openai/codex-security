@@ -919,9 +919,17 @@ process.exit(0);
       join(dirname(f.repository), "registry [user] #.npmrc"),
       join(dirname(f.repository), "lowercase-registry.npmrc"),
     ];
+    const configuredStores = [
+      join(dirname(f.repository), "registry-config", "git", "credentials"),
+      join(dirname(f.repository), "cloud-credentials"),
+      join(dirname(f.repository), "cloud-config"),
+    ];
     Object.assign(f.environment, {
       NPM_CONFIG_USERCONFIG: npmFiles[1],
       npm_config_userconfig: npmFiles[2],
+      XDG_CONFIG_HOME: dirname(dirname(configuredStores[0]!)),
+      AWS_SHARED_CREDENTIALS_FILE: configuredStores[1],
+      AWS_CONFIG_FILE: configuredStores[2],
     });
     await using security = f.client;
     const result = await security.scanDependencies({
@@ -943,6 +951,19 @@ process.exit(0);
     );
     const privateFiles = [
       ...npmFiles,
+      ...configuredStores,
+      ...[
+        ".git-credentials",
+        ".config/git/credentials",
+        ".pypirc",
+        ".m2/settings.xml",
+        ".m2/settings-security.xml",
+        ".aws/credentials",
+        ".aws/config",
+      ].map((relative) => join(f.selectedUserHome, relative)),
+      join(f.ambientHome, "sessions", "synthetic-session.jsonl"),
+      join(f.ambientHome, "archived_sessions", "synthetic-session.jsonl"),
+      join(f.ambientHome, "history.jsonl"),
       selectedSsh,
       selectedGitHub,
       join(f.selectedUserHome, ".config", "gh", "hosts.yml"),
@@ -989,10 +1010,20 @@ process.exit(0);
     });
     for (const path of [
       ...npmFiles,
+      ...configuredStores,
       join(homedir(), ".npmrc"),
+      join(homedir(), ".git-credentials"),
+      join(homedir(), ".config", "git", "credentials"),
+      join(homedir(), ".pypirc"),
+      join(homedir(), ".m2", "settings.xml"),
+      join(homedir(), ".m2", "settings-security.xml"),
+      join(homedir(), ".aws"),
       join(homedir(), ".codex", "auth.json"),
       join(homedir(), ".codex", ".credentials.json"),
       join(homedir(), ".codex", "config.toml"),
+      join(homedir(), ".codex", "sessions"),
+      join(homedir(), ".codex", "archived_sessions"),
+      join(homedir(), ".codex", "history.jsonl"),
       codexSecurityCredentialHome({}),
     ]) {
       expect(filesystem[path]).toEqual({ ".": "deny" });
