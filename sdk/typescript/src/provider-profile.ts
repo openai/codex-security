@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import { CodexSecurityError } from "./errors.js";
+import { configuredCodexHome } from "./codex-home.js";
 import {
   resolveCodexProfile,
   modelProviderConfigOverride,
@@ -16,11 +17,13 @@ import { isRecord } from "./record.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
+  codexSecurityCredentialHome,
   executablePathForSpawn,
   requirePrivateCredentialHome,
   requireSecureCredentialHome,
   resolveCodexCommand,
   type CodexCommand,
+  type ProcessEnvironment,
 } from "./runtime.js";
 
 export interface ProviderProfile {
@@ -85,22 +88,31 @@ export async function createProviderProfile(
 export async function restoreProviderProfile(
   config: JsonObject,
   profile: unknown,
-  codexHome: string,
+  environment: ProcessEnvironment,
 ): Promise<JsonObject> {
   if (profile === undefined) return config;
   if (
-    typeof profile !== "string" ||
+    !isRecord(profile) ||
+    typeof profile["name"] !== "string" ||
+    (profile["home"] !== "ambient" && profile["home"] !== "managed") ||
     !/^codex_security_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
-      profile,
+      profile["name"],
     )
   ) {
     throw new CodexSecurityError(
       "The saved scan contains an invalid provider profile.",
     );
   }
-  await requireSecureCredentialHome(codexHome);
+  const codexHome =
+    profile["home"] === "ambient"
+      ? configuredCodexHome(environment)
+      : codexSecurityCredentialHome(environment);
+  // The managed home has stricter ownership rules. Native execution preserves
+  // the invoking home's permissions and reads the same private profile files.
+  if (profile["home"] === "managed")
+    await requireSecureCredentialHome(codexHome);
   const saved = parse(
-    await readFile(join(codexHome, `${profile}.config.toml`), "utf8"),
+    await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
   );
   if (!isRecord(saved["model_providers"])) {
     throw new CodexSecurityError(

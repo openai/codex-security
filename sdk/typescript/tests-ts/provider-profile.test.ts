@@ -83,8 +83,8 @@ test("saved provider profiles keep concurrent replay credentials private and sep
     profiles.map((profile) =>
       restoreProviderProfile(
         { model_provider: "synthetic" },
-        profile.name,
-        home,
+        { name: profile.name, home: "ambient" },
+        { CODEX_HOME: home },
       ),
     ),
   );
@@ -93,9 +93,13 @@ test("saved provider profiles keep concurrent replay credentials private and sep
     if (process.platform !== "win32")
       expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
   }
-  await expect(restoreProviderProfile({}, "../outside", home)).rejects.toThrow(
-    "invalid provider profile",
-  );
+  await expect(
+    restoreProviderProfile(
+      {},
+      { name: "../outside", home: "ambient" },
+      { CODEX_HOME: home },
+    ),
+  ).rejects.toThrow("invalid provider profile");
 });
 
 test.each([

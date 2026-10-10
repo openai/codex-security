@@ -210,7 +210,12 @@ async function interruptedScan(
   const recipe = {
     ...(providerProfile === undefined
       ? {}
-      : { providerProfile: providerProfile.name }),
+      : {
+          providerProfile: {
+            name: providerProfile.name,
+            home: "managed" as const,
+          },
+        }),
     ...(knowledge ? { knowledgeBaseSha256: knowledge.sha256 } : {}),
     repository,
     target: {

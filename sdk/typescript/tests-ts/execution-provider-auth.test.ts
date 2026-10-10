@@ -1,15 +1,98 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
 import type { JsonObject } from "../src/config.js";
-import { prepareAmbientExecution } from "../src/execution-preparation.js";
+import {
+  nativeScanConfiguration,
+  prepareAmbientExecution,
+} from "../src/execution-preparation.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/api-events.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
+
+test.each(["synthetic", "openai"])(
+  "native %s provider replay retains the invoking credential home",
+  async (providerName) => {
+    const root = await temporaryDirectory();
+    const home = join(root, "ambient-home");
+    const repository = join(root, "repository");
+    await mkdir(home, { mode: 0o755 });
+    await mkdir(repository);
+    const environment = {
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      CODEX_API_KEY: "synthetic-native-key",
+    };
+    const provider = {
+      name: "Synthetic",
+      wire_api: "responses",
+      requires_openai_auth: true,
+    };
+    const configuration = {
+      model: "gpt-5.6-sol",
+      model_provider: providerName,
+      model_providers: { [providerName]: provider },
+    };
+    const ambientExecution = await prepareAmbientExecution({
+      command: { command: process.execPath },
+      configuration,
+      environment,
+      pluginRoot: PLUGIN_ROOT,
+      auth: "api-key",
+    });
+    expect(ambientExecution.preserveProviderEnvironment).toBe(false);
+    let recipe: JsonObject | undefined;
+    await using client = new TestClient(
+      { codexOverrides: configuration },
+      {
+        environment,
+        ambientExecution,
+        resolvePluginPython: async () => process.execPath,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "register-cli-scan")
+            recipe = JSON.parse(input!).recipe;
+          return mockWorkbench(args, input);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              throw new Error("Synthetic native execution reached");
+            },
+          }),
+        }),
+      },
+    );
+    await expect(
+      client.run(repository, {
+        mode: "standard",
+        auth: "api-key",
+        outputDir: join(root, "scan"),
+      }),
+    ).rejects.toThrow("Synthetic native execution reached");
+    expect(recipe?.["providerProfile"]).toMatchObject({ home: "ambient" });
+    expect(recipe?.["config"]).not.toHaveProperty("model_providers");
+    const restored = await nativeScanConfiguration(
+      environment,
+      { recipe: recipe! },
+      1,
+    );
+    expect(restored["model_providers"]).toEqual({ [providerName]: provider });
+    if (process.platform !== "win32") {
+      expect((await stat(home)).mode & 0o777).toBe(0o755);
+      const reference = recipe!["providerProfile"] as JsonObject;
+      expect(
+        (await stat(join(home, `${reference["name"]}.config.toml`))).mode &
+          0o777,
+      ).toBe(0o600);
+    }
+  },
+);
 
 test.each([
   ["synthetic", "env_key"],

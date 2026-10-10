@@ -6499,7 +6499,7 @@ async function prepareScanArgumentsFromRecipe(
       : await restoreProviderProfile(
           config,
           recipe["providerProfile"],
-          codexSecurityCredentialHome(environment),
+          environment,
         );
   return {
     repository,

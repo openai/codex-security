@@ -4280,7 +4280,7 @@ async function prepareSavedScanRecipe({
     ...preflightConfig,
     approval_policy: approvalPolicy,
   };
-  let providerProfile: string | undefined;
+  let providerProfile: JsonObject | undefined;
   if (!session.source.preserveProviderEnvironment) {
     const resolved = resolveCodexProfile(session.effectiveConfig);
     const modelProvider = scanModelProvider(resolved);
@@ -4297,11 +4297,13 @@ async function prepareSavedScanRecipe({
     ) {
       // Recipes are readable scan history. Keep replay credentials in the same
       // denied home as live provider profiles, and retain this profile for replay.
-      providerProfile = (
-        await createProviderProfile(runtime.codexHome, {
-          model_providers: { [modelProvider]: provider as JsonObject },
-        })
-      ).name;
+      const saved = await createProviderProfile(runtime.codexHome, {
+        model_providers: { [modelProvider]: provider as JsonObject },
+      });
+      providerProfile = {
+        name: saved.name,
+        home: runtime.preserveCodexHomeConfig ? "ambient" : "managed",
+      };
     }
   }
   const recipe = scanRecipe({

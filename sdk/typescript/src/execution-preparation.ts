@@ -46,7 +46,6 @@ import {
 } from "./execution-auth.js";
 import {
   codexSecurityStateDirectory,
-  codexSecurityCredentialHome,
   acquireCodexSecurityCredentialHomeLock,
   environmentWithGit,
   executablePathForSpawn,
@@ -600,7 +599,7 @@ export async function nativeScanConfiguration(
       await restoreProviderProfile(
         input.recipe?.config ?? {},
         input.recipe?.providerProfile,
-        codexSecurityCredentialHome(environment),
+        environment,
       ),
     ),
     subagents,

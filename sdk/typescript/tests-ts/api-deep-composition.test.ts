@@ -915,11 +915,9 @@ test.each([
     };
     expect(config).not.toHaveProperty("model_providers");
     const providerProfile = (saved["recipe"] as JsonObject)["providerProfile"];
-    const restored = await restoreProviderProfile(
-      config,
-      providerProfile,
-      h.home,
-    );
+    const restored = await restoreProviderProfile(config, providerProfile, {
+      CODEX_HOME: h.home,
+    });
     expect(restored["model_providers"]).toEqual({
       synthetic: {
         ...replayProvider,
