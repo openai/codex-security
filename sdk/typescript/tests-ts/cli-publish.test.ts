@@ -332,6 +332,78 @@ describe("publish scan to custom", () => {
 });
 
 describe("publish check", () => {
+  test.each(["completed-scan", "~/completed-scan"])(
+    "resolves %s and shared options without invoking publication",
+    async (scanDir) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const currentDirectory = join(tmpdir(), "codex-security-check-current");
+      const result: CheckScanPublicationResult = {
+        scanId: "scan-example",
+        destination: {
+          type: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+        },
+        recorded: [],
+        counts: { findings: 2, recorded: 0, pending: 2 },
+        access: {
+          transport: "linear-api",
+          authentication: "verified",
+          team: "verified",
+          project: "verified",
+          assignee: "verified",
+          issueCreation: "not-tested",
+        },
+      };
+      const deps = dependencies({
+        currentDirectory,
+        environment: {
+          CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
+          CODEX_SECURITY_LINEAR_TEAM: "environment-team",
+        },
+      });
+      deps.publishScan = async () => fail("Check must not publish.");
+      deps.checkScanPublication = async (directory, options) => {
+        expect(directory).toBe(
+          resolve(
+            scanDir.startsWith("~/") ? homedir() : currentDirectory,
+            "completed-scan",
+          ),
+        );
+        expect(options).toEqual({
+          destination: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+          linearApiKey: "explicit-key",
+          assigneeId: "teammate@example.com",
+          signal: expect.any(AbortSignal),
+        });
+        return result;
+      };
+      expect(
+        await runCli(
+          [
+            "publish",
+            "check",
+            scanDir,
+            ...DESTINATION_OPTIONS,
+            "--linear-api-key",
+            "explicit-key",
+            "--linear-assignee",
+            "teammate@example.com",
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(result);
+      expect(stderr.text()).toBe("");
+      expect(stdout.text()).not.toContain("explicit-key");
+      expect(stdout.text()).not.toContain("teammate@example.com");
+    },
+  );
+
   test("escapes contract property controls at the CLI boundary without changing the SDK error", async () => {
     const scanDir = join(await publicationDirectory(), "scan");
     await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
