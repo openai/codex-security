@@ -1,3 +1,5 @@
+import { main } from "../src/cli.js";
+import { capture, dependencies as cliDependencies } from "./cli-fixtures.js";
 import { randomUUID } from "node:crypto";
 import { restoreScanKnowledge } from "../src/scan-inputs.js";
 import { restoreProviderProfile } from "../src/provider-profile.js";
@@ -14,7 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
@@ -2566,4 +2568,130 @@ test("queued native callers preserve the first saved knowledge snapshot", async 
   expect(await readFile(path, "utf8")).toBe(original);
   expect(result.manifest.scan.id).toBe(h.options.registeredScan!.scanId);
   expect(h.launches.length).toBeGreaterThan(1);
+});
+
+test("accepted patches restore ambient providers from a produced native-preservation recipe", async () => {
+  const h = await fixture();
+  const provider = {
+    name: "Synthetic",
+    wire_api: "responses",
+    base_url: "https://provider.example.test/v1",
+    auth: { command: ["synthetic-credential-command"] },
+    http_headers: { Authorization: "synthetic-native-patch-token" },
+  };
+  const configuration = {
+    model: "gpt-6-astra",
+    model_reasoning_effort: "high",
+    service_tier: "priority",
+    analytics: { enabled: false },
+    model_provider: "synthetic",
+    model_providers: { synthetic: provider },
+  };
+  await writeFile(join(h.home, "config.toml"), stringifyToml(configuration));
+  h.stopAfterSealing();
+  await using first = h.makeClient(configuration);
+  await expect(
+    first.run(h.repository, {
+      ...h.options,
+      knowledgeBasePaths: undefined,
+      preserveProviderEnvironment: true,
+    }),
+  ).rejects.toBeInstanceOf(ScanTransportClosedError);
+  const parentId = [...h.records].find(
+    ([, record]) => record.mode === "deep",
+  )![0];
+  const parent = h.records.get(parentId)!;
+  expect(parent.recipe["preserveProviderEnvironment"]).toBe(true);
+  expect(parent.recipe["providerProfile"]).toBeUndefined();
+  expect(parent.recipe["config"]).not.toHaveProperty("model_providers");
+  const environment: NodeJS.ProcessEnv = {
+    ...parent.options.environment,
+    CODEX_HOME: h.home,
+    TERM: "xterm",
+  };
+  delete environment["CI"];
+  const command = (args: readonly string[], input?: string) =>
+    runWorkbench(
+      { ...parent.options, environment, signal: undefined },
+      args,
+      input,
+    );
+  const receipt = await command(["get-cli-scan-resume", "--scan-id", parentId]);
+  expect(typeof receipt["sealedProducerVersion"]).toBe("string");
+  const names = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+    "report.md",
+    "artifacts/deep-scan/checkpoint.json",
+  ];
+  const before = await Promise.all(
+    names.map((name) => readFile(join(h.outputDir, name))),
+  );
+  const stdout = capture(),
+    stderr = capture(true);
+  const patchConfigurations: unknown[] = [];
+  let runtimeStarts = 0;
+  let prompted = false;
+  await main(
+    ["scans", "resume", parentId, "--json"],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...cliDependencies({
+        environment,
+        currentDirectory: h.root,
+        onCodex(_args, output) {
+          patchConfigurations.push(output?.codexOverrides);
+          return 1;
+        },
+      }),
+      runWorkbench: command,
+      confirmPatchReview: async () => {
+        prompted = true;
+        expect(
+          (await command(["get-scan", "--scan-id", parentId]))["scan"],
+        ).toMatchObject({ progress: { status: "complete" } });
+        return true;
+      },
+      patchEditor: async (_repository, findings) => ({
+        severity: "low",
+        occurrenceIds: [findings[0]!.occurrenceId],
+      }),
+      createSecurity(config) {
+        return new CodexSecurity(
+          {
+            ...config,
+            pluginPath: pluginRoot,
+            pythonPath: Bun.which("python3")!,
+          },
+          {
+            environment,
+            resolvePluginPython: async () => Bun.which("python3")!,
+            prepareRuntime: async () => {
+              runtimeStarts++;
+              throw new Error("Publication must not prepare a runtime");
+            },
+            createCodex: () => {
+              runtimeStarts++;
+              throw new Error("Publication must not create a model client");
+            },
+            runWorkbench,
+          },
+          { surface: "sdk" },
+        );
+      },
+    },
+  );
+  expect(prompted, stderr.text()).toBe(true);
+  expect(runtimeStarts).toBe(0);
+  expect(patchConfigurations).toHaveLength(1);
+  expect(patchConfigurations[0]).toMatchObject(configuration);
+  expect(
+    (await command(["get-scan", "--scan-id", parentId]))["scan"],
+  ).toMatchObject({ progress: { status: "complete" } });
+  expect(
+    await Promise.all(names.map((name) => readFile(join(h.outputDir, name)))),
+  ).toEqual(before);
+  expect(h.launches).toHaveLength(3);
 });

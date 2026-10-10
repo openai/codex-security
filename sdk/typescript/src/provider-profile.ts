@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
@@ -8,7 +8,7 @@ import { CodexSecurityError } from "./errors.js";
 import {
   configuredCodexHome,
   environmentEntry,
-  expandHomePath,
+  resolveNativeCodexHome,
 } from "./codex-home.js";
 import {
   resolveCodexProfile,
@@ -110,10 +110,11 @@ export async function restoreProviderProfile(
   const requestedHome = environmentEntry(environment, "CODEX_HOME");
   const codexHome =
     profile["home"] === "ambient"
-      ? await realpath(
+      ? await resolveNativeCodexHome(
           requestedHome?.trim()
-            ? expandHomePath(requestedHome, environment)
+            ? requestedHome
             : configuredCodexHome(environment),
+          environment,
         )
       : codexSecurityCredentialHome(environment);
   // The managed home has stricter ownership rules. Native execution preserves

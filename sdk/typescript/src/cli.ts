@@ -949,6 +949,7 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 interface ScanArguments extends ResolvedScanSettings {
   rerunInputIdentity?: JsonValue;
   publicationOnly?: boolean;
+  restoreReplayConfiguration?: () => Promise<JsonObject>;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
@@ -6502,22 +6503,21 @@ async function prepareScanArgumentsFromRecipe(
   const publicationOnly =
     typeof continuation?.sealedProducerVersion === "string" &&
     !(postScanPrompt ?? continuation.postScanPrompt)?.trim();
-  const replayConfig = publicationOnly
-    ? config
-    : recipe["preserveProviderEnvironment"] === true
-      ? await nativeScanConfiguration(
+  const restoreReplayConfiguration = () =>
+    recipe["preserveProviderEnvironment"] === true
+      ? nativeScanConfiguration(
           environment,
           { recipe: { config } },
           deepScan.data?.subagents ?? DEFAULT_DEEP_SCAN_SETTINGS.subagents,
         )
-      : await restoreProviderProfile(
-          config,
-          recipe["providerProfile"],
-          environment,
-        );
+      : restoreProviderProfile(config, recipe["providerProfile"], environment);
+  const replayConfig = publicationOnly
+    ? config
+    : await restoreReplayConfiguration();
   return {
     repository,
     publicationOnly,
+    ...(publicationOnly ? { restoreReplayConfiguration } : {}),
     inheritedPermissions:
       inheritedPermissions as ScanOptions["inheritedPermissions"],
     preserveProviderEnvironment: recipe["preserveProviderEnvironment"] === true,
@@ -9094,6 +9094,37 @@ async function executeScan(
       ),
     };
     try {
+      if (
+        selected.findings.length > 0 &&
+        arguments_.restoreReplayConfiguration
+      ) {
+        const restored = resolveCodexProfile({
+          ...DEFAULT_CODEX_CONFIG,
+          ...(await arguments_.restoreReplayConfiguration()),
+        });
+        ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
+          scanModelConfiguration(restored));
+        patchServiceTier = restored["service_tier"] ?? "default";
+        const analytics = restored["analytics"];
+        patchAnalyticsOverride =
+          isJsonObject(analytics) && analytics["enabled"] !== undefined
+            ? `analytics.enabled=${JSON.stringify(analytics["enabled"])}`
+            : undefined;
+        const provider = scanModelProvider(restored);
+        if (typeof provider === "string") {
+          providerOptions = {
+            provider,
+            providerConfiguration:
+              (
+                restored["model_providers"] as
+                  Record<string, JsonObject> | undefined
+              )?.[provider] ??
+              (isExternalModelProvider(provider)
+                ? EXTERNAL_CODEX_PROVIDERS[provider]
+                : undefined),
+          };
+        }
+      }
       patches = await runFindingPatches(
         selected,
         {

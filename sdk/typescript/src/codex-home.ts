@@ -1,5 +1,6 @@
+import { lstat, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { isAbsolute, join, parse, resolve, sep, win32 } from "node:path";
 import type { ProcessEnvironment } from "./runtime.js";
 
 /** @internal */
@@ -82,4 +83,47 @@ export function expandHomePath(
   return path.startsWith("~/")
     ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
     : expandHome(path, environment);
+}
+
+/** @internal Resolve the home selected by native startup without changing its path semantics. */
+export async function resolveNativeCodexHome(
+  value: string,
+  environment: ProcessEnvironment,
+): Promise<string> {
+  const home = expandHome(value, environment);
+  return await realpath(home).catch((error: NodeJS.ErrnoException) => {
+    const windowsRootRelative =
+      process.platform === "win32" &&
+      (win32.parse(home).root === "\\" || win32.parse(home).root === "/");
+    // Runtime preparation creates an explicitly selected absolute home.
+    if (error.code === "ENOENT" && isAbsolute(home) && !windowsRootRelative)
+      return resolveMissingNativeHome(home);
+    throw error;
+  });
+}
+
+async function resolveMissingNativeHome(home: string): Promise<string> {
+  const root = parse(home).root;
+  let resolved = await realpath(root);
+  const separator = process.platform === "win32" ? /[\\/]+/u : /\/+/u;
+  for (const component of home.slice(root.length).split(separator)) {
+    if (!component) continue;
+    // Resolve each prefix before normalizing .., including after missing parents.
+    const candidate = `${resolved}${sep}${component}`;
+    try {
+      resolved = await realpath(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const entry = await lstat(candidate).catch(
+        (cause: NodeJS.ErrnoException) => {
+          if (cause.code !== "ENOENT") throw cause;
+          return undefined;
+        },
+      );
+      // A dangling symlink is not a directory runtime preparation can create.
+      if (entry !== undefined) throw error;
+      resolved = join(resolved, component);
+    }
+  }
+  return resolved;
 }

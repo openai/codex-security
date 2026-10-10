@@ -1,3 +1,5 @@
+import assert from "node:assert/strict";
+import { snapshotNativeEnvironment } from "../../../../plugins/codex-security/mcp-app/src/native-executable.js";
 import { mkdir, readFile, realpath, symlink } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { main } from "../../src/cli.js";
@@ -21,8 +23,7 @@ await symlink(
   process.platform === "win32" ? "junction" : "dir",
 );
 const rawHome = `${alias}${sep}link${sep}..`;
-// Native startup uses Node's realpath before writing its private replay file.
-const selectedHome = await realpath(rawHome);
+const traversedHome = process.platform === "win32" ? alias : physical;
 const privateConfig = {
   model_providers: {
     synthetic: {
@@ -32,25 +33,46 @@ const privateConfig = {
     },
   },
 };
-const profile = await createProviderProfile(selectedHome, privateConfig);
-const reference = { name: profile.name, home: "ambient" };
-const canonicalControl = await restoreProviderProfile({}, reference, {
-  CODEX_HOME: selectedHome,
-});
-const original = await readFile(profile.path);
+let canonicalControl: JsonObject | undefined;
 const results = [];
-for (const [spelling, requestedHome] of [
-  ["absolute", rawHome],
-  ["relative", `${relative(process.cwd(), alias)}${sep}link${sep}..`],
-  ["home-relative", `~${sep}alias${sep}link${sep}..`],
+for (const [spelling, requestedHome, expectedHome] of [
+  ["absolute", rawHome, traversedHome],
+  [
+    "relative",
+    `${relative(process.cwd(), alias)}${sep}link${sep}..`,
+    traversedHome,
+  ],
+  ["home-relative", `~${sep}alias${sep}link${sep}..`, alias],
+  ["missing-parent", `${root}${sep}missing${sep}..${sep}physical`, physical],
 ] as const) {
+  const environment = {
+    HOME: root,
+    USERPROFILE: root,
+    CODEX_HOME: requestedHome,
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  const previous = Object.fromEntries(
+    Object.keys(environment).map((key) => [key, process.env[key]]),
+  );
+  let producer: Record<string, string>;
+  try {
+    Object.assign(process.env, environment);
+    producer = await snapshotNativeEnvironment();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const selectedHome = producer.CODEX_HOME!;
+  assert.equal(selectedHome, expectedHome);
+  const profile = await createProviderProfile(selectedHome, privateConfig);
+  const reference = { name: profile.name, home: "ambient" };
+  canonicalControl = await restoreProviderProfile({}, reference, {
+    CODEX_HOME: selectedHome,
+  });
+  const original = await readFile(profile.path);
   for (const command of ["resume", "rerun"] as const) {
-    const environment = {
-      HOME: root,
-      USERPROFILE: root,
-      CODEX_HOME: requestedHome,
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    };
     const saved = savedRecipe({
       model: "gpt-5.6-sol",
       model_provider: "synthetic",

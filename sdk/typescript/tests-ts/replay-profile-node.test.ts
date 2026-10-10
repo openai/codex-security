@@ -12,7 +12,8 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 afterEach(cleanup);
 
-const name = "Node CLI replay preserves symlink/.. homes for resume and rerun";
+const name =
+  "Node CLI replay uses the original native home for resume and rerun";
 test(name, async () => {
   if (runTestInSubprocess(import.meta.filename, name)) return;
   // Bun's realpath collapses these components; exercise the supported Node runtime.
@@ -41,7 +42,7 @@ test(name, async () => {
     );
     const proof = JSON.parse(stdout);
     expect(proof.canonicalControl).toEqual(proof.privateConfig);
-    expect(proof.results).toHaveLength(6);
+    expect(proof.results).toHaveLength(8);
     for (const result of proof.results) {
       expect(
         result.code,

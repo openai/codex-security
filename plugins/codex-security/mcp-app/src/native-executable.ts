@@ -2,7 +2,6 @@ import {
   accessSync,
   constants as fsConstants,
   existsSync,
-  promises as fs,
   readdirSync,
   statSync,
 } from "node:fs";
@@ -12,12 +11,13 @@ import {
   dirname,
   isAbsolute,
   join,
-  parse,
   resolve,
-  sep,
   win32,
 } from "node:path";
-import { expandHome } from "../../../../sdk/typescript/src/codex-home.js";
+import {
+  expandHome,
+  resolveNativeCodexHome,
+} from "../../../../sdk/typescript/src/codex-home.js";
 import {
   resolveTrustedExecutable,
   type TrustedExecutable,
@@ -63,47 +63,12 @@ export async function snapshotNativeEnvironment(): Promise<
     delete environment.CODEX_HOME;
   } else if (codexHome !== undefined && codexHome.length > 0) {
     // Resolve symlink/.. paths before consumers normalize them or change cwd.
-    const home = expandHome(codexHome, environment);
-    environment.CODEX_HOME = await fs
-      .realpath(home)
-      .catch((error: NodeJS.ErrnoException) => {
-        // Runtime preparation creates an explicitly selected absolute home.
-        if (
-          error.code === "ENOENT" &&
-          isAbsolute(home) &&
-          !isNativeWindowsRootRelativePath(home)
-        )
-          return resolveMissingNativeHome(home);
-        throw error;
-      });
+    environment.CODEX_HOME = await resolveNativeCodexHome(
+      codexHome,
+      environment,
+    );
   }
   return environment;
-}
-
-async function resolveMissingNativeHome(home: string): Promise<string> {
-  const root = parse(home).root;
-  let resolved = await fs.realpath(root);
-  const separator = process.platform === "win32" ? /[\\/]+/u : /\/+/u;
-  for (const component of home.slice(root.length).split(separator)) {
-    if (!component) continue;
-    // Resolve each prefix before normalizing .., including after missing parents.
-    const candidate = `${resolved}${sep}${component}`;
-    try {
-      resolved = await fs.realpath(candidate);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      const entry = await fs
-        .lstat(candidate)
-        .catch((cause: NodeJS.ErrnoException) => {
-          if (cause.code !== "ENOENT") throw cause;
-          return undefined;
-        });
-      // A dangling symlink is not a directory runtime preparation can create.
-      if (entry !== undefined) throw error;
-      resolved = join(resolved, component);
-    }
-  }
-  return resolved;
 }
 
 export function resolveCodexPath(

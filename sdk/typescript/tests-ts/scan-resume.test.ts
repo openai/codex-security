@@ -2526,3 +2526,166 @@ test.each([
     ).toEqual(before);
   },
 );
+
+test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
+  "sealed resume restores private execution settings only for selected patches (%s)",
+  async (selection) => {
+    const findings = [
+      semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
+    ];
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 375,
+      output_tokens: 3,
+    })!;
+    const f = await interruptedScan("deep", false, {}, false, true, {
+      findings,
+      coverage: semanticCoverage(),
+      cost,
+    });
+    await writeDraft(f.command, f.registration, "deep", {
+      scanId: f.scanId,
+      findings,
+      coverage: semanticCoverage(),
+    });
+    const checkpoint = JSON.parse(
+      await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+    );
+    await f.command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        f.scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify({
+        ...checkpoint,
+        terminalReason: "capped",
+        finalCost: cost,
+      }),
+    );
+    const home = join(f.root, "private-replay-home");
+    await mkdir(home, { mode: 0o700 });
+    const provider = {
+      name: "Synthetic",
+      wire_api: "responses",
+      base_url: "https://provider.example.test/v1",
+      auth: { command: ["synthetic-credential-command"] },
+      http_headers: { Authorization: "synthetic-private-patch-token" },
+    };
+    const profile = await createProviderProfile(home, {
+      model_providers: { synthetic: provider },
+    });
+    const recipe = {
+      ...f.recipe,
+      auth: "api-key",
+      config: {
+        ...f.recipe.config,
+        model_provider: "synthetic",
+        model_reasoning_effort: "high",
+        service_tier: "priority",
+        analytics: { enabled: false },
+      },
+      providerProfile: { name: profile.name, home: "ambient" },
+    };
+    execFileSync(f.python, [
+      "-c",
+      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE scans SET recipe_json=? WHERE id=?',(sys.argv[2],sys.argv[3])); c.commit()",
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      JSON.stringify(recipe),
+      f.scanId,
+    ]);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    f.environment.CODEX_HOME = home;
+    if (selection !== "accept") await rm(profile.path);
+    const files = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "report.md",
+      DEEP_SCAN_CHECKPOINT,
+    ];
+    const before = await Promise.all(
+      files.map((name) => readFile(join(f.scanDir, name))),
+    );
+    const stdout = capture(),
+      stderr = capture(true);
+    const patchConfigurations: unknown[] = [];
+    let prompted = false;
+    let runtimeStarts = 0;
+    const code = await main(
+      ["scans", "resume", f.scanId, "--json"],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies({
+          environment: f.environment,
+          currentDirectory: f.root,
+          onCodex(_args, output) {
+            patchConfigurations.push(output?.codexOverrides);
+            return 1;
+          },
+        }),
+        runWorkbench: f.command,
+        confirmPatchReview: async () => {
+          prompted = true;
+          expect(
+            (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+          ).toMatchObject({ progress: { status: "complete" } });
+          return selection !== "decline";
+        },
+        patchEditor: async (_repository, findings) =>
+          selection === "cancel"
+            ? null
+            : {
+                severity: "high",
+                occurrenceIds:
+                  selection === "empty"
+                    ? []
+                    : findings.map((finding) => finding.occurrenceId),
+              },
+        createSecurity(config) {
+          const client = new TestClient(
+            { ...config, pluginPath: PLUGIN_ROOT, pythonPath: f.python },
+            {
+              environment: f.environment,
+              resolvePluginPython: async () => f.python,
+              prepareRuntime: async () => {
+                runtimeStarts++;
+                throw new Error("Publication must not prepare a model runtime");
+              },
+              createCodex: () => {
+                runtimeStarts++;
+                throw new Error("Publication must not create a model client");
+              },
+              runWorkbench,
+            },
+          );
+          return client;
+        },
+      },
+    );
+    expect(prompted, stderr.text()).toBe(true);
+    expect(runtimeStarts).toBe(0);
+    expect(patchConfigurations).toHaveLength(selection === "accept" ? 1 : 0);
+    if (selection === "accept") {
+      expect(patchConfigurations[0]).toMatchObject({
+        model: (recipe.config as JsonObject)["model"],
+        model_reasoning_effort: "high",
+        service_tier: "priority",
+        analytics: { enabled: false },
+        model_provider: "synthetic",
+        model_providers: { synthetic: provider },
+      });
+    } else if (selection === "missing") {
+      expect(code).toBe(2);
+      expect(stderr.text()).toContain("ENOENT");
+    } else expect(code, stderr.text()).toBe(0);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({ progress: { status: "complete" } });
+    expect(
+      await Promise.all(files.map((name) => readFile(join(f.scanDir, name)))),
+    ).toEqual(before);
+  },
+);
