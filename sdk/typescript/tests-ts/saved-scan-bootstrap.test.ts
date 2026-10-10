@@ -882,12 +882,21 @@ for (const selector of ["latest", "workflow"] as const) {
   test(`bootstrap ${selector} ignores unrelated history enclosing trusted Python`, async () => {
     const f = await fixture(true);
     const trustedRuntime = join(f.root, "trusted-python");
+    // Keep the interpreter separate from host Git, including when Python comes
+    // from a virtualenv whose packages (such as Python 3.10's tomli) are needed.
     execFileSync(f.python, [
-      "-m",
-      "venv",
-      "--copies",
-      "--without-pip",
-      "--system-site-packages",
+      "-I",
+      "-c",
+      [
+        "import pathlib, site, subprocess, sys",
+        "base = pathlib.Path(sys.base_prefix)",
+        "names = ['python.exe'] if sys.platform == 'win32' else [f'bin/python{sys.version_info.major}.{sys.version_info.minor}', 'bin/python3', 'bin/python']",
+        "python = next(base / name for name in names if (base / name).is_file())",
+        "subprocess.run([str(python), '-m', 'venv', '--copies', '--without-pip', '--system-site-packages', sys.argv[1]], check=True)",
+        "isolated = pathlib.Path(sys.argv[1]) / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')",
+        "library = subprocess.check_output([str(isolated), '-I', '-c', 'import sysconfig; print(sysconfig.get_path(\"purelib\"))'], text=True).strip()",
+        "pathlib.Path(library, 'fixture-parent.pth').write_text('\\n'.join(site.getsitepackages()) + '\\n', encoding='utf-8')",
+      ].join("\n"),
       trustedRuntime,
     ]);
     const trustedPython = join(
