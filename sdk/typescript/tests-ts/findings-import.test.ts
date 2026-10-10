@@ -44,6 +44,18 @@ function exportCsv(findings: Finding[]): string {
 }
 
 describe("findings import formats", () => {
+  test("round-trips an empty exported CSV", async () => {
+    expect(
+      await parseImportedFindings(exportCsv([]), "csv", PLUGIN_ROOT),
+    ).toEqual([]);
+    await expect(
+      parseImportedFindings("", "csv", PLUGIN_ROOT),
+    ).rejects.toThrow();
+    await expect(
+      parseImportedFindings("title,summary\n", "csv", PLUGIN_ROOT),
+    ).rejects.toThrow();
+  });
+
   test("retains distinct occurrences of a shared finding in CSV and JSON", async () => {
     const {
       findings: [finding],
@@ -249,9 +261,22 @@ describe("findings import formats", () => {
         parseImportedFindings(JSON.stringify(payload), "json", PLUGIN_ROOT),
       ).rejects.toThrow("Findings JSON");
     }
-    await expect(
-      parseImportedFindings("{", "json", PLUGIN_ROOT),
-    ).rejects.toThrow("could not be parsed");
+    for (const source of ["{", '{"findings": [],}']) {
+      let parseError: Error | undefined;
+      try {
+        JSON.parse(source);
+      } catch (error) {
+        parseError = error as Error;
+      }
+      expect(parseError).toBeInstanceOf(SyntaxError);
+      await expect(
+        parseImportedFindings(source, "json", PLUGIN_ROOT),
+      ).rejects.toMatchObject({
+        name: "CodexSecurityError",
+        message: `Findings JSON could not be parsed. ${parseError!.message}`,
+        cause: expect.objectContaining({ message: parseError!.message }),
+      });
+    }
     await expect(
       parseImportedFindings(
         JSON.stringify({

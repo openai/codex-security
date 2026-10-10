@@ -18,7 +18,7 @@ const COMMAND_GROUPS: readonly Group[] = [
       "publish",
     ],
   ],
-  ["Automate", ["bulk-scan", "scan-components", "install-hook", "serve"]],
+  ["Automate", ["bulk-scan", "scan-components", "install-hook"]],
   ["Setup and support", ["login", "logout", "init", "info", "feedback"]],
 ];
 
@@ -102,7 +102,6 @@ const VALUE_LABELS: Record<string, string> = {
   "filter-output": "keys",
   "token-limit": "count",
   "token-offset": "count",
-  port: "port",
   to: "destination",
 };
 
@@ -211,13 +210,9 @@ function optionRow(row: Row, command: string): Row {
 
 function globalRows(rows: Row[], command: string): Row[] {
   const scan = command === "scan" || command === "scan import";
-  const plainOutput = [
-    "validate",
-    "login",
-    "logout",
-    "serve",
-    "export",
-  ].includes(command);
+  const plainOutput = ["validate", "login", "logout", "export"].includes(
+    command,
+  );
   const visible = rows.filter(({ label }) => {
     if (scan && label.startsWith("--filter-output")) return false;
     return !(
@@ -310,8 +305,28 @@ export function formatCliHelp(text: string, columns = 80): string {
       if (command === "") {
         sections.push(
           "Get started:\n" +
-            "  codex-security login\n" +
-            "  codex-security scan .\n" +
+            "  codex-security login\n\n" +
+            wrap(
+              "In your repository, optionally draft SECURITY.md:",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n  codex-security policy .\n" +
+            wrap(
+              "Review and edit the draft, then copy it to the displayed Policy target.",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n" +
+            wrap(
+              "Skip this step to keep an existing policy or scan without one.",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n\n  codex-security scan .\n" +
             "  codex-security findings",
         );
       } else if (examples) {

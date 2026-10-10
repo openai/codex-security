@@ -1,8 +1,9 @@
 # CLI and workflows
 
-Use `npx @openai/codex-security` without a global install. The examples below
-use `codex-security`, which is available after
-`npm install --global @openai/codex-security`.
+The global installation provides both `codex-security` and its short alias `cs`.
+They accept the same arguments and options. The examples below use
+`codex-security`; you can also use `cs` or, without a global installation,
+`npx @openai/codex-security`. See the [installation guide](../README.md#install).
 
 ```bash
 codex-security --help
@@ -695,7 +696,70 @@ a larger total or `undefined`. It runs once per limit without blocking the scan.
 Late responses after cancellation/completion are ignored; invalid increases or
 save failures keep the existing limit. `onCost(cost, maxCostUsd)` reports changes.
 
+## Review one system across repositories
+
+Use a single directory/path scan when an application spans repositories and you
+want Codex to follow relationships between their source files. Put the checkouts
+under one parent directory; that parent does not need to be a Git repository.
+Select the relevant paths beneath it and supply the shared architecture and
+reporting instructions explicitly:
+
+```text
+workspace/
+├── application/
+│   ├── api/       # Git checkout
+│   ├── web/       # Git checkout
+│   └── shared/    # Git checkout
+├── context/
+│   ├── architecture.md
+│   └── scan-instructions.md
+└── results/
+```
+
+From `workspace/`, run:
+
+```bash
+codex-security scan ./application \
+  --mode deep \
+  --path api/src --path web/src --path shared/src \
+  --knowledge-base ./context/architecture.md \
+  --scan-prompt-file ./context/scan-instructions.md \
+  --output-dir ./results/system-review
+```
+
+Scope paths are relative to `application/`. Context and output paths in this
+example are relative to the working directory. Keep results outside the scanned
+directory and any enclosing Git worktree. You do not need to add `AGENTS.md` or
+`SECURITY.md` to each checkout to pass these documents.
+
+Include both sides of a boundary you want reviewed, such as an API caller and
+its authorization implementation. Architecture documents can explain deployment
+facts and trust boundaries, but cannot replace missing source evidence. Identify
+excluded or unavailable services in the context so their dependencies remain
+explicit coverage limitations. Distinguish source that supports an investigation
+from locations where you want findings reported.
+
+Record each checkout's commit and local changes before scanning, and keep the
+checkouts unchanged while a scan or resume is active. A non-Git parent is recorded
+as one directory snapshot, rather than one pinned revision per child repository.
+Use the saved scan ID when inspecting results and logs:
+
+```bash
+codex-security scans show SCAN_ID
+codex-security scans logs SCAN_ID
+```
+
+See [scan history and reruns](#scan-history-and-reruns) for the distinction between
+continuing an interrupted scan and starting a new run. Neither approach proves
+that every possible cross-service path was reviewed; inspect the reported
+coverage and unresolved questions alongside findings.
+
 ## Bulk scans
+
+Bulk scans run independent repository reviews in one resumable campaign. Shared
+knowledge-base documents give each review application context; they do not make
+the campaign a joint source review across repositories. For that workflow, use
+[one system scan](#review-one-system-across-repositories).
 
 Run `gh auth login`, then `codex-security bulk-scan` for interactive GitHub
 selection. It lists repositories pushed in the last 90 days, excluding forks
@@ -1097,6 +1161,25 @@ least eight characters.
 | `findings list [REPOSITORY]`                          | List open findings.                                        |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
 
+Without an ID, `scans show` selects the latest completed scan, while `scans logs`
+selects the latest scan of any status. After a successful scan followed by a
+failed or active scan, these defaults refer to different runs. Human output
+identifies the selected run, labels its saved update time, and gives matching
+commands with its full scan ID:
+
+```bash
+codex-security scans show SCAN_ID
+codex-security scans logs SCAN_ID
+```
+
+Completion summaries include that ID and the saved results directory. Failure
+summaries include the same navigation when the current run was registered, plus
+the last observed phase when available. A failure before registration has no
+scan ID. The handoff uses that run's registration receipt without querying scan
+history. Inspect its saved status before choosing resume or rerun, and supply
+the original custom prompt files for reruns. Structured history and log output
+and command selection defaults are unchanged.
+
 Recipes save settings and authentication choice, not credentials. Reruns use the
 current checkout/context files and do not reload project files. Supply replacement
 scan and custom-validation prompts when the original used them:
@@ -1104,6 +1187,14 @@ scan and custom-validation prompts when the original used them:
 ```bash
 codex-security scans rerun SCAN_ID --scan-prompt-file instructions.md
 ```
+
+A rerun creates a new scan. When the original has saved input identities, the
+rerun reports changes to the scan instructions or knowledge base. `scans show`
+includes the saved scope, runtime and Deep Scan settings, instruction digest,
+and knowledge snapshot/document digests. JSON includes these identities under
+`recipe.scanInputs`. The instruction digest covers the exact UTF-8 prompt text;
+document digests cover the extracted text workers receive. These identities
+describe supplied inputs, not proof that a model read or followed every passage.
 
 History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Keep it private,
@@ -1128,7 +1219,14 @@ and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
 
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
-settings/instructions. New records save the authentication mode, explicit safety
+settings/instructions. Knowledge-bearing scans save their extracted documents in
+the private `.scan-knowledge.json` continuation file beside the scan artifacts.
+Resume verifies and uses that snapshot even if the original files changed or were
+deleted. Preserve it with the scan directory; canonical reports do not embed its
+document text. Old individual scans without a saved knowledge snapshot require a
+new scan when they used a knowledge base. Old scans without a knowledge base and
+bulk campaigns with an already-bound snapshot retain their existing resume path.
+New records save the authentication mode, explicit safety
 identifier, and post-scan prompt; older records cannot reconstruct missing values.
 A failed connection leaves the scan available for another resume attempt.
 Compatible scans can resume after plugin updates; sealed results keep their
@@ -1423,8 +1521,8 @@ schema, and `completions bash|zsh|fish` for shell completions. Scan output suppo
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
 MCP exposes only read-only `info`, because the transport cannot cancel scans.
 
-For a local findings API and deduplication, see the
-[findings service guide](findings-service.md).
+For local findings storage, deduplication, and custom endpoints, see the
+[findings guide](findings-service.md).
 
 ## Containerized bulk scans
 

@@ -12,7 +12,7 @@ import {
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { ConfigurationError } from "../src/errors.js";
 import {
@@ -41,7 +41,7 @@ function docx(
 ): Uint8Array {
   return zipSync({
     "word/document.xml": strToU8(
-      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r>${secondLine === undefined ? "" : `${breakElement}<w:r><w:t>${secondLine}</w:t></w:r>`}</w:p></w:body></w:document>`,
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t>${secondLine === undefined ? "" : `${breakElement}<w:t>${secondLine}</w:t>`}</w:r></w:p></w:body></w:document>`,
     ),
   });
 }
@@ -482,6 +482,14 @@ describe("scan knowledge bases", () => {
       join(root, "carriage-return.docx"),
       docx("Authentication", "Review sessions", "<w:cr/>"),
     );
+    await writeFile(
+      join(root, "paired-tab.docx"),
+      docx("Role", "Capability", "<w:tab></w:tab>"),
+    );
+    await writeFile(
+      join(root, "self-closing-tab.docx"),
+      docx("User", "Permission", "<w:tab/>"),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.track(knowledgeBase.path);
@@ -491,6 +499,8 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");
+    expect(documents).toContain("Role\tCapability\n");
+    expect(documents).toContain("User\tPermission\n");
   });
 
   test.each([
@@ -520,6 +530,44 @@ describe("scan knowledge bases", () => {
       }
     },
   );
+
+  test("cancels PDF extraction when the scan is aborted", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "large.pdf");
+    await writeFile(source, pdf("Cancellable content"));
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation.");
+    let pagesRead = 0;
+    const destroy = mock(async () => {});
+    const parser = spyOn(pdfjs, "getDocument").mockImplementation(
+      () =>
+        ({
+          promise: Promise.resolve({
+            numPages: 3,
+            getPage: async () => {
+              pagesRead += 1;
+              return {
+                getTextContent: async () => {
+                  controller.abort(reason);
+                  return { items: [{ str: "page" }] };
+                },
+              };
+            },
+          }),
+          destroy,
+        }) as never,
+    );
+
+    try {
+      const prepared = prepareKnowledgeBase([source], controller.signal);
+      await expect(prepared).rejects.toBe(reason);
+      expect(pagesRead).toBe(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      parser.mockRestore();
+    }
+  });
 
   test("preserves the local origin and cause when snapshot staging fails", async () => {
     const root = await temporaryDirectory();

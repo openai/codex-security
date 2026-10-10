@@ -14,6 +14,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -22,7 +23,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
-import * as streams from "./support/streams.ts";
+import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,7 +58,7 @@ async function testDeepScanStdioLifecycle() {
     "fake-codex-signal-checkpoint-control.txt",
   );
   const fakeCodexPath = path.join(fixtureRoot, "fake-codex.mjs");
-  const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper.mjs");
+  const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper ");
   const cancelFailureControlPath = path.join(
     fixtureRoot,
     "fail-next-cancel-scan",
@@ -126,7 +127,8 @@ profile = "selected"
 model_reasoning_summary = "none"
 `,
   );
-  await writePythonWrapper(pythonWrapperPath);
+  await writePythonWrapper(`${pythonWrapperPath}.mjs`);
+  await symlink(`${pythonWrapperPath}.mjs`, pythonWrapperPath);
   await buildServer(serverBundlePath, { target: "node20" });
 
   const environment = {
@@ -140,6 +142,7 @@ model_reasoning_summary = "none"
     CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
+    CODEX_SECURITY_PYTHON_COMMAND: pythonWrapperPath,
     REAL_PYTHON: process.env.PYTHON?.trim() || "python3",
     FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL: cancelFailureControlPath,
     FAKE_WORKBENCH_CANCEL_LOG: cancelLogPath,
@@ -555,7 +558,7 @@ model_reasoning_summary = "none"
     assert.equal(activeFailureState.workers[0].status, "running");
     assertProcessAlive(failedWorker.pid);
 
-    const failureMessage = "fixture unrecoverable failure";
+    const failureMessage = "fixture unrecoverable failure\0source";
     const failureResponse = await server.request(
       21,
       "tools/call",
@@ -936,11 +939,13 @@ model_reasoning_summary = "none"
       const helperLaunches = await readLogLines(workbenchLaunchLogPath);
       for (const command of ["get-scan", "write-scan-draft", "complete-scan"]) {
         const launches = helperLaunches.filter(
-          (launch) => launch.args[1] === command,
+          (launch) => launch.workbenchArgs[0] === command,
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.equal(launch.args[0], workbenchPath);
+          assert.equal(launch.args[0], "-c");
+          assert.equal(launch.args.at(-1), workbenchPath);
+          assert.equal(launch.args.length, 3);
           assert.equal(launch.cwd, pluginRoot);
         }
       }
@@ -985,6 +990,13 @@ model_reasoning_summary = "none"
     } finally {
       await restartedServer.stop();
     }
+    await testCliDeepScanEngine({
+      fixtureRoot,
+      environment,
+      serverBundlePath,
+      codexHome,
+      restartControlPath,
+    });
   } catch (error) {
     (error as Error).message += `\nMCP stderr:\n${server.stderrText()}`;
     throw error;
@@ -996,12 +1008,227 @@ model_reasoning_summary = "none"
   }
 }
 
-function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
-  return streams.startServer(serverPath, env, {
-    cwd: pluginRoot,
-    component: "codex_security_deep_scan",
-    timeoutMessage: (id) => `Timed out waiting for JSON-RPC response ${id}.`,
+async function testCliDeepScanEngine({
+  fixtureRoot,
+  environment,
+  serverBundlePath,
+  codexHome,
+  restartControlPath,
+}: {
+  fixtureRoot: string;
+  environment: NodeJS.ProcessEnv;
+  serverBundlePath: string;
+  codexHome: string;
+  restartControlPath: string;
+}) {
+  const canonicalRoot = await realpath(fixtureRoot);
+  const repository = path.join(canonicalRoot, "cli-engine-target");
+  await mkdir(repository);
+  await writeFile(
+    path.join(repository, "fixture.py"),
+    "print('engine fixture')\n",
+  );
+  const threadId = "cli-engine-session";
+  const register = async (name: string) => {
+    const scanDir = path.join(canonicalRoot, name);
+    await mkdir(scanDir, { mode: 0o700 });
+    const registration = await runWorkbench(environment, [
+      "register-cli-scan",
+      "--repository",
+      repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        repository,
+        mode: "deep",
+        target: { kind: "repository", paths: [] },
+        config: { model: "gpt-6.1-sol", model_reasoning_effort: "max" },
+      }),
+    ]);
+    await runWorkbench(environment, [
+      "set-scan-thread",
+      "--scan-id",
+      registration.scanId,
+      "--thread-id",
+      threadId,
+    ]);
+    return { scanId: registration.scanId as string, scanDir };
+  };
+  const launch = (scanId: string, overrides: NodeJS.ProcessEnv = {}) => {
+    const execution = execFileAsync(
+      process.execPath,
+      [serverBundlePath, "--deep-scan-engine"],
+      {
+        env: { ...environment, ...overrides },
+        encoding: "utf8",
+        timeout: 30_000,
+      },
+    );
+    execution.child.stdin!.write(
+      JSON.stringify({
+        scanId,
+        threadId,
+        model: "gpt-6.1-sol",
+        reasoningEffort: "max",
+        permissionProfile: (
+          parentSandboxState as { permissionProfile: unknown }
+        ).permissionProfile,
+      }) + "\n",
+    );
+    return execution;
+  };
+  const completed = await register("cli-engine-completed");
+  const startIndex = (await readLogLines(environment.FAKE_CODEX_START_LOG!))
+    .length;
+  const helperStartIndex = (
+    await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
+  ).length;
+  const result = await launch(completed.scanId);
+  const helperLaunches = (
+    await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
+  ).slice(helperStartIndex);
+  assert.ok(helperLaunches.length > 0);
+  for (const launch of helperLaunches) {
+    assert.deepEqual(launch.args.slice(0, 5), ["-I", "-X", "utf8", "-B", "-c"]);
+    assert.equal(launch.args.at(-1), workbenchPath);
+    assert.equal(launch.args.length, 7);
+    assert.equal(launch.cwd, pluginRoot);
+  }
+  assert.deepEqual(JSON.parse(result.stdout), {
+    scanId: completed.scanId,
+    manifestPath: path.join(completed.scanDir, "scan-manifest.json"),
   });
+  const starts = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).slice(
+    startIndex,
+  );
+  assert.ok(
+    starts.some((entry) => discoveryPromptContext(entry.stdin).workerLabel),
+  );
+  assert.ok(
+    starts.some(
+      (entry) => discoveryPromptContext(entry.stdin).claimedWorkerIds,
+    ),
+  );
+  for (const entry of starts) {
+    assertReadOnlyWorkerInvocation(entry.argv, codexHome);
+    assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
+    assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
+    assert.equal(entry.hasExpectedApiKey, true);
+  }
+  const count = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length;
+  await launch(completed.scanId);
+  assert.equal(
+    (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length,
+    count,
+  );
+  await runWorkbench(environment, [
+    "complete-scan",
+    "--scan-id",
+    completed.scanId,
+  ]);
+  const manifest = await readJson(
+    path.join(completed.scanDir, "scan-manifest.json"),
+  );
+  assert.equal(manifest.scan.status, "completed");
+  assert.ok(manifest.scan.sealedAt);
+  assert.ok(
+    (await readFile(path.join(completed.scanDir, "report.md"), "utf8")).length >
+      0,
+  );
+
+  await rm(restartControlPath);
+  const canceled = await register("cli-engine-canceled");
+  const execution = launch(canceled.scanId);
+  const outcome = execution.then(
+    () => undefined,
+    (error) => error,
+  );
+  try {
+    await waitForJsonLines(environment.FAKE_CODEX_START_LOG!, count + 1);
+    await waitForDeepScanWorker({
+      environment,
+      scanId: canceled.scanId,
+      threadId,
+    });
+    const running = (
+      await readLogLines(environment.FAKE_CODEX_START_LOG!)
+    ).slice(count);
+    assert.ok(running.length > 0);
+    const observerLog = path.join(
+      canonicalRoot,
+      "cli-observer-workbench.jsonl",
+    );
+    const observer = launch(canceled.scanId, {
+      FAKE_WORKBENCH_LAUNCH_LOG: observerLog,
+    });
+    const observerOutcome = observer.then(
+      () => undefined,
+      (error) => error,
+    );
+    try {
+      await waitFor(
+        async () =>
+          (await readLogLines(observerLog)).some(
+            (entry) => entry.workbenchArgs[0] === "get-deep-scan",
+          ),
+        "second CLI engine to observe the active coordinator",
+      );
+      observer.child.stdin!.end();
+      const error = await observerOutcome;
+      assert.ok(error);
+      assert.equal(error.killed, false);
+      for (const worker of running) assertProcessAlive(worker.pid);
+      assert.equal(
+        (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length,
+        count + running.length,
+      );
+    } finally {
+      if (
+        observer.child.exitCode === null &&
+        observer.child.signalCode === null
+      )
+        observer.child.kill("SIGKILL");
+      await observerOutcome;
+    }
+    execution.child.stdin!.end();
+    assert.ok(await outcome);
+    for (const worker of running) {
+      assert.throws(() => process.kill(worker.pid, 0), /ESRCH/);
+    }
+    const saved = await getDeepScan({
+      environment,
+      scanId: canceled.scanId,
+      threadId,
+    });
+    assert.notEqual(saved.status, "succeeded");
+    assert.equal(
+      saved.workers.filter(
+        (worker: PersistedDeepScanWorker) => worker.status === "running",
+      ).length,
+      0,
+    );
+  } finally {
+    if (
+      execution.child.exitCode === null &&
+      execution.child.signalCode === null
+    )
+      execution.child.kill("SIGKILL");
+    await outcome;
+  }
+}
+
+function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
+  return startRpcServer(
+    {
+      command: process.execPath,
+      args: [serverPath, "--stdio"],
+      cwd: pluginRoot,
+      env: env,
+      stderr: "pipe",
+    },
+    { component: "codex_security_deep_scan", timeoutMs: 15_000 },
+  );
 }
 
 function toolCall(
@@ -1234,17 +1461,19 @@ async function writePythonWrapper(executablePath: string) {
 import { appendFileSync, existsSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, cwd: process.cwd() }) + '\\n');
+const input = Buffer.concat(await process.stdin.toArray());
+const workbenchArgs = JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'));
+appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
-if (args[1] === 'cancel-scan') {
-  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(args) + '\\n');
+if (workbenchArgs[0] === 'cancel-scan') {
+  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(workbenchArgs) + '\\n');
 }
-if (args[1] === 'cancel-scan' && control && existsSync(control)) {
+if (workbenchArgs[0] === 'cancel-scan' && control && existsSync(control)) {
   unlinkSync(control);
   console.error('injected cancel-scan failure');
   process.exit(1);
 }
-const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { stdio: 'inherit' });
+const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { input, stdio: ['pipe', 'inherit', 'inherit'] });
 if (result.error) throw result.error;
 process.exit(result.status ?? 1);
 `,
