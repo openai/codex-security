@@ -162,6 +162,11 @@ Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 
+Saved-history excerpts use scanned Git objects without fetching missing data.
+Working-tree diff scans omit excerpts, as do historical scans whose source or
+scope cannot be established. Unambiguous older scans remain readable. An omitted
+excerpt does not remove the finding.
+
 The SDK does not set your process's exit status. Use `hasFindingsAtOrAbove()`
 as in the example to enforce a severity threshold.
 

@@ -1,5 +1,24 @@
 [
   [
+    "-- Move source-scope previews before the shared history repairs.",
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 48 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (34, 40, 41, 42, 43, 44)",
+    "    AND name = 'persist authorized source excerpt scopes';"
+  ],
+  [
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS version,",
+    "        json_extract(value, '$.name') AS name FROM json_each(:history)",
+    ")",
+    "SELECT 'error' AS operation,",
+    "    'The Codex Security database has an unsupported source-scope migration history.' AS value",
+    "FROM schema_migrations JOIN history USING (version)",
+    "WHERE version IN (43, 48) AND schema_migrations.name != history.name;"
+  ],
+  [
     "-- mirror and early-moves: relocate numbers before checking profiles.",
     "WITH",
     "-- Keep the common :history binding even though these moves do not inspect it.",

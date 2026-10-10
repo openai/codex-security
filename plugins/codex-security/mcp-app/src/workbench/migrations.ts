@@ -224,7 +224,7 @@ export function applyMigrations(
         );
       } else if (item.version === 16) backfill = repairStableTargets(database);
       else if (applied.has(item.version)) {
-        if ([2, 12, 13, 26, 28, 31, 32, 47].includes(item.version))
+        if ([2, 12, 13, 26, 28, 31, 32, 42, 47, 48].includes(item.version))
           repairAdditive(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
       } else {

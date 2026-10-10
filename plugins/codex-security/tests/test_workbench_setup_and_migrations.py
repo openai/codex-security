@@ -89,6 +89,7 @@ EXPECTED_MIGRATIONS = [
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
     (47, "snapshot deep scan discovery context"),
+    (48, "persist authorized source excerpt scopes"),
 ]
 
 
@@ -2159,6 +2160,114 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
+
+
+@pytest.mark.parametrize("installed_history", ["main-scan-names", "source-excerpt-scopes"])
+def test_workbench_preserves_both_installed_migration_42_histories(
+    tmp_path: Path, installed_history: str
+) -> None:
+    state_dir = tmp_path / "state"
+    database = state_dir / "workbench.sqlite3"
+    database.parent.mkdir()
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
+    timestamp = "2026-08-01T00:00:00Z"
+    installed = [
+        (42 if name == "persist authorized source excerpt scopes" else version, name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if name
+        != (
+            "persist authorized source excerpt scopes"
+            if installed_history == "main-scan-names"
+            else "editable scan names"
+        )
+    ]
+    with sqlite3.connect(database) as connection:
+        create_migration_history(connection)
+        apply_historical_migrations(connection, installed, timestamp)
+        original = dict(connection.execute("SELECT name, applied_at FROM schema_migrations"))
+
+    run_workbench(state_dir, "database-info")
+    with sqlite3.connect(database) as connection:
+        first = connection.execute(
+            "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert [(version, name) for version, name, _ in first] == EXPECTED_MIGRATIONS
+        assert all(
+            {name: applied_at for _, name, applied_at in first}[name] == value
+            for name, value in original.items()
+        )
+        assert {"name", "source_scopes_json"} <= {
+            row[1] for row in connection.execute("PRAGMA table_info(scans)")
+        }
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    run_workbench(state_dir, "database-info")
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            == first
+        )
+
+
+@pytest.mark.parametrize("preview_version", [34, 40, 41, 42, 43, 44])
+def test_workbench_upgrades_pre_release_source_scope_migration(
+    tmp_path: Path, preview_version: int
+) -> None:
+    state_dir = tmp_path / "state"
+    database = state_dir / "workbench.sqlite3"
+    database.parent.mkdir()
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
+    migrations = namespace["MIGRATIONS"]
+    source_scope = next(
+        migration
+        for migration in migrations
+        if migration[1] == "persist authorized source excerpt scopes"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE schema_migrations ("
+            "version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        for version, name, sql in migrations:
+            if version > (42 if preview_version == 43 else 32):
+                continue
+            for statement in SCHEMA.sql_statements(sql):
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+                (version, name, "2026-08-01T00:00:00Z"),
+            )
+        for statement in SCHEMA.sql_statements(source_scope[2]):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            (preview_version, source_scope[1], "2026-08-01T00:00:00Z"),
+        )
+
+    run_workbench(state_dir, "database-info")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name FROM schema_migrations WHERE version = 34"
+        ).fetchone() == ("associate findings with repositories",)
+        assert connection.execute(
+            "SELECT version, applied_at FROM schema_migrations WHERE name = ?",
+            (source_scope[1],),
+        ).fetchone() == (48, "2026-08-01T00:00:00Z")
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_repositories'"
+        ).fetchone() == ("finding_repositories",)
+        assert connection.execute(
+            "SELECT name FROM schema_migrations WHERE version = 43"
+        ).fetchone() == ("preserve severity assessments per scan",)
+        assert connection.execute("SELECT COUNT(*) FROM scan_severity_assessments").fetchone() == (
+            0,
+        )
+        assert "source_scopes_json" in {
+            row[1] for row in connection.execute("PRAGMA table_info(scans)")
+        }
 
 
 def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:

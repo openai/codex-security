@@ -913,7 +913,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (48,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -3017,8 +3017,23 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(
 
 
 @pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "long_path",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform == "darwin",
+                reason="macOS cannot represent the real Git pathname beyond its 1024-byte path limit",
+            ),
+        ),
+    ],
+    ids=["short-control", "long-real-git-path"],
+)
 def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     tmp_path: Path,
+    long_path: bool,
     nested: bool,
 ) -> None:
     state_dir = tmp_path / "state"
@@ -3029,12 +3044,17 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         (repository / "README.md").write_text("different root source\n" * 50)
         target = repository / "nested"
         target.mkdir()
-    (target / "README.md").write_text(
+    relative_path = (
+        "/".join(["segment" + "a" * 178] * 12 + ["README.md"]) if long_path else "README.md"
+    )
+    source_path = target / relative_path
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(
         "\n".join(f"source line {line_number}" for line_number in range(1, 51))
         + "\n"
         + "x" * (1024 * 1024)
     )
-    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "core.longpaths=true", "add", "."], cwd=repository, check=True)
     subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=repository, check=True)
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -3052,7 +3072,7 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         Path(str(started["results"]["scanDir"])),
         scan_id,
         target,
-        relative_path="README.md",
+        relative_path=relative_path,
         target_kind="git_revision",
         target_revision="wrong-revision",
     )
@@ -3063,16 +3083,32 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     )
     assert manifest["scan"]["target"]["revision"] == revision
     assert "snapshotDigest" not in manifest["scan"]["target"]
-    excerpt = completed["scan"]["findings"][0]["sourceExcerpt"]
-    assert excerpt.startswith("38  source line 38")
-    assert "41  source line 41" in excerpt
-    assert excerpt.endswith("47  source line 47")
+    finding = completed["scan"]["findings"][0]
+    saved_findings = json.loads(
+        (Path(str(started["results"]["scanDir"])) / "findings.json").read_text()
+    )
+    assert saved_findings["findings"][0]["locations"][0]["path"] == relative_path
+    if long_path:
+        assert len(relative_path.encode()) > 2048
+        assert finding["locations"][0]["path"] != relative_path
+        assert "sourceExcerpt" not in finding
+    else:
+        assert finding["locations"][0]["path"] == relative_path
+        excerpt = finding["sourceExcerpt"]
+        assert excerpt.startswith("38  source line 38")
+        assert "41  source line 41" in excerpt
+        assert excerpt.endswith("47  source line 47")
 
-    (target / "README.md").write_text("replacement source\n")
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
+    source_path.write_text("replacement source\n")
+    subprocess.run(
+        ["git", "-c", "core.longpaths=true", "add", "--", relative_path], cwd=target, check=True
+    )
     subprocess.run(["git", "commit", "-qm", "Replace source fixture"], cwd=target, check=True)
     refreshed = get_scan(state_dir, scan_id)
-    assert refreshed["scan"]["findings"][0]["sourceExcerpt"] == excerpt
+    if long_path:
+        assert "sourceExcerpt" not in refreshed["scan"]["findings"][0]
+    else:
+        assert refreshed["scan"]["findings"][0]["sourceExcerpt"] == excerpt
 
 
 def commit_source_fixture(target: Path, source: bytes) -> str:
@@ -3109,6 +3145,7 @@ def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator:
         {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
+        ["."],
     )
 
     assert excerpt == "\n".join(
@@ -3131,6 +3168,7 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
         {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
+        ["."],
     )
 
     assert excerpt == "\n".join(
@@ -3164,6 +3202,7 @@ def test_source_excerpt_preserves_final_lines(
         scan,
         target,
         [{"path": "README.md", "startLine": len(expected_lines)}],
+        ["."],
     )
 
     assert excerpt == "\n".join(
@@ -3174,6 +3213,7 @@ def test_source_excerpt_preserves_final_lines(
             scan,
             target,
             [{"path": "README.md", "startLine": len(expected_lines) + 1}],
+            ["."],
         )
         is None
     )

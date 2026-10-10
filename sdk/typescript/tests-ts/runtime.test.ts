@@ -2551,10 +2551,9 @@ ${directNode ? "}" : ""}
     ]);
   });
 
-  test("upgrades a cached plugin without deleting persistent credentials", async () => {
+  test("upgrades the prior 0.1.25 bundle without deleting persistent credentials", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.4");
+    const previous = await plugin(join(root, "previous"), "0.1.25");
     const home = join(root, "home");
     const configPath = join(home, "config.toml");
     const marketplace = join(home, "sdk-marketplace");
@@ -2622,12 +2621,14 @@ ${directNode ? "}" : ""}
     };
 
     expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "1.2.3",
+      "0.1.25",
     );
-    const upgraded = await bootstrapPlugin(home, next, options);
+    const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
 
-    expect(upgraded.version).toBe("1.2.4");
-    expect(upgraded.installedRoot).toBe(join(pluginCache, "1.2.4"));
+    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(upgraded.installedRoot).toBe(
+      join(pluginCache, BUNDLED_PLUGIN_VERSION),
+    );
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
       '{"token":"preserved"}\n',
     );
@@ -2637,7 +2638,7 @@ ${directNode ? "}" : ""}
     expect(await readFile(configPath, "utf8")).toContain(
       `[projects.${JSON.stringify(join(root, "unrelated-project"))}]`,
     );
-    expect(existsSync(join(pluginCache, "1.2.3"))).toBe(false);
+    expect(existsSync(join(pluginCache, "0.1.25"))).toBe(false);
     expect(calls).toEqual([
       ["plugin", "marketplace", "add", marketplace],
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
