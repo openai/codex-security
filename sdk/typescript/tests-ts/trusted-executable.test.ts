@@ -1,12 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   inspectTrustedExecutable,
   resolveTrustedExecutable,
 } from "../src/trusted-executable.js";
+import { PYTHON } from "./support/security-policy.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -223,6 +224,102 @@ describe("trusted executable resolution", () => {
           resolveTrustedExecutable(candidate, { PATH: "" }, repository),
         ).resolves.toEqual({ executable: wrapper, environment: { PATH: "" } });
       }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "Node preserves explicit Python launcher identity through parent traversal",
+    async () => {
+      const root = await temporaryDirectory();
+      const trusted = join(root, "trusted tools");
+      const lexical = join(root, "lexical");
+      const repository = join(root, "repository");
+      const marker = join(root, "selected.txt");
+      await Promise.all([
+        mkdir(join(trusted, "child"), { recursive: true }),
+        mkdir(lexical),
+        mkdir(repository),
+      ]);
+      await symlink(join(trusted, "child"), join(lexical, "linked"), "dir");
+      const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+      for (const [directory, identity] of [
+        [trusted, "intended"],
+        [lexical, "wrong executable"],
+      ]) {
+        await writeFile(
+          join(directory!, "python"),
+          `#!/bin/sh\nprintf '%s' ${quote(identity!)} > ${quote(marker)}\nexec ${quote(Bun.which(PYTHON) ?? PYTHON)} "$@"\n`,
+          { mode: 0o755 },
+        );
+      }
+      const candidate = `${lexical}/linked/../python`;
+      const runtimePath = join(root, "runtime.mjs");
+      const build = spawnSync(
+        process.execPath,
+        [
+          "build",
+          fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
+          "--target=node",
+          "--format=esm",
+          "--outfile",
+          runtimePath,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(build.status, build.stderr).toBe(0);
+      const result = spawnSync(
+        "node",
+        [
+          "--experimental-strip-types",
+          "--input-type=module",
+          "-e",
+          `
+      import { readFile, rm, chmod } from "node:fs/promises";
+      import { spawnSync } from "node:child_process";
+      import assert from "node:assert/strict";
+      const { resolveTrustedExecutable } = await import(process.argv[1]);
+      const { resolvePluginPython } = await import(process.argv[3]);
+      const [candidates, repository, trusted, sibling, marker] = JSON.parse(process.argv[2]);
+      for (const candidate of candidates) {
+        const resolved = await resolveTrustedExecutable(candidate, { PATH: "" }, repository);
+        assert.ok(resolved);
+        const child = spawnSync(resolved.executable, ["-I", "-c", "import sys; assert sys.version_info >= (3, 10); print('real-python-ok')"], { env: resolved.environment, encoding: "utf8" });
+        assert.equal(child.status, 0, child.stderr);
+        assert.equal(child.stdout.trim(), "real-python-ok");
+        assert.equal(await readFile(marker, "utf8"), "intended");
+        assert.equal(resolved.executable, trusted + "/python");
+        for (const candidate of ["~/linked/../python", "~\\\\linked\\\\..\\\\python"]) for (const source of ["configuredPath", "PYTHON"]) {
+          const selected = await resolvePluginPython({
+            environment: { HOME: sibling.slice(0, -"/python".length), PATH: "", ...(source === "PYTHON" ? { PYTHON: candidate } : {}) },
+            ...(source === "configuredPath" ? { configuredPath: candidate } : {}),
+            protectedRoot: repository,
+          });
+          assert.equal(selected, trusted + "/python");
+          assert.equal(await readFile(marker, "utf8"), "intended");
+        }
+        await rm(sibling, { force: true });
+      }
+      assert.equal(await resolveTrustedExecutable(candidates[0], { PATH: "" }, trusted), null);
+      await chmod(trusted + "/python", 0o600);
+      assert.equal(await resolveTrustedExecutable(candidates[0], { PATH: "" }, repository), null);
+    `,
+          new URL("../src/trusted-executable.ts", import.meta.url).href,
+          JSON.stringify([
+            [
+              candidate,
+              relative(process.cwd(), lexical) + "/linked/../python",
+              candidate,
+            ],
+            repository,
+            trusted,
+            join(lexical, "python"),
+            marker,
+          ]),
+          pathToFileURL(runtimePath).href,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
     },
   );
 

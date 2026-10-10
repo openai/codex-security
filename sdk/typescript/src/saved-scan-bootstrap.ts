@@ -8,7 +8,7 @@ import {
   gitMarkerRoot,
   gitProtectionRoots,
 } from "./targets.js";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
   codexSecurityStateDirectory,
@@ -253,7 +253,7 @@ async function readTargets(
     signal?.throwIfAborted();
     if (error instanceof CodexSecurityError) throw error;
     throw new CodexSecurityError(
-      "Could not read saved scan targets before Python discovery.",
+      `Could not read saved scan targets before Python discovery: ${errorMessage(error)}`,
       { cause: error },
     );
   } finally {

@@ -89,7 +89,7 @@ def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
     )
 
 
-def _uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
+def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
     if coverage.get("mode") == "deep_repository":
         return True
     if coverage.get("mode") != "scoped_path":
@@ -766,7 +766,7 @@ def build_report_markdown(
             "reportable findings have duplicate writeup reportPath values: "
             + ", ".join(duplicate_writeup_paths)
         )
-    deep_presentation = _uses_deep_presentation(coverage, findings)
+    deep_presentation = uses_deep_presentation(coverage, findings)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))

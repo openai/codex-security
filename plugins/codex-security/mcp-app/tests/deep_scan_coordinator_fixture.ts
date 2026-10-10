@@ -25,6 +25,7 @@ import { importModule } from "./import-module.ts";
 export const {
   DeepScanCoordinator,
   DeepScanCoordinatorRegistry,
+  WorkbenchDeepScanStore,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,
   AsyncLock,
@@ -35,10 +36,11 @@ export const {
   stdin: {
     contents: `
       export * from "./registry.ts";
+      export { WorkbenchDeepScanStore } from "./store.ts";
       export { classifyCodexWorkerError } from "./errors.ts";
       export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
-    resolveDir: new URL("../src/deep-scan/", import.meta.url).pathname,
+    resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
   },
   loader: { ".md": "text" },
 });
@@ -115,9 +117,6 @@ export class FakeStore {
   rejectFailurePersistence = false;
   replacementManifestBeforeFinishRejection: string | undefined = undefined;
   replacementCandidatesBeforeDedupRejection: string | undefined = undefined;
-  loseFirstFinishResponseAfterCommit = false;
-  loseFirstDiscoveryAcceptanceResponseAfterCommit = false;
-  loseFirstDedupCommitResponseAfterCommit = false;
   dedupCommitResponseGate?: PromiseWithResolvers<void>;
   blockDiscoveryUpdate?: "failed" | "succeeded";
   discoveryBlocked = Promise.withResolvers<void>();
@@ -219,16 +218,6 @@ export class FakeStore {
     }
     persisted.consecutiveErrors = this.run.consecutiveErrors;
     this.workers.set(update.id, persisted);
-    if (
-      this.loseFirstDiscoveryAcceptanceResponseAfterCommit &&
-      update.kind === "discovery" &&
-      update.status === "succeeded"
-    ) {
-      this.loseFirstDiscoveryAcceptanceResponseAfterCommit = false;
-      throw new Error(
-        "fixture lost discovery acceptance response after commit",
-      );
-    }
     return structuredClone(persisted);
   }
 
@@ -297,10 +286,6 @@ export class FakeStore {
     }
     if (this.dedupCommitResponseGate)
       await this.dedupCommitResponseGate.promise;
-    if (this.loseFirstDedupCommitResponseAfterCommit) {
-      this.loseFirstDedupCommitResponseAfterCommit = false;
-      throw new Error("fixture lost dedup commit response after commit");
-    }
     return structuredClone(this.run);
   }
 
@@ -343,12 +328,6 @@ export class FakeStore {
     this.run.status = "succeeded";
     this.run.terminalReason = input.reason;
     this.run.manifestPath = input.manifestPath;
-    if (
-      this.loseFirstFinishResponseAfterCommit &&
-      this.finishCalls.length === 1
-    ) {
-      throw new Error("fixture lost finish response after commit");
-    }
     return structuredClone(this.run);
   }
 

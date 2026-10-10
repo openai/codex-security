@@ -1,6 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: npm
+    labels: [dependencies]
     directories:
       - /github-action
       - /sdk/typescript
@@ -39,6 +40,7 @@ updates:
       include: scope
 
   - package-ecosystem: pip
+    labels: [dependencies]
     directory: /plugins/codex-security
     schedule:
       interval: cron
@@ -52,6 +54,7 @@ updates:
       include: scope
 
   - package-ecosystem: github-actions
+    labels: [dependencies]
     directory: /
     schedule:
       interval: cron
@@ -64,6 +67,7 @@ updates:
       prefix: ci
 
   - package-ecosystem: docker
+    labels: [dependencies]
     directory: /
     schedule:
       interval: cron
@@ -75,6 +79,7 @@ updates:
       include: scope
 
   - package-ecosystem: cargo
+    labels: [dependencies]
     directory: /plugins/codex-security/native
     schedule:
       interval: cron
@@ -86,6 +91,7 @@ updates:
       include: scope
 
   - package-ecosystem: devcontainers
+    labels: [dependencies]
     directory: /
     schedule:
       interval: cron
