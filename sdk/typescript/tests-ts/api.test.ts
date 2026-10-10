@@ -5261,7 +5261,7 @@ describe("CodexSecurity orchestration", () => {
     ["standard", true],
     ["deep", true],
   ] as const)(
-    "enforces priced usage with an unpriced remainder (%s, raised limit: %s)",
+    "enforces priced usage with an unpriced remainder (%s, raised limit: %p)",
     async (mode, raised) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
