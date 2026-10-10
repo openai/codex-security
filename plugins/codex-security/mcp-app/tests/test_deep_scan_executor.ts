@@ -1886,6 +1886,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               },
             );
             assert.equal(
+              workerLaunch.args.some((arg) =>
+                arg.startsWith("permissions.codex_security_policy"),
+              ),
+              false,
+            );
+            assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
               workerConfigurations[index].knowledgePath,
             );

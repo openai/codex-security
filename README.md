@@ -34,17 +34,16 @@ which must be on your `PATH`. If `cs` already resolves to another tool, use
 `codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
 `npx @openai/codex-security` without a global installation.
 
-From your repository directory, optionally draft security guidance before your
-first scan:
+From your repository, optionally [draft a `SECURITY.md`](#generate-securitymd)
+that explains what counts as a security issue in your project:
 
 ```bash
 cs policy .
 ```
 
-The command saves a draft outside the checkout. Review the proposed diff and
-notes, edit the draft as needed, then copy it to the displayed `Policy target`
-so future scans use it. Generating the draft alone does not install it.
-Skip this step to keep an existing policy or scan without one.
+The draft is saved outside your repository. Review the diff and notes, edit the
+draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
+to keep your current policy or scan without one.
 
 Run your scan from the repository directory:
 
@@ -121,16 +120,29 @@ validation, severity classification, owner suggestions, and result handling.
 
 ## Generate SECURITY.md
 
-Draft security guidance for a repository or one of its components:
+Use `policy` to draft a new `SECURITY.md` or update an existing one. Use `--path`
+to select a component:
 
 ```bash
 cs policy .
 cs policy . --path services/api --knowledge-base architecture.md
 ```
 
-The command saves a draft outside the checkout. Review it before installing it
-as guidance for future scans. See the [policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy)
-for supporting documents and SDK usage.
+The command saves its draft outside the repository and leaves existing files
+unchanged. Review the diff and notes, edit the draft, then copy only `SECURITY.md`
+to the displayed **Policy target**. Keep the saved architecture and threat-model
+documents outside the repository.
+
+Scans already use root and component `SECURITY.md` files. Keep your current policy
+if it needs no changes. When updating it, preserve its vulnerability-reporting
+instructions. If the command says the policy is already up to date, no copy is
+needed.
+
+Files at `.github/SECURITY.md` or `docs/SECURITY.md` often contain reporting
+instructions. Preserve them when drafting a policy; those locations do not
+automatically provide repository-wide scan guidance. See the
+[policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy) for policy
+locations, unanswered questions, saved artifacts, and SDK usage.
 
 ## Save and export threat models
 

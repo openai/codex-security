@@ -497,7 +497,7 @@ describe("policy CLI", () => {
     expect(input).toHaveBeenCalledTimes(1);
     expect(stderr.text()).toContain("--- /dev/null");
     expect(stderr.text()).toContain("+Requests must be authorized");
-    expect(stderr.text()).toContain("Owner review:");
+    expect(stderr.text()).toContain("Review notes:");
     expect(stderr.text()).toContain("No repository files changed");
     expect(await readFile(join(f.outputDir, "SECURITY.md"), "utf8")).toBe(
       POLICY,

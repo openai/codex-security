@@ -400,17 +400,16 @@ After [installing the CLI](#install-the-cli), sign in if needed:
 cs login
 ```
 
-From your repository directory, optionally draft security guidance before scanning:
+From your repository, optionally [draft a `SECURITY.md`](#generate-a-security-policy)
+that explains what counts as a security issue in your project:
 
 ```bash
 cs policy .
 ```
 
-The command saves a draft outside the checkout. Review the proposed diff and
-notes, edit the draft as needed, then copy it to the displayed `Policy target`
-so future scans use it. Generating the draft alone does not install it.
-Skip this step to keep an existing policy or scan without one. See
-[Generate a security policy](#generate-a-security-policy) for details.
+The draft is saved outside your repository. Review the diff and notes, edit the
+draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
+to keep your current policy or scan without one.
 
 Then scan the repository:
 
@@ -435,16 +434,20 @@ scans, custom validation, imports, patching, and integrations.
 
 ### Generate a security policy
 
-To draft guidance for a selected path:
+Use `policy` to draft a new `SECURITY.md` or update an existing one. To select a
+component:
 
 ```bash
 cs policy . --path services/api
 ```
 
-The SDK provides `generatePolicy()`,
-`preflightPolicy()`, and `previewPolicy()`. See
+Existing files stay unchanged until you review and copy the draft to the
+**Policy target** shown. Scans already use root and component policies; you can
+keep them without generating new ones.
+
+The SDK provides `generatePolicy()`, `preflightPolicy()`, and `previewPolicy()`. See
 [policy generation](docs/cli.md#generate-a-security-policy) for SDK examples,
-headless use, artifacts, and review requirements.
+policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
