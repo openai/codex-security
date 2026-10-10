@@ -6411,12 +6411,15 @@ describe("CodexSecurity orchestration", () => {
     );
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",
-      "/scripts/generate_rank_input.py",
+      "/scripts/launch_codex_security_mcp",
     );
     const scopes = shellEnvironmentReference(
       "CODEX_SECURITY_TARGET_PATHS_FILE",
     );
-    const makeScopeCommand = `${pythonCommand} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
+    const makeScopeCommand =
+      process.platform === "win32"
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%CODEX_SECURITY_REPOSITORY%\." --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --out "%CODEX_SECURITY_SCAN_DIR%\scoped-source-input.jsonl""'`
+        : `${helper} --helper make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
     const bindScopeCommand =
       process.platform === "win32"
         ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
@@ -6460,10 +6463,11 @@ describe("CodexSecurity orchestration", () => {
         `${repository}\0${scanDir}\0${python}\0${serializedPaths}\n`,
       );
     }
-    const interpreter = pythonExecutable(false);
-    expect(interpreter).not.toBeNull();
     const scopedSourceInput = join(scanDir, "scoped-source-input.jsonl");
-    const runScopedHelper = (command: string): void => {
+    const runScopedHelper = (
+      command: string,
+      overrides: NodeJS.ProcessEnv = {},
+    ): void => {
       const shell =
         process.platform === "win32" ? Bun.which("powershell.exe") : "/bin/sh";
       expect(shell).not.toBeNull();
@@ -6477,11 +6481,10 @@ describe("CodexSecurity orchestration", () => {
           env: {
             ...process.env,
             ...environment,
-            PYTHON: interpreter!,
-            PYTHONDONTWRITEBYTECODE: "1",
             CODEX_MCP_NODE_PATH: Bun.which("node")!,
             PATH_LITERAL: "expanded-wrong-directory",
             CODEX_SECURITY_TARGET_PATHS_FILE: capturedTargetPathsFile,
+            ...overrides,
           },
           stdio: "pipe",
         },
@@ -6511,7 +6514,126 @@ describe("CodexSecurity orchestration", () => {
     expect(JSON.parse(await readFile(coverage, "utf8")).includePaths).toEqual(
       paths,
     );
+    if (process.platform === "win32") {
+      const driveRoot = win32.parse(repository).root;
+      const absoluteScopes = join(root, "absolute-scopes.json");
+      await writeFile(
+        absoluteScopes,
+        JSON.stringify(paths.map((value) => join(repository, value))),
+      );
+      runScopedHelper(makeScopeCommand, {
+        CODEX_SECURITY_REPOSITORY: driveRoot,
+        CODEX_SECURITY_TARGET_PATHS_FILE: absoluteScopes,
+      });
+      expect(
+        (await readFile(scopedSourceInput, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((row) => JSON.parse(row).path),
+      ).toEqual(
+        paths
+          .map((value) =>
+            win32
+              .relative(driveRoot, join(repository, value))
+              .replaceAll("\\", "/"),
+          )
+          .sort(),
+      );
+    }
     await client.close();
+  });
+
+  test("uses an existing Python scope generator from a custom plugin", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const pluginRoot = join(root, "legacy plugin");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const python = pythonExecutable()!;
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await mkdir(join(pluginRoot, "skills", "security-scan"), {
+      recursive: true,
+    });
+    await mkdir(join(pluginRoot, "scripts"));
+    await writeFile(join(repository, "source [1].ts"), "export {};\n");
+    await writeFile(
+      join(pluginRoot, "skills", "security-scan", "SKILL.md"),
+      "Review the requested source.\n",
+    );
+    await writeFile(
+      join(pluginRoot, "scripts", "generate_rank_input.py"),
+      [
+        "import argparse, json",
+        "from pathlib import Path",
+        "parser = argparse.ArgumentParser()",
+        "parser.add_argument('command', choices=['make-repo-scope-input'])",
+        "for name in ('repo', 'scopes-file', 'out'): parser.add_argument('--' + name, required=True)",
+        "args = parser.parse_args()",
+        "scopes = json.loads(Path(args.scopes_file).read_text())",
+        "Path(args.out).write_text(''.join(json.dumps({'path': scope}) + '\\n' for scope in scopes))",
+      ].join("\n"),
+    );
+    const client = new TestClient(
+      { pluginPath: pluginRoot },
+      {
+        prepareRuntime: async () => {
+          const runtime = preparedRuntime(codexHome);
+          return {
+            ...runtime,
+            plugin: {
+              ...runtime.plugin,
+              pluginRoot,
+              installedRoot: pluginRoot,
+            },
+          };
+        },
+        resolvePluginPython: async () => python,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed(prompt: string) {
+              const command =
+                /Scan target paths:.* using (.+)\. Before finalization/u.exec(
+                  prompt,
+                )?.[1];
+              expect(command).toContain("/scripts/generate_rank_input.py");
+              expect(command).not.toContain("--helper make-repo-scope-input");
+              const shell =
+                process.platform === "win32"
+                  ? Bun.which("powershell.exe")!
+                  : "/bin/sh";
+              execFileSync(
+                shell,
+                process.platform === "win32"
+                  ? ["-NoProfile", "-NonInteractive", "-Command", command!]
+                  : ["-c", command!],
+                { env: { ...process.env, ...options.env }, stdio: "pipe" },
+              );
+              expect(
+                JSON.parse(
+                  await readFile(
+                    join(scanDir, "scoped-source-input.jsonl"),
+                    "utf8",
+                  ),
+                ),
+              ).toEqual({ path: "source [1].ts" });
+              throw new Error("legacy scope prepared");
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { target: ["source [1].ts"] }),
+      ).rejects.toThrow("legacy scope prepared");
+    } finally {
+      await client.close();
+    }
   });
 
   test("keeps requested source paths without ranking or ignored directory files", async () => {
@@ -6522,9 +6644,6 @@ describe("CodexSecurity orchestration", () => {
     const vendored = join(source, "vendor");
     const scopes = join(root, "scopes.json");
     const output = join(root, "scoped-source-input.jsonl");
-    const interpreter = pythonExecutable(false);
-    expect(interpreter).not.toBeNull();
-
     await mkdir(join(source, "tests"), { recursive: true });
     await mkdir(join(source, "examples"));
     await mkdir(ignored);
@@ -6556,10 +6675,9 @@ describe("CodexSecurity orchestration", () => {
     const enumerate = async (requested: string[]) => {
       await writeFile(scopes, JSON.stringify(requested));
       execFileSync(
-        interpreter!,
+        nodeCommand().command,
         [
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           "make-repo-scope-input",
           "--repo",
           repository,

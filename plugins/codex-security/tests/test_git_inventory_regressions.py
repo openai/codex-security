@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
-import json
 import os
 import sqlite3
 import subprocess
@@ -194,53 +192,3 @@ def test_disabled_git_source_snapshot_does_not_inspect_refs(
         )["source"]
     assert source["revision"] == "unversioned"
     assert source["refsDigest"] == hashlib.sha256(b"").hexdigest()
-
-
-@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-@pytest.mark.parametrize("replacement", ["symlink", "gitlink"])
-def test_diff_inventories_exclude_non_file_type_changes(
-    tmp_path: Path, mode: str, replacement: str
-) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    source = target / "replaced.py"
-    source.write_text("old source\n")
-    git(target, "add", ".")
-    git(target, "commit", "-qm", "Add source fixture")
-    base = git(target, "rev-parse", "HEAD").decode()
-    if replacement == "symlink":
-        source.unlink()
-        try:
-            source.symlink_to("README.md")
-        except OSError:
-            pytest.skip("symlinks are unavailable")
-    else:
-        origin = tmp_path / "origin"
-        initialize_git_repository(origin)
-        git(target, "rm", "-f", source.name)
-        git(
-            target, "-c", "protocol.file.allow=always", "submodule", "add", str(origin), source.name
-        )
-    (target / "visible.py").write_text("value = 1\n")
-    git(target, "add", ".")
-    if mode == "revisions":
-        git(target, "commit", "-qm", "Replace source type")
-    inventory_path = tmp_path / "inventory.txt"
-    rank_path = tmp_path / "rank.jsonl"
-    load_script("generate_in_scope_files").generate_diff_in_scope_files(
-        target, base, "HEAD", mode, inventory_path
-    )
-    load_script("generate_rank_input").make_diff_rank_input(
-        argparse.Namespace(
-            repo=str(target),
-            base=base,
-            head="HEAD",
-            mode=mode,
-            out=str(rank_path),
-            area="fixture",
-            preview_bytes=1024,
-        )
-    )
-    expected = [".gitmodules", "visible.py"] if replacement == "gitlink" else ["visible.py"]
-    assert inventory_path.read_text().splitlines() == expected
-    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == expected

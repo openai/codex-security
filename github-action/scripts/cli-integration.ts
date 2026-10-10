@@ -1,6 +1,7 @@
 // Exercise the locked CLI or an installed release candidate without model calls.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
@@ -128,9 +129,14 @@ try {
   const scopesFile = join(root, 'literal-scopes.json');
   const sourceInput = join(root, 'literal-source.jsonl');
   await writeFile(scopesFile, JSON.stringify(scopes));
-  execFileSync(python, [join(cliPackage, '_bundled_plugin/scripts/generate_rank_input.py'),
-    'make-repo-scope-input', '--repo', repository, '--scopes-file', scopesFile, '--out', sourceInput],
-    {cwd: repository, env, stdio: ['ignore', 'pipe', 'pipe']});
+  const legacyGenerator = join(cliPackage, '_bundled_plugin/scripts/generate_rank_input.py');
+  const usesPythonGenerator = existsSync(legacyGenerator);
+  const generateScopeInput = (output: string, pythonCommand: string, environment: NodeJS.ProcessEnv) =>
+    execFileSync(usesPythonGenerator ? pythonCommand : process.execPath,
+      [usesPythonGenerator ? legacyGenerator : join(cliPackage, '_bundled_plugin/mcp/helpers.mjs'),
+        'make-repo-scope-input', '--repo', repository, '--scopes-file', scopesFile, '--out', output],
+      {cwd: repository, env: environment, stdio: ['ignore', 'pipe', 'pipe']});
+  generateScopeInput(sourceInput, python, env);
   const selectedFiles = (await readFile(sourceInput, 'utf8')).trim().split('\n').map(row => JSON.parse(row).path).sort();
   assert.deepEqual(selectedFiles, [...literalFiles].sort(), 'Real scope selection must preserve literal names and exclude glob-matching decoys');
 
@@ -215,12 +221,10 @@ try {
     assert.equal(await readFile(outsideFile, 'utf8'), 'unchanged');
     assert.equal(await readFile(workspaceFile, 'utf8'), 'scan output');
   }
-  // The actual pinned helper must still work when an MCP-style child drops the loader variable.
+  // The bundled helper must still work when an MCP-style child drops the loader variable.
   const strippedEnv = {...venvEnv, LD_LIBRARY_PATH:undefined};
   const loaderSourceInput = join(root, 'loader-source.jsonl');
-  execFileSync(selected.python, [join(cliPackage, '_bundled_plugin/scripts/generate_rank_input.py'),
-    'make-repo-scope-input', '--repo', repository, '--scopes-file', scopesFile, '--out', loaderSourceInput],
-    {cwd:repository, env:strippedEnv, stdio:['ignore','pipe','pipe']});
+  generateScopeInput(loaderSourceInput, selected.python, strippedEnv);
   assert.equal(await readFile(loaderSourceInput, 'utf8'), await readFile(sourceInput, 'utf8'));
   const venvArguments = scanArguments(parseInputs(name => deepInputs[name] ?? '', repository),
     {repository}, join(root, 'venv-results'));

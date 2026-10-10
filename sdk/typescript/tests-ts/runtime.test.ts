@@ -1,4 +1,5 @@
 import { runNodePython } from "./support/python-probe.js";
+import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
@@ -411,21 +412,27 @@ describe("plugin runtime preparation", () => {
       expect(initialized.status, initialized.stderr).toBe(0);
     }
 
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
-    const generatorArguments = (destination: string) => [
-      join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-      "--repo",
-      repository,
-      "--scope",
-      ".",
-      "--out",
-      destination,
-    ];
+    const generatorArguments = (destination: string) =>
+      [
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        destination,
+      ] as const;
     for (const destination of [output, repeatedOutput]) {
-      const inventory = runNodePython(python!, generatorArguments(destination));
+      const inventory = spawnSync(
+        nodeCommand().command,
+        generatorArguments(destination),
+        {
+          encoding: "utf8",
+        },
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
     }
 
@@ -451,7 +458,13 @@ describe("plugin runtime preparation", () => {
       );
       await writeFile(join(repository, "literal:colon.txt"), "colon\n");
       const posixOutput = join(root, "inventory-posix-filenames.txt");
-      const inventory = runNodePython(python!, generatorArguments(posixOutput));
+      const inventory = spawnSync(
+        nodeCommand().command,
+        generatorArguments(posixOutput),
+        {
+          encoding: "utf8",
+        },
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
       const posixRows = (await readFile(posixOutput, "utf8"))
         .trimEnd()
@@ -475,32 +488,37 @@ describe("plugin runtime preparation", () => {
         join(repository, "source.ts:synthetic-stream"),
         "export const hidden = true;\n",
       );
-      const python =
-        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-
-      const inventory = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "--repo",
-        repository,
-        "--scope",
-        "source.ts:synthetic-stream",
-        "--out",
-        join(root, "inventory.txt"),
-      ]);
+      const inventory = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "generate-in-scope-files",
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "inventory.txt"),
+        ],
+        { encoding: "utf8" },
+      );
       expect(inventory.status).toBe(2);
-      expect(inventory.stderr).toContain("NTFS alternate data streams");
+      expect(inventory.stderr).toContain("NTFS alternate data stream");
 
-      const rankInput = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-rank-input",
-        "--repo",
-        repository,
-        "--scope",
-        "source.ts:synthetic-stream",
-        "--out",
-        join(root, "rank-input.jsonl"),
-      ]);
+      const rankInput = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "make-repo-rank-input",
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "rank-input.jsonl"),
+        ],
+        { encoding: "utf8" },
+      );
       expect(rankInput.status).toBe(1);
       expect(rankInput.stderr).toContain("NTFS alternate data stream");
     },
@@ -6343,21 +6361,18 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test.skipIf(process.platform !== "win32")(
-    "runs plugin helpers with UTF-8 standard streams",
+    "runs Node inventory helpers with UTF-8 standard streams",
     async () => {
       const root = await temporaryDirectory("codex-security-python-utf8-");
       const repository = join(root, "repository");
       const output = join(root, "出力.jsonl");
       await mkdir(repository);
       await writeFile(join(repository, "source.py"), "value = 1\n");
-      const python = Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
 
       const result = spawnSync(
-        python!,
+        nodeCommand().command,
         [
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           "make-repo-rank-input",
           "--repo",
           repository,
@@ -6366,10 +6381,11 @@ describe("runtime directories and plugin Python boundary", () => {
         ],
         {
           encoding: "utf8",
-          env: pluginExecutionEnvironment(python!, {
+          env: {
             ...process.env,
             pythonutf8: "0",
-          }),
+            PYTHON: "missing-python",
+          },
         },
       );
 

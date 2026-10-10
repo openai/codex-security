@@ -1,4 +1,5 @@
 import { closeSync, readFileSync } from "node:fs";
+import { inventoryCommand } from "./src/helpers/generate-inventory";
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
@@ -63,6 +64,15 @@ if (!isMainThread) {
   parentPort!.postMessage(normalizeCandidateBatch(workerData));
 } else if (command === "config-preflight") {
   process.exitCode = configPreflightCommand(args);
+} else if (
+  command === "generate-in-scope-files" ||
+  command === "make-repo-rank-input" ||
+  command === "make-repo-scope-input" ||
+  command === "make-diff-rank-input"
+) {
+  void inventoryCommand(command, args).then((code) => {
+    process.exitCode = code;
+  });
 } else if (command === "resolve-security-md") {
   process.exitCode = resolveSecurityMdCommand(args, posixHome);
 } else if (command === "normalize-candidates") {
@@ -133,7 +143,7 @@ if (!isMainThread) {
   });
 } else {
   console.error(
-    `Usage: launch_codex_security_mcp[.cmd] --helper <config-preflight | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+    `Usage: launch_codex_security_mcp[.cmd] --helper <config-preflight | generate-in-scope-files | make-repo-rank-input | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
   );
   process.exitCode = 2;
 }

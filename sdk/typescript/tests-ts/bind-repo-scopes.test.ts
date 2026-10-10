@@ -300,7 +300,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
     process.platform !== "win32" ||
       (location === "unc" && !hasWindowsLoopbackShare),
   )(
-    `documented PowerShell scope binding preserves ${location} literal input and artifact paths`,
+    `documented PowerShell scope generation and binding preserve ${location} literal paths`,
     async () => {
       const requested = ["caf\u00e9/\u96ea.py", "src", "src"];
       const f = fixture(requested);
@@ -320,6 +320,11 @@ for (const location of ["absolute", "relative", "unc"] as const)
       const launcher = windowsHelperFixture(f.root, {
         CODEX_SECURITY_TARGET_PATHS_FILE: argument(scopes),
       });
+      const repository = join(f.root, "repository %USERNAME% !EXPAND! café's");
+      mkdirSync(join(repository, "café"), { recursive: true });
+      mkdirSync(join(repository, "src"));
+      writeFileSync(join(repository, "café", "雪.py"), "source\n");
+      writeFileSync(join(repository, "src", "source.py"), "source\n");
       const scanDir = join(f.root, "scan %USERNAME% !EXPAND! \u96ea's");
       const expandedScanDir = scanDir.replace("%USERNAME%", "expanded-user");
       for (const directory of [scanDir, expandedScanDir]) mkdirSync(directory);
@@ -328,6 +333,27 @@ for (const location of ["absolute", "relative", "unc"] as const)
         "coverage.json": readFileSync(f.coverage),
       };
       for (const powershell of launcher.powershells) {
+        const generated = await launcher.run(
+          powershell,
+          "skills/security-scan/SKILL.md",
+          {
+            "<plugin_dir>": argument(launcher.plugin),
+            "<repo_root>": argument(repository),
+            "<scan_dir>": argument(scanDir),
+          },
+          undefined,
+          workingDirectory,
+          undefined,
+          1,
+        );
+        expect(generated.status, generated.diagnostics).toBe(0);
+        expect(
+          readFileSync(join(scanDir, "scoped-source-input.jsonl"), "utf8")
+            .trim()
+            .split(/\r?\n/u)
+            .map((line) => JSON.parse(line).path),
+          generated.diagnostics,
+        ).toEqual(["café/雪.py", "src/source.py"]);
         for (const [name, bytes] of Object.entries(initial)) {
           writeFileSync(join(scanDir, name), bytes);
           writeFileSync(join(expandedScanDir, name), bytes);

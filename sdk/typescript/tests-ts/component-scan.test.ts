@@ -219,6 +219,16 @@ async function scopedInventory(paths: Fixture, scope: string) {
   const scopesFile = join(paths.root, "scopes.json");
   const output = join(paths.root, "scoped-source-input.jsonl");
   await writeFile(scopesFile, JSON.stringify([scope]));
+  execFileSync(nodeCommand().command, [
+    join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+    "make-repo-scope-input",
+    "--repo",
+    paths.repository,
+    "--scopes-file",
+    scopesFile,
+    "--out",
+    output,
+  ]);
   const stdout = execFileSync(
     python!,
     [
@@ -231,9 +241,7 @@ async function scopedInventory(paths: Fixture, scope: string) {
         "from pathlib import Path",
         "sys.path.insert(0, sys.argv[1])",
         "import workbench_target as target",
-        "from generate_rank_input import make_repo_scope_input",
         "repo, scope, scopes, output = sys.argv[2:]",
-        "make_repo_scope_input(Namespace(repo=repo, scopes_file=scopes, out=output))",
         "rows = [json.loads(line)['path'] for line in Path(output).read_text().splitlines()]",
         "count = target.directory_snapshot_regular_file_count((Path(repo) / scope).resolve())",
         "print(json.dumps({'paths': rows, 'count': count}))",

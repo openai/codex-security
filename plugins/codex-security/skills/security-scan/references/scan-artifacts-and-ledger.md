@@ -56,7 +56,7 @@ The parent agent must reconcile validation and attack-path subagent outputs befo
 ## Scoped Deep Review
 
 - Use `deep_review_input.jsonl` as the canonical changed-file review worklist for diff scans.
-- For diff-scoped scans, generate `rank_input.jsonl` deterministically from changed text files regardless of filename, extension, or directory, with `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode revisions --head <head> --out <discovery_dir>/rank_input.jsonl` for PR, commit, and branch diffs, or `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode local-patch --out <discovery_dir>/rank_input.jsonl` for a local patch, then copy every row into `deep_review_input.jsonl` with `<plugin_dir>/scripts/launch_codex_security_mcp --helper copy-deep-review-input --rank-input <discovery_dir>/rank_input.jsonl --out <discovery_dir>/deep_review_input.jsonl`. On Windows, use the [PowerShell copy command](#windows-worklist-copy) below.
+- For diff-scoped scans, generate `rank_input.jsonl` deterministically from changed text files regardless of filename, extension, or directory, with `<plugin_dir>/scripts/launch_codex_security_mcp --helper make-diff-rank-input --repo <repo_root> --base <base> --mode revisions --head <head> --out <discovery_dir>/rank_input.jsonl` for PR, commit, and branch diffs, or `<plugin_dir>/scripts/launch_codex_security_mcp --helper make-diff-rank-input --repo <repo_root> --base <base> --mode local-patch --out <discovery_dir>/rank_input.jsonl` for a local patch, then copy every row into `deep_review_input.jsonl` with `<plugin_dir>/scripts/launch_codex_security_mcp --helper copy-deep-review-input --rank-input <discovery_dir>/rank_input.jsonl --out <discovery_dir>/deep_review_input.jsonl`. On Windows, use the [PowerShell generation commands](#windows-diff-worklist-generation) for the selected mode, then the [PowerShell copy command](#windows-worklist-copy).
 - Diff-scoped scans do not rank or drop changed files before deep review. Every row in diff `rank_input.jsonl` must be copied into `deep_review_input.jsonl` and receive a full-file review receipt.
 - Add directly supporting files required to understand the changed security behavior only when repository evidence shows they are needed; record the add-back reason in the work ledger or per-file result.
 - Deep-review every file selected into `deep_review_input.jsonl`.
@@ -82,6 +82,33 @@ cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mc
 ```
 
 These variables are temporary values in the calling shell, not application settings. Resolve paths against PowerShell's current location before CMD starts, including when that location is a UNC share. Missing paths stop the invocation with PowerShell's path error. The discovery directory already contains `rank_input.jsonl`; the output file does not need to exist. CMD expands the references once, preserving literal `%` and `!` in the paths.
+
+### Windows Diff Worklist Generation
+
+In PowerShell, replace the placeholders inside single quotes with literal paths and revisions, doubling any single quote in a value. Use the command for the selected diff mode.
+
+For PR, commit, and branch diffs:
+
+```powershell
+$env:worklistPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
+$env:worklistRepoRoot = Convert-Path -LiteralPath '<repo_root>' -ErrorAction Stop
+$env:worklistDiscoveryDir = Convert-Path -LiteralPath '<discovery_dir>' -ErrorAction Stop
+$env:worklistBase = '<base>'
+$env:worklistHead = '<head>'
+cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper make-diff-rank-input --repo "%worklistRepoRoot%\." --base "%worklistBase%" --mode revisions --head "%worklistHead%" --out "%worklistDiscoveryDir%\rank_input.jsonl""'
+```
+
+For a local patch:
+
+```powershell
+$env:worklistPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
+$env:worklistRepoRoot = Convert-Path -LiteralPath '<repo_root>' -ErrorAction Stop
+$env:worklistDiscoveryDir = Convert-Path -LiteralPath '<discovery_dir>' -ErrorAction Stop
+$env:worklistBase = '<base>'
+cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper make-diff-rank-input --repo "%worklistRepoRoot%\." --base "%worklistBase%" --mode local-patch --out "%worklistDiscoveryDir%\rank_input.jsonl""'
+```
+
+These variables are temporary shell values, not application settings. The plugin, repository, and discovery directories must exist; `rank_input.jsonl` does not need to exist. Resolving paths before CMD starts supports relative paths and PowerShell locations on UNC shares. CMD expands the references once with delayed expansion disabled, preserving literal `%` and `!`. The repository's `\.` suffix also preserves a drive-root path through native argument parsing.
 
 ## Candidate Finding Coverage
 

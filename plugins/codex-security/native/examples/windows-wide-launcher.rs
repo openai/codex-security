@@ -230,6 +230,49 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
+        // Keep the Node 20 ABI proof independent of its win32.relative bug for
+        // case-folding expansions such as İ. The SDK tests inventory on supported Node versions.
+        let inventory_repo = root.join(&cwds[0]).join(raw("inventory-", 0xdc80));
+        let inventory_scope = inventory_repo.join(&scopes[0]);
+        fs::create_dir_all(&inventory_scope)?;
+        fs::write(inventory_scope.join("SECURITY.md"), "scope raw\n")?;
+        let inventory_output = inventory_repo.join(&output_name);
+        let inventory_scopes = inventory_repo.join("inventory-scopes.json");
+        fs::write(&inventory_scopes, r#"["scope-\udfff"]"#)?;
+        let scoped_expected = "{\"path\":\"scope-\\udfff/SECURITY.md\"}\r\n";
+        let ranked_expected = concat!(
+            "{\"path\":\"scope-\\udfff/SECURITY.md\",",
+            "\"area\":\"scope-\\udfff\",\"preview\":\"scope raw\"}\r\n",
+        );
+        for (command, expected) in [
+            ("make-repo-scope-input", scoped_expected),
+            ("make-repo-rank-input", ranked_expected),
+        ] {
+            let generated = invoke(
+                command,
+                &[
+                    "--repo".into(),
+                    inventory_repo.clone(),
+                    "--scopes-file".into(),
+                    inventory_scopes.clone(),
+                    "--out".into(),
+                    inventory_output.clone(),
+                ],
+            )?;
+            let actual = fs::read(&inventory_output);
+            if !generated.status.success()
+                || !generated.stderr.is_empty()
+                || !actual
+                    .as_ref()
+                    .is_ok_and(|bytes| bytes == expected.as_bytes())
+            {
+                return Err(io::Error::other(format!(
+                    "Wide inventory helper {command} failed: status={}, stdout={:?}, stderr={:?}, expected={:?}, actual={actual:?}",
+                    generated.status, generated.stdout, generated.stderr, expected.as_bytes(),
+                )));
+            }
+        }
+        fs::remove_dir_all(inventory_repo)?;
         let identity_root = root.join("İroot");
         let sibling = root.join("i\u{307}root");
         fs::create_dir(&identity_root)?;
@@ -675,7 +718,7 @@ fn main() -> std::io::Result<()> {
             }
         }
         println!(
-            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"bindScopesHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
+            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"bindScopesHelperRawPaths\":true,\"inventoryHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
         );
         Ok(())
     }
