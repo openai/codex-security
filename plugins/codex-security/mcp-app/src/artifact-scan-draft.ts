@@ -211,7 +211,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
           accepted?.status === "draft_written" &&
           isDeepStrictEqual(
             accepted.input,
-            JSON.parse(JSON.stringify({ ...stagedDraft, checkpoint: snapshot })),
+            JSON.parse(
+              JSON.stringify({ ...stagedDraft, checkpoint: snapshot }),
+            ),
           )
         ) {
           signal?.throwIfAborted();
