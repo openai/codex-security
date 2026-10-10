@@ -34,14 +34,19 @@ afterEach(async () => {
   );
 });
 
-async function fixture() {
+async function fixture(native = true) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "scan-resume-permissions-")),
   );
   roots.push(root);
   const repository = join(root, "repository");
-  const codexHome = join(root, "codex");
-  await Promise.all([mkdir(repository), mkdir(codexHome)]);
+  const codexHome = native
+    ? join(root, "codex")
+    : join(root, "state", "codex-home");
+  await Promise.all([
+    mkdir(repository),
+    mkdir(codexHome, { recursive: true, mode: 0o700 }),
+  ]);
   await writeFile(join(repository, "app.py"), "print('synthetic fixture')\n");
   const inheritedPermissions = {
     filesystem: { [join(root, "private")]: "deny", glob_scan_max_depth: 6 },
@@ -57,7 +62,7 @@ test.each([
   "saved ordinary passes retain provider settings and attribution at the resumed Codex process boundary (%s)",
   async (_label, native) => {
     const { root, repository, codexHome, inheritedPermissions } =
-      await fixture();
+      await fixture(native);
     const scanDir = join(root, "scan");
     const captures = join(root, "launches.jsonl");
     const preload = join(root, "codex-stub.mjs");
@@ -221,26 +226,24 @@ await new Promise(() => {});
             },
           },
         };
-    expect(recipe["config"]).toMatchObject(
-      native
-        ? {
-            model: savedSettings.model,
-            model_provider: savedSettings.model_provider,
-            model_reasoning_effort: savedSettings.model_reasoning_effort,
-          }
-        : expectedSettings,
-    );
-    if (native) expect(recipe["config"]).not.toHaveProperty("model_providers");
+    expect(recipe["config"]).toMatchObject({
+      model: savedSettings.model,
+      model_provider: savedSettings.model_provider,
+      model_reasoning_effort: savedSettings.model_reasoning_effort,
+    });
+    expect(recipe["config"]).not.toHaveProperty("model_providers");
+    if (!native)
+      expect(recipe["providerProfile"]).toMatchObject({ home: "managed" });
     expect(JSON.stringify(recipe)).not.toContain("saved-provider-header");
     expect(JSON.stringify(recipe)).not.toContain("synthetic-provider-key");
     expect(recipe["config"]).not.toHaveProperty("plugins");
     expect(recipe["config"]).not.toHaveProperty("marketplaces");
     expect(recipe["config"]).not.toHaveProperty("features.plugins");
     environment.CODEX_SAFETY_IDENTIFIER = "synthetic-other-host-identifier";
-    // CLI replay restores the native caller's ambient provider configuration;
-    // the resumed child consumes that projection at its actual process boundary.
+    // CLI replay restores native ambient settings or managed private profiles;
+    // the resumed child consumes those settings at its actual process boundary.
     let resumedConfig = recipe["config"] as JsonObject;
-    if (native) {
+    {
       const stdout = capture();
       const stderr = capture();
       expect(
@@ -258,7 +261,7 @@ await new Promise(() => {});
           }),
         ),
       ).toBe(0);
-      expect(resumedConfig).toMatchObject(savedSettings);
+      expect(resumedConfig).toMatchObject(expectedSettings);
     }
     const resumed = makeClient(false, resumedConfig);
     try {

@@ -35,7 +35,11 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import { prepareReadOnlyExecution } from "./execution-preparation.js";
+import {
+  prepareReadOnlyExecution,
+  readOnlyFilesystem,
+} from "./execution-preparation.js";
+import { providerPreflightCommand } from "./provider-profile.js";
 import { createExecutionProfileCodex } from "./execution-profile.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import { codexSecurityRequestMetadata } from "./request-metadata.js";
@@ -681,6 +685,7 @@ async function startReadOnlyCodexThread(
       : undefined;
   const command =
     environment === undefined ? undefined : resolveCodexCommand(environment);
+  let usesPrivatePermissionProfile = false;
   const createCodex =
     preparedFactory ??
     (({ config, configOverrides, ...settings }: CodexOptions) => {
@@ -694,13 +699,30 @@ async function startReadOnlyCodexThread(
           ...(configOverrides ?? []),
         ],
       };
-      return provider.requiresConfigFile || mcp.requiresConfigFile
-        ? createExecutionProfileCodex(
-            settingsWithOverrides,
-            configuredCodexHome(settings.env ?? {}),
-            configuration,
-          )
-        : new Codex(settingsWithOverrides);
+      if (!provider.requiresConfigFile && !mcp.requiresConfigFile)
+        return new Codex(settingsWithOverrides);
+      const home = configuredCodexHome(settings.env ?? {});
+      usesPrivatePermissionProfile = true;
+      settingsWithOverrides.configOverrides.push(
+        'default_permissions="codex_security_comparison"',
+        `permissions.codex_security_comparison=${inlineToml({
+          extends: ":read-only",
+          filesystem: {
+            ":root": "read",
+            ...readOnlyFilesystem(
+              options.inheritedPermissions?.filesystem ?? {},
+            ),
+            [home]: { ".": "deny" },
+          },
+          network: { enabled: false },
+        })}`,
+      );
+      return createExecutionProfileCodex(
+        settingsWithOverrides,
+        home,
+        configuration,
+        true,
+      );
     });
   const codex = await createCodex({
     ...(command === undefined
@@ -760,7 +782,8 @@ async function startReadOnlyCodexThread(
     // Native Codex accepts strings before the pinned SDK widens its effort type.
     modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
     ...(options.codex !== undefined ||
-    options.inheritedPermissions === undefined
+    (options.inheritedPermissions === undefined &&
+      !usesPrivatePermissionProfile)
       ? { sandboxMode: "read-only" as const }
       : {}),
     approvalPolicy: "never",
@@ -1321,7 +1344,7 @@ export async function comparisonEnvironment(
     }
     storedEnvironment["CODEX_HOME"] = canonicalCredentialHome;
     const status = await nativeAccountStatus(
-      resolveCodexCommand(source),
+      await providerPreflightCommand(resolveCodexCommand(source), config ?? {}),
       storedEnvironment,
       signal,
     );

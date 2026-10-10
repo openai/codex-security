@@ -854,6 +854,8 @@ process.exit(0);
         },
       },
       rootProvider: {
+        name: "Synthetic root provider",
+        wire_api: "responses",
         auth: {
           command: "./root-auth",
           args: ["--account", "root-account"],
@@ -1125,7 +1127,19 @@ process.exit(0);
           }
         }
         for (const capture of [native, ordinary]) {
-          expect(capture.argv).toContain("read-only");
+          if (capture.argv.includes("--profile")) {
+            expect(capture.argv).not.toContain("--sandbox");
+            expect(argvConfig(capture.argv)).toMatchObject({
+              default_permissions: "codex_security_comparison",
+              permissions: {
+                codex_security_comparison: {
+                  extends: ":read-only",
+                  filesystem: { [home]: { ".": "deny" } },
+                  network: { enabled: false },
+                },
+              },
+            });
+          } else expect(capture.argv).toContain("read-only");
           expect(argvConfig(capture.argv)["features"]).toMatchObject({
             shell_tool: false,
             plugins: false,
@@ -1474,10 +1488,22 @@ process.exit(0);
         }
         expect(threadOptions).toMatchObject({
           workingDirectory: home,
-          sandboxMode: "read-only",
           approvalPolicy: "never",
           networkAccessEnabled: false,
         });
+        if (commandAuth) {
+          expect(threadOptions).not.toHaveProperty("sandboxMode");
+          expect(launchConfig(captured!.configOverrides!)).toMatchObject({
+            default_permissions: "codex_security_comparison",
+            permissions: {
+              codex_security_comparison: {
+                extends: ":read-only",
+                filesystem: { [home]: { ".": "deny" } },
+                network: { enabled: false },
+              },
+            },
+          });
+        } else expect(threadOptions?.sandboxMode).toBe("read-only");
         expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
           contents,
         );

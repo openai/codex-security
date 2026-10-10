@@ -9,6 +9,7 @@ import type { JsonObject } from "../src/config.js";
 import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { prepareKnowledgeBase } from "../src/knowledge-base.js";
+import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import {
   bootstrapPlugin,
@@ -98,6 +99,9 @@ async function fixture(
     root,
   );
   await knowledge.cleanup();
+  const restoringKnowledge =
+    role === "merge" || (resumed && role !== "followup");
+  if (restoringKnowledge) await saveScanKnowledge(scanDir, knowledge.snapshot);
 
   await writeFile(capture, "");
   await writeFile(
@@ -361,6 +365,7 @@ async function fixture(
       repository,
       target: { kind: "repository", paths: [] },
       knowledgeBaseSha256: knowledge.sha256,
+      scanInputs: scanInputIdentity(undefined, knowledge.snapshot),
     },
     contract: {
       target: {
@@ -630,6 +635,9 @@ async function fixture(
     mode: role === "merge" || composedDiscovery ? "deep" : "standard",
     outputDir: scanDir,
     knowledgeBasePaths: [knowledgeDocument],
+    ...(restoringKnowledge
+      ? { knowledgeBaseSnapshot: knowledge.snapshot }
+      : {}),
     ...(role === "comparison" || role === "followup"
       ? { inheritedPermissions }
       : {}),
