@@ -326,13 +326,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - name: Checkout plugin source without the SDK
+      - name: Checkout plugin and shared SDK source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: |
             plugins/codex-security
             .github/actions/setup-tools
+            sdk/typescript
       - *set-up-mcp-tools
       - name: Install plugin dependencies
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
@@ -484,7 +485,7 @@ jobs:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [validate-title, package]
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

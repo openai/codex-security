@@ -1,4 +1,6 @@
 import { writeJsonLines } from "./support/json.js";
+import { throwing } from "./support/errors.js";
+import { createCliTest } from "./support/cli-run.js";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,8 +15,6 @@ import { scanLogsJson } from "../src/cli-scan-logs-json.js";
 import { readSavedScanLogs } from "../src/scan-logs.js";
 import { VERSION } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
-import { throwing } from "./support/errors.js";
-import { createCliTest } from "./support/cli-run.js";
 
 async function fixture(desktop = false, archived = false, continuation = true) {
   const state = await realpath(await mkdtemp(join(tmpdir(), "saved-logs-")));
@@ -72,6 +72,128 @@ function withoutDuration(text: string) {
   return value;
 }
 
+async function attributedFixture(attributedOwner = false) {
+  const state = await realpath(await mkdtemp(join(tmpdir(), "saved-logs-")));
+  const home = join(state, "codex-home");
+  await mkdir(join(home, "sessions"), { recursive: true });
+  const events: Record<string, unknown>[] = [
+    { type: "session_meta", payload: { id: "thread-1" } },
+    {
+      type: "event_msg",
+      payload: {
+        message: 'full values: \" \\ \n \u0000 😀',
+        nested: [null, false, 2],
+      },
+    },
+  ];
+  const timestamp = "2026-08-11T12:01:00.000Z";
+  if (attributedOwner) {
+    events.splice(1, 0, {
+      type: "turn_context",
+      timestamp,
+      payload: { turn_id: "scan-turn" },
+    });
+    Object.assign(events.at(-1)!, { timestamp });
+  }
+  await writeFile(
+    join(home, "sessions", "rollout.jsonl"),
+    events.map((event) => JSON.stringify(event)).join("\n"),
+  );
+  const originalHome = join(state, "original-home");
+  const scanDir = join(state, "scan");
+  const settingsDirectory = join(scanDir, "artifacts", "deep_discovery");
+  await mkdir(settingsDirectory, { recursive: true });
+  await mkdir(join(originalHome, "sessions"), { recursive: true });
+  let ownerEvents = events;
+  if (attributedOwner) {
+    const repeated = {
+      type: "event_msg",
+      timestamp,
+      payload: { message: "repeated scan occurrence" },
+    };
+    ownerEvents = [
+      ...events,
+      repeated,
+      repeated,
+      {
+        type: "event_msg",
+        timestamp,
+        payload: { message: "recorded non-usage suffix" },
+      },
+    ];
+    await writeFile(
+      join(home, "sessions", "rollout.jsonl"),
+      [
+        ...events,
+        { type: "turn_context", timestamp, payload: { turn_id: "other-turn" } },
+        {
+          type: "event_msg",
+          timestamp,
+          payload: { message: "unrelated first-copy suffix" },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n"),
+    );
+    await writeFile(
+      join(originalHome, "sessions", "owner.jsonl"),
+      ownerEvents.map((event) => JSON.stringify(event)).join("\n"),
+    );
+  }
+  await writeFile(
+    join(settingsDirectory, "execution-settings.json"),
+    JSON.stringify({
+      version: 1,
+      settings: {
+        codexHome: originalHome,
+        codexPath: join(originalHome, "codex"),
+      },
+    }),
+  );
+  await writeFile(
+    join(home, "sessions", "worker.jsonl"),
+    JSON.stringify({ type: "session_meta", payload: { id: "worker" } }) + "\n",
+  );
+  await writeFile(
+    join(originalHome, "sessions", "worker.jsonl"),
+    [
+      { type: "session_meta", payload: { id: "worker" } },
+      { type: "event_msg", payload: { message: "recorded worker suffix" } },
+    ]
+      .map((event) => JSON.stringify(event) + "\n")
+      .join(""),
+  );
+  const scan = {
+    scanId: "scan-1",
+    continuationThreadId: "thread-1",
+    mode: "deep",
+    scanDir,
+    executionThreadIds: ["worker"],
+    executionAttribution: {
+      formatVersion: 1 as const,
+      ...(attributedOwner ? {} : { legacy: true as const }),
+      workerCodexHome: originalHome,
+      executionThreadIds: ["worker"],
+      owner: {
+        threadId: "thread-1",
+        turnId: attributedOwner ? "scan-turn" : null,
+        startedAt: timestamp,
+      },
+      startedAt: timestamp,
+      completedAt: timestamp,
+    },
+  };
+  const logs = await readSavedScanLogs(scan, [home, originalHome]);
+  const deps = dependencies({
+    environment: { CODEX_SECURITY_STATE_DIR: state, CODEX_HOME: home },
+    onWorkbench: () => ({ scan }),
+  });
+  deps.createSecurity = () => {
+    throw new Error("Reading logs must not start Codex");
+  };
+  return { state, logs, deps, ownerEvents };
+}
+
 describe("saved logs JSON output", () => {
   let dataHome: string;
   let previousDataHome: string | undefined;
@@ -86,6 +208,63 @@ describe("saved logs JSON output", () => {
     if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
     else process.env["XDG_DATA_HOME"] = previousDataHome;
     await rm(dataHome, { recursive: true, force: true });
+  });
+
+  test("selects the recorded owner suffix after scan attribution through the saved logs command", async () => {
+    const f = await attributedFixture(true);
+    try {
+      const stdout = capture();
+      expect(
+        await main(
+          ["scans", "logs", "scan-1", "--json"],
+          stdout.stream,
+          capture().stream,
+          f.deps,
+        ),
+      ).toBe(0);
+      const result = JSON.parse(stdout.text());
+      expect(
+        result.sessions.map(({ threadId }: { threadId: string }) => threadId),
+      ).toEqual(["worker", "thread-1"]);
+      expect(
+        result.events
+          .filter(
+            ({ threadId }: { threadId: string }) => threadId === "thread-1",
+          )
+          .map(({ event }: { event: unknown }) => event),
+      ).toEqual(f.ownerEvents);
+    } finally {
+      await rm(f.state, { recursive: true, force: true });
+    }
+  });
+
+  test("loads the same-thread recorded worker suffix through the saved logs command", async () => {
+    const f = await attributedFixture();
+    try {
+      const stdout = capture();
+      expect(
+        await main(
+          ["scans", "logs", "scan-1", "--json"],
+          stdout.stream,
+          capture().stream,
+          f.deps,
+        ),
+      ).toBe(0);
+      expect(
+        JSON.parse(stdout.text()).sessions.map(
+          ({ threadId }: { threadId: string }) => threadId,
+        ),
+      ).toEqual(["thread-1", "worker"]);
+      expect(JSON.parse(stdout.text()).events).toContainEqual({
+        threadId: "worker",
+        event: {
+          type: "event_msg",
+          payload: { message: "recorded worker suffix" },
+        },
+      });
+    } finally {
+      await rm(f.state, { recursive: true, force: true });
+    }
   });
 
   test.each([
@@ -129,7 +308,9 @@ describe("saved logs JSON output", () => {
 
   test("preserves the stale installed-skills CTA after saved logs", async () => {
     const f = await fixture();
+    const previousDataHome = process.env["XDG_DATA_HOME"];
     try {
+      const dataHome = join(f.state, "data");
       const skillPath = join(f.state, "skills", "codex-security-scans");
       await mkdir(join(dataHome, "incur"), { recursive: true });
       await mkdir(skillPath, { recursive: true });
@@ -145,16 +326,22 @@ describe("saved logs JSON output", () => {
           paths: [skillPath],
         }),
       );
+      process.env["XDG_DATA_HOME"] = dataHome;
       for (const args of [
         ["--json"],
         ["--format", "json"],
         ["--format=json"],
       ]) {
-        const { stdout, stderr, runCli } = createCliTest(main);
-
-        expect(await runCli(["scans", "logs", "scan-1", ...args], f.deps)).toBe(
-          0,
-        );
+        const stdout = capture();
+        const stderr = capture();
+        expect(
+          await main(
+            ["scans", "logs", "scan-1", ...args],
+            stdout.stream,
+            stderr.stream,
+            f.deps,
+          ),
+        ).toBe(0);
         const expected = await referenceOutput(["--json"], f.logs);
         expect(Object.keys(JSON.parse(expected))).toEqual([
           "scanId",
@@ -167,6 +354,8 @@ describe("saved logs JSON output", () => {
         expect(stderr.text()).toBe("");
       }
     } finally {
+      if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
+      else process.env["XDG_DATA_HOME"] = previousDataHome;
       await rm(f.state, { recursive: true, force: true });
     }
   });
@@ -200,11 +389,16 @@ describe("saved logs JSON output", () => {
   )("preserves Incur output for %j", async (args) => {
     const f = await fixture();
     try {
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      expect(await runCli(["scans", "logs", "scan-1", ...args], f.deps)).toBe(
-        0,
-      );
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["scans", "logs", "scan-1", ...args],
+          stdout.stream,
+          stderr.stream,
+          f.deps,
+        ),
+      ).toBe(0);
       const expected = await referenceOutput(
         args.flatMap((arg) =>
           arg === "--format=json" ? ["--format", "json"] : [arg],
@@ -238,27 +432,42 @@ describe("saved logs JSON output", () => {
       ["--json", "--filter-output"],
     ].map((args) => [args]),
   )("preserves invalid-option failure for %j", async (args) => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
+    const stdout = capture();
+    const stderr = capture();
     expect(
-      await runCli(["scans", "logs", "scan-1", ...args], dependencies()),
+      await main(
+        ["scans", "logs", "scan-1", ...args],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).not.toBe("");
   });
 
-  test("formats empty session and event lists", async () => {
-    const logs = {
-      scanId: "scan-1",
-      threadId: "thread-1",
-      sessions: [],
-      events: [],
-    };
-    const chunks = [];
-    for await (const chunk of scanLogsJson(logs)) chunks.push(chunk);
-    expect(Buffer.concat(chunks).toString()).toBe(
-      `${Formatter.format(logs, "json")}\n`,
-    );
+  test("preserves JSON conversion and empty arrays", async () => {
+    const f = await fixture();
+    try {
+      f.logs.events.push({
+        threadId: "thread-1",
+        event: {
+          bigint: 42n,
+          missing: undefined,
+          values: [NaN, Infinity, -0],
+        },
+      });
+      for (const logs of [f.logs, { ...f.logs, sessions: [], events: [] }]) {
+        const chunks = [];
+        for await (const chunk of scanLogsJson(logs))
+          chunks.push(Buffer.from(chunk));
+        expect(Buffer.concat(chunks).toString()).toBe(
+          `${Formatter.format(logs, "json")}\n`,
+        );
+      }
+    } finally {
+      await rm(f.state, { recursive: true, force: true });
+    }
   });
 
   test("waits for output backpressure and leaves the stream open", async () => {

@@ -1,10 +1,12 @@
 import { build, type BuildOptions } from "esbuild";
+import path from "node:path";
 
 export async function importModule(options: BuildOptions) {
   const result = await build({
     bundle: true,
     format: "esm",
     platform: "node",
+    nodePaths: [path.resolve(import.meta.dirname, "../node_modules")],
     write: false,
     ...options,
   });

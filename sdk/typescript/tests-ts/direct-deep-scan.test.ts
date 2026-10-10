@@ -1,4 +1,10 @@
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  copyFile,
+  mkdir,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { runDeepScan } from "../src/deep-scan.js";
@@ -142,7 +148,7 @@ test("preserves complete worker usage and cost after direct engine completion", 
   const codexHome = join(root, "codex-home");
   const scanDir = join(root, "scan");
   await mkdir(scanDir);
-  await writeSession(
+  const discoveryLog = await writeSession(
     codexHome,
     "discovery-session",
     {
@@ -163,7 +169,7 @@ test("preserves complete worker usage and cost after direct engine completion", 
       timestamp: "2026-07-26T12:00:01.000Z",
     },
   );
-  await writeSession(
+  const reducerLog = await writeSession(
     codexHome,
     "reducer-session",
     {
@@ -177,6 +183,39 @@ test("preserves complete worker usage and cost after direct engine completion", 
       timestamp: "2026-07-26T12:00:02.000Z",
     },
   );
+  for (const [path, thread] of [
+    [discoveryLog, "discovery-session"],
+    [reducerLog, "reducer-session"],
+  ] as const) {
+    const records = (await readFile(path, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const usage = records[1].payload.info.total_token_usage;
+    await appendFile(
+      path,
+      [
+        {
+          type: "turn_context",
+          timestamp: "2026-07-26T12:00:03.000Z",
+          payload: { turn_id: `${thread}-turn`, model: "gpt-6.1-sol" },
+        },
+        {
+          type: "token_usage_record",
+          timestamp: "2026-07-26T12:00:03.000Z",
+          payload: {
+            thread_id: thread,
+            turn_id: `${thread}-turn`,
+            response_id: `${thread}-response`,
+            model: "gpt-6.1-sol",
+            usage,
+          },
+        },
+      ]
+        .map((value) => JSON.stringify(value))
+        .join("\n") + "\n",
+    );
+  }
   await writeFile(
     join(codexHome, "sessions", "owner.jsonl"),
     JSON.stringify({
@@ -215,12 +254,38 @@ test("preserves complete worker usage and cost after direct engine completion", 
     scanDirectory: scanDir,
     model: "gpt-6.1-sol",
   });
+  tracker.setAttributionReader(async () => ({
+    formatVersion: 1,
+    workerCodexHome: codexHome,
+    executionThreadIds: [
+      "engine-session",
+      "discovery-session",
+      "reducer-session",
+    ],
+    owner: {
+      threadId: "engine-session",
+      turnId: null,
+      dedicated: true,
+      startedAt: "2026-07-26T12:00:00.000Z",
+    },
+    startedAt: "2026-07-26T12:00:00.000Z",
+    completedAt: null,
+  }));
+  tracker.recordUsage(
+    {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+    },
+    "engine-session",
+  );
   tracker.start("engine-session");
   const running = await tracker.refresh();
   const completed = (await events.next()).value;
   expect(completed?.type).toBe("turn.completed");
   const final = await tracker.stop(completed?.["usage"]);
-  expect(running.usage).toEqual({
+  expect(running.usage).toMatchObject({
     input_tokens: 1_500,
     cached_input_tokens: 250,
     cache_write_input_tokens: 140,

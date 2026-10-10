@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -15,7 +15,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { startRpc } from "./package-rpc.mjs";
@@ -59,8 +59,10 @@ try {
       ? "package-codex.exe"
       : "package-deep-codex.mjs",
   );
-  if (process.platform === "win32")
+  if (process.platform === "win32") {
     await copyFile(process.execPath, executable);
+    await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
+  }
   await chmod(executable, 0o700);
   if (process.platform === "win32") {
     // The direct SDK engine launches its preflight from this process too.
@@ -344,6 +346,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
   } finally {
     await rpc.close();
   }
+  await assertSavedState(f, scanId, owner);
   await assertExecutions(f, scanId, 4);
 }
 
@@ -373,6 +376,11 @@ async function runInstalledSdk(pluginRoot, executable) {
     await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
   const owner = "package-sdk-owner";
+  const postScanPrompt = "Explain the completed synthetic scan.";
+  const prompts = [];
+  let threadCount = 0;
+  let resumedThreads = 0;
+  let manifestBeforeFollowUp;
   let scanId;
   const client = new sdk.CodexSecurity(
     { pythonPath: f.env.PYTHON },
@@ -391,16 +399,49 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
-      // The installed SDK runs the direct engine without a parent model turn.
-      createCodex() {
+      // The native control session starts the real packaged engine. Only the
+      // post-scan model response is synthetic, after authoritative completion.
+      createCodex({ env }) {
         return {
           startThread() {
+            threadCount += 1;
             return {
-              id: owner,
+              id: null,
               async runStreamed() {
-                assert.fail(
-                  "The direct engine must not start a parent model turn.",
+                throw new Error(
+                  "The direct Deep Scan must not start a parent model turn.",
                 );
+              },
+            };
+          },
+          resumeThread(threadId) {
+            assert.equal(threadId, owner);
+            resumedThreads += 1;
+            return {
+              id: threadId,
+              async runStreamed(prompt) {
+                prompts.push(prompt);
+                assert.equal(prompt, postScanPrompt);
+                manifestBeforeFollowUp = await readFile(
+                  join(env.CODEX_SECURITY_SCAN_DIR, "scan-manifest.json"),
+                  "utf8",
+                );
+                const completed = JSON.parse(manifestBeforeFollowUp);
+                assert.equal(completed.scan.status, "completed");
+                assert.ok(completed.scan.sealedAt);
+                return {
+                  events: (async function* () {
+                    yield { type: "thread.started", thread_id: owner };
+                    yield {
+                      type: "turn.completed",
+                      usage: {
+                        input_tokens: 100_000,
+                        cached_input_tokens: 0,
+                        output_tokens: 100_000,
+                      },
+                    };
+                  })(),
+                };
               },
             };
           },
@@ -416,16 +457,26 @@ async function runInstalledSdk(pluginRoot, executable) {
       subagents: 0,
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
+      postScanPrompt,
       outputDir: join(f.directory, "output"),
       onScanRegistered(scan) {
         scanId = scan.scanId;
       },
     });
+    assert.equal(threadCount, 1);
+    assert.equal(resumedThreads, 1);
+    assert.deepEqual(prompts, [postScanPrompt]);
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
     assert.ok(result.manifest.scan.sealedAt);
     assert.equal(result.manifest.scan.id, scanId);
     assert.deepEqual(result.findings.findings, []);
+    assert.equal(
+      await readFile(result.manifestPath, "utf8"),
+      manifestBeforeFollowUp,
+    );
+    assert.ok(result.cost === null || result.cost.inputTokens < 100_000);
+    assert.equal(result.toJSON().threadId, owner);
     assert.ok(
       (await readFile(join(f.directory, "output", "report.md"), "utf8"))
         .length > 0,
@@ -433,7 +484,77 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
+  await assertSavedState(f, scanId, owner);
   await assertExecutions(f, scanId, 5);
+}
+
+async function assertSavedState(f, scanId, owner) {
+  const { deepScan } = await workbench(f, [
+    "get-deep-scan",
+    "--scan-id",
+    scanId,
+    "--thread-id",
+    owner,
+  ]);
+  assert.equal(deepScan.status, "succeeded");
+  if (deepScan.workflowVersion === "deep-security-scan/v2") {
+    const selected = deepScan.finalizationInput;
+    assert.ok(
+      selected,
+      "The completed v2 scan retains its finalization input.",
+    );
+    assert.equal(selected.version, 1);
+    assert.equal(selected.terminalReason, deepScan.terminalReason);
+    assert.deepEqual(selected.omittedWorkerIds, []);
+    await assertDigest(
+      resolve(deepScan.scanDir, selected.resultPath),
+      selected.resultSha256,
+    );
+    const workers = deepScan.workers.filter(
+      (worker) => worker.status === "succeeded",
+    );
+    assert.equal(workers.length, 3);
+    for (const worker of workers) {
+      const attempt = deepScan.attempts.find(
+        (entry) =>
+          entry.workerId === worker.id && entry.attempt === worker.attempt,
+      );
+      assert.ok(attempt, "Each accepted worker retains its execution attempt.");
+      assert.equal(attempt.status, "succeeded");
+      await assertDigest(
+        attempt.acceptedResultPath,
+        attempt.acceptedResultSha256,
+      );
+      if (worker.kind === "dedup") {
+        assert.equal(selected.resultSha256, attempt.acceptedResultSha256);
+      } else {
+        const input = deepScan.dedupInputs.find(
+          (entry) => entry.discoveryWorkerId === worker.id,
+        );
+        assert.ok(input, "The reducer retains each accepted discovery input.");
+        assert.equal(input.attempt, worker.attempt);
+        assert.equal(input.resultManifestSha256, attempt.acceptedResultSha256);
+        await assertDigest(
+          input.resultManifestPath,
+          input.resultManifestSha256,
+        );
+      }
+    }
+    assert.equal(deepScan.dedupInputs.length, 2);
+  }
+  console.log(
+    JSON.stringify({
+      fixture: basename(f.directory),
+      workflowVersion: deepScan.workflowVersion,
+      attempts: deepScan.attempts?.length ?? null,
+      selectedFinalization: deepScan.finalizationInput != null,
+    }),
+  );
+}
+
+async function assertDigest(path, expected) {
+  const bytes = await readFile(path);
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), expected);
 }
 
 async function assertDraft(path) {

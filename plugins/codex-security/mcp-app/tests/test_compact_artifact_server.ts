@@ -19,7 +19,12 @@ type CompletedResult = {
       fingerprints: { primary: string };
     })[];
   };
-  coverage: Record<string, unknown> & { surfaces: { disposition: string }[] };
+  coverage: Record<string, unknown> & {
+    completeness: string;
+    surfaces: { disposition: string }[];
+    deferred: unknown[];
+    explicitExclusions: unknown[];
+  };
 };
 type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
 type WorkspaceResult = {
@@ -28,6 +33,8 @@ type WorkspaceResult = {
 type ScanResult = {
   scan: {
     progress: Record<string, unknown>;
+    scanDir: string;
+    usage: unknown;
     reportAvailable: boolean;
     continuationThreadId?: string;
     handoffClaimToken?: string;
@@ -301,8 +308,12 @@ async function testCompactDiffScanCompletion(
       }),
       `${runtimeLabel}: record compact diff canonical semantics`,
     );
+    const completion = await call("complete_codex_security_scan", {
+      scanId,
+      handoffClaimToken,
+    });
     requireSuccessfulTool<ScanResult>(
-      await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
+      completion,
       `${runtimeLabel}: complete compact diff scan`,
     );
     const completed = requireSuccessfulTool<CompletedResult>(
@@ -320,6 +331,12 @@ async function testCompactDiffScanCompletion(
     );
     assert.equal(completed.coverage.inventoryStrategy, "diff");
     assert.equal(completed.findings.findings.length, 0);
+    await assertCompletionCoverageAndReplay(
+      call,
+      { scanId, handoffClaimToken },
+      completion,
+      completed.coverage,
+    );
   } finally {
     await client.close();
   }
@@ -762,8 +779,12 @@ async function testSemanticScanDraftCompletion(
       unit: null,
     });
 
+    const completion = await call("complete_codex_security_scan", {
+      scanId,
+      handoffClaimToken,
+    });
     const completed = requireSuccessfulTool<ScanResult>(
-      await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
+      completion,
       `${runtimeLabel}: finalize the accepted draft exactly once`,
     );
     assert.equal(completed.scan.progress.status, "complete");
@@ -806,6 +827,12 @@ async function testSemanticScanDraftCompletion(
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
     assert.equal(results.coverage.inventoryStrategy, "directory");
     assert.equal(results.coverage.completeness, "partial");
+    await assertCompletionCoverageAndReplay(
+      call,
+      { scanId, handoffClaimToken },
+      completion,
+      results.coverage,
+    );
     assert.deepEqual(results.coverage.includePaths, ["."]);
     assert.deepEqual(results.coverage.excludePaths, []);
     assert.equal(results.coverage.surfaces[0].disposition, "reported");
@@ -1134,6 +1161,61 @@ async function testClaimedParentArtifactOperations(
   }
 }
 
+async function assertCompletionCoverageAndReplay(
+  call: ReturnType<typeof toolCaller>,
+  identity: { scanId: string; handoffClaimToken?: string },
+  completion: ToolResponse,
+  coverage: CompletedResult["coverage"],
+) {
+  const expected = {
+    completeness: coverage.completeness,
+    surfaceCount: coverage.surfaces.length,
+    deferredCount: coverage.deferred.length,
+    explicitExclusionCount: coverage.explicitExclusions.length,
+  };
+  type Completion = ScanResult & { coverageSummary: typeof expected };
+  const scan = requireSuccessfulTool<Completion>(completion).scan;
+  const snapshot = () =>
+    Promise.all(
+      ["scan-manifest.json", "findings.json", "coverage.json", "report.md"].map(
+        (name) => readFile(path.join(scan.scanDir, name), "utf8"),
+      ),
+    );
+  const sealed = await snapshot();
+  const replay = await call("complete_codex_security_scan", identity);
+  for (const result of [completion, replay]) {
+    const structured = requireSuccessfulTool<Completion>(result);
+    assert.equal(structured.scan.progress.status, "complete");
+    const content = (result.content as TextContent[])[0];
+    assert.equal(content.type, "text");
+    assert.match(
+      content.text,
+      new RegExp(`Canonical coverage: ${expected.completeness}\\b`),
+    );
+    assert.match(
+      content.text,
+      new RegExp(`\\b${expected.surfaceCount} surfaces\\b`),
+    );
+    assert.match(
+      content.text,
+      new RegExp(`\\b${expected.deferredCount} deferred items\\b`),
+    );
+    assert.match(
+      content.text,
+      new RegExp(
+        `\\b${expected.explicitExclusionCount} explicit exclusions\\b`,
+      ),
+    );
+    assert.deepEqual(structured.coverageSummary, expected);
+    assert.deepEqual(structured.scan.usage, scan.usage);
+  }
+  assert.deepEqual(
+    await snapshot(),
+    sealed,
+    "completion replay preserves sealed artifacts",
+  );
+}
+
 function requireSuccessfulTool<Result = Record<string, unknown>>(
   result: ToolResponse,
   label?: string,
@@ -1363,6 +1445,18 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       findings: [],
       coverage: workerDraft([]).coverage,
     };
+
+    for (const arguments_ of [
+      { ...input, scope: { includePaths: ["src"], excludePaths: [] } },
+      { ...input, coverage: { ...input.coverage, scanId } },
+    ]) {
+      requireToolError(
+        await client.callTool({ name: tool.name, arguments: arguments_ }),
+        /expected never/,
+        "The draft description must not change rejection of workbench-owned metadata.",
+      );
+      await assert.rejects(readFile(resultPath), { code: "ENOENT" });
+    }
 
     requireToolError(
       await client.callTool({

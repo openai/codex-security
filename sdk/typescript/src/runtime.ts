@@ -1704,6 +1704,7 @@ export async function runWorkbench(
           )
         : input,
       signal,
+      undefined,
       archiveHandshake,
       // Match native argv's UTF-8 encoding for the private argument frame.
       framedArguments
@@ -3171,6 +3172,7 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
+  cwd?: string,
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
@@ -3185,6 +3187,7 @@ export async function runCodexCommand(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: cancellation?.signal ?? signal,
+      ...(cwd === undefined ? {} : { cwd }),
     },
   );
   let stdout = "";

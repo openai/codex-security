@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import runpy
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,6 +16,7 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    SCRIPT,
     begin_deep_scan,
     create_saved_workspace,
     fail_scan,
@@ -164,17 +168,34 @@ def _rollout(
     source: Any = "cli"
     if parent_thread_id is not None:
         source = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+    own_started_at = (
+        task_started_at.isoformat().replace("+00:00", "Z")
+        if task_started_at is not None
+        else next((item["timestamp"] for item in events if "timestamp" in item), None)
+    )
     records: list[dict[str, Any]] = [
         {
             "type": "session_meta",
-            "payload": {"id": recorded_thread_id or thread_id, "source": source},
+            "payload": {
+                "id": recorded_thread_id or thread_id,
+                "source": source,
+                "timestamp": own_started_at,
+            },
         },
         *(copied_events or []),
     ]
     if parent_thread_id is not None and include_task_start:
         event: dict[str, Any] = {
             "type": "event_msg",
-            "payload": {"type": "task_started", "turn_id": f"turn-{thread_id}"},
+            "payload": {
+                "type": "task_started",
+                "turn_id": f"turn-{thread_id}",
+                "started_at": int(
+                    datetime.fromisoformat(own_started_at.replace("Z", "+00:00")).timestamp()
+                )
+                if own_started_at is not None
+                else None,
+            },
         }
         if include_task_start_timestamp:
             event["timestamp"] = (
@@ -526,6 +547,32 @@ def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path)
     assert "totalTokens" not in usage
 
 
+@pytest.mark.parametrize("reported", ["missing", "null-counter", "explicit-zero"])
+def test_completion_distinguishes_missing_token_records_from_zero(
+    tmp_path: Path, reported: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    events = []
+    if reported == "explicit-zero":
+        events.append(_token_event(counted, 0, 0))
+    elif reported == "null-counter":
+        events.append(
+            _event(counted, "event_msg", {"type": "token_count", "info": None, "rate_limits": None})
+        )
+    parent = _rollout(tmp_path, "scan-parent", events)
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    if reported == "explicit-zero":
+        assert usage["coverage"] == "complete"
+        assert usage["totalTokens"] == 0
+    else:
+        assert usage["coverage"] == "unavailable"
+        assert "token_usage_unavailable" in usage["warnings"]
+        assert "token_record_invalid" not in usage["warnings"]
+        assert "totalTokens" not in usage
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS system path aliases")
 @pytest.mark.parametrize("temporary_root", [tempfile.gettempdir(), "/tmp"], ids=["var", "tmp"])
 def test_completion_accepts_macos_system_rollout_alias(
@@ -630,11 +677,391 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
     assert usage == {
-        "coverage": "complete",
+        "coverage": "partial",
         "source": "codex_rollout",
-        **_counts(37, 0, 10),
-        "threadCount": 3,
+        **_counts(27, 0, 7),
+        "threadCount": 2,
+        "missingThreadCount": 1,
+        "warnings": ["scan_owner_turn_unavailable"],
+        "modelUsage": [{"model": None, **_counts(27, 0, 7)}],
     }
+
+
+@pytest.mark.parametrize(
+    "worker_home",
+    [
+        "recorded",
+        "current",
+        "inherited-sqlite",
+        "current-prefix",
+        "recorded-prefix",
+        "current-equal-incomplete",
+        "recorded-equal-incomplete",
+        "current-unreadable",
+        "current-mismatched",
+        "external-sqlite",
+        "external-archived",
+        "external-home-alias",
+        "external-archived-home-alias",
+        "external-shared-home",
+        "external-missing-copy",
+        "external-missing-child",
+        "external-current-middle-missing",
+        "external-current-middle-complete",
+        "unavailable",
+    ],
+)
+def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
+    tmp_path: Path, worker_home: str
+) -> None:
+    current_home = tmp_path / "current-home"
+    copied_rollout = worker_home in {
+        "current-prefix",
+        "recorded-prefix",
+        "current-equal-incomplete",
+        "recorded-equal-incomplete",
+        "current-unreadable",
+        "current-mismatched",
+    }
+    environment = {
+        "CODEX_HOME": str(current_home),
+        "CODEX_SQLITE_HOME": str(current_home / "sqlite"),
+        "CODEX_STATE_DB": str(current_home / "sqlite" / "state_5.sqlite"),
+    }
+    owners = {
+        f"owner-{index}": _rollout(
+            tmp_path,
+            f"owner-{index}",
+            [_event(datetime.now().astimezone(), "turn_context", {"turn_id": "original"})],
+        )
+        for index in (1, 2)
+    }
+    _state_graph(environment, owners, [])
+
+    def complete(index: int) -> dict[str, Any]:
+        root = tmp_path / f"scan-{index}"
+        target = root / "target"
+        target.mkdir(parents=True)
+        selected_home = current_home if worker_home == "current" else root / "original-home"
+        if worker_home == "external-shared-home":
+            selected_home = tmp_path / "shared-original-home"
+        if worker_home in {"external-home-alias", "external-archived-home-alias"}:
+            actual_home = root / "actual-home"
+            actual_home.mkdir()
+            selected_home.symlink_to(actual_home, target_is_directory=True)
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import runpy, sys; script = sys.argv.pop(1); "
+                    "runpy.run_path(script)['main'](with_execution_settings=True)"
+                ),
+                str(SCRIPT),
+                "begin-deep-scan",
+                "--thread-id",
+                f"owner-{index}",
+                "--target-path",
+                str(target),
+                "--scan-root",
+                str(root / "scans"),
+            ],
+            env={**os.environ, **environment, "CODEX_SECURITY_STATE_DIR": str(root / "state")},
+            input=json.dumps(
+                {
+                    "executionSettings": {
+                        "codexHome": str(selected_home),
+                        "codexPath": sys.executable,
+                    }
+                }
+            ),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert process.returncode == 0, process.stderr
+        deep = json.loads(process.stdout)["deepScan"]
+        scan_id, scan_dir = deep["scanId"], Path(deep["scanDir"])
+        snapshot = scan_dir / "artifacts/deep_discovery/execution-settings.json"
+        original_bytes = snapshot.read_bytes()
+        fixture = ScanFixture(
+            root / "state",
+            target,
+            scan_id,
+            scan_dir,
+            datetime.fromisoformat(deep["createdAt"].replace("Z", "+00:00")),
+            environment,
+            "deep",
+        )
+        counted = fixture.started_at + timedelta(microseconds=1)
+        with owners[f"owner-{index}"].open("a") as stream:
+            stream.write(json.dumps(_token_event(counted, index * 10, 2)) + "\n")
+            stream.write(json.dumps(_event(counted, "turn_context", {"turn_id": "later"})) + "\n")
+            stream.write(json.dumps(_token_event(counted, 9000, 900)) + "\n")
+        worker_threads = {}
+        for kind in ("discovery", "second-discovery"):
+            thread_id = f"{kind}-{index}"
+            artifact = scan_dir / "artifacts" / thread_id
+            artifact.mkdir()
+            prompt = artifact / "prompt.md"
+            prompt.write_text("Review the synthetic target.\n")
+            run_workbench(
+                fixture.state_dir,
+                "upsert-deep-scan-worker",
+                "--scan-id",
+                scan_id,
+                "--worker-id",
+                str(uuid.uuid4()),
+                "--kind",
+                "discovery",
+                "--status",
+                "running",
+                "--prompt-path",
+                str(prompt),
+                "--artifact-dir",
+                str(artifact),
+                "--sdk-thread-id",
+                thread_id,
+                environment=environment,
+            )
+            worker_threads[thread_id] = _rollout(
+                root,
+                thread_id,
+                [
+                    *(
+                        [_event(counted, "turn_context", {"model": "model-alpha"})]
+                        if copied_rollout and kind == "discovery"
+                        else []
+                    ),
+                    _token_event(counted, index * 20, 3),
+                    _event(
+                        counted,
+                        "turn_context",
+                        {
+                            "turn_id": "resumed",
+                            **(
+                                {"model": "model-beta"}
+                                if copied_rollout and kind == "discovery"
+                                else {}
+                            ),
+                        },
+                    ),
+                    _token_event(counted, index * 30, 5),
+                ],
+            )
+        child_id = f"child-{index}"
+        worker_threads[child_id] = _rollout(
+            root,
+            child_id,
+            [_token_event(counted, index * 7, 1)],
+            parent_thread_id=f"discovery-{index}",
+        )
+        if worker_home in {"current", "inherited-sqlite"}:
+            with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
+                connection.executemany(
+                    "INSERT INTO threads VALUES (?, ?)",
+                    [(key, str(path)) for key, path in worker_threads.items()],
+                )
+                connection.execute(
+                    "INSERT INTO thread_spawn_edges VALUES (?, ?)", (f"discovery-{index}", child_id)
+                )
+            if worker_home == "inherited-sqlite":
+                # Earlier launches used A; the resumed process forwards its
+                # explicit SQLite home C even while workers keep Codex home A.
+                _state_graph(
+                    {"CODEX_SQLITE_HOME": str(selected_home)},
+                    {f"discovery-{index}": worker_threads[f"discovery-{index}"]},
+                    [],
+                )
+        elif worker_home in {
+            "recorded",
+            "current-prefix",
+            "recorded-prefix",
+            "current-equal-incomplete",
+            "recorded-equal-incomplete",
+            "current-unreadable",
+            "current-mismatched",
+        }:
+            recorded_threads = dict(worker_threads)
+            if worker_home != "recorded":
+                thread_id = f"discovery-{index}"
+                full = worker_threads[thread_id]
+                copied = full.with_name(f"copied-{thread_id}.jsonl")
+                copied.write_bytes(b"\n".join(full.read_bytes().splitlines()[:3]) + b"\n")
+                if worker_home in {"current-equal-incomplete", "recorded-equal-incomplete"}:
+                    copied.write_bytes(full.read_bytes() + b'{"type":"event_msg"')
+                if worker_home == "current-unreadable":
+                    copied.write_text("invalid session metadata\n")
+                elif worker_home == "current-mismatched":
+                    copied.write_text(full.read_text().replace(thread_id, "unrelated-thread"))
+                current_copy = copied
+                if worker_home in {"recorded-prefix", "recorded-equal-incomplete"}:
+                    recorded_threads[thread_id] = copied
+                    current_copy = full
+                with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
+                    connection.execute(
+                        "INSERT INTO threads VALUES (?, ?)", (thread_id, str(current_copy))
+                    )
+            _state_graph(
+                {"CODEX_SQLITE_HOME": str(selected_home)},
+                recorded_threads,
+                [(f"discovery-{index}", child_id)],
+            )
+        elif worker_home in {
+            "external-sqlite",
+            "external-archived",
+            "external-home-alias",
+            "external-archived-home-alias",
+            "external-shared-home",
+            "external-missing-copy",
+            "external-missing-child",
+            "external-current-middle-missing",
+            "external-current-middle-complete",
+        }:
+            if worker_home.startswith("external-current-middle"):
+                grandchild_id = f"grandchild-{index}"
+                worker_threads[grandchild_id] = _rollout(
+                    root,
+                    grandchild_id,
+                    [_token_event(counted, index * 11, 2)],
+                    parent_thread_id=child_id,
+                )
+            # Native keeps rollouts in its Codex home even when its SQLite
+            # index lives elsewhere and recovery chooses a different index.
+            sessions = (
+                selected_home
+                / ("archived_sessions" if "archived" in worker_home else "sessions")
+                / "2026"
+                / "01"
+                / "01"
+            )
+            sessions.mkdir(parents=True, exist_ok=True)
+            for thread_id, path in worker_threads.items():
+                recorded = sessions / f"rollout-{thread_id}.jsonl"
+                path.rename(recorded)
+                worker_threads[thread_id] = recorded
+            _state_graph(
+                {"CODEX_SQLITE_HOME": str(root / "original-external-sqlite")},
+                worker_threads,
+                [(f"discovery-{index}", child_id)],
+            )
+        if worker_home in {"external-missing-copy", "external-missing-child"}:
+            first_id = f"discovery-{index}"
+            with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
+                connection.execute(
+                    "INSERT INTO threads VALUES (?, ?)",
+                    (
+                        first_id,
+                        str(root / "missing-copy.jsonl")
+                        if worker_home == "external-missing-copy"
+                        else str(worker_threads[first_id]),
+                    ),
+                )
+                if worker_home == "external-missing-child":
+                    connection.execute(
+                        "INSERT INTO thread_spawn_edges VALUES (?, ?)", (first_id, child_id)
+                    )
+                    worker_threads[child_id].unlink()
+        if worker_home.startswith("external-current-middle"):
+            # Recovery's current index sees the grandchild while its parent
+            # rollout is restored later from the worker's original home.
+            with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
+                connection.executemany(
+                    "INSERT INTO threads VALUES (?, ?)",
+                    [
+                        (f"discovery-{index}", str(worker_threads[f"discovery-{index}"])),
+                        (
+                            child_id,
+                            str(root / "missing-middle.jsonl")
+                            if worker_home.endswith("missing")
+                            else str(worker_threads[child_id]),
+                        ),
+                        (grandchild_id, str(worker_threads[grandchild_id])),
+                    ],
+                )
+                connection.executemany(
+                    "INSERT INTO thread_spawn_edges VALUES (?, ?)",
+                    [(f"discovery-{index}", child_id), (child_id, grandchild_id)],
+                )
+        result = _complete_scan(fixture)["scan"]["usage"]
+        assert snapshot.read_bytes() == original_bytes
+        return result
+
+    # Both completions share current home B; each scan retains its own worker home A.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(complete, (1, 2)))
+    for index, usage in enumerate(results, 1):
+        if worker_home == "unavailable":
+            assert usage["coverage"] == "partial"
+            assert usage["inputTokens"] == index * 10
+            assert usage["outputTokens"] == 2
+            assert usage["threadCount"] == 1
+            assert usage["missingThreadCount"] == 2
+        elif worker_home == "external-missing-child":
+            assert usage == {
+                "coverage": "partial",
+                "source": "codex_rollout",
+                **_counts(index * 70, 0, 12),
+                "threadCount": 3,
+                "missingThreadCount": 1,
+                "warnings": [
+                    "codex_state_unavailable",
+                    "rollout_unavailable",
+                    "scan_root_unavailable",
+                ],
+                "modelUsage": [{"model": None, **_counts(index * 70, 0, 12)}],
+            }
+        else:
+            assert usage == {
+                "coverage": "complete",
+                "source": "codex_rollout",
+                **_counts(
+                    index * (88 if worker_home.startswith("external-current-middle") else 77),
+                    0,
+                    15 if worker_home.startswith("external-current-middle") else 13,
+                ),
+                "threadCount": 5 if worker_home.startswith("external-current-middle") else 4,
+                "modelUsage": (
+                    [
+                        {"model": None, **_counts(index * 47, 0, 8)},
+                        {"model": "model-alpha", **_counts(index * 20, 0, 3)},
+                        {"model": "model-beta", **_counts(index * 10, 0, 2)},
+                    ]
+                    if copied_rollout
+                    else [
+                        {
+                            "model": None,
+                            **_counts(
+                                index
+                                * (88 if worker_home.startswith("external-current-middle") else 77),
+                                0,
+                                15 if worker_home.startswith("external-current-middle") else 13,
+                            ),
+                        }
+                    ]
+                ),
+            }
+
+
+def test_recorded_home_alias_keeps_individual_rollout_links_excluded(
+    tmp_path: Path, workbench_api
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    home = tmp_path / "home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(home, target_is_directory=True)
+    canonical = _rollout(tmp_path, "worker", [])
+    path = sessions / "worker.jsonl"
+    canonical.rename(path)
+    linked = _rollout(tmp_path, "linked-worker", [])
+    (sessions / "linked-worker.jsonl").symlink_to(linked)
+    (sessions / "linked-directory").symlink_to(linked.parent, target_is_directory=True)
+
+    discovered = reader._discover_recorded_worker_sessions(alias, {"worker", "linked-worker"})
+    assert [(session.thread_id, session.path) for session in discovered] == [("worker", path)]
+    assert reader._discover_recorded_worker_sessions(tmp_path / "missing-home", {"worker"}) == []
 
 
 def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
@@ -701,3 +1128,622 @@ def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
     )["scan"]
     assert failed["progress"]["status"] == "failed"
     assert "usage" not in failed
+
+
+@pytest.mark.parametrize("complete_first", [False, True])
+@pytest.mark.parametrize("tail", ["complete", "partial", "invalid"])
+def test_rollout_copies_prefer_parsed_cache_and_model_corrections(
+    tmp_path: Path, workbench_api, complete_first: bool, tail: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    prefix = _rollout(
+        tmp_path,
+        "worker",
+        [
+            _event(start, "turn_context", {"turn_id": "scan-turn", "model": "model-before"}),
+            _token_event(start, 1_000_000, 0),
+        ],
+    )
+    complete = tmp_path / "complete.jsonl"
+    tokens = dict(
+        input_tokens=1_000_000, cached_input_tokens=900_000, output_tokens=0, total_tokens=1_000_000
+    )
+    receipt = _event(
+        start,
+        "token_usage_record",
+        dict(
+            response_id="response-one",
+            thread_id="worker",
+            turn_id="scan-turn",
+            model="model-receipt",
+            usage=tokens,
+            thread_token_usage=tokens,
+        ),
+    )
+    complete.write_bytes(prefix.read_bytes() + json.dumps(receipt).encode() + b"\n")
+    if tail == "partial":
+        with complete.open("ab") as stream:
+            stream.write(b'{"type":"event_msg"')
+    elif tail == "invalid":
+        with complete.open("ab") as stream:
+            stream.write(b"invalid-record\n")
+    paths = [prefix, complete] if not complete_first else [complete, prefix]
+    models = {}
+    counts, warnings = reader._read_rollout_copies_usage(
+        [reader.RolloutSession("worker", None, path) for path in paths],
+        started_at=start,
+        completed_at=None,
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    expected = _counts(1_000_000, 900_000, 0)
+    assert counts == expected
+    assert models == {"model-receipt": expected}
+    assert warnings == (
+        set()
+        if tail == "complete"
+        else {"rollout_record_incomplete" if tail == "partial" else "rollout_record_invalid"}
+    )
+
+
+def test_rollout_usage_reconciles_stale_cumulative_events_and_models(
+    tmp_path: Path, workbench_api
+) -> None:
+    usage_reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    events = [
+        _event(start, "turn_context", {"turn_id": "own-turn", "model": "gpt-5.6-sol"}),
+        _token_event(start, 100, 10),
+        _token_event(start, 60, 6),
+        _event(start, "turn_context", {"turn_id": "own-turn", "model": "gpt-6-astra"}),
+        _token_event(start, 200, 20),
+    ]
+    rollout = _rollout(tmp_path, "worker", events)
+    counts, warnings = usage_reader._read_rollout_usage(
+        usage_reader.RolloutSession("worker", None, rollout),
+        started_at=start,
+        completed_at=None,
+    )
+    assert counts == _counts(200, 0, 20)
+    assert warnings == {"token_counter_regressed"}
+    models = {}
+    counts, warnings = usage_reader._read_rollout_usage(
+        usage_reader.RolloutSession("worker", None, rollout),
+        started_at=start,
+        completed_at=None,
+        model_usage=models,
+    )
+    assert counts == _counts(200, 0, 20)
+    assert warnings == {"token_counter_regressed"}
+    assert models == {"gpt-5.6-sol": _counts(100, 0, 10), "gpt-6-astra": _counts(100, 0, 10)}
+
+
+def test_shared_parent_usage_requires_original_turn_and_scan_interval(
+    tmp_path: Path, workbench_api
+) -> None:
+    usage_reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    end = start + timedelta(seconds=5)
+    events = [
+        _event(
+            start - timedelta(seconds=1),
+            "turn_context",
+            {"turn_id": "prior", "model": "gpt-5.6-sol"},
+        ),
+        _token_event(start - timedelta(seconds=1), 100, 10),
+        _event(start, "turn_context", {"turn_id": "scan-turn", "model": "gpt-6-astra"}),
+        _token_event(start, 110, 12),
+        _event(start, "turn_context", {"turn_id": "unrelated", "model": "gpt-5.6-sol"}),
+        _token_event(start, 910, 92),
+        _event(
+            end + timedelta(seconds=1),
+            "turn_context",
+            {"turn_id": "scan-turn", "model": "gpt-6-astra"},
+        ),
+        _token_event(end + timedelta(seconds=1), 1000, 100),
+    ]
+    models = {}
+    counts, warnings = usage_reader._read_rollout_usage(
+        usage_reader.RolloutSession("parent", None, _rollout(tmp_path, "parent", events)),
+        started_at=start,
+        completed_at=end,
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    assert counts == _counts(10, 0, 2)
+    assert warnings == set()
+    assert models == {"gpt-6-astra": _counts(10, 0, 2)}
+
+
+@pytest.mark.parametrize(
+    "counter_info,receipt_state,expected_warning",
+    [
+        (None, "complete", None),
+        ({}, "complete", "token_record_invalid"),
+        ({"total_token_usage": {"input_tokens": -1}}, "complete", "token_record_invalid"),
+        (None, "missing-response", "token_receipts_incomplete"),
+        (None, "incomplete-line", "rollout_record_incomplete"),
+        (None, "invalid-timestamp", "token_record_invalid"),
+    ],
+    ids=[
+        "null-counter",
+        "empty-info",
+        "malformed-usage",
+        "missing-response",
+        "incomplete-line",
+        "invalid-timestamp",
+    ],
+)
+def test_completion_handles_no_usage_counter_without_hiding_incomplete_receipts(
+    tmp_path: Path, counter_info: Any, receipt_state: str, expected_warning: str | None
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    tokens = dict(input_tokens=100, cached_input_tokens=20, output_tokens=10, total_tokens=110)
+    response = _event(
+        counted,
+        "token_usage_record",
+        dict(
+            response_id="response-one",
+            thread_id="scan-parent",
+            model="gpt-5.6-sol",
+            usage=tokens,
+            thread_token_usage=(
+                {**tokens, "input_tokens": 150, "total_tokens": 160}
+                if receipt_state == "missing-response"
+                else tokens
+            ),
+        ),
+    )
+    counter = _event(
+        counted,
+        "event_msg",
+        {"type": "token_count", "info": counter_info, "rate_limits": None},
+    )
+    events = [counter, response, counter]
+    if receipt_state == "invalid-timestamp":
+        events.append(
+            {
+                **response,
+                "timestamp": None,
+                "payload": {**response["payload"], "response_id": "response-two"},
+            }
+        )
+    parent = _rollout(tmp_path, "scan-parent", events)
+    if receipt_state == "incomplete-line":
+        with parent.open("a") as stream:
+            stream.write('{"type":"token_usage_record"')
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["totalTokens"] == 110
+    assert usage["modelUsage"] == [{"model": "gpt-5.6-sol", **_counts(100, 20, 10)}]
+    assert usage["coverage"] == ("partial" if expected_warning else "complete")
+    assert usage.get("warnings", []) == ([expected_warning] if expected_warning else [])
+
+
+@pytest.mark.parametrize("counters", [False, True])
+def test_response_receipts_count_compaction_once_across_resets(
+    tmp_path: Path, workbench_api, counters: bool
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def usage(input_tokens, cached, output):
+        return dict(
+            input_tokens=input_tokens,
+            cached_input_tokens=cached,
+            cache_write_input_tokens=0,
+            output_tokens=output,
+            reasoning_output_tokens=0,
+            total_tokens=input_tokens + output,
+        )
+
+    def receipt(response, count, cumulative, model="gpt-5.6-sol", turn="scan-turn", second=1):
+        return _event(
+            start + timedelta(seconds=second),
+            "token_usage_record",
+            dict(
+                response_id=response,
+                thread_id="parent",
+                turn_id=turn,
+                model=model,
+                usage=count,
+                thread_token_usage=cumulative,
+            ),
+        )
+
+    first = receipt("first", usage(100, 80, 10), usage(100, 80, 10))
+    compact = receipt("compaction", usage(50, 40, 5), usage(150, 120, 15), model="gpt-6-astra")
+    second = receipt("second", usage(120, 90, 12), usage(120, 90, 12))
+    events = [
+        first,
+        *([_token_event(start + timedelta(seconds=1), 100, 10)] if counters else []),
+        compact,
+        _event(start + timedelta(seconds=1), "compacted", {"message": "Synthetic summary"}),
+        compact,
+        second,
+        *([_token_event(start + timedelta(seconds=1), 220, 22)] if counters else []),
+        first,
+        receipt("other", usage(900, 0, 0), usage(900, 0, 0), turn="other-turn"),
+        receipt("post", usage(800, 0, 0), usage(1700, 0, 0), second=11),
+    ]
+    models = {}
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, _rollout(tmp_path, "parent", events)),
+        started_at=start,
+        completed_at=start + timedelta(seconds=10),
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    assert total == _counts(270, 210, 27)
+    assert warnings == set()
+    assert models == {"gpt-5.6-sol": _counts(220, 170, 22), "gpt-6-astra": _counts(50, 40, 5)}
+
+
+def test_delayed_response_receipt_resolves_missing_cumulative_usage(
+    tmp_path: Path, workbench_api
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def receipt(response, tokens, cumulative):
+        def usage(value):
+            return dict(input_tokens=value, output_tokens=0, total_tokens=value)
+
+        return _event(
+            start,
+            "token_usage_record",
+            dict(
+                response_id=response,
+                thread_id="parent",
+                model="gpt-5.6-sol",
+                usage=usage(tokens),
+                thread_token_usage=usage(cumulative),
+            ),
+        )
+
+    rollout = _rollout(tmp_path, "parent", [receipt("first", 100, 100), receipt("third", 50, 180)])
+    session = reader.RolloutSession("parent", None, rollout)
+    total, warnings = reader._read_rollout_usage(session, started_at=start, completed_at=None)
+    assert total == _counts(150, 0, 0)
+    assert warnings == {"token_receipts_incomplete"}
+    with rollout.open("a") as source:
+        source.write(json.dumps(receipt("second", 30, 130)) + "\n")
+    total, warnings = reader._read_rollout_usage(session, started_at=start, completed_at=None)
+    assert total == _counts(180, 0, 0)
+    assert warnings == set()
+
+
+@pytest.mark.parametrize("missing_receipt", [False, True])
+def test_completion_retains_child_receipt_gap_across_compaction(
+    tmp_path: Path, missing_receipt: bool
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+
+    def receipt(thread_id: str, response: str, tokens: int, cumulative: int):
+        return _event(
+            counted,
+            "token_usage_record",
+            {
+                "response_id": response,
+                "thread_id": thread_id,
+                "model": "gpt-5.6-sol",
+                "usage": {"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+                "thread_token_usage": {
+                    "input_tokens": cumulative,
+                    "output_tokens": 0,
+                    "total_tokens": cumulative,
+                },
+            },
+        )
+
+    parent = _rollout(tmp_path, "scan-parent", [receipt("scan-parent", "parent", 10, 10)])
+    first = receipt("scan-worker", "first", 50 if missing_receipt else 100, 100)
+    second = receipt("scan-worker", "second", 100, 100)
+    worker = _rollout(
+        tmp_path,
+        "scan-worker",
+        [
+            first,
+            _event(counted, "compacted", {"message": "Synthetic summary"}),
+            first,
+            second,
+            second,
+        ],
+        parent_thread_id="scan-parent",
+    )
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": parent, "scan-worker": worker},
+        [("scan-parent", "scan-worker")],
+    )
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    expected = _counts(160 if missing_receipt else 210, 0, 0)
+    assert usage["totalTokens"] == expected["totalTokens"]
+    assert usage["modelUsage"] == [{"model": "gpt-5.6-sol", **expected}]
+    assert usage["coverage"] == ("partial" if missing_receipt else "complete")
+    assert usage.get("warnings", []) == (["token_receipts_incomplete"] if missing_receipt else [])
+
+
+@pytest.mark.parametrize("prior_turn", [False, True])
+@pytest.mark.parametrize("outside_after", [False, True])
+def test_compaction_before_owned_receipts_does_not_taint_scan_coverage(
+    tmp_path: Path, workbench_api, prior_turn: bool, outside_after: bool
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def receipt(response: str, tokens: int, timestamp: datetime, turn: str):
+        return _event(
+            timestamp,
+            "token_usage_record",
+            {
+                "response_id": response,
+                "thread_id": "parent",
+                "turn_id": turn,
+                "model": "gpt-5.6-sol",
+                "usage": {"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+                "thread_token_usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 0,
+                    "total_tokens": 100,
+                },
+            },
+        )
+
+    previous = start if prior_turn else start - timedelta(seconds=1)
+    if outside_after:
+        previous = start + timedelta(seconds=1 if prior_turn else 10)
+    outside = receipt("prior", 50, previous, "other-turn" if prior_turn else "scan-turn")
+    current = receipt("current", 100, start, "scan-turn")
+    compacted = _event(previous, "compacted", {"message": "Synthetic previous summary"})
+    rollout = _rollout(
+        tmp_path,
+        "parent",
+        [current, compacted, outside] if outside_after else [outside, compacted, current],
+    )
+    counts, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, rollout),
+        started_at=start,
+        completed_at=start + timedelta(seconds=5),
+        owner_turn_id="scan-turn",
+    )
+    assert counts == _counts(100, 0, 0)
+    assert warnings == set()
+
+
+def test_exact_receipts_replace_overlapping_legacy_counter(tmp_path: Path, workbench_api) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def receipt(response, tokens, cumulative):
+        def usage(value):
+            return dict(input_tokens=value, output_tokens=0, total_tokens=value)
+
+        return _event(
+            start,
+            "token_usage_record",
+            dict(
+                response_id=response,
+                thread_id="parent",
+                model="gpt-5.6-sol",
+                usage=usage(tokens),
+                thread_token_usage=usage(cumulative),
+            ),
+        )
+
+    rollout = _rollout(
+        tmp_path,
+        "parent",
+        [
+            _token_event(start, 100, 0),
+            receipt("new", 10, 110),
+            receipt("old", 100, 100),
+            _token_event(start, 10, 0),
+        ],
+    )
+    models = {}
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, rollout),
+        started_at=start,
+        completed_at=None,
+        model_usage=models,
+    )
+    assert total == _counts(110, 0, 0)
+    assert warnings == set()
+    assert models == {"gpt-5.6-sol": _counts(110, 0, 0)}
+
+
+@pytest.mark.parametrize(
+    "receipt,counter,expected",
+    [
+        ((150, 15), (100, 200), (150, 200)),
+        ((150, 15), (100, 20), (150, 20)),
+        ((100, 50), (110, 10), (110, 50)),
+        ((100, 50), (200, 10), (200, 50)),
+        ((100, 10), (100, 10), (100, 10)),
+    ],
+    ids=[
+        "counter-output",
+        "smaller-counter-output",
+        "smaller-counter-input",
+        "counter-input",
+        "equal-control",
+    ],
+)
+def test_completion_retains_receipt_and_counter_categories(tmp_path, receipt, counter, expected):
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    response = _event(
+        counted,
+        "token_usage_record",
+        {
+            "response_id": "category-response",
+            "thread_id": "scan-parent",
+            "model": "gpt-5.6-sol",
+            "usage": {
+                "input_tokens": receipt[0],
+                "output_tokens": receipt[1],
+                "total_tokens": sum(receipt),
+            },
+            "thread_token_usage": {
+                "input_tokens": counter[0],
+                "output_tokens": counter[1],
+                "total_tokens": sum(counter),
+            },
+        },
+    )
+    parent = _rollout(tmp_path, "scan-parent", [response, _token_event(counted, *counter)])
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert (usage["inputTokens"], usage["outputTokens"], usage["totalTokens"]) == (
+        *expected,
+        sum(expected),
+    )
+    for category in ("inputTokens", "outputTokens", "totalTokens"):
+        assert sum(row[category] for row in usage["modelUsage"]) == usage[category]
+    assert usage["coverage"] == ("complete" if receipt == counter else "partial")
+
+
+@pytest.mark.parametrize("counter_input,expected_cached", [(100, 20), (250, 90)])
+def test_completion_keeps_cached_subsets_valid_when_categories_diverge(
+    tmp_path, counter_input, expected_cached
+):
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    response = _event(
+        counted,
+        "token_usage_record",
+        {
+            "response_id": "cache-response",
+            "thread_id": "scan-parent",
+            "model": "gpt-5.6-sol",
+            "usage": {
+                "input_tokens": 150,
+                "cached_input_tokens": 20,
+                "output_tokens": 15,
+                "total_tokens": 165,
+            },
+        },
+    )
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [response, _token_event(counted, counter_input, 200, cached_input_tokens=90)],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert (usage["inputTokens"], usage["cachedInputTokens"], usage["outputTokens"]) == (
+        max(150, counter_input),
+        expected_cached,
+        200,
+    )
+    for row in usage["modelUsage"]:
+        assert row["cachedInputTokens"] + row["cacheWriteInputTokens"] <= row["inputTokens"]
+    for key in ("inputTokens", "cachedInputTokens", "outputTokens", "totalTokens"):
+        assert sum(row[key] for row in usage["modelUsage"]) == usage[key]
+
+
+@pytest.mark.parametrize("receipt_owner", ["other-turn", "outside-window"])
+def test_owned_legacy_model_survives_unrelated_first_receipt(
+    tmp_path: Path, workbench_api, receipt_owner: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    end = start + timedelta(seconds=5)
+    events = [
+        _event(start, "turn_context", {"turn_id": "scan-turn", "model": "gpt-5.6-sol"}),
+        _token_event(start, 1000, 10),
+        _event(
+            end + timedelta(seconds=1) if receipt_owner == "outside-window" else start,
+            "token_usage_record",
+            {
+                "thread_id": "parent",
+                "turn_id": "other-turn" if receipt_owner == "other-turn" else "scan-turn",
+                "response_id": "unrelated-response",
+                "model": "gpt-6-astra",
+                "usage": {
+                    "input_tokens": 50,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 50,
+                },
+            },
+        ),
+    ]
+    models = {}
+    counts, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, _rollout(tmp_path, "parent", events)),
+        started_at=start,
+        completed_at=end,
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    assert counts == _counts(1000, 0, 10)
+    assert warnings == set()
+    assert models == {"gpt-5.6-sol": _counts(1000, 0, 10)}
+
+
+@pytest.mark.parametrize("thread_id", ["legacy-worker", "12345678-1234-4234-8234-123456789abc"])
+def test_legacy_worker_usage_excludes_replayed_parent_turns(
+    tmp_path: Path, workbench_api, thread_id: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    created = start + timedelta(seconds=10, microseconds=500_000)
+    rollout = _rollout(
+        tmp_path,
+        thread_id,
+        [_token_event(created + timedelta(seconds=1), 130, 13)],
+        parent_thread_id="parent",
+        task_started_at=created,
+        copied_events=[
+            _event(
+                created,
+                "event_msg",
+                {
+                    "type": "task_started",
+                    "turn_id": "parent-turn",
+                    "started_at": int(start.timestamp()),
+                },
+            ),
+            _token_event(created, 100, 10),
+        ],
+    )
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession(thread_id, "parent", rollout), started_at=start, completed_at=None
+    )
+    assert total == _counts(30, 0, 3)
+    assert warnings == set()
+
+
+@pytest.mark.parametrize(
+    "missing", ["session timestamp", "task started_at", "boolean task started_at"]
+)
+def test_legacy_worker_usage_requires_turn_ownership_timestamps(
+    tmp_path: Path, workbench_api, missing: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    rollout = _rollout(
+        tmp_path, "legacy-worker", [_token_event(start, 100, 10)], parent_thread_id="parent"
+    )
+    records = [json.loads(line) for line in rollout.read_text().splitlines()]
+    if missing == "session timestamp":
+        records[0]["payload"].pop("timestamp")
+    elif missing == "task started_at":
+        records[1]["payload"].pop("started_at")
+    else:
+        records[1]["payload"]["started_at"] = True
+    rollout.write_text("".join(json.dumps(record) + "\n" for record in records))
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("legacy-worker", "parent", rollout),
+        started_at=start,
+        completed_at=None,
+    )
+    assert total == _counts(0, 0, 0)
+    assert warnings == {"thread_ownership_unavailable"}

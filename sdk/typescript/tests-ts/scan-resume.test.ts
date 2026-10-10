@@ -211,10 +211,16 @@ async function interruptedScan(
   const sessionPath = join(codexHome, "sessions", `rollout-${threadId}.jsonl`);
   await writeFile(
     sessionPath,
-    JSON.stringify({
-      type: "session_meta",
-      payload: { id: threadId, cwd: scanDir },
-    }) + "\n",
+    [
+      { type: "session_meta", payload: { id: threadId, cwd: scanDir } },
+      {
+        type: "turn_context",
+        timestamp: new Date().toISOString(),
+        payload: { turn_id: "synthetic-scan-turn", model: "gpt-5.6-sol" },
+      },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join("\n") + "\n",
   );
   if (mode === "deep") {
     await command([
@@ -674,6 +680,7 @@ test.each([
       f.sessionPath,
       JSON.stringify({
         type: "event_msg",
+        timestamp: new Date().toISOString(),
         payload: {
           type: "token_count",
           info: {
@@ -1273,6 +1280,104 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
     (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
   ).toMatchObject({ knowledgeBasePaths: [document] });
 });
+
+test.each([
+  [false, "none", "deleted"],
+  [true, "none", "deleted"],
+  [false, "saved", "deleted"],
+  [false, "saved", "moved"],
+  [false, "saved", "available"],
+  [false, "modified", "available"],
+  [false, "missing", "available"],
+  [false, "missing", "deleted"],
+] as const)(
+  "CLI restores selected finalization without current inputs or session logs (bulk: %p, knowledge: %s, checkout: %s)",
+  async (bulk, knowledge, checkout) => {
+    const document = join(await temporaryDirectory(), "architecture.md");
+    await writeFile(document, "Original architecture.");
+    const f = await interruptedScan("deep", bulk, {
+      postScanPrompt: "Keep the saved follow-up behavior.",
+      ...(knowledge === "none" ? {} : { knowledgeBasePaths: [document] }),
+    });
+    await writeFile(document, "Edited source context must not be loaded.");
+    if (knowledge === "modified") {
+      const snapshotPath = join(f.scanDir, ".scan-knowledge.json");
+      const snapshot = JSON.parse(await readFile(snapshotPath, "utf8"));
+      snapshot.documents["0-architecture.md.txt"] = "Modified saved context.";
+      await writeFile(snapshotPath, JSON.stringify(snapshot));
+    } else if (knowledge === "missing") {
+      await rm(join(f.scanDir, ".scan-knowledge.json"));
+    }
+    await rm(f.sessionPath);
+    if (checkout === "moved")
+      await rename(f.repository, `${f.repository}-moved`);
+    else if (checkout === "deleted")
+      await rm(f.repository, { recursive: true });
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const calls: { repository: string; options: ScanOptions }[] = [];
+    const deps = dependencies({
+      environment: f.environment,
+      currentDirectory: f.root,
+      onTurn(repository, options) {
+        calls.push({ repository, options });
+      },
+    });
+    const code = await runCli(
+      bulk
+        ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
+        : ["scans", "resume", f.scanId, "--json"],
+      {
+        ...deps,
+        runWorkbench: async (args, input) =>
+          args[0] === "get-cli-scan-resume"
+            ? {
+                ...f.registration,
+                scanId: f.scanId,
+                scanDir: f.scanDir,
+                threadId: f.threadId,
+                selectedFinalization: true,
+                userContext: null,
+                recipe: { ...f.recipe, validationMode: "custom" },
+              }
+            : f.command(args, input),
+      },
+    );
+    if (knowledge === "modified" || knowledge === "missing") {
+      expect(code, stderr.text()).toBe(2);
+      expect(calls).toHaveLength(0);
+      expect(stderr.text()).toContain(
+        knowledge === "modified" ? "snapshot changed" : ".scan-knowledge.json",
+      );
+      return;
+    }
+    expect(code, stderr.text()).toBe(0);
+    expect(calls).toHaveLength(1);
+    if (knowledge === "saved" && checkout === "available") {
+      expect(calls[0]!.options.knowledgeBaseSnapshot?.documents).toEqual({
+        "0-architecture.md.txt": "Original architecture.",
+      });
+    } else {
+      expect(calls[0]!.options.knowledgeBaseSnapshot).toBeUndefined();
+    }
+    expect(calls[0]).toMatchObject({
+      repository: f.repository,
+      options: {
+        resumeScanId: f.scanId,
+        outputDir: f.scanDir,
+        postScanPrompt: "Keep the saved follow-up behavior.",
+      },
+    });
+    expect(calls[0]!.options.scanPrompt).toBeUndefined();
+    expect(calls[0]!.options.validationPrompt).toBeUndefined();
+    if (bulk) {
+      const result = JSON.parse(stdout.text());
+      const receipts = await readJsonLines(result.resultsPath);
+      expect(receipts).toHaveLength(2);
+      expect(receipts[1]).toMatchObject({ attempt: 1, outputDir: f.scanDir });
+      expect(stderr.text()).not.toContain("starting a new one");
+    }
+  },
+);
 
 test("missing session logs do not create another session or fail the original scan", async () => {
   const f = await interruptedScan();

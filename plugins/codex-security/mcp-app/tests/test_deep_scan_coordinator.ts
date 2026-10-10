@@ -1,3 +1,4 @@
+import { testSelectedFinalizationOwner } from "./deep_scan_selected_finalization_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
@@ -10,7 +11,7 @@ import type {
 } from "../src/deep-scan/types.js";
 import { mock } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -22,6 +23,7 @@ import {
 import path from "node:path";
 import { testDeepScanLifecycle } from "./deep_scan_lifecycle_cases.ts";
 import {
+  DeepScanCoordinator,
   DeepScanCoordinatorRegistry,
   WorkbenchDeepScanStore,
   DeepScanNonRetryableError,
@@ -68,6 +70,8 @@ async function testCappedQueueAndSerialDedup() {
     handoffClaimToken: "claim-fixture",
     onComplete: async (draft) =>
       void completedDrafts.push(structuredClone(draft)),
+    onFinalized: async () =>
+      assert.fail("Legacy scans retain explicit parent completion"),
   });
   assert.equal(terminal?.status, "succeeded");
   assert.equal(terminal?.terminalReason, "capped");
@@ -1985,7 +1989,7 @@ async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
   const preserved = Promise.withResolvers<DeepScanRunState>();
   const releasePreservation = Promise.withResolvers<void>();
   const coordinator = createCoordinator(fixture, store, executor, {
-    log: (event) => events.push(event),
+    log: (event: DeepScanLogEvent) => events.push(event),
     threadId: "checkpoint-owner",
     onStopped: async () => {
       const worker = [...store.workers.values()].find(
@@ -2102,7 +2106,7 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
   const events: DeepScanLogEvent[] = [];
   const coordinator = createCoordinator(fixture, store, executor, {
     threadId: "checkpoint-owner",
-    log: (event) => events.push(event),
+    log: (event: DeepScanLogEvent) => events.push(event),
     onStopped: async () => {
       throw new Error(
         `fixture retained result publication failure ${"y".repeat(2_350)}`,
@@ -3671,10 +3675,14 @@ async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
   );
 }
 
-async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
-  const { fixture, store } = await coordinatorFixture(
-    twoRunConfig({ workers: 2 }),
-  );
+async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
+  const fixture = await fixtureRun({
+    workers: 2,
+    subagents: 0,
+    stopAfterNoNew: 2,
+    maxDiscoveryRuns: 2,
+  });
+  const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor();
   const run = executor.run.bind(executor);
   const reviewed = { label: "Reviewed query", disposition: "no_issue_found" };
@@ -3689,7 +3697,7 @@ async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
   executor.run = async (request) => {
     const outcome = await run(request);
     const resultPath = path.join(request.artifactContext!.root, "result.json");
-    const draft = await readJson(resultPath);
+    const draft = JSON.parse(await readFile(resultPath, "utf8"));
     draft.coverage = {
       completeness:
         request.kind === "discovery" &&
@@ -3702,24 +3710,50 @@ async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
         { reason: "An independent review left this question unresolved." },
       ],
     };
-    await writeJson(resultPath, draft);
+    await writeFile(resultPath, JSON.stringify(draft));
     return outcome;
   };
   const completed: ScanDraftInput[] = [];
-  const terminal = await runCoordinator(fixture, store, executor, {
-    onComplete: async (draft) => void completed.push(structuredClone(draft)),
+  const coordinator = new DeepScanCoordinator({
+    run: fixture.run,
+    store,
+    executor,
+    pluginRoot: fixture.pluginRoot,
+    clock: immediateClock,
+    onComplete: async (draft: ScanDraftInput) =>
+      void completed.push(structuredClone(draft)),
   });
+  coordinator.start();
+  const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(completed.length, 1);
-  assert.deepEqual(completed[0].coverage, {
-    completeness: "complete",
-    surfaces: [],
-    explicitExclusions: [],
-    deferred: [],
-  });
+  const projection = completed[0].coverage as {
+    completeness: string;
+    deferred: { provenance: { attempt: number; workerId: string } }[];
+    surfaces: unknown[];
+    reviews: { completeness: string }[];
+  };
+  assert.equal(projection.completeness, "partial");
+  assert.equal(projection.deferred.length, 2);
+  assert.equal(projection.surfaces.length, 4);
+  assert.equal(projection.reviews.length, 2);
+  assert.deepEqual(
+    new Set(
+      projection.reviews.map(
+        (review: { completeness: string }) => review.completeness,
+      ),
+    ),
+    new Set(["partial", "unknown"]),
+  );
+  for (const item of projection.deferred) {
+    assert.equal(item.provenance.attempt, 1);
+    assert.ok(store.workers.has(item.provenance.workerId));
+  }
   for (const worker of store.workers.values()) {
     if (worker.kind !== "discovery") continue;
-    const draft = await readJson(worker.resultManifestPath!);
+    const draft = JSON.parse(
+      await readFile(worker.resultManifestPath!, "utf8"),
+    );
     assert.notEqual(draft.coverage.completeness, "complete");
     assert.deepEqual(draft.coverage.surfaces, [workerReviewed, followUp]);
     assert.equal(draft.coverage.deferred.length, 1);
@@ -3734,6 +3768,26 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
     stopAfterNoNew: 2,
     maxDiscoveryRuns: 6,
   });
+  fixture.run.workflowVersion = "deep-security-scan/v2";
+  store.run.workflowVersion = "deep-security-scan/v2";
+  store.selectFinalization = async (input) => {
+    const checkpointRoot = path.join(
+      path.dirname(input.resultPath!),
+      "checkpoints",
+    );
+    const [name] = await readdir(checkpointRoot);
+    const checkpoint = path.join(checkpointRoot, name);
+    const bytes = await readFile(checkpoint);
+    store.run.finalizationInput = {
+      version: 1,
+      resultPath: path.relative(fixture.run.scanDir, checkpoint),
+      resultSha256: createHash("sha256").update(bytes).digest("hex"),
+      terminalReason: input.reason,
+      omittedWorkerIds: input.omittedWorkerIds ?? [],
+      selectedAt: "2026-01-01T00:00:00Z",
+    };
+    return structuredClone(store.run);
+  };
   const executor = new FakeExecutor({
     blockDiscoveryAfterCalls: 2,
   });
@@ -3834,7 +3888,7 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
   );
   const { coverage, ...publishedReduction } = completed[0];
   assert.deepEqual(
-    publishedReduction,
+    { ...publishedReduction, sourceCoverage: coverage },
     await readJson(acceptedReducer!.resultManifestPath!),
     "the accepted aggregate still reaches publication when redundant cancellation writes fail",
   );
@@ -4117,6 +4171,7 @@ async function testNonRetryableReducerAbortsScanWithoutRetry(
 }
 
 try {
+  await testSelectedFinalizationOwner();
   await testDeepScanLifecycle({
     fixtureRun,
     FakeStore,
@@ -4138,7 +4193,7 @@ try {
   await testCompletionOrdering();
   await testSaturationPreservesFindingAlreadyBuffered();
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
-  await testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus();
+  await testSuccessfulDeepCoveragePreservesWorkerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure(true);
   await testPublicationUsesAcceptedReducerSnapshot();

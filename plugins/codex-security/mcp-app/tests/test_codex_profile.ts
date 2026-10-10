@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { syncBuiltinESMExports } from "node:module";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
@@ -110,6 +118,8 @@ async function fixture(mode = "success") {
       },
     }));
     const emit = (event) => process.stdout.write(JSON.stringify(event) + "\n");
+    if (process.env.PROFILE_TEST_MODE === "slow_completion")
+      process.once("SIGTERM", () => setTimeout(() => process.exit(0), 50));
     if (process.env.PROFILE_TEST_MODE === "error") {
       process.stderr.write("synthetic token=fixture-secret: upstream diagnostic\n");
       process.exit(3);
@@ -139,7 +149,10 @@ async function fixture(mode = "success") {
       if (process.env.PROFILE_TEST_MODE === "null_usage") completion.usage = null;
       else if (process.env.PROFILE_TEST_MODE !== "missing_usage") completion.usage = { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) };
       emit(completion);
-      process.exit(0);
+      if (process.env.PROFILE_TEST_MODE === "slow_completion") {
+        setInterval(() => {}, 1000);
+        await new Promise(() => {});
+      } else process.exit(0);
     }
   `,
   );
@@ -175,6 +188,48 @@ async function fixture(mode = "success") {
     record: async () => JSON.parse(await readFile(marker, "utf8")),
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
+}
+
+async function npmLauncherFixture() {
+  const f = await fixture("slow_completion");
+  const codexRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
+  const packageRoot = path.dirname(
+    codexRequire.resolve("@openai/codex/package.json"),
+  );
+  const launcherRoot = path.join(f.directory, "npm-codex");
+  const targetTriple = new Map([
+    ["linux-x64", "x86_64-unknown-linux-musl"],
+    ["linux-arm64", "aarch64-unknown-linux-musl"],
+    ["darwin-x64", "x86_64-apple-darwin"],
+    ["darwin-arm64", "aarch64-apple-darwin"],
+  ]).get(`${process.platform}-${process.arch}`);
+  assert.ok(targetTriple);
+  const launcher = path.join(launcherRoot, "bin", "codex.js");
+  const native = path.join(
+    launcherRoot,
+    "vendor",
+    targetTriple,
+    "bin",
+    "codex",
+  );
+  await mkdir(path.dirname(launcher), { recursive: true });
+  await mkdir(path.dirname(native), { recursive: true });
+  await copyFile(
+    path.join(packageRoot, "package.json"),
+    path.join(launcherRoot, "package.json"),
+  );
+  await copyFile(path.join(packageRoot, "bin", "codex.js"), launcher);
+  await chmod(launcher, 0o755);
+  await writeFile(
+    native,
+    "#!/usr/bin/env node\n" +
+      (
+        await readFile(path.join(f.directory, "native-fixture.mjs"), "utf8")
+      ).replace("process.argv.slice(1)", "process.argv.slice(2)"),
+  );
+  await chmod(native, 0o755);
+  const { NODE_OPTIONS: _fixtureImport, ...env } = f.options.env;
+  return { ...f, options: { ...f.options, codexPathOverride: launcher, env } };
 }
 
 test("native profile turns preserve settings, JSON events, schema cleanup, and resume identity", async () => {
@@ -406,18 +461,28 @@ test("native profile failures preserve upstream diagnostics and remove schema fi
 
 function captureChildClose() {
   let closed: Promise<void> | undefined;
+  let isClosed = false;
+  let pid: number | undefined;
   const originalSpawn = childProcess.spawn;
   const spawnSpy = mock.method(
     childProcess,
     "spawn",
     (command: string, args: readonly string[], options: SpawnOptions) => {
       const child = originalSpawn(command, args, options);
-      closed = new Promise((resolve) => child.once("close", () => resolve()));
+      pid = child.pid;
+      closed = new Promise((resolve) =>
+        child.once("close", () => {
+          isClosed = true;
+          resolve();
+        }),
+      );
       return child;
     },
   );
   syncBuiltinESMExports();
   return {
+    isClosed: () => isClosed,
+    pid: () => pid,
     wait: () => {
       assert.ok(closed);
       return closed;
@@ -427,6 +492,93 @@ function captureChildClose() {
       syncBuiltinESMExports();
     },
   };
+}
+
+for (const resumed of [false, true]) {
+  test(`native profile ${resumed ? "resumed" : "fresh"} completion waits for its slow child to close`, async () => {
+    const f = await fixture("slow_completion");
+    const childClose = captureChildClose();
+    try {
+      const client = createCodexProfileClient(f.options);
+      const thread = resumed
+        ? client.resumeThread("existing-fixture")
+        : client.startThread();
+      const { events } = await thread.runStreamed("synthetic prompt");
+      for await (const event of events) {
+        if (event.type === "turn.completed") break;
+      }
+      assert.equal(childClose.isClosed(), true);
+      const record = await f.record();
+      assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
+    } finally {
+      await childClose.wait();
+      childClose.restore();
+      await f.cleanup();
+    }
+  });
+}
+
+for (const resumed of [false, true]) {
+  test(
+    `native profile ${resumed ? "resumed" : "fresh"} completion releases npm launcher inherited output`,
+    { skip: process.platform === "win32" },
+    async () => {
+      const f = await npmLauncherFixture();
+      const childClose = captureChildClose();
+      let completion: Promise<void> | undefined;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const client = createCodexProfileClient(f.options);
+        const thread = resumed
+          ? client.resumeThread("existing-fixture")
+          : client.startThread();
+        const { events } = await thread.runStreamed("synthetic prompt", {
+          outputSchema: { type: "object" },
+        });
+        completion = (async () => {
+          for await (const event of events) {
+            if (event.type === "turn.completed") break;
+          }
+        })();
+        await Promise.race([
+          completion,
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => {
+              reject(
+                new Error(
+                  "Completed profile turn did not release npm launcher output.",
+                ),
+              );
+            }, 1_000);
+          }),
+        ]);
+        clearTimeout(timeout);
+        assert.equal(childClose.isClosed(), true);
+        assert.ok(childClose.pid());
+        assert.throws(() => process.kill(childClose.pid()!, 0), {
+          code: "ESRCH",
+        });
+        const record = await f.record();
+        assert.equal(record.args.includes("resume"), resumed);
+        assert.equal(record.environment.CODEX_HOME, f.options.env.CODEX_HOME);
+        assert.equal(record.environment.CODEX_API_KEY, "synthetic-api-key");
+        assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
+        await assert.rejects(readFile(record.schemaPath), { code: "ENOENT" });
+      } finally {
+        clearTimeout(timeout);
+        const record = await f.record().catch(() => undefined);
+        if (record?.pid) {
+          try {
+            process.kill(record.pid, "SIGKILL");
+          } catch {}
+        }
+        await completion?.catch(() => {});
+        await childClose.wait();
+        childClose.restore();
+        await f.cleanup();
+      }
+    },
+  );
 }
 
 test("native profile abort and abandoned streams close the actual child", async () => {

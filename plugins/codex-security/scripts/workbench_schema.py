@@ -79,6 +79,16 @@ def apply_migrations(
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
+                elif 48 <= version <= 53:
+                    # Recreated Deep tables need the recorded extensions too.
+                    # Do not replay data updates from an already applied migration.
+                    for statement in sql_statements(sql):
+                        if statement.startswith("ALTER TABLE "):
+                            add_migration_column(connection, statement)
+                        elif statement.startswith("CREATE TABLE "):
+                            connection.execute(
+                                statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                            )
             else:
                 if version in (38, 39):
                     connection.create_function("migration_json_extract", 2, migration_json_extract)

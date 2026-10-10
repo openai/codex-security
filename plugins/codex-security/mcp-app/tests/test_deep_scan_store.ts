@@ -13,13 +13,17 @@ const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
 );
 
 await testBeginProtocolAndParsing();
+await testBeginCarriesOriginalSettingsWithUserContext();
+await testClaimChecksOriginalSettingsInsideTheTransaction();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
 testRunErrorParsing();
+testWorkflowVersionParsing();
 testConfiguredMaximumDurationParsing();
 await testWriteSerializationAndRecovery();
 await testBeginUsesTheWriteQueue();
 await testHeartbeatBypassesBlockedWriteQueue();
+await testReleaseRetiresTheOwnedLeaseThroughWorkbench();
 await testOwnershipReadClearsStaleLease();
 await testWorkerResponseParsing();
 await testReplaceableDiscoveryFailureProtocol();
@@ -30,6 +34,94 @@ await testPersistenceRetryExhaustionPreservesDiagnostics();
 await testDeterministicPersistenceFailuresAreNotRetried();
 await testNonIdempotentMutationsAreNotRetried();
 testInvalidPersistedConfig();
+testOriginalUsageOwnerParsing();
+
+function testOriginalUsageOwnerParsing() {
+  const value = stateResult(randomUUID());
+  const usageOwner = {
+    threadId: "original-thread",
+    turnId: "original-turn",
+    startedAt: "2026-01-01T00:00:00Z",
+  };
+  assert.deepEqual(
+    parseDeepScan({ deepScan: { ...value.deepScan, usageOwner } }).usageOwner,
+    usageOwner,
+  );
+  assert.equal(
+    parseDeepScan({ deepScan: { ...value.deepScan, usageOwner: null } })
+      .usageOwner,
+    null,
+  );
+  assert.equal(
+    parseDeepScan(value).usageOwner,
+    null,
+    "old readers do not establish an original owner",
+  );
+}
+
+async function testBeginCarriesOriginalSettingsWithUserContext() {
+  const executionSettings = {
+    codexPath: "/fixture/codex",
+    codexHome: "/fixture/home",
+    model: "original-model",
+    reasoningSummary: "concise",
+  };
+  const userContext = "Review the parser.\nKeep this second line.";
+  const runner = async (
+    args: string[],
+    input?: string,
+    selectFinalization?: boolean,
+    withExecutionSettings?: boolean,
+  ) => {
+    assert.equal(selectFinalization, false);
+    assert.equal(withExecutionSettings, true);
+    assert.deepEqual(JSON.parse(input!), { executionSettings, userContext });
+    assert.equal(
+      args.includes("--user-context-stdin"),
+      false,
+      "the private structured input carries context without a second stdin consumer",
+    );
+    assert.equal(
+      args.some((arg) => arg.includes("execution-settings")),
+      false,
+      "no public argument is added for the internal settings handoff",
+    );
+    return stateResult(randomUUID(), { startDisposition: "created" });
+  };
+  await new WorkbenchDeepScanStore(runner).begin({
+    targetPath: "/fixture/repository",
+    threadId: "fixture-thread",
+    scanRoot: "/fixture/scans",
+    userContext,
+    executionSettings,
+  });
+}
+
+async function testClaimChecksOriginalSettingsInsideTheTransaction() {
+  const scanId = randomUUID();
+  const store = new WorkbenchDeepScanStore(
+    async (
+      args: string[],
+      input?: string,
+      selectFinalization?: boolean,
+      withExecutionSettings?: boolean,
+    ) => {
+      assert.equal(args[0], "claim-deep-scan-coordinator");
+      assert.equal(input, undefined);
+      assert.equal(selectFinalization, false);
+      assert.equal(withExecutionSettings, true);
+      return {
+        ...stateResult(scanId, { deepScan: { coordinatorGeneration: 2 } }),
+        coordinatorDisposition: "claimed",
+      };
+    },
+  );
+  assert.equal(
+    (await store.claimCoordinator({ scanId, threadId: "fixture-thread" }))
+      .acquired,
+    true,
+  );
+}
 
 async function testBeginProtocolAndParsing() {
   const scanId = randomUUID();
@@ -77,7 +169,7 @@ async function testBeginProtocolAndParsing() {
   );
   assert.equal(
     flagValue(calls[0].args, "--workflow-version"),
-    "deep-scan-mcp/v1",
+    "deep-security-scan/v2",
   );
 
   const claimToken = randomUUID();
@@ -532,7 +624,7 @@ async function testPersistenceRetriesRemainInsideTheWriteQueue() {
     if (args[0] === "claim-deep-scan-dedup" && calls.length === 1) {
       throw new Error("sqlite3.OperationalError: database is locked");
     }
-    return {};
+    return stateResult(scanId);
   });
 
   const claim = store.claimDedup({
@@ -799,7 +891,7 @@ function idempotentPersistenceScenarios() {
     })),
     {
       operation: "claim-deep-scan-dedup",
-      result: {},
+      result: stateResult(scanId),
       invoke: (store: Store) =>
         store.claimDedup({
           id: reducerId,
@@ -978,4 +1070,120 @@ function repeatedFlagValues(args: string[], flag: string) {
   return args.flatMap((value, index: number) =>
     value === flag ? [args[index + 1]] : [],
   );
+}
+
+function testWorkflowVersionParsing() {
+  const value = stateResult(randomUUID()).deepScan;
+  const run = parseDeepScan({
+    deepScan: {
+      ...value,
+      schemaVersion: 1,
+      workflowVersion: "deep-scan-mcp/v1",
+      model: "original-model",
+      reasoningEffort: "high",
+    },
+  });
+  assert.equal(run.model, "original-model");
+  assert.equal(run.reasoningEffort, "high");
+  assert.equal(run.schemaVersion, 1);
+  assert.equal(run.workflowVersion, "deep-scan-mcp/v1");
+  const future = parseDeepScan({
+    deepScan: { ...value, schemaVersion: 99, workflowVersion: "future/v99" },
+  });
+  assert.equal(future.schemaVersion, 99);
+  assert.equal(
+    future.workflowVersion,
+    "future/v99",
+    "inspection preserves unsupported versions",
+  );
+}
+
+for (const version of [1, 99]) {
+  const finalizationInput = {
+    version,
+    resultPath: null,
+    resultSha256: null,
+    terminalReason: "capped",
+    omittedWorkerIds: ["fixture-worker"],
+    selectedAt: "2026-01-01T00:00:00Z",
+  };
+  assert.deepEqual(
+    parseDeepScan(
+      stateResult(randomUUID(), { deepScan: { finalizationInput } }),
+    ).finalizationInput,
+    finalizationInput,
+    "inspection preserves finalization input and version before execution compatibility checks",
+  );
+}
+
+async function testReleaseRetiresTheOwnedLeaseThroughWorkbench() {
+  const scanId = randomUUID();
+  const handoffClaimToken = randomUUID();
+  const scanDir = await mkdtemp(join(tmpdir(), "deep-scan-release-"));
+  const calls: { args: string[]; release: boolean }[] = [];
+  const store = new WorkbenchDeepScanStore(
+    async (
+      args: string[],
+      _input?: string,
+      _selectFinalization?: boolean,
+      _withExecutionSettings?: boolean,
+      _signal?: AbortSignal,
+      releaseCoordinator = false,
+    ) => {
+      calls.push({ args, release: releaseCoordinator });
+      return {
+        ...stateResult(scanId, {
+          deepScan: { coordinatorGeneration: 2, scanDir },
+        }),
+        coordinatorDisposition: "claimed",
+      };
+    },
+  );
+  try {
+    const input = { scanId, threadId: "thread-fixture", handoffClaimToken };
+    await store.claimCoordinator(input);
+    const heartbeat = store.heartbeatCoordinator(input);
+    await store.releaseCoordinator(scanId);
+    const renewed = await heartbeat;
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]!.release, false);
+    assert.equal(
+      calls[1]!.release,
+      true,
+      "release must reach the authoritative host mutation",
+    );
+    assert.deepEqual(calls[1]!.args, [
+      "claim-deep-scan-coordinator",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      input.threadId,
+      "--coordinator-generation",
+      "2",
+      "--claim-token",
+      handoffClaimToken,
+    ]);
+    assert.deepEqual(
+      await readJson(
+        scanDir,
+        "artifacts",
+        "deep_discovery",
+        "coordinator-heartbeat-2.json",
+      ),
+      {
+        coordinatorGeneration: 2,
+        updatedAt: renewed.updatedAt,
+      },
+      "artifact heartbeat data must not retire a persisted lease",
+    );
+    assert.deepEqual(store.coordinatorLeaseArgs(scanId), []);
+    await store.releaseCoordinator(scanId);
+    assert.equal(
+      calls.length,
+      2,
+      "a retired local lease must not release a later owner",
+    );
+  } finally {
+    await rm(scanDir, { recursive: true, force: true });
+  }
 }

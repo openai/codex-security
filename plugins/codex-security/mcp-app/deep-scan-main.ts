@@ -6,11 +6,30 @@ import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import { resolveDeepWorkerParentSandbox } from "./src/deep-scan/parent-sandbox.js";
 import { DeepScanCoordinatorRegistry } from "./src/deep-scan/registry.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
+import {
+  beginDeepScanWithCapturedSettings,
+  captureDeepScanExecutionSettings,
+} from "./src/deep-scan/recovery-settings.js";
 
 /** Private SDK entry point. The child process isolates each scan's environment. */
 export async function runCliDeepScan(): Promise<void> {
-  const runWorkbench = (args: string[], input?: string | Buffer) =>
-    runWorkbenchCommand(args, input, { isolatedPython: true });
+  const runWorkbench = (
+    args: string[],
+    input?: string | Buffer,
+    selectFinalization?: boolean,
+    withExecutionSettings?: boolean,
+    signal?: AbortSignal,
+    releaseCoordinator?: boolean,
+  ) =>
+    runWorkbenchCommand(
+      args,
+      input,
+      selectFinalization,
+      withExecutionSettings,
+      signal,
+      releaseCoordinator,
+      true,
+    );
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const registry = new DeepScanCoordinatorRegistry();
   const controller = new AbortController();
@@ -47,13 +66,24 @@ export async function runCliDeepScan(): Promise<void> {
     });
     if (controller.signal.aborted)
       throw new Error("Deep Scan canceled before coordinator startup.");
-    const run = await store.begin({
-      scanId: input.scanId,
-      threadId: input.threadId,
-      model: input.model,
-      reasoningEffort: input.reasoningEffort,
-      scanRoot: join(process.env.CODEX_SECURITY_STATE_DIR!, "scans"),
-    });
+    const run = await beginDeepScanWithCapturedSettings(
+      () =>
+        captureDeepScanExecutionSettings(
+          { model: input.model, reasoningEffort: input.reasoningEffort },
+          parentSandbox,
+          process.env,
+          { threadId: input.threadId, startedAt: new Date().toISOString() },
+        ),
+      (executionSettings) =>
+        store.begin({
+          executionSettings,
+          scanId: input.scanId,
+          threadId: input.threadId,
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          scanRoot: join(process.env.CODEX_SECURITY_STATE_DIR!, "scans"),
+        }),
+    );
     if (controller.signal.aborted)
       throw new Error("Deep Scan canceled before coordinator startup.");
     let terminal = run;

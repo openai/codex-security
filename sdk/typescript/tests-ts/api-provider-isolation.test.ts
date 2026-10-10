@@ -1,10 +1,11 @@
 import { codexFactory } from "./support/api-events.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { build } from "esbuild";
+import { promisify } from "node:util";
+import { nodeCommand } from "./support/shell.js";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { resolveCodexProfile, type JsonObject } from "../src/config.js";
 import * as childProcess from "node:child_process";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -148,23 +149,16 @@ async function bundleWorkerSettings(root: string) {
       import.meta.url,
     ),
   );
-  const bundled = await build({
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    write: false,
-    define: { "import.meta.url": JSON.stringify(pathToFileURL(executor).href) },
-    stdin: {
-      contents:
-        (await readFile(executor, "utf8")) +
-        "\nexport { workerRuntimeSettings };",
-      loader: "ts",
-      resolveDir: dirname(executor),
-      sourcefile: executor,
-    },
-  });
   const bundledPath = join(root, "worker-settings.mjs");
-  await writeFile(bundledPath, bundled.outputFiles[0]!.contents);
+  // Keep compilation independent of the long-lived Bun suite's subprocess mocks
+  // and esbuild service; the native worker configuration under test is unchanged.
+  await promisify(execFile)(nodeCommand().command, [
+    fileURLToPath(
+      new URL("./fixtures/bundle-worker-settings.mjs", import.meta.url),
+    ),
+    executor,
+    bundledPath,
+  ]);
   return bundledPath;
 }
 
@@ -736,7 +730,7 @@ const legacyScanCases: Array<
     ],
   ),
   [
-    "deep with a resolved profile and readable snapshot",
+    "deep with a resolved dotted profile and readable snapshot",
     "deep",
     {
       profile: "selected.profile",
@@ -745,6 +739,7 @@ const legacyScanCases: Array<
     {
       capability: true,
       inherited: "synthetic.system",
+      reads: false,
     },
   ],
 ];

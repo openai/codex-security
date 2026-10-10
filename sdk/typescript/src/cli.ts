@@ -2274,6 +2274,7 @@ export async function main(
       output: scanOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
       async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
+        let selectedFinalization = false;
         try {
           const saved = await dependencies.runWorkbench([
             "get-cli-scan-resume",
@@ -2288,6 +2289,7 @@ export async function main(
               "The workbench returned invalid scan resume context.",
             );
           }
+          selectedFinalization = saved["selectedFinalization"] === true;
           scanArguments = await prepareScanArgumentsFromRecipe(
             saved["recipe"],
             saved["scanId"],
@@ -2298,6 +2300,7 @@ export async function main(
                   : undefined,
             },
             dependencies.currentDirectory(),
+            selectedFinalization,
           );
           scanArguments.resumeScanId = saved["scanId"];
           scanArguments.outputDir = resolveCliPath(
@@ -2305,11 +2308,27 @@ export async function main(
             saved["scanDir"],
           );
           if (scanArguments.knowledgeBasePaths.length > 0) {
-            scanArguments.knowledgeBaseSnapshot = await restoreScanKnowledge(
-              scanArguments.outputDir,
-              scanArguments.repository!,
-              (saved["recipe"] as JsonObject)["scanInputs"],
-            );
+            try {
+              scanArguments.knowledgeBaseSnapshot = await restoreScanKnowledge(
+                scanArguments.outputDir,
+                scanArguments.repository!,
+                (saved["recipe"] as JsonObject)["scanInputs"],
+              );
+            } catch (error) {
+              const cause = error instanceof Error ? error.cause : undefined;
+              // A missing original checkout can use selected artifact recovery.
+              if (
+                !selectedFinalization ||
+                typeof cause !== "object" ||
+                cause === null ||
+                !("code" in cause) ||
+                cause.code !== "ENOENT" ||
+                !("path" in cause) ||
+                cause.path !== scanArguments.repository
+              ) {
+                throw error;
+              }
+            }
           }
           scanArguments.parentScanId = undefined;
           // Resume uses the installed engine with the saved recipe and checkpoints.
@@ -2326,7 +2345,12 @@ export async function main(
             "SCAN_RESUME_UNAVAILABLE",
           );
         }
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        const outcome = await runScan(
+          scanArguments,
+          errorOutput,
+          dependencies,
+          !selectedFinalization,
+        );
         return finishScan(outcome, format, incurError);
       },
     })
@@ -4670,20 +4694,24 @@ export async function main(
                       );
                       return undefined;
                     }
-                    const session =
-                      typeof saved["threadId"] === "string"
-                        ? await findScanSession(
-                            codexSecurityCredentialHome(
-                              dependencies.environment,
-                            ),
-                            saved["threadId"],
-                          )
-                        : null;
-                    if (session?.workingDirectory !== scanDir) {
-                      errorOutput.write(
-                        `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
-                      );
-                      return undefined;
+                    const selectedFinalization =
+                      saved["selectedFinalization"] === true;
+                    if (!selectedFinalization) {
+                      const session =
+                        typeof saved["threadId"] === "string"
+                          ? await findScanSession(
+                              codexSecurityCredentialHome(
+                                dependencies.environment,
+                              ),
+                              saved["threadId"],
+                            )
+                          : null;
+                      if (session?.workingDirectory !== scanDir) {
+                        errorOutput.write(
+                          `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
+                        );
+                        return undefined;
+                      }
                     }
                     const recipe = await prepareScanArgumentsFromRecipe(
                       saved["recipe"],
@@ -4695,6 +4723,7 @@ export async function main(
                             : undefined,
                       },
                       currentDirectory,
+                      selectedFinalization,
                     );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
@@ -6291,6 +6320,7 @@ async function prepareScanArgumentsFromRecipe(
     "scanPrompt" | "scanPromptFile" | "validationPromptFile"
   >,
   directory: string,
+  selectedFinalization = false,
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -6298,6 +6328,7 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   if (
+    !selectedFinalization &&
     recipe["requiresScanPrompt"] === true &&
     scanPrompt === undefined &&
     scanPromptFile === undefined
@@ -6307,6 +6338,7 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   if (
+    !selectedFinalization &&
     recipe["validationMode"] === "custom" &&
     validationPromptFile === undefined
   ) {
@@ -6450,7 +6482,11 @@ async function prepareScanArgumentsFromRecipe(
     repository,
     directory,
   );
-  if (recipe["requiresScanPrompt"] === true && !prompts.scanPrompt?.trim()) {
+  if (
+    !selectedFinalization &&
+    recipe["requiresScanPrompt"] === true &&
+    !prompts.scanPrompt?.trim()
+  ) {
     throw new CodexSecurityError(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );

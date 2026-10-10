@@ -18,6 +18,8 @@ import {
 } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
+import { preparedRuntime } from "./support/api-events.js";
+import { parse as parseToml } from "smol-toml";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -950,7 +952,7 @@ describe("CodexSecurity preflight configuration", () => {
       });
 
       expect(config).toEqual({
-        model_provider: "openai",
+        model_provider: provider,
         profile: "selected",
         profiles: { selected: { model, model_provider: provider } },
         model_providers: { [provider]: providerConfig },
@@ -987,7 +989,7 @@ describe("CodexSecurity preflight configuration", () => {
     });
 
     expect(config).toEqual({
-      model_provider: "openai",
+      model_provider: "amazon-bedrock",
       profile: "bedrock",
       profiles: {
         bedrock: {
@@ -1005,3 +1007,63 @@ describe("CodexSecurity preflight configuration", () => {
     expect(JSON.stringify(config)).not.toContain("synthetic-");
   });
 });
+
+test.each(["cloud.production", "selected", undefined] as const)(
+  "saved Deep runtime retains the resolved provider for profile %s",
+  async (profile) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    const scanDir = join(root, "scan");
+    const configPath = join(home, "config-preflight.toml");
+    const deepScanConfigPath = join(home, "deep-scan.toml");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(home),
+      mkdir(scanDir, { mode: 0o700 }),
+    ]);
+    const expected = profile === undefined ? "openai" : "openrouter";
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: "openai",
+          model_reasoning_summary: "none",
+          ...(profile === undefined ? {} : { profile }),
+          profiles: {
+            [profile ?? "unselected"]: { model_provider: "openrouter" },
+          },
+        },
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-parent-key",
+          OPENROUTER_API_KEY: "synthetic-provider-key",
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(home),
+          configPath,
+          deepScanConfigPath,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => {
+          throw new Error("Synthetic parent boundary reached");
+        },
+      },
+    );
+    try {
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "Synthetic parent boundary reached",
+      );
+      const saved = parseToml(await readFile(configPath, "utf8")) as JsonObject;
+      expect(scanModelProvider(saved)).toBe(expected);
+      const worker = parseToml(await readFile(deepScanConfigPath, "utf8"));
+      expect((worker["worker_runtime"] as JsonObject)["model_provider"]).toBe(
+        expected,
+      );
+    } finally {
+      await client.close();
+    }
+  },
+);

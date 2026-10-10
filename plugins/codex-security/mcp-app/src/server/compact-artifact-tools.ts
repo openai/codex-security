@@ -170,7 +170,7 @@ export function registerCompactArtifactTools(
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
     description:
-      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
+      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs. Provide the required top-level scanId. The workbench supplies findingId, occurrenceId and fingerprints within each finding; includePaths and excludePaths within scope; and documentType, schemaVersion, scanId, mode, includePaths, excludePaths, receiptRefs and inventoryStrategy within coverage; omit these host-owned fields from your draft.",
     inputSchema: scanDraftInputSchema,
     readOnly: false,
     handler: async (input, requestContext) => {
@@ -267,7 +267,7 @@ export function registerCompactWorkerArtifactTools(
       name: "record_codex_security_scan_draft",
       title: "Record Codex Security Scan Draft",
       description:
-        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. On terminal drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
+        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. On terminal drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs. Provide the required top-level scanId. The workbench supplies findingId, occurrenceId and fingerprints within each finding; includePaths and excludePaths within scope; and documentType, schemaVersion, scanId, mode, includePaths, excludePaths, receiptRefs and inventoryStrategy within coverage; omit these host-owned fields from your draft.",
       inputSchema: scanDraftInputSchema,
       readOnly: false,
       handler: async (value) =>

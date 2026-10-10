@@ -762,3 +762,75 @@ test("retries an upgrade when another process holds the write lock beyond the bu
     await writer.terminate();
   }
 });
+
+test("original Deep history preserves saved inputs and applies local embedding migrations", (t) => {
+  const originalVersions = new Map([
+    ["preserve original deep scan discovery context", 44],
+    ["retain deep scan attempts and exact merge inputs", 45],
+    ["persist selected deep scan finalization input", 46],
+    ["freeze stopped scan checkpoint selections", 47],
+    ["bind original deep scan parent usage turn", 48],
+    ["bind original deep scan execution settings", 51],
+  ]);
+  const database = memory(t);
+  database.exec(`CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+  for (const item of migrations.filter(
+    (entry) => entry.version <= 43 || originalVersions.has(entry.name),
+  )) {
+    for (const statement of item.statements) database.exec(statement);
+    database
+      .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
+      .run(originalVersions.get(item.name) ?? item.version, item.name);
+  }
+  insertScan(database);
+  database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version,
+    status, phase, workers, subagents, stop_after_no_new, max_discovery_runs,
+    discovery_user_context, finalization_input_json, usage_owner_json,
+    execution_settings_json, created_at, updated_at)
+    VALUES ('scan', 1, 'deep-scan-mcp/v1', 'running', 'discovery', 2, 0, 2, 10,
+      'original context', '{"result":"original"}', '{"turn":"original"}',
+      '{"model":"synthetic"}', 'created', 'updated')`);
+  const original = database.prepare("SELECT * FROM deep_scan_runs").get();
+
+  applyMigrations(database);
+
+  assert.deepEqual(
+    { ...database.prepare("SELECT * FROM deep_scan_runs").get() },
+    { ...original, discovery_user_context_json: null },
+  );
+  assert.deepEqual(
+    database.prepare("SELECT * FROM local_finding_embeddings").all(),
+    [],
+  );
+  assert.ok(
+    database
+      .prepare("PRAGMA table_info(finding_embeddings)")
+      .all()
+      .some((row) => row.name === "cache_key"),
+  );
+  assert.ok(
+    database
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'invalidate_local_finding_embedding'",
+      )
+      .get(),
+  );
+  const recorded = database
+    .prepare("SELECT * FROM schema_migrations ORDER BY version")
+    .all();
+  assert.deepEqual(
+    recorded.map((row) => [row.version, row.name]),
+    migrations.map((item) => [item.version, item.name]),
+  );
+  assert.ok(
+    recorded
+      .filter((row) => originalVersions.has(String(row.name)))
+      .every((row) => row.applied_at === "original"),
+  );
+  applyMigrations(database);
+  assert.deepEqual(
+    database.prepare("SELECT * FROM schema_migrations ORDER BY version").all(),
+    recorded,
+  );
+});

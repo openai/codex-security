@@ -27,6 +27,10 @@ import {
   DeepScanCoordinatorRegistry,
   AsyncLock,
 } from "./src/deep-scan/registry.js";
+import {
+  beginDeepScanWithCapturedSettings,
+  captureDeepScanExecutionSettings,
+} from "./src/deep-scan/recovery-settings.js";
 import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
@@ -953,7 +957,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Deep Scan",
       description:
-        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate draft is ready, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the canonical parent scan-manifest.json. Call complete_codex_security_scan once.",
+        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate draft is ready, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the canonical parent scan-manifest.json; native scans can call complete_codex_security_scan once. SDK-managed scans leave completion to the SDK after the scan turn ends.",
       inputSchema: startDeepScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -1003,24 +1007,52 @@ export function createCodexSecurityServer(): McpServer {
       }
       const preparation = await deepScanStartLock
         .run(async () => {
-          const begun = await deepScanStore.begin({
-            scanId,
-            targetPath,
-            scope: hasTarget ? (scope ?? ".") : undefined,
-            userContext: normalizedUserContext,
-            handoffClaimToken,
-            threadId,
-            ...modelSettings,
-            scanRoot: await scanRoot(),
-          });
+          // A joining observer does not need a usable current home. A new run,
+          // however, must save its original settings before creation can commit.
+          const begun = await beginDeepScanWithCapturedSettings(
+            () =>
+              captureDeepScanExecutionSettings(
+                modelSettings,
+                parentSandbox,
+                process.env,
+                { threadId, startedAt: new Date().toISOString() },
+              ),
+            async (executionSettings) =>
+              deepScanStore.begin({
+                executionSettings,
+                scanId,
+                targetPath,
+                scope: hasTarget ? (scope ?? ".") : undefined,
+                userContext: normalizedUserContext,
+                handoffClaimToken,
+                threadId,
+                ...modelSettings,
+                scanRoot: await scanRoot(),
+              }),
+          );
           if (handoffClaimToken) {
             authenticatedArtifactClaims.set(begun.scanId, {
               claimToken: handoffClaimToken,
               threadId,
             });
           }
-          const immediate = deepScanTerminalResult(begun);
-          if (immediate) return { begun, immediate };
+          // Recipes identify SDK executions, including runs predating usageOwner.
+          const sdkOwned =
+            begun.usageOwner?.dedicated ??
+            (await runWorkbench(["get-scan", "--scan-id", begun.scanId]))
+              .recipe != null;
+          const immediate = deepScanTerminalResult(begun, sdkOwned);
+          const completingLocally =
+            begun.status === "succeeded" &&
+            begun.finalizationInput &&
+            deepScanCoordinators.get(begun.scanId);
+          const recoverableSelection =
+            begun.status === "succeeded" &&
+            begun.finalizationInput &&
+            !sdkOwned &&
+            begun.ownerThreadId === threadId;
+          if (immediate && !completingLocally && !recoverableSelection)
+            return { begun, immediate, sdkOwned };
           const started = await startDeepScanEngine({
             run: begun,
             registry: deepScanCoordinators,
@@ -1033,8 +1065,44 @@ export function createCodexSecurityServer(): McpServer {
             log: logDeepScanEvent,
             handoffClaimToken,
             threadId,
+            onFinalized: async (run, signal) => {
+              // Active owners finish through the completion tool after this call;
+              // detached native scans still publish without another observer.
+              if (sdkOwned || !abortSignalFromExtra(extra)?.aborted) return;
+              try {
+                await runWorkbench(
+                  [
+                    "complete-scan",
+                    "--scan-id",
+                    run.scanId,
+                    "--thread-id",
+                    threadId,
+                    ...optionalArg("--claim-token", handoffClaimToken),
+                  ],
+                  undefined,
+                  false,
+                  false,
+                  signal,
+                );
+              } catch (error) {
+                if (!signal.aborted) {
+                  await deepScanStore
+                    .releaseCoordinator(run.scanId)
+                    .catch((releaseError) => {
+                      logDeepScanEvent({
+                        event: "coordinator_release_failed",
+                        scanId: run.scanId,
+                        reason: boundedErrorData(releaseError).message,
+                      });
+                    });
+                }
+                throw new Error(deepScanInvocationFailureMessage(error), {
+                  cause: error,
+                });
+              }
+            },
           });
-          return { begun, ...started };
+          return { begun, sdkOwned, ...started };
         })
         .catch((error: unknown) => ({
           invocationFailure: toolErrorResult(
@@ -1043,16 +1111,14 @@ export function createCodexSecurityServer(): McpServer {
         }));
       if ("invocationFailure" in preparation)
         return preparation.invocationFailure;
+      // SDK completion belongs to the host; native selected results use the existing lease.
       if (preparation.immediate) return preparation.immediate;
       const { begun, coordinator, joined } = preparation;
       if (joined) {
-        logDeepScanEvent({
-          event: "coordinator_joined",
-          scanId: begun.scanId,
-        });
+        logDeepScanEvent({ event: "coordinator_joined", scanId: begun.scanId });
       }
       const terminal = await coordinator.wait(abortSignalFromExtra(extra));
-      const result = deepScanTerminalResult(terminal);
+      const result = deepScanTerminalResult(terminal, preparation.sdkOwned);
       if (!result) {
         return toolErrorResult(
           deepScanInvocationFailureMessage(
@@ -1526,21 +1592,39 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Complete Codex Security Scan",
       description:
-        "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
+        "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. SDK-managed Deep scans leave sealing to the SDK after the scan turn ends. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId, handoffClaimToken }) => {
       try {
+        const context = await runWorkbench(["get-scan", "--scan-id", scanId]);
+        const scan = isJsonObject(context.scan) ? context.scan : undefined;
+        const progress = isJsonObject(scan?.progress)
+          ? scan.progress
+          : undefined;
+        if (
+          scan?.mode === "deep" &&
+          context.recipe != null &&
+          progress?.status === "running"
+        ) {
+          // A tool call is still inside the owner turn; its final usage has not arrived.
+          return scanActionResult(
+            redactHandoffClaimToken(context),
+            "The SDK completes this Deep Scan after the scan turn finishes. Continue any remaining scan work, then end the turn without calling completion again. The SDK will account for the turn, enforce its budget, and seal and publish the scan.",
+          );
+        }
+        const result = await runWorkbench([
+          "complete-scan",
+          "--scan-id",
+          scanId,
+          ...optionalArg("--claim-token", handoffClaimToken),
+        ]);
+        const coverage = result.coverageSummary as JsonObject;
         return scanActionResult(
-          await runWorkbench([
-            "complete-scan",
-            "--scan-id",
-            scanId,
-            ...optionalArg("--claim-token", handoffClaimToken),
-          ]),
-          "Validated and indexed the completed Codex Security scan.",
+          result,
+          `Validated and indexed the completed Codex Security scan. Canonical coverage: ${coverage.completeness}; ${coverage.surfaceCount} surfaces; ${coverage.deferredCount} deferred items; ${coverage.explicitExclusionCount} explicit exclusions.`,
         );
       } catch (error) {
         throw new Error(completionFailureMessage(error));
@@ -2106,10 +2190,10 @@ function boundedErrorData(error: unknown): { message: string; name: string } {
   };
 }
 
-function deepScanTerminalResult(run: DeepScanRunState) {
+function deepScanTerminalResult(run: DeepScanRunState, sdkOwned = false) {
   if (run.status === "succeeded") {
     if (!run.manifestPath) return undefined;
-    const instructions = `Deep Scan discovery completed. Independent Standard scans have already performed validation and attack-path analysis and have been consolidated into the canonical scan-manifest.json, findings.json, and coverage.json under ${run.scanDir}. The returned manifestPath is the canonical scan-manifest.json, not a legacy discovery manifest. Any instructions requiring parent candidate listing, centralized validation, attack-path analysis, or another draft apply only to the old discovery-only workflow and must be skipped. The authoritative scan ID is ${run.scanId}. Immediately call complete_codex_security_scan once using that scan ID to seal and publish the scan. Return output only after completion succeeds and generated report.md exists. If completion fails, surface that exact error and return no final, no-findings, structured, or benchmark response.`;
+    const instructions = `Deep Scan discovery completed. Independent Standard scans have already performed validation and attack-path analysis and have been consolidated into the canonical scan-manifest.json, findings.json, and coverage.json under ${run.scanDir}. The returned manifestPath is the canonical scan-manifest.json, not a legacy discovery manifest. Any instructions requiring parent candidate listing, centralized validation, attack-path analysis, or another draft apply only to the old discovery-only workflow and must be skipped. The authoritative scan ID is ${run.scanId}. ${sdkOwned ? "Leave the canonical artifacts unchanged and end this scan turn without calling a completion tool. The SDK will account for the completed turn, enforce its budget, and seal and publish the scan." : "Immediately call complete_codex_security_scan once using that scan ID to seal and publish the scan. Return output only after completion succeeds and generated report.md exists. If completion fails, surface that exact error and return no final, no-findings, structured, or benchmark response."}`;
     return scanActionResult(
       {
         scanId: run.scanId,
@@ -2165,12 +2249,25 @@ interface WorkbenchOptions {
 export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
-  options: WorkbenchOptions = {},
+  selectFinalization: boolean | WorkbenchOptions = false,
+  withExecutionSettings = false,
+  signal?: AbortSignal,
+  releaseCoordinator = false,
+  isolatedPython = false,
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbench(pythonCommand, args, input, options);
+    return await executeWorkbench(
+      pythonCommand,
+      args,
+      input,
+      selectFinalization,
+      withExecutionSettings,
+      signal,
+      releaseCoordinator,
+      isolatedPython,
+    );
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -2189,8 +2286,29 @@ async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   input?: string | Buffer,
-  options: WorkbenchOptions = {},
+  selectFinalization: boolean | WorkbenchOptions = false,
+  withExecutionSettings = false,
+  signal?: AbortSignal,
+  releaseCoordinator = false,
+  isolatedPython = false,
 ): Promise<JsonObject> {
+  if (typeof selectFinalization === "object") {
+    isolatedPython = selectFinalization.isolatedPython ?? isolatedPython;
+    selectFinalization = false;
+  }
+  const internalInvocation = releaseCoordinator
+    ? "release_coordinator=True"
+    : selectFinalization
+      ? "select_finalization=True"
+      : withExecutionSettings
+        ? "with_execution_settings=True"
+        : undefined;
+  const pythonSource = internalInvocation
+    ? WORKBENCH_PYTHON.replace(
+        "workbench_db.main()",
+        `workbench_db.main(${internalInvocation})`,
+      )
+    : WORKBENCH_PYTHON;
   const timeout = [
     "begin-deep-scan",
     "cancel-scan",
@@ -2222,12 +2340,13 @@ async function executeWorkbench(
   const execution = execFileAsync(
     pythonCommand,
     [
-      ...(options.isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      ...(isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
       "-c",
-      WORKBENCH_PYTHON,
+      pythonSource,
       workbenchScriptPath(),
     ],
     {
+      signal,
       cwd: PLUGIN_ROOT,
       windowsHide: true,
       env: process.env,

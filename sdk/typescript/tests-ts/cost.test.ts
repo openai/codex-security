@@ -1,7 +1,17 @@
+import { Database } from "bun:sqlite";
 import { jsonLines } from "./support/json.js";
 import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
-import { appendFile, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  cp,
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -9,12 +19,21 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanSessionEvent,
+  type ScanCost,
   type ScanWorkerEvent,
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
-import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
+import {
+  estimateScanCostLowerBound,
+  formatTokenUsage,
+  tokenUsage,
+} from "../src/cost-model.js";
 import { readScanLogs } from "../src/scan-logs.js";
-import { sessionParentThreadId } from "../src/scan-sessions.js";
+import {
+  cachedScanAttributionReader,
+  sessionParentThreadId,
+  type ScanExecutionAttribution,
+} from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 import { PLUGIN_ROOT as BUNDLED_PLUGIN_ROOT } from "./plugin-root.js";
 import {
@@ -410,6 +429,153 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([false, true])(
+    "reconciles final cache categories for an observed model (missing child: %p)",
+    async (missingChild) => {
+      const home = await codexHome();
+      const usage = {
+        input_tokens: 1_000_000,
+        cached_input_tokens: 0,
+        output_tokens: 10_000,
+      };
+      const finalUsage = { ...usage, cache_write_input_tokens: 120_000 };
+      const parent = await writeSession(home, "scan-thread", usage);
+      const records = (await readFile(parent, "utf8")).trimEnd().split("\n");
+      records.splice(
+        1,
+        0,
+        JSON.stringify({
+          type: "turn_context",
+          payload: { model: "gpt-6-astra", turn_id: "scan-turn" },
+        }),
+      );
+      await writeFile(parent, `${records.join("\n")}\n`);
+      if (missingChild) {
+        await writeFile(
+          join(home, "sessions", "missing-worker.jsonl"),
+          `${JSON.stringify({
+            type: "session_meta",
+            payload: { id: "missing-worker", parent_thread_id: "scan-thread" },
+          })}\n`,
+        );
+      }
+      const initialCost = estimateScanCost("gpt-6-astra", usage)!;
+      const correctedCost = estimateScanCost("gpt-6-astra", finalUsage)!;
+      const budget =
+        (initialCost.estimatedUsd + correctedCost.estimatedUsd) / 2;
+      expect(initialCost.estimatedUsd).toBeLessThan(budget);
+      expect(correctedCost.estimatedUsd).toBeGreaterThan(budget);
+      const published: Readonly<ScanCost>[] = [];
+      const lowerBounds: Readonly<ScanCost>[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-6-astra",
+        maxCostUsd: budget,
+        onCost: (cost) => published.push(cost),
+        onCostLowerBound: (cost) => lowerBounds.push(cost),
+      });
+      try {
+        tracker.start("scan-thread");
+        await tracker.refresh();
+        const before = missingChild ? lowerBounds : published;
+        expect(before.at(-1)?.estimatedUsd).toBe(initialCost.estimatedUsd);
+        const completed = await tracker.stop(finalUsage);
+        const emitted = missingChild ? lowerBounds : published;
+        expect(emitted.at(-1)).toMatchObject({
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          cacheWriteInputTokens: finalUsage.cache_write_input_tokens,
+          estimatedUsd: correctedCost.estimatedUsd,
+        });
+        expect(emitted.at(-1)?.estimatedUsd).toBeGreaterThan(budget);
+        if (missingChild) {
+          expect(completed.cost).toBeNull();
+          expect(completed.usage).toBeNull();
+          expect(published).toHaveLength(0);
+        } else {
+          expect(completed.cost?.modelCosts).toHaveLength(1);
+          expect(completed.cost?.modelCosts?.[0]).toMatchObject({
+            model: "gpt-6-astra",
+            cacheWriteInputTokens: finalUsage.cache_write_input_tokens,
+            estimatedUsd: correctedCost.estimatedUsd,
+          });
+        }
+        const count = emitted.length;
+        expect(await tracker.refresh()).toEqual(completed);
+        expect(emitted).toHaveLength(count);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("does not assign a final cache correction across observed models", async () => {
+    const home = await codexHome();
+    const parent = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const records = (await readFile(parent, "utf8")).trimEnd().split("\n");
+    records.splice(
+      1,
+      0,
+      JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-5.6-sol", turn_id: "first-turn" },
+      }),
+    );
+    records.push(
+      JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-6-astra", turn_id: "second-turn" },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { input_tokens: 200, output_tokens: 20 } },
+        },
+      }),
+    );
+    await writeFile(parent, `${records.join("\n")}\n`);
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    try {
+      tracker.start("scan-thread");
+      const running = await tracker.refresh();
+      expect(running.cost?.modelCosts?.map((cost) => cost.model)).toEqual([
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+      ]);
+      const completed = await tracker.stop({
+        input_tokens: 200,
+        output_tokens: 20,
+        cache_write_input_tokens: 20,
+      });
+      expect(completed.cost).toBeNull();
+      expect(completed.usage).toMatchObject({
+        input_tokens: 200,
+        cache_write_input_tokens: 20,
+        modelUsage: [
+          {
+            model: "gpt-5.6-sol",
+            input_tokens: 100,
+            cache_write_input_tokens: 0,
+          },
+          {
+            model: "gpt-6-astra",
+            input_tokens: 100,
+            cache_write_input_tokens: 0,
+          },
+        ],
+      });
+    } finally {
+      await tracker.stop();
+    }
+  });
+
   test("retains reported write charges when another worker omits cache writes", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
@@ -483,23 +649,26 @@ describe("live scan cost tracking", () => {
     const tracker = costTracker(home, {
       maxCostUsd: 1,
     });
-    const refresh = tracker.refresh.bind(tracker);
-    tracker.refresh = async () => {
+    const forcedReads: boolean[] = [];
+    tracker.setAttributionReader(async (force) => {
+      forcedReads.push(force === true);
       await new Promise<void>((resolve) => releases.push(resolve));
-      return refresh();
-    };
+      return null;
+    });
     tracker.start("scan-thread");
 
     await new Promise<void>((resolve) => setTimeout(resolve, 350));
-    expect(releases).toHaveLength(1);
+    expect(forcedReads).toEqual([false]);
 
     const stopped = tracker.stop();
-    expect(releases).toHaveLength(2);
+    expect(releases).toHaveLength(1);
     releases[0]!();
+    await waitFor(() => releases.length === 2);
+    expect(forcedReads).toEqual([false, true]);
     releases[1]!();
 
     expect((await stopped).cost?.inputTokens).toBe(100);
-    expect(releases).toHaveLength(2);
+    expect(forcedReads).toEqual([false, true]);
   });
 
   test("retries one coalesced poll after a failed refresh", async () => {
@@ -649,6 +818,113 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-0");
     await tracker.stop();
     expect(resumed).toEqual([{ kind: "observed", worker: 1 }]);
+  });
+
+  test("retains unknown Standard usage while reporting known cost and later child usage", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      {},
+      {
+        parent: "scan-thread",
+      },
+    );
+    await writeFile(
+      worker,
+      (await readFile(worker, "utf8")).split("\n")[0]! + "\n",
+    );
+    const publicCosts: Readonly<ScanCost>[] = [];
+    const lowerBounds: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onCost: (cost) => publicCosts.push(cost),
+      onCostLowerBound: (cost) => lowerBounds.push(cost),
+    });
+    tracker.start("scan-thread");
+    try {
+      expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+      expect(publicCosts).toEqual([]);
+      expect(lowerBounds.at(-1)).toMatchObject({
+        inputTokens: 1_250,
+        estimatedUsd: 0.00488,
+        coverage: "partial",
+      });
+      await writeSession(
+        home,
+        "worker-thread",
+        {
+          input_tokens: 100,
+          output_tokens: 0,
+        },
+        { parent: "scan-thread" },
+      );
+      expect(await tracker.refresh()).toMatchObject({
+        usage: { input_tokens: 1_350 },
+        cost: { inputTokens: 1_350, estimatedUsd: 0.00528 },
+      });
+      expect(publicCosts.at(-1)?.estimatedUsd).toBe(0.00528);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("prices known Standard receipts by their recorded model while child usage is missing", async () => {
+    const home = await codexHome();
+    const parent = await writeSession(home, "scan-thread", {});
+    await appendFile(
+      parent,
+      jsonLines([
+        {
+          type: "token_usage_record",
+          payload: {
+            thread_id: "scan-thread",
+            response_id: "known-response",
+            model: "gpt-5.6-luna",
+            usage: { input_tokens: 1_000, output_tokens: 0 },
+          },
+        },
+      ]) + "\n",
+    );
+    const child = await writeSession(
+      home,
+      "worker-thread",
+      {},
+      { parent: "scan-thread" },
+    );
+    await writeFile(
+      child,
+      (await readFile(child, "utf8")).split("\n")[0]! + "\n",
+    );
+    const lowerBounds: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onCostLowerBound: (cost) => lowerBounds.push(cost),
+    });
+    tracker.start("scan-thread");
+    try {
+      expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+      expect(lowerBounds).toHaveLength(1);
+      expect(lowerBounds[0]).toMatchObject({
+        estimatedUsd: estimateScanCost("gpt-5.6-luna", {
+          input_tokens: 1_000,
+          output_tokens: 0,
+        })!.estimatedUsd,
+        coverage: "partial",
+        modelCosts: [{ model: "gpt-5.6-luna", inputTokens: 1_000 }],
+      });
+      await tracker.refresh();
+      expect(lowerBounds).toHaveLength(1);
+    } finally {
+      await tracker.stop();
+    }
   });
 
   test("counts the scan and delegated workers without including other scans", async () => {
@@ -2263,4 +2539,1446 @@ describe("live scan cost tracking", () => {
       else expect(snapshot.cost?.inputTokens).toBe(1_500);
     },
   );
+});
+
+describe("recorded Deep worker homes", () => {
+  test.each([
+    ["recorded=false archived=false", false, false],
+    ["recorded=false archived=true", false, true],
+    ["recorded=true archived=false", true, false],
+    ["recorded=true archived=true", true, true],
+  ] as const)(
+    "retains archived worker usage: %s",
+    async (_label, recorded, archived) => {
+      const home = await codexHome();
+      const workerHome = recorded ? await codexHome() : home;
+      const at = "2026-09-01T00:00:02Z";
+      await writeSession(home, "owner", {});
+      const worker = await writeSession(workerHome, "worker", {});
+      await appendFile(
+        worker,
+        jsonLines([
+          {
+            type: "turn_context",
+            timestamp: at,
+            payload: { turn_id: "worker-turn", model: "gpt-5.6-sol" },
+          },
+          {
+            type: "token_usage_record",
+            timestamp: at,
+            payload: {
+              thread_id: "worker",
+              turn_id: "worker-turn",
+              response_id: "worker-response",
+              model: "gpt-5.6-sol",
+              usage: { input_tokens: 1_000, output_tokens: 0 },
+            },
+          },
+        ]) + "\n",
+      );
+      if (archived) {
+        const directory = join(workerHome, "archived_sessions");
+        await mkdir(directory, { recursive: true });
+        await rename(worker, join(directory, "worker.jsonl"));
+      }
+      const costs: Readonly<ScanCost>[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        scanDirectory: join(home, "scan"),
+        model: "gpt-5.6-sol",
+        maxCostUsd: 0.003,
+        onCost: (cost) => costs.push(cost),
+        onCostLowerBound: (cost) => costs.push(cost),
+      });
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        workerCodexHome: workerHome,
+        executionThreadIds: ["worker"],
+        owner: { threadId: "owner", turnId: "owner-turn", startedAt: at },
+        startedAt: at,
+        completedAt: null,
+      }));
+      tracker.start("owner");
+      try {
+        await tracker.refresh();
+        expect(costs.at(-1)?.inputTokens).toBe(1_000);
+        expect(costs.at(-1)?.estimatedUsd).toBeCloseTo(0.004, 10);
+        expect(costs.at(-1)!.estimatedUsd).toBeGreaterThan(0.003);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("only enforces a priced subtotal from a valid attributed usage partition", () => {
+    const known = {
+      model: "gpt-5.6-sol",
+      input_tokens: 1_000,
+      output_tokens: 0,
+    };
+    const unknown = { model: null, input_tokens: 100, output_tokens: 0 };
+    const usage = {
+      input_tokens: 1_100,
+      output_tokens: 0,
+      modelUsage: [known, unknown],
+    };
+    expect(estimateScanCostLowerBound("gpt-5.6-sol", usage)?.estimatedUsd).toBe(
+      0.004,
+    );
+    expect(estimateScanCost("gpt-5.6-sol", usage)).toBeNull();
+    for (const invalid of [
+      { ...usage, input_tokens: 999 },
+      { ...usage, modelUsage: [known, known, unknown] },
+      { ...usage, modelUsage: [known, { ...unknown, input_tokens: -1 }] },
+      { ...usage, modelUsage: [{ ...known, model: null }, unknown] },
+    ])
+      expect(estimateScanCostLowerBound("gpt-5.6-sol", invalid)).toBeNull();
+  });
+
+  test.each(["gpt-5.6-sol", "synthetic-unpriced-model"])(
+    "prices live worker counters after an earlier response receipt with model %s",
+    async (currentModel) => {
+      const home = await codexHome();
+      const at = "2026-09-01T00:00:02Z";
+      await writeSession(home, "owner", {});
+      const worker = await writeSession(home, "worker", {});
+      const receipt = (id: string, model: string, input: number) => ({
+        type: "token_usage_record",
+        timestamp: at,
+        payload: {
+          thread_id: "worker",
+          turn_id: "worker-turn",
+          response_id: id,
+          model,
+          usage: { input_tokens: input, output_tokens: 0 },
+        },
+      });
+      await appendFile(
+        worker,
+        jsonLines([
+          {
+            type: "turn_context",
+            timestamp: at,
+            payload: { turn_id: "worker-turn", model: "gpt-5.6-sol" },
+          },
+          {
+            type: "event_msg",
+            timestamp: at,
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: 100,
+                  output_tokens: 0,
+                },
+              },
+            },
+          },
+          receipt("earlier", "gpt-5.6-sol", 100),
+        ]) + "\n",
+      );
+      const costUpdates: Readonly<ScanCost>[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 0.002,
+        onCost: (cost) => costUpdates.push(cost),
+        onCostLowerBound: (cost) => costUpdates.push(cost),
+      });
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        executionThreadIds: ["worker"],
+        owner: { threadId: "owner", turnId: "turn", startedAt: at },
+        startedAt: at,
+        completedAt: null,
+      }));
+      tracker.start("owner");
+      try {
+        await tracker.refresh();
+        expect(costUpdates.at(-1)?.estimatedUsd).toBeCloseTo(0.0004, 10);
+        await appendFile(
+          worker,
+          jsonLines([
+            {
+              type: "turn_context",
+              timestamp: at,
+              payload: { turn_id: "worker-turn", model: currentModel },
+            },
+            {
+              type: "event_msg",
+              timestamp: at,
+              payload: {
+                type: "token_count",
+                info: {
+                  total_token_usage: {
+                    input_tokens: 1_100,
+                    output_tokens: 0,
+                  },
+                },
+              },
+            },
+          ]) + "\n",
+        );
+        const running = await tracker.refresh();
+        expect(tokenUsage(running.usage)?.input_tokens).toBe(1_100);
+        expect(running.cost).toBeNull();
+        expect(costUpdates.at(-1)?.estimatedUsd).toBeCloseTo(
+          currentModel === "gpt-5.6-sol" ? 0.0044 : 0.0004,
+          10,
+        );
+        if (currentModel === "gpt-5.6-sol")
+          expect(costUpdates.at(-1)!.estimatedUsd).toBeGreaterThan(0.002);
+        const completedReceipt = receipt("current", currentModel, 1_000);
+        await appendFile(
+          worker,
+          jsonLines([completedReceipt, completedReceipt]) + "\n",
+        );
+        const completed = await tracker.refresh();
+        expect(tokenUsage(completed.usage)?.input_tokens).toBe(1_100);
+        expect(costUpdates.at(-1)?.estimatedUsd).toBeCloseTo(
+          currentModel === "gpt-5.6-sol" ? 0.0044 : 0.0004,
+          10,
+        );
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test.each([null, "synthetic-unpriced-model"])(
+    "reports an internal priced lower bound with model %p without inventing a total",
+    async (unknownModel) => {
+      const home = await codexHome();
+      const at = "2026-09-01T00:00:02Z";
+      const known = await writeSession(home, "owner", {});
+      await appendFile(
+        known,
+        JSON.stringify({
+          type: "token_usage_record",
+          timestamp: at,
+          payload: {
+            thread_id: "owner",
+            turn_id: "turn",
+            response_id: "known-response",
+            model: "gpt-5.6-sol",
+            usage: { input_tokens: 1_000, output_tokens: 0 },
+          },
+        }) + "\n",
+      );
+      const unknown = await writeSession(home, "worker", {});
+      await appendFile(
+        unknown,
+        JSON.stringify({
+          type: "turn_context",
+          timestamp: at,
+          payload: {
+            turn_id: "worker-turn",
+            ...(unknownModel === null ? {} : { model: unknownModel }),
+          },
+        }) +
+          "\n" +
+          JSON.stringify({
+            type: "event_msg",
+            timestamp: at,
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: { input_tokens: 100, output_tokens: 0 },
+              },
+            },
+          }) +
+          "\n",
+      );
+      const lowerBounds: Readonly<ScanCost>[] = [];
+      const publicCosts: Readonly<ScanCost>[] = [];
+      const options = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 0.003,
+        onCost: (cost: Readonly<ScanCost>) => publicCosts.push(cost),
+        onCostLowerBound: (cost: Readonly<ScanCost>) => lowerBounds.push(cost),
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        executionThreadIds: ["worker"],
+        owner: { threadId: "owner", turnId: "turn", startedAt: at },
+        startedAt: at,
+        completedAt: null,
+      }));
+      tracker.start("owner");
+      try {
+        const snapshot = await tracker.refresh();
+        expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(1_100);
+        expect(snapshot.cost).toBeNull();
+        expect(publicCosts).toEqual([]);
+        expect(lowerBounds).toHaveLength(1);
+        expect(lowerBounds[0]).toMatchObject({
+          inputTokens: 1_000,
+          estimatedUsd: 0.004,
+          coverage: "partial",
+        });
+        expect(lowerBounds[0]!.estimatedUsd).toBeGreaterThan(
+          options.maxCostUsd,
+        );
+        await tracker.refresh();
+        expect(lowerBounds).toHaveLength(1);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test.each(["identical", "prefix-first", "prefix-last"] as const)(
+    "forwards each event occurrence once from copied logs: %s",
+    async (copy) => {
+      const home = await codexHome();
+      const recordedHome = await codexHome();
+      const scanDirectory = join(home, "scan");
+      const settings = join(scanDirectory, "artifacts", "deep_discovery");
+      await mkdir(settings, { recursive: true });
+      await writeFile(
+        join(settings, "execution-settings.json"),
+        JSON.stringify({
+          version: 1,
+          settings: { codexHome: recordedHome },
+        }),
+      );
+      await mkdir(join(home, "sessions"));
+      await mkdir(join(recordedHome, "sessions"));
+      const first = join(home, "sessions", "worker.jsonl");
+      const second = join(recordedHome, "sessions", "worker-copy.jsonl");
+      const repeated = {
+        timestamp: "2026-09-01T00:00:02Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "Reviewing source." },
+      };
+      const expected = [
+        {
+          timestamp: "2026-09-01T00:00:00Z",
+          type: "session_meta",
+          payload: { id: "worker", model: "gpt-5.6-sol" },
+        },
+        repeated,
+        repeated,
+        {
+          timestamp: "2026-09-01T00:00:03Z",
+          type: "token_usage_record",
+          payload: {
+            thread_id: "worker",
+            turn_id: "turn",
+            response_id: "response",
+            model: "gpt-5.6-sol",
+            usage: { input_tokens: 100, output_tokens: 0 },
+          },
+        },
+      ];
+      const contents = expected.map((event) => JSON.stringify(event) + "\n");
+      await writeFile(
+        first,
+        contents.slice(0, copy === "prefix-first" ? 2 : 4).join(""),
+      );
+      await writeFile(
+        second,
+        contents.slice(0, copy === "prefix-last" ? 2 : 4).join(""),
+      );
+      const events: ScanSessionEvent[] = [];
+      const options = {
+        codexHome: home,
+        scanDirectory,
+        model: "gpt-5.6-sol",
+        onSessionEvent: (event: ScanSessionEvent) => events.push(event),
+      };
+      const recordedOwner = async () => ({
+        formatVersion: 1 as const,
+        legacy: true as const,
+        workerCodexHome: recordedHome,
+        executionThreadIds: [],
+        owner: {
+          threadId: "worker",
+          turnId: null,
+          startedAt: "2026-09-01T00:00:00Z",
+        },
+        startedAt: "2026-09-01T00:00:00Z",
+        completedAt: null,
+      });
+      const tracker = new ScanCostTracker(options);
+      tracker.setAttributionReader(recordedOwner);
+      tracker.start("worker");
+      try {
+        expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+        expect(events.map((event) => event.event)).toEqual(expected);
+        await tracker.refresh();
+        expect(events).toHaveLength(expected.length);
+        // Both logs catch up, then a genuine repeated occurrence is copied later.
+        await writeFile(first, contents.join(""));
+        await writeFile(second, contents.join(""));
+        await appendFile(first, JSON.stringify(repeated) + "\n");
+        await tracker.refresh();
+        expect(events.map((event) => event.event)).toEqual([
+          ...expected,
+          repeated,
+        ]);
+        await appendFile(second, JSON.stringify(repeated) + "\n");
+        await tracker.stop();
+        expect(events.map((event) => event.event)).toEqual([
+          ...expected,
+          repeated,
+        ]);
+        // Re-reading after the owner interval becomes available filters early
+        // events, but must not renumber the surviving source occurrences.
+        tracker.setAttributionReader(async () => ({
+          formatVersion: 1,
+          workerCodexHome: recordedHome,
+          executionThreadIds: ["worker"],
+          owner: {
+            threadId: "worker",
+            turnId: "turn",
+            startedAt: "2026-09-01T00:00:03Z",
+          },
+          startedAt: "2026-09-01T00:00:03Z",
+          completedAt: "2026-09-01T00:00:04Z",
+        }));
+        await tracker.refresh();
+        expect(events.map((event) => event.event)).toEqual([
+          ...expected,
+          repeated,
+        ]);
+        events.length = 0;
+        const reconstructed = new ScanCostTracker(options);
+        reconstructed.setAttributionReader(recordedOwner);
+        reconstructed.start("worker");
+        await reconstructed.stop();
+        expect(events.map((event) => event.event)).toEqual([
+          ...expected,
+          repeated,
+        ]);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("keeps resumed worker usage and current parent usage isolated per scan", async () => {
+    const currentHome = await codexHome();
+    const firstHome = await codexHome();
+    const secondHome = await codexHome();
+    const at = "2026-09-01T00:00:02Z";
+    const trackers: ScanCostTracker[] = [];
+    const fixture = async (home: string, id: string, count: number) => {
+      const path = await writeSession(home, id, {});
+      await appendFile(
+        path,
+        [
+          {
+            type: "turn_context",
+            timestamp: at,
+            payload: { turn_id: "scan-turn", model: "gpt-5.6-sol" },
+          },
+          {
+            type: "token_usage_record",
+            timestamp: at,
+            payload: {
+              thread_id: id,
+              turn_id: "scan-turn",
+              response_id: `${id}-response`,
+              model: "gpt-5.6-sol",
+              usage: { input_tokens: count, output_tokens: 0 },
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      return path;
+    };
+    try {
+      const cases = [
+        { id: "one", home: firstHome, parent: 10, discovery: 20, reducer: 30 },
+        { id: "two", home: secondHome, parent: 11, discovery: 21, reducer: 31 },
+      ];
+      for (const row of cases) {
+        const scanDirectory = join(currentHome, "scans", row.id);
+        const settingsDirectory = join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+        );
+        await mkdir(settingsDirectory, { recursive: true });
+        await writeFile(
+          join(settingsDirectory, "execution-settings.json"),
+          JSON.stringify({
+            version: 1,
+            settings: { codexHome: row.home },
+          }),
+        );
+        await fixture(currentHome, `${row.id}-parent`, row.parent);
+        const discovery = await fixture(
+          row.home,
+          `${row.id}-discovery`,
+          row.discovery,
+        );
+        await fixture(row.home, `${row.id}-reducer`, row.reducer);
+        await fixture(row.home, `${row.id}-unrelated`, 10_000);
+        // Repeated receipt identity after reconnect must remain one charge.
+        const duplicate = (await readFile(discovery, "utf8"))
+          .trim()
+          .split("\n")
+          .at(-1)!;
+        await appendFile(discovery, duplicate + "\n");
+        const attribution = {
+          formatVersion: 1 as const,
+          workerCodexHome: row.home,
+          executionThreadIds: [`${row.id}-discovery`, `${row.id}-reducer`],
+          owner: {
+            threadId: `${row.id}-parent`,
+            turnId: "scan-turn",
+            startedAt: at,
+          },
+          startedAt: at,
+          completedAt: null,
+        };
+        const tracker = new ScanCostTracker({
+          codexHome: currentHome,
+          scanDirectory,
+          model: "gpt-5.6-sol",
+          maxCostUsd: 0.0002,
+        });
+        tracker.setAttributionReader(async () => attribution);
+        tracker.start(`${row.id}-parent`);
+        trackers.push(tracker);
+      }
+      const initial = await Promise.all(
+        trackers.map((tracker) => tracker.refresh()),
+      );
+      expect(
+        initial.map((snapshot) => tokenUsage(snapshot.usage)?.input_tokens),
+      ).toEqual([60, 63]);
+      expect(initial.map((snapshot) => snapshot.cost?.inputTokens)).toEqual([
+        60, 63,
+      ]);
+      expect(initial[0]!.cost!.estimatedUsd).toBeGreaterThan(0.0002);
+      const firstDirectory = join(currentHome, "scans", "one");
+      await writeFile(
+        join(
+          firstDirectory,
+          "artifacts",
+          "deep_discovery",
+          "execution-settings.json",
+        ),
+        JSON.stringify({ version: 1, settings: { codexHome: secondHome } }),
+      );
+      await unlink(
+        join(
+          currentHome,
+          "scans",
+          "two",
+          "artifacts",
+          "deep_discovery",
+          "execution-settings.json",
+        ),
+      );
+      expect(
+        (await Promise.all(trackers.map((tracker) => tracker.refresh()))).map(
+          (snapshot) => snapshot.cost?.inputTokens,
+        ),
+      ).toEqual([60, 63]);
+      const rebuilt = new ScanCostTracker({
+        codexHome: currentHome,
+        scanDirectory: firstDirectory,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 0.0002,
+      });
+      rebuilt.setAttributionReader(async () => ({
+        formatVersion: 1,
+        workerCodexHome: firstHome,
+        executionThreadIds: [
+          "one-discovery",
+          "one-reducer",
+          "one-missing-attempt",
+        ],
+        owner: { threadId: "one-parent", turnId: "scan-turn", startedAt: at },
+        startedAt: at,
+        completedAt: null,
+      }));
+      rebuilt.start("one-parent");
+      trackers.push(rebuilt);
+      expect((await rebuilt.refresh()).usage).toMatchObject({
+        input_tokens: 60,
+        coverage: "partial",
+      });
+      expect((await rebuilt.refresh()).cost!.estimatedUsd).toBeGreaterThan(
+        0.0002,
+      );
+      await fixture(firstHome, "one-missing-attempt", 7);
+      expect((await rebuilt.refresh()).cost?.inputTokens).toBe(67);
+      expect((await trackers[1]!.refresh()).cost?.inputTokens).toBe(63);
+    } finally {
+      await Promise.all(trackers.map((tracker) => tracker.stop()));
+    }
+  });
+
+  test("reads a recorded directory alias only once", async () => {
+    const home = await codexHome();
+    const alias = join(await codexHome(), "recorded-home");
+    await symlink(
+      home,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const scanDirectory = join(home, "scan");
+    const directory = join(scanDirectory, "artifacts", "deep_discovery");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "execution-settings.json"),
+      JSON.stringify({ version: 1, settings: { codexHome: alias } }),
+    );
+    await writeSession(home, "worker", { input_tokens: 100, output_tokens: 0 });
+    const events: ScanSessionEvent[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      scanDirectory,
+      model: "gpt-5.6-sol",
+      onSessionEvent: (event) => events.push(event),
+    });
+    tracker.start("worker");
+    try {
+      expect((await tracker.stop()).cost?.inputTokens).toBe(100);
+      expect(events).toHaveLength(2);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test.each([
+    ["identical, attribution: false", "identical", false],
+    ["identical, attribution: true", "identical", true],
+    ["prefix-first, attribution: false", "prefix-first", false],
+    ["prefix-first, attribution: true", "prefix-first", true],
+    ["prefix-last, attribution: false", "prefix-last", false],
+    ["prefix-last, attribution: true", "prefix-last", true],
+    ["truncated-first, attribution: false", "truncated-first", false],
+    ["truncated-first, attribution: true", "truncated-first", true],
+    ["truncated-last, attribution: false", "truncated-last", false],
+    ["truncated-last, attribution: true", "truncated-last", true],
+    ["tail-first, attribution: false", "tail-first", false],
+    ["tail-first, attribution: true", "tail-first", true],
+    ["tail-last, attribution: false", "tail-last", false],
+    ["tail-last, attribution: true", "tail-last", true],
+  ] as const)(
+    "prices copied response records (%s)",
+    async (_label, copy, attributed) => {
+      const home = await codexHome();
+      const recordedHome = await codexHome();
+      const scanDirectory = join(home, "scan");
+      const directory = join(scanDirectory, "artifacts", "deep_discovery");
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        join(directory, "execution-settings.json"),
+        JSON.stringify({ version: 1, settings: { codexHome: recordedHome } }),
+      );
+      const path = await writeSession(home, "worker", {});
+      for (const [id, model, input, output] of [
+        ["response-one", "gpt-5.6-sol", 100, 10],
+        ["response-two", "gpt-6-astra", 50, 5],
+      ] as const) {
+        await appendFile(
+          path,
+          JSON.stringify({
+            type: "token_usage_record",
+            timestamp: "2026-09-01T00:00:02Z",
+            payload: {
+              thread_id: "worker",
+              turn_id: "turn",
+              response_id: id,
+              model,
+              usage: { input_tokens: input, output_tokens: output },
+            },
+          }) + "\n",
+        );
+      }
+      await mkdir(join(recordedHome, "sessions"));
+      const copiedPath = join(recordedHome, "sessions", "copied-worker.jsonl");
+      await cp(path, copiedPath);
+      const prefix =
+        (await readFile(path, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .slice(0, -1)
+          .join("\n") + "\n";
+      if (copy === "prefix-first") await writeFile(path, prefix);
+      if (copy === "prefix-last") await writeFile(copiedPath, prefix);
+      const truncated = prefix + '{"type":"token_usage_record"';
+      if (copy === "truncated-first") await writeFile(path, truncated);
+      if (copy === "truncated-last") await writeFile(copiedPath, truncated);
+      if (copy === "tail-first") await appendFile(path, '{"type":"event_msg"');
+      if (copy === "tail-last")
+        await appendFile(copiedPath, '{"type":"event_msg"');
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        scanDirectory,
+        model: "gpt-5.6-sol",
+      });
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        ...(attributed ? {} : { legacy: true as const }),
+        workerCodexHome: recordedHome,
+        executionThreadIds: ["worker"],
+        owner: {
+          threadId: null,
+          turnId: null,
+          startedAt: "2026-09-01T00:00:00Z",
+        },
+        startedAt: "2026-09-01T00:00:00Z",
+        completedAt: null,
+      }));
+      tracker.start("worker");
+      try {
+        const snapshot = await tracker.stop();
+        expect(snapshot.usage).toMatchObject({
+          input_tokens: 150,
+          output_tokens: 15,
+          total_tokens: 165,
+        });
+        expect(snapshot.usage).not.toMatchObject({ coverage: "partial" });
+        expect(
+          Object.fromEntries(
+            snapshot.cost!.modelCosts!.map((part) => [
+              part.model,
+              [part.inputTokens, part.outputTokens],
+            ]),
+          ),
+        ).toEqual({
+          "gpt-5.6-sol": [100, 10],
+          "gpt-6-astra": [50, 5],
+        });
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+});
+
+test.each(
+  [false, true].flatMap((fullInArchive) =>
+    [false, true].flatMap((receipt) =>
+      [false, true].map((attributed) => ({
+        fullInArchive,
+        receipt,
+        attributed,
+      })),
+    ),
+  ),
+)(
+  "keeps corrected usage from the complete rollout copy: %j",
+  async ({ fullInArchive, receipt, attributed }) => {
+    const home = await codexHome();
+    const at = "2026-09-01T00:00:02Z";
+    const usage = (cached: number) => ({
+      input_tokens: 1_000_000,
+      cached_input_tokens: cached,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+    });
+    const counter = (cached: number) => ({
+      type: "event_msg",
+      timestamp: at,
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: usage(cached) },
+      },
+    });
+    const prefix =
+      jsonLines([
+        { type: "session_meta", payload: { id: "worker" } },
+        {
+          type: "turn_context",
+          timestamp: at,
+          payload: { model: "gpt-5.6-sol", turn_id: "turn" },
+        },
+        counter(0),
+      ]) + "\n";
+    const correction = receipt
+      ? {
+          type: "token_usage_record",
+          timestamp: at,
+          payload: {
+            thread_id: "worker",
+            turn_id: "turn",
+            response_id: "corrected-receipt",
+            model: "gpt-5.6-sol",
+            usage: usage(900_000),
+            thread_token_usage: usage(900_000),
+          },
+        }
+      : counter(900_000);
+    const active = join(home, "sessions");
+    const archive = join(home, "archived_sessions");
+    await mkdir(active);
+    await mkdir(archive);
+    const fullPath = join(fullInArchive ? archive : active, "full.jsonl");
+    const prefixPath = join(fullInArchive ? active : archive, "prefix.jsonl");
+    await writeFile(fullPath, prefix + JSON.stringify(correction) + "\n");
+    const observed: number[] = [];
+    const createTracker = () => {
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 2,
+        onCost: (cost) => observed.push(cost.estimatedUsd),
+        onCostLowerBound: (cost) => observed.push(cost.estimatedUsd),
+      });
+      if (attributed)
+        tracker.setAttributionReader(async () => ({
+          formatVersion: 1,
+          executionThreadIds: [],
+          owner: { threadId: "worker", turnId: "turn", startedAt: at },
+          startedAt: at,
+          completedAt: null,
+        }));
+      tracker.start("worker");
+      return tracker;
+    };
+    const tracker = createTracker();
+    let reloaded: ScanCostTracker | undefined;
+    try {
+      const baseline = await tracker.refresh();
+      expect(baseline.cost?.estimatedUsd).toBeCloseTo(0.76, 10);
+      await writeFile(prefixPath, prefix);
+      expect((await tracker.refresh()).cost).toEqual(baseline.cost);
+      reloaded = createTracker();
+      const cold = await reloaded.stop(usage(0));
+      expect(cold.cost).toEqual(baseline.cost);
+      expect(cold.usage).toMatchObject(usage(900_000));
+      expect(observed.length).toBeGreaterThan(0);
+      expect(observed.every((cost) => cost < 2)).toBe(true);
+    } finally {
+      await tracker.stop();
+      await reloaded?.stop();
+    }
+  },
+);
+
+test.each(
+  [false, true].flatMap((fullInArchive) =>
+    [false, true].map((attributed) => ({ fullInArchive, attributed })),
+  ),
+)(
+  "retains the complete copy's counter lower bound with missing receipts: %j",
+  async ({ fullInArchive, attributed }) => {
+    const home = await codexHome();
+    const at = "2026-09-01T00:00:02Z";
+    const usage = (input: number) => ({
+      input_tokens: input,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+    });
+    const counter = (input: number) => ({
+      type: "event_msg",
+      timestamp: at,
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: usage(input) },
+      },
+    });
+    const prefix = [
+      { type: "session_meta", payload: { id: "worker" } },
+      {
+        type: "turn_context",
+        timestamp: at,
+        payload: { model: "gpt-5.6-sol", turn_id: "turn" },
+      },
+      counter(1_000_000),
+    ];
+    const complete = [
+      ...prefix,
+      {
+        type: "token_usage_record",
+        timestamp: at,
+        payload: {
+          thread_id: "worker",
+          turn_id: "turn",
+          response_id: "partial-receipt",
+          model: "gpt-5.6-sol",
+          usage: usage(600_000),
+          thread_token_usage: usage(1_000_000),
+        },
+      },
+      counter(1_300_000),
+    ];
+    const active = join(home, "sessions");
+    const archive = join(home, "archived_sessions");
+    await mkdir(active);
+    await mkdir(archive);
+    const fullPath = join(fullInArchive ? archive : active, "full.jsonl");
+    const prefixPath = join(fullInArchive ? active : archive, "prefix.jsonl");
+    await writeFile(fullPath, jsonLines(complete) + "\n");
+    const observed: number[] = [];
+    const createTracker = () => {
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 5,
+        onCost: (cost) => observed.push(cost.estimatedUsd),
+        onCostLowerBound: (cost) => observed.push(cost.estimatedUsd),
+      });
+      if (attributed)
+        tracker.setAttributionReader(async () => ({
+          formatVersion: 1,
+          executionThreadIds: [],
+          owner: { threadId: "worker", turnId: "turn", startedAt: at },
+          startedAt: at,
+          completedAt: null,
+        }));
+      tracker.start("worker");
+      return tracker;
+    };
+    const tracker = createTracker();
+    let reloaded: ScanCostTracker | undefined;
+    try {
+      const baseline = await tracker.refresh();
+      expect(baseline.usage).toMatchObject({
+        input_tokens: 1_300_000,
+        total_tokens: 1_300_000,
+        coverage: "partial",
+      });
+      expect(observed.at(-1)).toBeCloseTo(5.2, 10);
+      await writeFile(prefixPath, jsonLines(prefix) + "\n");
+      expect((await tracker.refresh()).usage).toEqual(baseline.usage);
+      expect(observed.at(-1)).toBeCloseTo(5.2, 10);
+      reloaded = createTracker();
+      expect((await reloaded.stop()).usage).toEqual(baseline.usage);
+      expect(observed.at(-1)).toBeCloseTo(5.2, 10);
+      expect(observed.every((cost) => cost > 5)).toBe(true);
+    } finally {
+      await tracker.stop();
+      await reloaded?.stop();
+    }
+  },
+);
+
+test.each([
+  ["150000/15000 vs 100000/200000", 150_000, 15_000, 100_000, 200_000],
+  ["150000/15000 vs 100000/20000", 150_000, 15_000, 100_000, 20_000],
+  ["100000/50000 vs 110000/10000", 100_000, 50_000, 110_000, 10_000],
+  ["100000/50000 vs 200000/10000", 100_000, 50_000, 200_000, 10_000],
+  ["100000/10000 vs 100000/10000", 100_000, 10_000, 100_000, 10_000],
+] as const)(
+  "preserves receipt pricing across divergent counters %s",
+  async (_label, input, output, counterInput, counterOutput) => {
+    const home = await codexHome();
+    const path = await writeSession(home, "worker", {});
+    const counts = (input: number, output: number) => ({
+      input_tokens: input,
+      output_tokens: output,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      reasoning_output_tokens: 0,
+      total_tokens: input + output,
+    });
+    await appendFile(
+      path,
+      JSON.stringify({
+        type: "token_usage_record",
+        timestamp: "2026-09-01T00:00:02Z",
+        payload: {
+          thread_id: "worker",
+          turn_id: "turn",
+          response_id: "receipt",
+          model: "gpt-5.6-sol",
+          usage: counts(input, output),
+          thread_token_usage: counts(counterInput, counterOutput),
+        },
+      }) +
+        "\n" +
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: {
+            type: "token_count",
+            info: { total_token_usage: counts(counterInput, counterOutput) },
+          },
+        }) +
+        "\n",
+    );
+    const lowerBounds: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 0.8,
+      onCost: (cost) => lowerBounds.push(cost),
+      onCostLowerBound: (cost) => lowerBounds.push(cost),
+    });
+    tracker.start("worker");
+    try {
+      const snapshot = await tracker.stop();
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: Math.max(input, counterInput),
+        output_tokens: Math.max(output, counterOutput),
+      });
+      if (counterInput > input || counterOutput > output)
+        expect(snapshot.usage).toMatchObject({ coverage: "partial" });
+      else expect(snapshot.usage).not.toMatchObject({ coverage: "partial" });
+      const measured = tokenUsage(snapshot.usage);
+      expect(measured).not.toBeNull();
+      expect(lowerBounds.length).toBeGreaterThan(0);
+      expect(lowerBounds.at(-1)!.estimatedUsd).toBeGreaterThanOrEqual(
+        estimateScanCost("gpt-5.6-sol", counts(input, output))!.estimatedUsd,
+      );
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(["standard", "pending-deep", "legacy-deep", "bound-deep"] as const)(
+  "uses bound log homes rather than draft settings: %s",
+  async (kind) => {
+    const home = await codexHome();
+    const foreign = await codexHome();
+    const scanDirectory = join(home, "scan");
+    const settings = join(scanDirectory, "artifacts", "deep_discovery");
+    await mkdir(settings, { recursive: true });
+    await writeFile(
+      join(settings, "execution-settings.json"),
+      JSON.stringify({ version: 1, settings: { codexHome: foreign } }),
+    );
+    for (const [directory, input] of [
+      [home, 100],
+      [foreign, 900_000],
+    ] as const) {
+      const path = await writeSession(
+        directory,
+        "scan-thread",
+        {
+          input_tokens: input,
+          output_tokens: 0,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+        },
+        { timestamp: "2026-09-01T00:00:02Z" },
+      );
+      const lines = (await readFile(path, "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((line) => ({
+          ...JSON.parse(line),
+          timestamp: "2026-09-01T00:00:02Z",
+        }));
+      await writeFile(path, jsonLines(lines) + "\n");
+    }
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      scanDirectory,
+      model: "gpt-5.6-sol",
+    });
+    if (kind !== "standard")
+      tracker.setAttributionReader(async () =>
+        kind === "pending-deep"
+          ? null
+          : {
+              formatVersion: 1,
+              ...(kind === "legacy-deep"
+                ? { legacy: true as const }
+                : { workerCodexHome: foreign }),
+              executionThreadIds: ["scan-thread"],
+              owner: {
+                threadId: null,
+                turnId: null,
+                startedAt: "2026-09-01T00:00:00Z",
+              },
+              startedAt: "2026-09-01T00:00:00Z",
+              completedAt: null,
+            },
+      );
+    tracker.start("scan-thread");
+    try {
+      expect((await tracker.stop()).usage).toMatchObject({
+        input_tokens: kind === "bound-deep" ? 900_000 : 100,
+      });
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(["no-reader", "pending-reader"] as const)(
+  "enforces dedicated parent cost before orchestration: %s",
+  async (kind) => {
+    const home = await codexHome();
+    await writeSession(home, "new-parent", {
+      input_tokens: 100_000,
+      output_tokens: 0,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+    });
+    const costs: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 0.003,
+      onCost: (cost) => costs.push(cost),
+      onCostLowerBound: (cost) => costs.push(cost),
+    });
+    if (kind === "pending-reader")
+      tracker.setAttributionReader(async () => null);
+    tracker.start("new-parent");
+    try {
+      const snapshot = await tracker.stop();
+      expect(snapshot.cost?.estimatedUsd).toBeGreaterThan(0.003);
+      expect(costs.length).toBeGreaterThan(0);
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(["single", "identical", "prefix-first", "prefix-last"] as const)(
+  "forwards copied worker activities without replaying completed calls: %s",
+  async (copy) => {
+    const { home, worker } = await workerSessionFixture();
+    const recordedHome = await codexHome();
+    await mkdir(join(recordedHome, "sessions"));
+    const second = join(recordedHome, "sessions", "worker-copy.jsonl");
+    const call = (id: string) => ({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        call_id: id,
+        arguments: JSON.stringify({ cmd: "rg -n source routes/login.ts" }),
+      },
+    });
+    const done = (id: string) => ({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: id },
+    });
+    const prefix =
+      (await readFile(worker, "utf8")) + jsonLines([call("first")]) + "\n";
+    const complete = prefix + jsonLines([done("first")]) + "\n";
+    await writeFile(worker, copy === "prefix-first" ? prefix : complete);
+    if (copy !== "single")
+      await writeFile(second, copy === "prefix-last" ? prefix : complete);
+    const activities: ScanActivity[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      scanDirectory: join(home, "scan"),
+      model: "gpt-5.6-sol",
+      repository: "/code/juice-shop",
+      onActivity: (activity) => activities.push(activity),
+    });
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      legacy: true,
+      workerCodexHome: recordedHome,
+      executionThreadIds: [],
+      owner: {
+        threadId: "scan-thread",
+        turnId: null,
+        startedAt: "2026-09-01T00:00:00Z",
+      },
+      startedAt: "2026-09-01T00:00:00Z",
+      completedAt: null,
+    }));
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      expect(activities.map(({ id, status }) => [id, status])).toEqual([
+        ["worker-thread:first", "running"],
+        ["worker-thread:first", "completed"],
+      ]);
+      await writeFile(worker, complete);
+      if (copy !== "single") await writeFile(second, complete);
+      await tracker.refresh();
+      expect(activities).toHaveLength(2);
+      const later = jsonLines([call("second"), done("second")]) + "\n";
+      await appendFile(worker, later);
+      await tracker.refresh();
+      if (copy !== "single") await appendFile(second, later);
+      await tracker.stop();
+      expect(activities.map(({ id, status }) => [id, status])).toEqual([
+        ["worker-thread:first", "running"],
+        ["worker-thread:first", "completed"],
+        ["worker-thread:second", "running"],
+        ["worker-thread:second", "completed"],
+      ]);
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each([0, 100])(
+  "ignores only zero unpriced counter buckets: %i",
+  async (unpricedTokens) => {
+    const home = await codexHome();
+    const path = await writeSession(home, "owner", {
+      input_tokens: unpricedTokens,
+      output_tokens: 0,
+    });
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "turn_context",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: { turn_id: "turn", model: "gpt-5.6-sol" },
+        },
+        {
+          type: "event_msg",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: unpricedTokens + 1000,
+                output_tokens: 0,
+              },
+            },
+          },
+        },
+      ]) + "\n",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    tracker.start("owner");
+    try {
+      const snapshot = await tracker.refresh();
+      expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(
+        unpricedTokens + 1000,
+      );
+      if (unpricedTokens === 0)
+        expect(snapshot.cost?.estimatedUsd).toBeCloseTo(0.004, 10);
+      else expect(snapshot.cost).toBeNull();
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(["other turn", "outside window"])(
+  "keeps owned legacy model before an unrelated first receipt: %s",
+  async (kind) => {
+    const home = await codexHome();
+    const path = await writeSession(home, "owner", {});
+    const at = "2026-09-01T00:00:02Z";
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "turn_context",
+          timestamp: at,
+          payload: { turn_id: "turn", model: "gpt-5.6-sol" },
+        },
+        {
+          type: "event_msg",
+          timestamp: at,
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: { input_tokens: 1000, output_tokens: 0 },
+            },
+          },
+        },
+        {
+          type: "token_usage_record",
+          timestamp: kind === "outside window" ? "2026-09-01T00:00:04Z" : at,
+          payload: {
+            thread_id: "owner",
+            turn_id: kind === "other turn" ? "other" : "turn",
+            response_id: "unrelated-response",
+            model: "gpt-6-astra",
+            usage: { input_tokens: 50, output_tokens: 0 },
+          },
+        },
+      ]) + "\n",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      executionThreadIds: [],
+      owner: { threadId: "owner", turnId: "turn", startedAt: at },
+      startedAt: at,
+      completedAt: "2026-09-01T00:00:03Z",
+    }));
+    tracker.start("owner");
+    try {
+      const snapshot = await tracker.refresh();
+      expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(1000);
+      expect(snapshot.cost?.estimatedUsd).toBeCloseTo(0.004, 10);
+      expect(snapshot.usage).not.toMatchObject({ coverage: "partial" });
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(["sdk-owner", "unbound-owner", "unknown-worker"] as const)(
+  "prices known completion receipts without a rollout: %s",
+  async (kind) => {
+    const home = await codexHome();
+    const observed: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 0.003,
+      onCost: (cost) => observed.push(cost),
+      onCostLowerBound: (cost) => observed.push(cost),
+    });
+    if (kind !== "unbound-owner")
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        executionThreadIds: [kind === "unknown-worker" ? "worker" : "owner"],
+        owner: {
+          threadId: "owner",
+          turnId: "turn",
+          startedAt: "2026-09-01T00:00:00Z",
+          dedicated: true,
+        },
+        startedAt: "2026-09-01T00:00:00Z",
+        completedAt: null,
+      }));
+    tracker.start("owner");
+    try {
+      const receipt = { input_tokens: 1000, output_tokens: 0 };
+      if (kind === "unknown-worker") tracker.recordUsage(receipt, "worker");
+      const snapshot = await tracker.stop(
+        kind === "unknown-worker" ? undefined : receipt,
+      );
+      expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(1000);
+      if (kind === "unknown-worker") {
+        expect(snapshot.cost).toBeNull();
+        expect(observed).toHaveLength(0);
+      } else {
+        expect(snapshot.cost?.estimatedUsd).toBeCloseTo(0.004, 10);
+        expect(observed.at(-1)?.estimatedUsd).toBeGreaterThan(0.003);
+      }
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test("cost polls reuse attribution until SQLite changes and refresh it at final accounting", async () => {
+  const home = await codexHome();
+  const databasePath = join(home, "workbench.sqlite3");
+  const database = new Database(databasePath);
+  database.run("PRAGMA journal_mode=WAL");
+  database.run("CREATE TABLE attribution (value TEXT)");
+  const attribution: ScanExecutionAttribution = {
+    formatVersion: 1,
+    executionThreadIds: [],
+    owner: {
+      threadId: "parent",
+      turnId: "parent-turn",
+      startedAt: "2026-01-01T00:00:00Z",
+      dedicated: true,
+    },
+    startedAt: "2026-01-01T00:00:00Z",
+    completedAt: null,
+  };
+  database
+    .query("INSERT INTO attribution VALUES (?)")
+    .run(JSON.stringify(attribution));
+  for (const [thread, input] of [
+    ["parent", 100],
+    ["worker", 200],
+  ] as const) {
+    const path = await writeSession(home, thread, {});
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "turn_context",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: { turn_id: `${thread}-turn`, model: "gpt-5.6-sol" },
+        },
+        {
+          type: "token_usage_record",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: {
+            thread_id: thread,
+            turn_id: `${thread}-turn`,
+            response_id: `${thread}-response`,
+            model: "gpt-5.6-sol",
+            usage: { input_tokens: input, output_tokens: 0 },
+          },
+        },
+      ]) + "\n",
+    );
+  }
+  let reads = 0;
+  const reader = cachedScanAttributionReader(home, async () => {
+    reads++;
+    return JSON.parse(
+      (
+        database.query("SELECT value FROM attribution").get() as {
+          value: string;
+        }
+      ).value,
+    ) as ScanExecutionAttribution;
+  });
+  const tracker = costTracker(home);
+  tracker.setAttributionReader(reader);
+  tracker.start("parent");
+  try {
+    for (let poll = 0; poll < 8; poll++)
+      expect((await tracker.refresh()).usage).toMatchObject({
+        input_tokens: 100,
+      });
+    expect(reads).toBe(1);
+    attribution.executionThreadIds.push("worker");
+    database
+      .query("UPDATE attribution SET value = ?")
+      .run(JSON.stringify(attribution));
+    expect((await tracker.refresh()).usage).toMatchObject({
+      input_tokens: 300,
+    });
+    expect(reads).toBe(2);
+    database.run("PRAGMA wal_checkpoint(TRUNCATE)");
+    expect((await tracker.refresh()).usage).toMatchObject({
+      input_tokens: 300,
+    });
+    expect(reads).toBe(3);
+    for (let poll = 0; poll < 8; poll++) await tracker.refresh();
+    expect(reads).toBe(3);
+    expect((await tracker.stop()).usage).toMatchObject({ input_tokens: 300 });
+    expect(reads).toBe(4);
+  } finally {
+    await tracker.stop();
+    database.close();
+  }
+});
+
+test("attribution caching notices database replacement and writes during a read", async () => {
+  const directory = await codexHome();
+  const path = join(directory, "workbench.sqlite3");
+  const next = join(directory, "replacement.sqlite3");
+  await writeFile(path, "first");
+  let changeDuringRead = false;
+  let reads = 0;
+  const reader = cachedScanAttributionReader(directory, async () => {
+    reads++;
+    const before = await readFile(path, "utf8");
+    if (changeDuringRead) {
+      changeDuringRead = false;
+      await appendFile(path, "-committed-during-read");
+    }
+    return { startedAt: before } as ScanExecutionAttribution;
+  });
+  expect((await reader())?.startedAt).toBe("first");
+  expect((await reader())?.startedAt).toBe("first");
+  expect(reads).toBe(1);
+  await writeFile(next, "replacement");
+  await rename(next, path);
+  changeDuringRead = true;
+  expect((await reader())?.startedAt).toBe("replacement");
+  expect((await reader())?.startedAt).toBe("replacement-committed-during-read");
+  expect(reads).toBe(3);
 });

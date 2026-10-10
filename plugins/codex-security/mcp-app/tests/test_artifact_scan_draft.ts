@@ -840,33 +840,39 @@ try {
     "obsolete.json",
   );
   await writeFile(obsoleteCheckpointPath, "{malformed obsolete checkpoint\n");
-  const deepWorkbenchWrites = mock.fn(async (arguments_: string[]) => {
-    assert.deepEqual(arguments_.slice(0, 3), [
-      "write-scan-draft",
-      "--scan-id",
-      scanId,
-    ]);
-    assert.equal(arguments_.includes("--expected-draft-digest"), false);
-    assert.deepEqual(arguments_.slice(-2), ["--claim-token", claimToken]);
-    const draftPath = arguments_[arguments_.indexOf("--draft-path") + 1];
-    const checkpointPath =
-      arguments_[arguments_.indexOf("--checkpoint-path") + 1];
-    const staged = await readJson(draftPath);
-    const stagedCheckpoint = await readJson(checkpointPath);
-    assert.deepEqual(staged.findings, acceptedDeepFindings);
-    assert.deepEqual(staged.coverage, acceptedDeepCoverage);
-    assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
-    assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
-  });
+  let deepWorkbenchWrites = 0;
+  const deepPublication = {
+    coordinatorGeneration: 3,
+    resultPath: path.join(deepParentRoot, "workers", "reducer", "result.json"),
+  };
   await recordCodexSecurityScanDraftViaWorkbench(
     deepParentContext,
     acceptedDeepDraft,
-    deepWorkbenchWrites,
-  );
-  assert.equal(
-    deepWorkbenchWrites.mock.callCount(),
-    1,
-    "terminal Deep drafts still publish through the workbench lock despite obsolete malformed checkpoints",
+    async (arguments_: string[]) => {
+      deepWorkbenchWrites += 1;
+      assert.deepEqual(arguments_.slice(0, 3), [
+        "write-scan-draft",
+        "--scan-id",
+        scanId,
+      ]);
+      assert.equal(arguments_.includes("--expected-draft-digest"), false);
+      assert.deepEqual(arguments_.slice(-2), ["--claim-token", claimToken]);
+      const draftPath = arguments_[arguments_.indexOf("--draft-path") + 1];
+      const checkpointPath =
+        arguments_[arguments_.indexOf("--checkpoint-path") + 1];
+      const staged = JSON.parse(await readFile(draftPath, "utf8"));
+      const stagedCheckpoint = JSON.parse(
+        await readFile(checkpointPath, "utf8"),
+      );
+      assert.deepEqual(staged.deepScanPublication, deepPublication);
+      assert.equal(stagedCheckpoint.deepScanPublication, undefined);
+      assert.deepEqual(staged.findings, acceptedDeepFindings);
+      assert.deepEqual(staged.coverage, acceptedDeepCoverage);
+      assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
+      assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
+    },
+    undefined,
+    deepPublication,
   );
   assert.deepEqual(await readdir(path.join(deepParentRoot, "drafts")), []);
 

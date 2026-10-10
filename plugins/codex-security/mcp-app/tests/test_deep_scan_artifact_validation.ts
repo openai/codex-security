@@ -212,9 +212,20 @@ async function testReducerValidation(root: string) {
       ],
       previous: null,
     };
-  const validateSnapshot = (reducerId = "dedup-0001", snapshot = sources) =>
+  const validateSnapshot = (
+    reducerId = "dedup-0001",
+    snapshot = sources,
+    persistSourceCoverage = false,
+  ) =>
     validateReducerArtifacts(
-      { artifacts, artifactDir, resultPath, reducerId, sources: snapshot },
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId,
+        sources: snapshot,
+        persistSourceCoverage,
+      },
       scanId,
     );
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
@@ -223,10 +234,18 @@ async function testReducerValidation(root: string) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = await readJson(resultPath);
+  const { sourceCoverage, ...legacySnapshot } = validatedSnapshot.result;
+  assert.equal(sourceCoverage.completeness, "unknown");
   assert.deepEqual(
-    validatedSnapshot.result,
+    legacySnapshot,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "v1 preserves host coverage in memory while retaining the legacy persisted shape",
+  );
+  const versionedSnapshot = await validateSnapshot("dedup-0001", sources, true);
+  assert.deepEqual(
+    versionedSnapshot.result,
+    JSON.parse(await readFile(resultPath, "utf8")),
+    "v2 persists the full host projection",
   );
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [

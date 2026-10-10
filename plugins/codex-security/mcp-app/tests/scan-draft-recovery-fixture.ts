@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
@@ -8,76 +7,15 @@ import path from "node:path";
 import type { TestContext } from "node:test";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { ArtifactContext } from "../src/artifact-io.js";
-import { importModule, importSource } from "./import-module.ts";
+import { importSource } from "./import-module.ts";
 export const draftApi = await importSource("../src/artifact-scan-draft.ts", {
   absWorkingDir: import.meta.dirname,
 });
 
-const {
-  artifactDestination,
-  replaceArtifactJson,
-  replaceArtifactText,
-  saveThreatModelDocument,
-} = await importModule({
-  stdin: {
-    contents:
-      'export * from "./artifact-io.ts"; export * from "./threat-model-document.ts";',
-    resolveDir: path.join(import.meta.dirname, "../src"),
-  },
-});
-
-// Unit publication boundary; real lock/binding behavior is covered by the workbench integration suite.
-export async function recordCodexSecurityScanDraft(
-  context: ArtifactContext,
-  input: unknown,
-) {
-  return draftApi.recordCodexSecurityScanDraftViaWorkbench(
-    context,
-    input,
-    async (args: string[]) => {
-      const draft = await readJson(args[args.indexOf("--draft-path") + 1]);
-      const rawContents = await fs.readFile(
-        args[args.indexOf("--checkpoint-path") + 1],
-        "utf8",
-      );
-      const checkpoint = JSON.parse(rawContents);
-      const rawName =
-        createHash("sha256").update(rawContents).digest("hex") + ".json";
-      await replaceArtifactText(
-        await artifactDestination(
-          context,
-          ["checkpoints", rawName],
-          "raw checkpoint",
-        ),
-        rawContents,
-      );
-      const { complete, scope, threatModel } = draft.manifest.scan;
-      await draftApi.saveScanDraftCheckpoint(
-        { ...context, layout: "worker" },
-        {
-          scanId: checkpoint.scanId,
-          ...(complete === undefined ? {} : { complete }),
-          ...(scope === undefined ? {} : { scope }),
-          ...(threatModel === undefined ? {} : { threatModel }),
-          findings: draft.findings.findings,
-          coverage: draft.coverage,
-        },
-      );
-      for (const [key, name] of [
-        ["findings", "findings.json"],
-        ["coverage", "coverage.json"],
-        ["manifest", "scan-manifest.json"],
-      ]) {
-        await replaceArtifactJson(
-          await artifactDestination(context, [name], "scan draft"),
-          draft[key],
-        );
-      }
-      const warning = await saveThreatModelDocument(context, threatModel);
-      return warning === undefined ? {} : { warnings: [warning] };
-    },
-  );
-}
+export const { recordCodexSecurityScanDraft } = await importSource(
+  "./scan-draft-writer-fixture.ts",
+  { absWorkingDir: import.meta.dirname },
+);
 
 export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 export const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";

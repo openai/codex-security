@@ -123,6 +123,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "threadCount",
         "missingThreadCount",
         "warnings",
+        "modelUsage",
         *SCAN_USAGE_TOKEN_KEYS,
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
@@ -132,6 +133,22 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         or usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
     ):
         return False
+    if "modelUsage" in usage:
+        parts = usage["modelUsage"]
+        if not isinstance(parts, list) or not parts:
+            return False
+        for part in parts:
+            if not isinstance(part, dict) or set(part) != {"model", *SCAN_USAGE_TOKEN_KEYS}:
+                return False
+            if part["model"] is not None and not isinstance(part["model"], str):
+                return False
+            if (
+                not all(type(part[key]) is int and part[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
+                or part["cachedInputTokens"] + part["cacheWriteInputTokens"] > part["inputTokens"]
+            ):
+                return False
+        if any(sum(part[key] for part in parts) != usage[key] for key in SCAN_USAGE_TOKEN_KEYS):
+            return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
         return False
@@ -142,7 +159,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     return True
 
 
-def parse_scan_cost(value: str | None) -> str | None:
+def parse_scan_cost(value: str | None, *, allow_lower_bound: bool = False) -> str | None:
     if value is None:
         return None
     if len(value.encode("utf-8")) > 8192:
@@ -151,7 +168,10 @@ def parse_scan_cost(value: str | None) -> str | None:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:
         raise SystemExit("Scan cost must be a valid JSON object.") from exc
-    if isinstance(cost, dict) and "usage" in cost:
+    if allow_lower_bound and isinstance(cost, dict) and set(cost) == {"lowerBound"}:
+        if not _valid_legacy_scan_cost(cost["lowerBound"]):
+            raise SystemExit("Scan cost lower bound must be a valid measured cost.")
+    elif isinstance(cost, dict) and "usage" in cost:
         if (
             not set(cost).issubset({"usage", "cost"})
             or not _valid_measured_scan_usage(cost["usage"])

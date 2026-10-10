@@ -319,6 +319,17 @@ within each worker. Time and run limits apply to discovery. After discovery
 stops, the scan combines and returns completed findings. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
 
+New Deep scans preserve the selected aggregate and original terminal reason through
+publication and completion retries. Resuming a selected result reuses accepted
+findings instead of starting another discovery or reducer run; older scans keep
+their recorded workflow. Remaining workers use their recorded execution settings,
+while authentication continues to use the original configured account.
+
+The SDK's `onDeepProgress` callback reports completed, active and maximum independent
+reviews. Saved execution attribution and recorded worker homes let resumed usage and
+session logs retain their original scan membership. A known priced lower bound can
+still stop an explicit budget when another model's price is unavailable.
+
 ### Progress and cost
 
 Use `onProgress` for scan progress and `onCost` for cost updates.

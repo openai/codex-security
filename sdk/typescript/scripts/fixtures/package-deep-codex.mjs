@@ -69,6 +69,7 @@ async function run() {
                 },
               },
             })}\n`,
+            { mode: 0o600 },
           );
           result = {};
           break;
@@ -169,20 +170,17 @@ async function run() {
       }
     } else {
       assert.equal(layout, "reducer");
+      let document = "";
       let cursor;
-      let json = "";
       do {
         const page = await server.call(
           "get_codex_security_deep_reducer_inputs",
-          {
-            maxBytes: 64_000,
-            ...(cursor === undefined ? {} : { cursor }),
-          },
+          { maxBytes: 4096, ...(cursor === undefined ? {} : { cursor }) },
         );
-        json += page.json;
+        document += page.json;
         cursor = page.nextCursor;
       } while (cursor !== undefined);
-      const inputs = JSON.parse(json);
+      const inputs = JSON.parse(document);
       assert.ok(inputs.discoveries.length > 0);
       await server.call("record_codex_security_deep_reduction", {
         scanId: env.CODEX_SECURITY_SCAN_ID,
