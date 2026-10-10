@@ -82,6 +82,7 @@ class FakePrompt implements BulkScanPrompt {
 
 interface Repository {
   fullName: string;
+  affiliation?: "OWNER" | "COLLABORATOR";
   visibility?: "private" | "internal" | "public";
   archived?: boolean;
   fork?: boolean;
@@ -191,7 +192,13 @@ function discoveryDependencies(
               }
 
               const visible = repositories.filter(
-                ({ archived, fork }) => !archived && !fork,
+                ({ archived, fork, affiliation }) =>
+                  !archived &&
+                  !fork &&
+                  !(
+                    affiliation === "COLLABORATOR" &&
+                    /ownerAffiliations:\s*\[OWNER\]/u.test(body.query)
+                  ),
               );
               const start = Number(body.variables?.cursor ?? 0);
               const page = visible.slice(start, start + 100);
@@ -380,16 +387,23 @@ describe("bulk scan repository discovery", () => {
     const root = await temporaryDirectory();
     const { dependencies, prompt, requests } = discoveryDependencies(root, {
       organizations: ["acme"],
+      repositories: [
+        { fullName: "personal-account/owned", affiliation: "OWNER" },
+        { fullName: "another-owner/collaborated", affiliation: "COLLABORATOR" },
+      ],
     });
     prompt.confirms = [true];
     prompt.choices = ["personal-account"];
 
-    await runBulkScanWizard(dependencies);
+    const result = await runBulkScanWizard(dependencies);
 
     expect(prompt.searchOptions[0]).toEqual(["acme", "personal-account"]);
     expect(
       requests.find(({ path }) => path === "/graphql")?.variables?.owner,
     ).toBe("personal-account");
+    const csv = await readFile(result!.inputPath, "utf8");
+    expect(csv).toContain("personal-account/owned");
+    expect(csv).not.toContain("another-owner/collaborated");
   });
 
   test("includes organizations beyond the first GitHub results page", async () => {
