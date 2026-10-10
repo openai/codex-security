@@ -1064,13 +1064,21 @@ async function testOpenAiCredentialsReachWorker() {
     };
     nativeProvider?: string;
     configuration?: string;
+    projectConfiguration?: string;
   }[] = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
+    {
+      configuration:
+        'model_provider = "amazon-bedrock"\nprofile = "selected"\n[profiles.selected]\nmodel_provider = "openai"\n',
+      openai: "synthetic-openai-key",
+      expected: "synthetic-openai-key",
+    },
     {
       openai: "synthetic-openai-key",
       expected: "synthetic-openai-key",
       // Optional null auth is omitted from the SDK's private TOML snapshot.
-      configuration: 'model_provider = "openai"\n[model_providers.openai]\n',
+      projectConfiguration:
+        'model_provider = "openai"\n[model_providers.openai]\n',
     },
     {
       openai: "  synthetic-openai-key  ",
@@ -1095,6 +1103,7 @@ async function testOpenAiCredentialsReachWorker() {
       accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
     },
     {
+      configuration: 'model_provider = "synthetic-provider"\n',
       openai: "synthetic-provider-key",
       accountResult: { account: null, requiresOpenaiAuth: false },
     },
@@ -1153,14 +1162,16 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
-      const configPath = path.join(fixture.root, "scan-settings.toml");
-      await writeFile(configPath, entry.configuration ?? "");
-      process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
+      if (entry.projectConfiguration !== undefined) {
+        const configPath = path.join(fixture.root, "scan-settings.toml");
+        await writeFile(configPath, entry.projectConfiguration);
+        process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      }
+      let configuration = entry.configuration ?? 'model_provider = "openai"\n';
       Object.assign(process.env, runtimeEnvironment);
       if (entry.nativeProvider !== undefined) {
-        await writeFile(
-          path.join(fixture.root, "config.toml"),
-          `model_provider = ${JSON.stringify(entry.nativeProvider)}
+        configuration = `model_provider = ${JSON.stringify(entry.nativeProvider)}
 cli_auth_credentials_store = "file"
 [features]
 plugins = false
@@ -1171,9 +1182,9 @@ wire_api = "responses"
 base_url = "https://provider.example.test/v1"
 requires_openai_auth = false
 env_key = "CODEX_API_KEY"
-`,
-        );
+`;
       }
+      await writeFile(path.join(fixture.root, "config.toml"), configuration);
       let nativePreflight:
         | {
             codexHome: string | undefined;
@@ -1251,6 +1262,16 @@ env_key = "CODEX_API_KEY"
           for (const [name, value] of Object.entries(runtimeEnvironment)) {
             assert.equal(process.env[name], value);
           }
+          assert.equal(
+            invocation.openaiAuthentication.configuration,
+            entry.projectConfiguration ?? configuration,
+          );
+          assert.equal(
+            invocation.argv.some((arg: string) =>
+              arg.startsWith("model_provider="),
+            ),
+            false,
+          );
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,
@@ -3300,6 +3321,7 @@ async function fakeCodexFixture(
   const markerPath = path.join(root, "invocation.json");
   const preflightMarkerPath = path.join(root, "preflight.json");
   const scriptPath = path.join(root, "fake-codex.mjs");
+  await writeFile(path.join(root, "config.toml"), "");
   await writeFile(
     scriptPath,
     `#!/usr/bin/env node
@@ -3352,7 +3374,7 @@ if (process.argv.includes('app-server')) {
 const stdin = (await process.stdin.toArray()).join('');
 const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
-const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
+const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY, configuration: readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH ?? join(process.env.CODEX_HOME, 'config.toml'), 'utf8') } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
 const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
 const toolProbe = stdin.includes('CAPTURE_SYNTHETIC_RG') ? spawnSync('rg', ['--version'], { encoding: 'utf8' }) : undefined;
