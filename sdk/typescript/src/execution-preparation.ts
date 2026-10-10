@@ -1,4 +1,4 @@
-import { restoreProviderProfile } from "./provider-profile.js";
+import { restoreReplayProfile } from "./provider-profile.js";
 import { readFile, realpath } from "node:fs/promises";
 import { parse as parseToml } from "smol-toml";
 import { accountStatus, configuredCodexHome } from "./auth.js";
@@ -536,9 +536,9 @@ export async function nativeScanConfiguration(
 ): Promise<JsonObject> {
   if (input.recipe?.["config"] !== undefined)
     return scanCompositionOverrides(
-      await restoreProviderProfile(
+      await restoreReplayProfile(
         input.recipe["config"] as JsonObject,
-        input.recipe["providerProfile"],
+        input.recipe["replayProfile"],
         environment,
       ),
       subagents,

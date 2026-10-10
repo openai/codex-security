@@ -17,8 +17,9 @@ import { parse } from "smol-toml";
 import {
   createProfileCodex,
   createProviderProfile,
+  createReplayProfile,
   providerPreflightCommand,
-  restoreProviderProfile,
+  restoreReplayProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
 import { structuredCodexConfig } from "../src/config.js";
@@ -60,7 +61,7 @@ const startupProviders = {
 };
 
 test.each(["ambient", "managed"] as const)(
-  "saved %s provider profiles keep concurrent replay credentials private and separate",
+  "saved %s replay profiles keep concurrent replay credentials private and separate",
   async (kind) => {
     const root = await temporaryDirectory();
     const environment = {
@@ -84,13 +85,23 @@ test.each(["ambient", "managed"] as const)(
     }));
     const profiles = await Promise.all(
       providers.map((model_providers) =>
-        createProviderProfile(home, { model_providers }),
+        createReplayProfile(home, {
+          model_providers,
+          mcp_servers: {
+            synthetic: {
+              url: "https://mcp.example.test",
+              http_headers: {
+                Authorization: model_providers.synthetic.auth.env.TOKEN,
+              },
+            },
+          },
+        }),
       ),
     );
     expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
     const restored = await Promise.all(
       profiles.map((profile) =>
-        restoreProviderProfile(
+        restoreReplayProfile(
           { model_provider: "synthetic" },
           { name: profile.name, home: kind },
           environment,
@@ -99,16 +110,20 @@ test.each(["ambient", "managed"] as const)(
     );
     for (const [index, profile] of profiles.entries()) {
       expect(restored[index]!["model_providers"]).toEqual(providers[index]);
+      expect(restored[index]!["mcp_servers"]).toEqual({
+        synthetic: {
+          url: "https://mcp.example.test",
+          http_headers: {
+            Authorization: providers[index]!.synthetic.auth.env.TOKEN,
+          },
+        },
+      });
       if (process.platform !== "win32")
         expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
     }
     await expect(
-      restoreProviderProfile(
-        {},
-        { name: "../outside", home: kind },
-        environment,
-      ),
-    ).rejects.toThrow("invalid provider profile");
+      restoreReplayProfile({}, { name: "../outside", home: kind }, environment),
+    ).rejects.toThrow("invalid replay profile");
   },
 );
 

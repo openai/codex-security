@@ -69,6 +69,33 @@ export async function createProviderProfile(
   options: Parameters<typeof requirePrivateCredentialHome>[2] = {},
 ): Promise<ProviderProfile> {
   const providers = resolveCodexProfile(config)["model_providers"];
+  return createPrivateProfile(
+    codexHome,
+    {
+      model_providers: isRecord(providers) ? providers : {},
+    },
+    options,
+  );
+}
+
+/** Preserve credential-bearing replay tables outside readable scan history. */
+export async function createReplayProfile(
+  codexHome: string,
+  config: JsonObject,
+): Promise<ProviderProfile> {
+  const resolved = resolveCodexProfile(config);
+  const saved: JsonObject = {};
+  for (const key of ["model_providers", "mcp_servers"]) {
+    if (isRecord(resolved[key])) saved[key] = resolved[key] as JsonObject;
+  }
+  return createPrivateProfile(codexHome, saved);
+}
+
+async function createPrivateProfile(
+  codexHome: string,
+  config: JsonObject,
+  options: Parameters<typeof requirePrivateCredentialHome>[2] = {},
+): Promise<ProviderProfile> {
   const name = `codex_security_${randomUUID()}`;
   const path = join(codexHome, `${name}.config.toml`);
   if ((options.platform ?? process.platform) === "win32") {
@@ -79,14 +106,12 @@ export async function createProviderProfile(
       options,
     );
   }
-  await writeCodexConfig(path, {
-    model_providers: isRecord(providers) ? providers : {},
-  });
+  await writeCodexConfig(path, config);
   return { name, path, cleanup: () => rm(path, { force: true }) };
 }
 
-/** Restore a saved provider from the credential home, never from scan artifacts. */
-export async function restoreProviderProfile(
+/** Restore saved private settings from the credential home, never from scan artifacts. */
+export async function restoreReplayProfile(
   config: JsonObject,
   profile: unknown,
   environment: ProcessEnvironment,
@@ -101,7 +126,7 @@ export async function restoreProviderProfile(
     )
   ) {
     throw new CodexSecurityError(
-      "The saved scan contains an invalid provider profile.",
+      "The saved scan contains an invalid replay profile.",
     );
   }
   const codexHome =
@@ -115,12 +140,16 @@ export async function restoreProviderProfile(
   const saved = parse(
     await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
   );
-  if (!isRecord(saved["model_providers"])) {
+  const restored: JsonObject = {};
+  for (const key of ["model_providers", "mcp_servers"]) {
+    if (isRecord(saved[key])) restored[key] = saved[key] as JsonObject;
+  }
+  if (Object.keys(restored).length === 0) {
     throw new CodexSecurityError(
-      "The saved provider profile contains no provider configuration.",
+      "The saved replay profile contains no private configuration.",
     );
   }
-  return { ...config, model_providers: saved["model_providers"] as JsonObject };
+  return { ...config, ...restored };
 }
 
 /** The pinned SDK lacks the native CLI's private profile-file option. */

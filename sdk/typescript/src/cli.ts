@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { restoreProviderProfile } from "./provider-profile.js";
+import { restoreReplayProfile } from "./provider-profile.js";
 import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
@@ -6506,9 +6506,9 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
-  const replayConfig = await restoreProviderProfile(
+  const replayConfig = await restoreReplayProfile(
     config,
-    recipe["providerProfile"],
+    recipe["replayProfile"],
     environment,
   );
   return {

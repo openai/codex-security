@@ -96,6 +96,7 @@ import { z } from "incur";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
   createProviderProfile,
+  createReplayProfile,
   providerPreflightCommand,
 } from "./provider-profile.js";
 
@@ -4110,24 +4111,30 @@ async function prepareSavedScanRecipe({
     session.source.preserveProviderEnvironment
   ) {
     const savedConfig = recipe["config"] as JsonObject;
-    const providers = resolveCodexProfile(savedConfig)["model_providers"];
-    if (isRecord(providers) && Object.keys(providers).length > 0) {
-      // Scan history is readable. Keep replay provider credentials in the
-      // same denied home as live profiles, while retaining other saved settings.
-      const saved = await createProviderProfile(runtimeHome, {
-        model_providers: providers as JsonObject,
-      });
-      recipe["providerProfile"] = {
+    const resolved = resolveCodexProfile(savedConfig);
+    const privateTables = ["model_providers", "mcp_servers"];
+    if (
+      privateTables.some(
+        (key) =>
+          isRecord(resolved[key]) && Object.keys(resolved[key]).length > 0,
+      )
+    ) {
+      // Scan history is readable. Keep provider and MCP replay credentials in
+      // the denied home, while retaining other saved settings.
+      const saved = await createReplayProfile(runtimeHome, savedConfig);
+      recipe["replayProfile"] = {
         name: saved.name,
         home: runtime.preserveCodexHomeConfig ? "ambient" : "managed",
       };
-      for (const layer of [
-        savedConfig,
-        ...(isRecord(savedConfig["profiles"])
-          ? Object.values(savedConfig["profiles"])
-          : []),
-      ]) {
-        if (isRecord(layer)) delete layer["model_providers"];
+    }
+    for (const layer of [
+      savedConfig,
+      ...(isRecord(savedConfig["profiles"])
+        ? Object.values(savedConfig["profiles"])
+        : []),
+    ]) {
+      if (isRecord(layer)) {
+        for (const key of privateTables) delete layer[key];
       }
     }
   }

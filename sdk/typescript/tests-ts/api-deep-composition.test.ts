@@ -1,4 +1,4 @@
-import { restoreProviderProfile } from "../src/provider-profile.js";
+import { restoreReplayProfile } from "../src/provider-profile.js";
 import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
 import { randomUUID } from "node:crypto";
 import * as childProcess from "node:child_process";
@@ -49,6 +49,121 @@ const pluginRoot = fileURLToPath(
 );
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
+
+test.each([false, true])(
+  "inactive provider and MCP settings stay private in saved recipes (native: %s)",
+  async (native) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    await Promise.all([mkdir(repository), mkdir(home, { mode: 0o700 })]);
+    await writeFile(join(repository, "app.py"), "print('synthetic fixture')\n");
+    const environment = {
+      ...process.env,
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(root, "external-state"),
+      OPENAI_API_KEY: "synthetic-fixture-key",
+    };
+    const configuration = {
+      model: "gpt-5.6-sol",
+      model_provider: "openai",
+      profiles: {
+        unused: {
+          model: "unselected-model",
+          model_providers: {
+            unused: {
+              name: "Unused",
+              wire_api: "responses",
+              http_headers: {
+                Authorization: "synthetic-inactive-provider-token",
+              },
+            },
+          },
+          mcp_servers: {
+            unused: {
+              url: "https://mcp.example.test",
+              http_headers: { Authorization: "synthetic-inactive-mcp-token" },
+            },
+          },
+        },
+      },
+    };
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    let registration: string | undefined;
+    let launched = false;
+    await using client = new CodexSecurity(
+      { pluginPath: pluginRoot, codexOverrides: configuration },
+      {
+        environment,
+        prepareRuntime: async () => ({
+          codexHome: home,
+          preserveCodexHomeConfig: true,
+          environment,
+          credentialsAvailable: true,
+          plugin: {
+            pluginRoot,
+            installedRoot: pluginRoot,
+            marketplaceRoot: pluginRoot,
+            marketplaceName: "codex-security-sdk",
+            name: "codex-security",
+            version: "0.1.0",
+          },
+        }),
+        resolvePluginPython: async () => python!,
+        repositoryRevision: async () => null,
+        resolveCodexCommand: () => ({ command: process.execPath }),
+        probeCodexSandbox: async () => {},
+        runWorkbench: async (options, args, input) => {
+          const result = await runWorkbench(options, args, input);
+          if (args[0] === "register-cli-scan")
+            registration = result["scanId"] as string;
+          return result;
+        },
+        createCodex: () => {
+          launched = true;
+          throw new Error("Synthetic launch boundary");
+        },
+      },
+      { surface: "sdk" },
+    );
+    await expect(
+      client.run(repository, {
+        mode: "standard",
+        outputDir: join(root, "scan"),
+        ...(native
+          ? {
+              inheritedPermissions: {
+                filesystem: { ":workspace_roots": "write" },
+                network: { enabled: false },
+              },
+              preserveProviderEnvironment: true,
+            }
+          : {}),
+      }),
+    ).rejects.toThrow("Synthetic launch boundary");
+    expect(launched).toBe(true);
+    expect(registration).toBeDefined();
+    const saved = await runWorkbench(
+      { python: python!, pluginRoot, environment },
+      ["get-scan-recipe", "--scan-id", registration!],
+    );
+    expect(JSON.stringify(saved)).not.toContain(
+      "synthetic-inactive-provider-token",
+    );
+    expect(JSON.stringify(saved)).not.toContain("synthetic-inactive-mcp-token");
+    const recipe = saved["recipe"] as JsonObject;
+    expect(recipe).not.toHaveProperty("replayProfile");
+    if (native)
+      expect(recipe["config"]).toMatchObject({
+        profiles: { unused: { model: "unselected-model" } },
+      });
+    expect(
+      configuration.profiles.unused.mcp_servers.unused.http_headers
+        .Authorization,
+    ).toBe("synthetic-inactive-mcp-token");
+  },
+);
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 type CapturedNativeScan = {
@@ -244,6 +359,10 @@ test.each([
         synthetic: {
           command: "synthetic-mcp",
           env: { FIXTURE_TOKEN: "saved-mcp-setting" },
+        },
+        authenticated: {
+          url: "https://mcp.example.test",
+          http_headers: { Authorization: "Bearer synthetic-private-mcp-token" },
         },
       },
       shell_environment_policy: {
@@ -1214,9 +1333,9 @@ process.exit(0);
             ])
           )["recipe"] as JsonObject;
           expect(
-            await restoreProviderProfile(
+            await restoreReplayProfile(
               nativeRecipe["config"] as JsonObject,
-              nativeRecipe["providerProfile"],
+              nativeRecipe["replayProfile"],
               environment,
             ),
           ).toMatchObject(nativeSettings);
@@ -1330,6 +1449,24 @@ process.exit(0);
       expect(checkpoint.passes).toHaveLength(2);
       expect(checkpoint.mergedScanIds).toHaveLength(budget ? 1 : 2);
       expect(registrations.size).toBe(3);
+      if (prepareNative) {
+        for (const registration of registrations.values()) {
+          const saved = registration["recipe"] as JsonObject;
+          expect(JSON.stringify(saved)).not.toContain(
+            "synthetic-private-mcp-token",
+          );
+          expect(saved["config"]).not.toHaveProperty("mcp_servers");
+          expect(
+            (
+              await restoreReplayProfile(
+                saved["config"] as JsonObject,
+                saved["replayProfile"],
+                environment,
+              )
+            )["mcp_servers"],
+          ).toMatchObject(nativeSettings.mcp_servers);
+        }
+      }
       if (provider !== undefined) {
         for (const registration of registrations.values()) {
           const saved = registration["recipe"] as JsonObject;
@@ -1338,9 +1475,9 @@ process.exit(0);
           );
           expect(saved["preserveProviderEnvironment"]).toBe(true);
           expect(saved["config"]).not.toHaveProperty("model_providers");
-          const restored = await restoreProviderProfile(
+          const restored = await restoreReplayProfile(
             saved["config"] as JsonObject,
-            saved["providerProfile"],
+            saved["replayProfile"],
             environment,
           );
           expect(restored["model_providers"]).toMatchObject({
@@ -1365,10 +1502,14 @@ process.exit(0);
           command: "node",
           enabled: false,
         });
-        if (prepareNative)
+        if (prepareNative) {
           expect(servers?.["synthetic"]).toEqual(
             nativeSettings.mcp_servers.synthetic,
           );
+          expect(servers?.["authenticated"]).toEqual(
+            nativeSettings.mcp_servers.authenticated,
+          );
+        }
         const permission = turn.overrides?.find((value) =>
           value.startsWith("permissions.codex_security_scan="),
         );
