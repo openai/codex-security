@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, stat, symlink } from "node:fs/promises";
+import { copyFile, mkdir, readFile, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test, type TestContext } from "node:test";
@@ -28,6 +30,17 @@ const { openWorkbenchDatabase, databaseInfo } = (await importSource(
 const { applyMigrations, migrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
+// Frozen from 7fa0980411d89d7d1f2aafd5b2cbae941f539724, before severity migration 43.
+const historicalRepositoryMigrations: readonly Migrations.Migration[] =
+  JSON.parse(
+    await readFile(
+      new URL(
+        "./fixtures/pre-severity-repository-migrations.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 
@@ -761,4 +774,374 @@ test("retries an upgrade when another process holds the write lock beyond the bu
   } finally {
     await writer.terminate();
   }
+});
+
+function pythonMigrations(databasePath: string, through?: number): void {
+  const result = spawnSync(
+    process.env.PYTHON?.trim() || "python3",
+    [
+      "-I",
+      "-B",
+      "-c",
+      `import sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+import workbench_db, workbench_schema
+with sqlite3.connect(sys.argv[2]) as database:
+    database.row_factory = sqlite3.Row
+    database.execute("PRAGMA foreign_keys = ON")
+    workbench_schema.apply_migrations(database,
+        tuple(item for item in workbench_db.MIGRATIONS if item[0] <= int(sys.argv[3])),
+        workbench_db.now, workbench_db.backfill_security_targets)
+`,
+      fileURLToPath(new URL("../../scripts", import.meta.url)),
+      databasePath,
+      String(through ?? 49),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr || String(result.error));
+}
+
+function storedRows(database: DatabaseSync) {
+  return database
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+    )
+    .all()
+    .map(({ name }) => [
+      name,
+      database
+        .prepare(`SELECT * FROM "${name}"`)
+        .all()
+        .map((row) => {
+          // Independently run initializers use different migration application times.
+          if (name === "schema_migrations") delete row.applied_at;
+          return row;
+        }),
+    ]);
+}
+
+test("Node initialization leaves repository migration semantics to the Python consumer", async (t) => {
+  for (const fixture of [
+    "main42",
+    "main43",
+    "legacy30",
+    "legacy31",
+    "partial43",
+    "current43",
+    "current44",
+  ] as const) {
+    await t.test(fixture, async () => {
+      const directory = await temporary.create("workbench-repository-upgrade-");
+      const databasePath = join(directory, "workbench.sqlite3");
+      const database = new DatabaseSync(databasePath);
+      applyMigrations(
+        database,
+        migrations.filter(
+          (item) =>
+            item.version <=
+            (fixture === "legacy30"
+              ? 29
+              : fixture === "legacy31"
+                ? 30
+                : fixture === "main43"
+                  ? 43
+                  : 42),
+        ),
+      );
+      insertScan(database);
+      database.exec(`INSERT INTO security_targets (id,current_path,display_name,created_at,updated_at)
+        VALUES ('target','/synthetic/repository','Synthetic repository','created','updated');
+        UPDATE workspaces SET target_id='target'; UPDATE scans SET target_id='target';
+        UPDATE scans SET status='complete', started_at='2026-01-01T00:00:00Z',
+          completed_at='2026-01-01T00:00:01.123456789123z';`);
+      if (["legacy30", "legacy31", "partial43"].includes(fixture)) {
+        database.exec(
+          "ALTER TABLE security_targets ADD COLUMN repository_identity TEXT",
+        );
+        database.exec(
+          "UPDATE security_targets SET repository_identity='unestablished-legacy-identity'",
+        );
+      }
+      if (fixture === "legacy30" || fixture === "legacy31")
+        database
+          .prepare(
+            "INSERT INTO schema_migrations VALUES(?,'persist repository identities','original')",
+          )
+          .run(fixture === "legacy30" ? 30 : 31);
+      database.close();
+      if (fixture === "current43" || fixture === "current44") {
+        const current = new DatabaseSync(databasePath);
+        applyMigrations(
+          current,
+          historicalRepositoryMigrations.filter(
+            (item) => item.version <= (fixture === "current43" ? 43 : 44),
+          ),
+        );
+        assert.equal(
+          current
+            .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+            .get()?.version,
+          fixture === "current43" ? 43 : 44,
+        );
+        current.exec(
+          "UPDATE scans SET completion_sequence=77,repository_generation='synthetic-generation'; UPDATE security_targets SET repository_identity='synthetic-generation'",
+        );
+        current.close();
+      }
+      const saved = new DatabaseSync(databasePath);
+      const originalHistory = saved
+        .prepare(
+          "SELECT name, applied_at FROM schema_migrations WHERE name IN ('persist repository identities', 'stabilize Linux repository generations') ORDER BY name",
+        )
+        .all();
+      saved.close();
+      const controlPath = join(directory, "python.sqlite3");
+      await copyFile(databasePath, controlPath);
+      pythonMigrations(controlPath);
+      await databaseInfo(directory);
+      const initialized = new DatabaseSync(databasePath);
+      const identity = initialized
+        .prepare("SELECT * FROM security_targets")
+        .get()?.repository_identity;
+      assert.equal(
+        identity,
+        fixture === "current43" || fixture === "current44"
+          ? "synthetic-generation"
+          : fixture === "main42" || fixture === "main43"
+            ? undefined
+            : "unestablished-legacy-identity",
+      );
+      assert.equal(
+        initialized
+          .prepare("PRAGMA table_info(scans)")
+          .all()
+          .some((row) => row.name === "repository_generation"),
+        fixture === "current43" || fixture === "current44",
+      );
+      const beforeRepeat = storedRows(initialized);
+      initialized.close();
+      await databaseInfo(directory);
+      const repeated = new DatabaseSync(databasePath);
+      assert.deepEqual(storedRows(repeated), beforeRepeat);
+      repeated.close();
+      pythonMigrations(databasePath);
+      const actual = new DatabaseSync(databasePath);
+      const expected = new DatabaseSync(controlPath);
+      try {
+        assert.deepEqual(storedRows(actual), storedRows(expected));
+        for (const row of originalHistory)
+          assert.equal(
+            actual
+              .prepare("SELECT applied_at FROM schema_migrations WHERE name=?")
+              .get(row.name!)?.applied_at,
+            row.applied_at,
+          );
+        assert.equal(
+          actual
+            .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+            .get()?.version,
+          49,
+        );
+        assert.equal(
+          actual.prepare("SELECT completion_sequence FROM scans").get()
+            ?.completion_sequence,
+          fixture === "current43" || fixture === "current44" ? 77 : 1,
+        );
+        assert.deepEqual(actual.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally {
+        actual.close();
+        expected.close();
+      }
+    });
+  }
+});
+
+test("Node repository migration-label collisions roll back without changing stored rows", async (t) => {
+  for (const [name, setup] of [
+    [
+      "identity destination",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(48,'persist repository identities','original')",
+    ],
+    [
+      "generation destination",
+      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(49,'occupied destination','retained')",
+    ],
+    [
+      "identity collision after generation relocation",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version IN (31,43); UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44",
+    ],
+  ] as const)
+    await t.test(name, async () => {
+      const directory = await temporary.create(
+        "workbench-repository-collision-",
+      );
+      const databasePath = join(directory, "workbench.sqlite3");
+      const database = new DatabaseSync(databasePath);
+      applyMigrations(database);
+      database.exec(setup);
+      const beforeSchema = schema(database);
+      const beforeRows = storedRows(database);
+      const beforeHistory = database
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all();
+      database.close();
+      await assert.rejects(
+        databaseInfo(directory),
+        /UNIQUE constraint failed/u,
+      );
+      const after = new DatabaseSync(databasePath);
+      try {
+        assert.deepEqual(schema(after), beforeSchema);
+        assert.deepEqual(storedRows(after), beforeRows);
+        assert.deepEqual(
+          after
+            .prepare("SELECT * FROM schema_migrations ORDER BY version")
+            .all(),
+          beforeHistory,
+        );
+      } finally {
+        after.close();
+      }
+    });
+});
+
+test("Node database-info preserves a linked repository's stored43 history for Python", async () => {
+  const directory = await temporary.create("workbench-linked-upgrade-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  const repository = join(directory, "repository");
+  const linked = join(directory, "linked");
+  const database = new DatabaseSync(databasePath);
+  applyMigrations(
+    database,
+    migrations.filter((item) => item.version <= 42),
+  );
+  insertScan(database, repository);
+  database.exec(
+    "INSERT INTO scan_progress (scan_id,updated_at) VALUES ('scan','updated')",
+  );
+  database.close();
+  const scripts = fileURLToPath(new URL("../../scripts", import.meta.url));
+  const seeded = spawnSync(
+    process.env.PYTHON?.trim() || "python3",
+    [
+      "-I",
+      "-B",
+      "-c",
+      `
+import json, pathlib, sqlite3, subprocess, sys
+from datetime import datetime, timezone
+sys.path.insert(0, sys.argv[1])
+import workbench_db as workbench, workbench_schema as schema, workbench_target_state as state
+repository, linked = map(pathlib.Path, sys.argv[3:5])
+subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+subprocess.run(['git', '-C', str(repository), '-c', 'user.name=Fixture', '-c',
+    'user.email=fixture@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'fixture'], check=True)
+subprocess.run(['git', '-C', str(repository), 'worktree', 'add', '-q', '--detach', str(linked)], check=True)
+with sqlite3.connect(sys.argv[2]) as connection:
+    connection.row_factory = sqlite3.Row
+    timestamp = datetime.now(timezone.utc).isoformat()
+    connection.execute('UPDATE scans SET started_at=?, created_at=?, updated_at=?', (timestamp, timestamp, timestamp))
+    connection.execute('UPDATE scan_progress SET updated_at=?', (timestamp,))
+    metadata = repository.stat()
+    connection.execute('UPDATE scans SET target_device=?, target_inode=?', (str(metadata.st_dev), str(metadata.st_ino)))
+    migration = json.loads(pathlib.Path(sys.argv[5]).read_text())[0]
+    assert migration['version'] == 43 and migration['name'] == 'persist repository identities'
+    for statement in migration['statements']:
+        connection.execute(statement)
+    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)',
+        (migration['version'], migration['name'], 'original'))
+    workbench.backfill_security_targets(connection)
+    identity = state._repository_identity_details(repository)
+    generation = identity.previous_value or identity.value
+    connection.execute('UPDATE security_targets SET repository_identity=?', (generation,))
+    connection.execute('UPDATE scans SET repository_generation=?', (generation,))
+`,
+      scripts,
+      databasePath,
+      repository,
+      linked,
+      fileURLToPath(
+        new URL(
+          "./fixtures/pre-severity-repository-migrations.json",
+          import.meta.url,
+        ),
+      ),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(seeded.status, 0, seeded.stderr || String(seeded.error));
+  const before = new DatabaseSync(databasePath);
+  const savedRows = storedRows(before);
+  assert.equal(
+    before
+      .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+      .get()?.version,
+    43,
+  );
+  before.close();
+  assert.equal((await databaseInfo(directory)).databasePath, databasePath);
+  const initialized = new DatabaseSync(databasePath);
+  assert.deepEqual(
+    storedRows(initialized).filter(
+      ([name]) =>
+        name !== "schema_migrations" &&
+        name !== "scan_severity_assessments" &&
+        name !== "local_finding_embeddings",
+    ),
+    savedRows.filter(([name]) => name !== "schema_migrations"),
+  );
+  assert.equal(
+    initialized
+      .prepare("SELECT COUNT(*) AS count FROM local_finding_embeddings")
+      .get()?.count,
+    0,
+  );
+  assert.equal(
+    initialized
+      .prepare("SELECT COUNT(*) AS count FROM scan_severity_assessments")
+      .get()?.count,
+    0,
+  );
+  assert.equal(
+    initialized
+      .prepare("SELECT name FROM schema_migrations WHERE version=48")
+      .get()?.name,
+    "persist repository identities",
+  );
+  assert.equal(
+    initialized
+      .prepare("SELECT name FROM schema_migrations WHERE version=49")
+      .get(),
+    undefined,
+  );
+  initialized.close();
+  const queried = spawnSync(
+    process.env.PYTHON?.trim() || "python3",
+    [
+      "-I",
+      "-B",
+      "-c",
+      `
+import argparse, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+import workbench_db as workbench, workbench_scan_history as history
+with sqlite3.connect(sys.argv[2]) as connection:
+    connection.row_factory = sqlite3.Row
+    workbench.apply_migrations(connection)
+    for repository in sys.argv[3:5]:
+        args = argparse.Namespace(repository=repository, scan_root=None, target_id=None,
+            mode=None, status=None, query=None, limit=None, offset=0)
+        scans = history.list_scans(connection, args)['scans']
+        assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 49
+`,
+      scripts,
+      databasePath,
+      repository,
+      linked,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(queried.status, 0, queried.stderr || String(queried.error));
 });

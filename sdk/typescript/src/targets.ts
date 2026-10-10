@@ -735,8 +735,15 @@ export async function gitHistoryIdentity(
   repository: string,
   git: TrustedExecutable,
   signal?: AbortSignal,
-): Promise<{ commonDirectory: string | null; origin: string | null }> {
-  const read = async (args: readonly string[]): Promise<string | null> => {
+): Promise<{
+  commonDirectory: string | null;
+  origin: string | null;
+  relativePath: string | null;
+}> {
+  const read = async (
+    args: readonly string[],
+    allowEmpty = false,
+  ): Promise<string | null> => {
     try {
       const { stdout } = await execFile(
         git.executable,
@@ -748,20 +755,22 @@ export async function gitHistoryIdentity(
           maxBuffer: Infinity,
         },
       );
-      return (
-        stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "") ||
-        null
+      const value = stdout.replace(
+        process.platform === "win32" ? /\r?\n$/u : /\n$/u,
+        "",
       );
+      return value || (allowEmpty ? "" : null);
     } catch {
       throwIfAborted(signal);
       return null;
     }
   };
-  const [commonDirectory, origin] = await Promise.all([
+  const [commonDirectory, origin, relativePath] = await Promise.all([
     read(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     read(["remote", "get-url", "origin"]),
+    read(["rev-parse", "--show-prefix"], true),
   ]);
-  return { commonDirectory, origin };
+  return { commonDirectory, origin, relativePath };
 }
 
 export function gitOutput(

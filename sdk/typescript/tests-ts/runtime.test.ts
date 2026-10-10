@@ -6810,3 +6810,58 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(false);
   });
 });
+
+test.each([
+  ["legacy", false],
+  ["current", true],
+] as const)(
+  "lists automatic matching pairs with a %s custom plugin",
+  async (_kind, supportsFocus) => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "custom-matching-plugin");
+    const scripts = join(pluginRoot, "scripts");
+    await mkdir(scripts, { recursive: true });
+    await writeFile(
+      join(scripts, "workbench_db.py"),
+      [
+        "import argparse, json, os, sys",
+        "from pathlib import Path",
+        "with Path(__file__).with_name('calls').open('a') as calls: calls.write(json.dumps(sys.argv[1:]) + '\\n')",
+        "parser = argparse.ArgumentParser()",
+        "command = parser.add_subparsers(dest='command', required=True).add_parser('list-unmatched-scan-pairs')",
+        "command.add_argument('--repository', required=True)",
+        ...(supportsFocus ? ["command.add_argument('--after-scan-id')"] : []),
+        "args = parser.parse_args()",
+        "if os.environ.get('FAIL_LIST'): sys.exit('Synthetic matching database failure')",
+        "print(json.dumps({'batches': [{'afterScanId': 'current'}]}))",
+      ].join("\n"),
+    );
+    const options = {
+      python: await resolvePluginPython(),
+      pluginRoot,
+      environment: { PATH: process.env["PATH"] },
+    };
+    const args = [
+      "list-unmatched-scan-pairs",
+      "--repository",
+      root,
+      "--after-scan-id",
+      "current",
+    ];
+    expect(await runWorkbench(options, args)).toEqual({
+      batches: [{ afterScanId: "current" }],
+    });
+    const calls = (await readFile(join(scripts, "calls"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(calls).toEqual(supportsFocus ? [args] : [args, args.slice(0, -2)]);
+    expect(args.slice(-2)).toEqual(["--after-scan-id", "current"]);
+    await expect(
+      runWorkbench(
+        { ...options, environment: { ...options.environment, FAIL_LIST: "1" } },
+        args,
+      ),
+    ).rejects.toThrow("Synthetic matching database failure");
+  },
+);

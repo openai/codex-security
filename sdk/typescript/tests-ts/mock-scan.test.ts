@@ -4,6 +4,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rm,
   realpath,
   writeFile,
 } from "node:fs/promises";
@@ -353,6 +354,71 @@ test.each([
     await expect(
       client.run(repository, { mock: true, ...options }),
     ).rejects.toThrow("require model calls");
+  } finally {
+    await client.close();
+  }
+});
+
+test("history archive compatibility restores completed mock output after a checkout is replaced", async () => {
+  const { root, repository, client, environment, python } = await fixture();
+  const git = async (...args: string[]) => {
+    const result = await runCommand(
+      "git",
+      [
+        "-C",
+        repository,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "user.name=Example",
+        "-c",
+        "user.email=example@example.test",
+        ...args,
+      ],
+      { timeout: 10000 },
+    );
+    expect(result.status).toBe(0);
+  };
+  const output = join(root, "completed-output");
+  try {
+    await git("init");
+    await git("add", ".");
+    await git("commit", "-m", "Initial synthetic fixture");
+    const first = await client.run(repository, {
+      mock: true,
+      outputDir: output,
+    });
+    const manifest = await readFile(join(output, "scan-manifest.json"));
+    await rm(join(repository, ".git"), { recursive: true, force: true });
+    await git("init");
+    await git("add", ".");
+    await git("commit", "-m", "Replacement synthetic fixture");
+    await expect(
+      client.run(repository, {
+        mock: true,
+        outputDir: output,
+        archiveExisting: true,
+      }),
+    ).rejects.toThrow();
+    expect(await readFile(join(output, "scan-manifest.json"))).toEqual(
+      manifest,
+    );
+    const history = await runWorkbench(
+      { python, pluginRoot: PLUGIN_ROOT, environment },
+      ["list-scans", "--scan-root", output],
+    );
+    expect(
+      (history["scans"] as { scanId: string; scanDir: string }[]).find(
+        ({ scanId }) => scanId === first.manifest.scan.id,
+      )?.scanDir,
+    ).toBe(output);
+    expect(
+      (await readdir(root)).filter((name) =>
+        name.startsWith("completed-output.previous-"),
+      ),
+    ).toEqual([]);
   } finally {
     await client.close();
   }

@@ -74,6 +74,12 @@ def apply_migrations(
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
+            elif version == 48:
+                should_backfill_targets = (
+                    repair_repository_identity_migration(connection)
+                    or version not in applied
+                    or should_backfill_targets
+                )
             elif version in applied:
                 if version in (2, 12, 13, 26, 28, 31, 32, 47):
                     repair_additive_migration(connection, version)
@@ -87,6 +93,10 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
+                elif version == 49:
+                    from workbench_target_state import upgrade_linux_repository_generations
+
+                    upgrade_linux_repository_generations(connection)
             if version not in applied:
                 connection.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -191,27 +201,119 @@ def repair_stable_targets_migration(connection: sqlite3.Connection) -> bool:
         and "target_id" in scan_columns
         and existing_objects == {"security_targets", "scans_by_target"}
     ):
-        return False
+        needs_backfill = bool(
+            connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM workspaces AS workspace
+                    WHERE (workspace.target_id IS NULL AND workspace.target_path IS NOT NULL)
+                        OR (
+                            workspace.target_id IS NOT NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM security_targets
+                                WHERE security_targets.id = workspace.target_id
+                            )
+                        )
+                ) OR EXISTS (
+                    SELECT 1 FROM scans AS scan
+                    WHERE scan.target_id IS NULL
+                        OR NOT EXISTS (
+                            SELECT 1 FROM security_targets
+                            WHERE security_targets.id = scan.target_id
+                        )
+                )
+                """
+            ).fetchone()[0]
+        )
+        if not needs_backfill:
+            return False
+    else:
+        migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 16)
+        for statement in sql_statements(migration_sql):
+            if statement.startswith("ALTER TABLE workspaces"):
+                add_column_if_missing(
+                    connection,
+                    "workspaces",
+                    "target_id",
+                    "TEXT REFERENCES security_targets(id)",
+                )
+                continue
+            if statement.startswith("ALTER TABLE scans"):
+                add_column_if_missing(
+                    connection,
+                    "scans",
+                    "target_id",
+                    "TEXT REFERENCES security_targets(id)",
+                )
+                continue
+            statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+            statement = statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+            connection.execute(statement)
 
-    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 16)
+    for table in ("workspaces", "scans"):
+        connection.execute(
+            f"""
+            UPDATE {table}
+            SET target_id = NULL
+            WHERE target_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM security_targets
+                    WHERE security_targets.id = {table}.target_id
+                )
+            """
+        )
+    return True
+
+
+def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool:
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(security_targets)")}
+    index_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'security_targets_by_repository_identity'"
+    ).fetchone()
+    identity_changed = "repository_identity" not in columns or index_exists is None
+    if (
+        "repository_identity" in columns
+        and connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = 48 AND name = ?",
+            ("persist repository identities",),
+        ).fetchone()
+        is not None
+        and not any(
+            row["name"] == "repository_generation"
+            for row in connection.execute("PRAGMA table_info(scans)")
+        )
+    ):
+        from workbench_target_state import normalize_pre_release_repository_identities
+
+        normalize_pre_release_repository_identities(connection)
+    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 48)
     for statement in sql_statements(migration_sql):
-        if statement.startswith(("ALTER TABLE workspaces", "ALTER TABLE scans")):
+        if statement.startswith(("ALTER TABLE security_targets", "ALTER TABLE scans")):
             add_migration_column(connection, statement)
             continue
-        statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
-        statement = statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+        for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TRIGGER "):
+            if statement.startswith(prefix):
+                statement = statement.replace(prefix, f"{prefix}IF NOT EXISTS ", 1)
+                break
         connection.execute(statement)
-    connection.execute(
-        """
-        UPDATE scans
-        SET target_id = NULL
-        WHERE target_id IS NOT NULL
-            AND NOT EXISTS (
-                SELECT 1 FROM security_targets WHERE security_targets.id = scans.target_id
-            )
-        """
-    )
-    return True
+
+    from workbench_scan_history import _scan_completion_order
+
+    sequence = connection.execute(
+        "SELECT COALESCE(MAX(completion_sequence), 0) FROM scans"
+    ).fetchone()[0]
+    unsequenced = connection.execute(
+        "SELECT id, started_at, completed_at FROM scans "
+        "WHERE status = 'complete' AND completion_sequence IS NULL"
+    ).fetchall()
+    for scan in sorted(unsequenced, key=_scan_completion_order):
+        sequence += 1
+        connection.execute(
+            "UPDATE scans SET completion_sequence = ? WHERE id = ? AND completion_sequence IS NULL",
+            (sequence, scan["id"]),
+        )
+    return identity_changed
 
 
 def repair_additive_migration(connection: sqlite3.Connection, version: int) -> None:

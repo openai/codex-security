@@ -4,7 +4,6 @@ import argparse
 import json
 import sqlite3
 import threading
-import uuid
 from pathlib import Path
 
 import pytest
@@ -277,7 +276,7 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
         archived_scan_dir=None,
         registration_json_stdin=False,
         recipe_json_stdin=False,
-        parent_scan_id=str(uuid.uuid4()),
+        parent_scan_id=None,
         recipe_json=json.dumps(
             {
                 "config": {},
@@ -315,6 +314,7 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
         if path == scan_dir:
             competitor.start()
             assert waiting.wait(5)
+            raise SystemExit("Synthetic failure after archive replacement")
         return result
 
     with sqlite3.connect(database) as first:
@@ -322,7 +322,7 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
         first.row_factory = sqlite3.Row
         with monkeypatch.context() as patch:
             patch.setattr(Path, "mkdir", replacement)
-            with pytest.raises(SystemExit, match="not found"):
+            with pytest.raises(SystemExit, match="Synthetic failure after archive replacement"):
                 register(first, arguments)
         competitor.join(10)
         assert not competitor.is_alive()

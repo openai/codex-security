@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sqlite3
 import sys
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_constants import CLAIM_LEASE_SECONDS, DELIVERED_ACTION_LEASE_SECONDS
+from workbench_constants import (
+    CLAIM_LEASE_SECONDS,
+    DELIVERED_ACTION_LEASE_SECONDS,
+    PATCH_PREVIEW_BYTES,
+)
 from workbench_validation import require_occurrence, require_uuid
 
 COMMANDS = {
@@ -24,6 +31,56 @@ COMMANDS = {
     "set-finding-remediation",
 }
 SCAN_STATUS_ERROR = "Remediation is available only for successfully completed scans."
+
+
+def patch_artifact_preview(
+    scan_dir: Path,
+    relative_path: str | None,
+    expected_digest: str | None,
+    open_scan_file: Callable[[Path, str], AbstractContextManager[BinaryIO]],
+) -> tuple[str | None, dict[str, int | bool] | None]:
+    if relative_path is None or expected_digest is None:
+        return None, None
+    digest = hashlib.sha256()
+    preview = bytearray()
+    additions = 0
+    deletions = 0
+    file_count = 0
+    old_headers = 0
+    new_headers = 0
+    at_line_start = True
+    try:
+        with open_scan_file(scan_dir, relative_path) as patch:
+            while chunk := patch.readline(1024 * 1024):
+                digest.update(chunk)
+                if len(preview) <= PATCH_PREVIEW_BYTES:
+                    preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
+                if at_line_start:
+                    if chunk.startswith(b"diff --git "):
+                        file_count += 1
+                    elif chunk.startswith(b"+++ "):
+                        new_headers += 1
+                    elif chunk.startswith(b"--- "):
+                        old_headers += 1
+                    elif chunk.startswith(b"+"):
+                        additions += 1
+                    elif chunk.startswith(b"-"):
+                        deletions += 1
+                at_line_start = chunk.endswith(b"\n")
+    except SystemExit:
+        return None, None
+    if f"sha256:{digest.hexdigest()}" != expected_digest:
+        return None, None
+    preview_truncated = len(preview) > PATCH_PREVIEW_BYTES
+    preview_text = preview[:PATCH_PREVIEW_BYTES].decode("utf-8", errors="replace")
+    if preview_truncated:
+        preview_text = f"{preview_text}\n... patch preview truncated ..."
+    return preview_text, {
+        "additions": additions,
+        "deletions": deletions,
+        "fileCount": file_count or min(old_headers, new_headers),
+        "previewTruncated": preview_truncated,
+    }
 
 
 def require_available(connection: sqlite3.Connection, args: Any, require_scan: Any) -> None:

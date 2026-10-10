@@ -89,6 +89,8 @@ EXPECTED_MIGRATIONS = [
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
     (47, "snapshot deep scan discovery context"),
+    (48, "persist repository identities"),
+    (49, "stabilize Linux repository generations"),
 ]
 
 
@@ -2620,3 +2622,59 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
             ).fetchone()
             is not None
         ) is supported
+
+
+@pytest.mark.parametrize("installed", ["main", "repository-identities", "fresh"])
+def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        if installed != "fresh":
+            create_migration_history(connection)
+            historical = []
+            for version, name, sql in namespace["MIGRATIONS"]:
+                if installed == "main" and name == "persist repository identities":
+                    continue
+                if installed == "repository-identities" and name == "editable scan names":
+                    continue
+                historical.append(
+                    (42 if name == "persist repository identities" else version, name, sql)
+                )
+            apply_historical_migrations(connection, historical, "synthetic-original")
+        else:
+            namespace["apply_schema_migrations"](
+                connection, namespace["MIGRATIONS"], namespace["now"], lambda _: None
+            )
+        connection.execute(
+            "INSERT INTO workspaces(id,created_at,updated_at) "
+            "VALUES ('synthetic-workspace','synthetic-created','synthetic-updated')"
+        )
+        connection.execute(
+            "INSERT INTO scans(id,workspace_id,target_path,target_revision,scope,mode,scan_dir,"
+            "status,phase,started_at,completed_at,created_at,updated_at) VALUES "
+            "('synthetic-scan','synthetic-workspace','/synthetic/repository','synthetic-revision',"
+            "'.','standard','/synthetic/output','complete','reporting',"
+            "'2026-01-01T00:00:00Z','2026-01-01T00:01:00Z','synthetic-created','synthetic-updated')"
+        )
+        saved_scan = dict(connection.execute("SELECT * FROM scans").fetchone())
+        timestamps = {
+            row["name"]: row["applied_at"]
+            for row in connection.execute("SELECT * FROM schema_migrations")
+        }
+        for _ in range(2):
+            namespace["apply_schema_migrations"](
+                connection, namespace["MIGRATIONS"], namespace["now"], lambda _: None
+            )
+            scan = dict(connection.execute("SELECT * FROM scans").fetchone())
+            assert saved_scan.items() <= scan.items()
+            assert scan["name"] is None
+            assert scan["repository_generation"] is None
+            assert scan["completion_sequence"] == 1
+            migrations = {
+                row["name"]: (row["version"], row["applied_at"])
+                for row in connection.execute("SELECT * FROM schema_migrations")
+            }
+            assert migrations["editable scan names"][0] == 42
+            assert migrations["persist repository identities"][0] == 48
+            for name, timestamp in timestamps.items():
+                assert migrations[name][1] == timestamp

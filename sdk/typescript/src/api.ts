@@ -2410,9 +2410,7 @@ export class CodexSecurity {
             scanId,
             repository: repo,
             previousFindings: previousFindings.filter(
-              (finding) =>
-                finding["scanId"] !== scanId &&
-                finding["targetId"] === targetId,
+              (finding) => finding["scanId"] !== scanId,
             ),
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
@@ -3775,20 +3773,28 @@ export class CodexSecurity {
 
 export async function listRepositoryFindings(
   workbench: (args: readonly string[]) => Promise<JsonObject>,
-  targetId: string,
+  target: string | { repository: string },
   status: "open" | "all" = "open",
 ): Promise<JsonObject[] | undefined> {
   const findings: JsonObject[] = [];
+  const selector =
+    typeof target === "string"
+      ? ["--target-id", target]
+      : ["--repository", target.repository];
   let offset: number | undefined;
   do {
     const page = await workbench([
       "list-global-findings",
-      "--target-id",
-      targetId,
+      ...selector,
       ...(status === "open" ? ["--status", "open"] : []),
       ...(offset === undefined ? [] : ["--offset", String(offset)]),
     ]);
-    if (!Array.isArray(page["findings"])) return undefined;
+    if (
+      page["projectionAvailable"] === false ||
+      !Array.isArray(page["findings"])
+    ) {
+      return undefined;
+    }
     findings.push(...(page["findings"] as JsonObject[]));
     offset =
       typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;

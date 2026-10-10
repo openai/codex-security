@@ -123,24 +123,21 @@ def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
-    finding["summary"] = (
-        "The `environment/add` RPC forwards `environmentId` to "
-        "`EnvironmentManager::upsert_environment()`."
-    )
+    finding["summary"] = "The `route/set` RPC forwards `routeName` to `RouteTable::set_route()`."
     finding["codeEvidence"] = [
         {
             "id": "runtime-upsert",
             "label": "Runtime upsert omits the reserved-ID check",
-            "path": "codex-rs/exec-server/src/environment.rs",
-            "startLine": 253,
-            "endLine": 281,
+            "path": "src/routes/table.rs",
+            "startLine": 25,
+            "endLine": 29,
             "language": "rust",
-            "code": "self.environments.write().insert(environment_id, environment);",
-            "explanation": "The runtime path inserts `local` without reusing the startup check.",
+            "code": "self.routes.insert(route_name, destination);",
+            "explanation": "The runtime path inserts `owner` without reusing the startup check.",
         }
     ]
     finding["rootCause"] = {
-        "summary": "`local` is reserved, but `upsert_environment()` accepts it.",
+        "summary": "`owner` is reserved, but `set_route()` accepts it.",
         "evidenceRefs": ["runtime-upsert"],
     }
     finding["validation"] = {
@@ -148,19 +145,19 @@ def test_projection_renders_inline_code_and_section_code_evidence() -> None:
         "evidenceRefs": ["runtime-upsert"],
     }
     finding["attackPath"] = {
-        "dataflow": {"summary": "`environment/add` -> shared environment map"},
+        "dataflow": {"summary": "`route/set` -> shared route map"},
         "evidenceRefs": ["runtime-upsert"],
     }
 
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
-    assert "The `environment/add` RPC forwards `environmentId`" in markdown
+    assert "The `route/set` RPC forwards `routeName`" in markdown
     assert "#### Root Cause" in markdown
     assert "**Runtime upsert omits the reserved-ID check**" in markdown
-    assert "`codex-rs/exec-server/src/environment.rs:253-281`" in markdown
+    assert "`src/routes/table.rs:25-29`" in markdown
     assert "```rust" in markdown
-    assert "self.environments.write().insert(environment_id, environment);" in markdown
-    assert "The runtime path inserts `local` without reusing the startup check." in markdown
+    assert "self.routes.insert(route_name, destination);" in markdown
+    assert "The runtime path inserts `owner` without reusing the startup check." in markdown
 
 
 @pytest.mark.parametrize("reference_key", ["evidenceRefs", "evidence_refs"])

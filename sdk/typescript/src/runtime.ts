@@ -177,6 +177,8 @@ export interface PluginPythonOptions {
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
   protectedRoot?: string | readonly string[];
+  /** @internal Additional roots excluded only from ambient interpreter discovery. */
+  discoveryProtectedRoots?: readonly string[];
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -1726,7 +1728,23 @@ export async function runWorkbench(
       args[0] === "register-cli-scan" &&
       args.includes("--archive-existing") &&
       !args.includes("--archived-scan-dir");
-    stdout = await run(args, input, archiveHandshake);
+    try {
+      stdout = await run(args, input, archiveHandshake);
+    } catch (error) {
+      const focusedIndex = args.indexOf("--after-scan-id");
+      if (
+        args[0] !== "list-unmatched-scan-pairs" ||
+        focusedIndex === -1 ||
+        !/unrecognized arguments: --after-scan-id(?:\s+\S+)?$/u.test(
+          processErrorDetail(error),
+        )
+      )
+        throw error;
+      options.signal?.throwIfAborted();
+      const legacyArgs = [...args];
+      legacyArgs.splice(focusedIndex, 2);
+      stdout = await run(legacyArgs, input, archiveHandshake);
+    }
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
@@ -3037,7 +3055,11 @@ export async function resolvePluginPython(
   }
   // Named interpreters are ambient PATH discovery, even when PYTHON names one.
   // Explicit trusted paths and managed runtimes retain their existing precedence.
-  const discoveryRoots = [...protectedRoot, ...callerDirectories];
+  const discoveryRoots = [
+    ...protectedRoot,
+    ...callerDirectories,
+    ...(options.discoveryProtectedRoots ?? []),
+  ];
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,

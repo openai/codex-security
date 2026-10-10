@@ -528,7 +528,9 @@ credentials, and workflow resume behavior.
 For `dedupe --scan latest`, matching across worktrees or clones requires a Git
 executable outside all saved scan targets. If a historical target includes the
 available Git installation, use `codex-security dedupe --scan SCAN_ID` with an
-explicit saved scan ID. Exact-path `latest` lookup still works without Git.
+explicit saved scan ID. Exact-path `latest` lookup works without Git for non-Git
+scan targets; recorded Git generations require a trusted Git executable to verify
+that the checkout still owns its saved history.
 
 Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
 `--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are
@@ -1117,18 +1119,28 @@ attach only their owner's session. Unrecorded earlier retry sessions may be abse
 Commands default to the current repository. IDs accept unique prefixes of at
 least eight characters.
 
-| Command                                               | Purpose                                                    |
-| ----------------------------------------------------- | ---------------------------------------------------------- |
-| `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.      |
-| `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                 |
-| `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active. |
-| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                         |
-| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                            |
-| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                    |
-| `scans match --all`                                   | Match completed scans across worktrees/clones.             |
-| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
-| `findings list [REPOSITORY]`                          | List open findings.                                        |
-| `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
+Linked Git worktrees share scans, findings, and reviewer decisions when their
+scans record the same repository generation in the selected state database.
+Older scans without this evidence remain target-local. Removed worktrees retain
+their recorded history; a reused checkout path does not inherit its previous
+owner's history. Separately verified clones can still be compared explicitly,
+but their finding histories remain separate.
+
+Finding confirmation and automatic post-scan matching follow completion order
+in the workbench, without changing sealed report timestamps.
+
+| Command                                               | Purpose                                                                          |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.                            |
+| `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                                       |
+| `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active.                       |
+| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                                               |
+| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                                                  |
+| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                          |
+| `scans match --all`                                   | Match completed scans in this repository generation, including linked worktrees. |
+| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.                                 |
+| `findings list [REPOSITORY]`                          | List open findings.                                                              |
+| `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                                      |
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
 selects the latest scan of any status. After a successful scan followed by a
@@ -1169,6 +1181,10 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Keep it private,
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
+
+Keep the same state directory across linked worktrees. Changing it selects
+separate history, artifacts, and a dedicated Codex sign-in. `--scan-root`
+filters recorded artifact paths; it does not import another directory's scans.
 
 Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
 Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
