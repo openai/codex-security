@@ -98,6 +98,33 @@ changed; otherwise run `logout`, then `login`.
 Some cybersecurity requests and protected findings require
 [Trusted Access for Cyber](https://chatgpt.com/cyber).
 
+### Daybreak Blue with an API key
+
+The [Responses API defaults](https://developers.openai.com/api/docs/guides/daybreak#understand-defaults-when-omitted)
+can apply Daybreak Blue to compatible mainline models when the API organization
+and project have access. An omitted `access_programs.cyber` field does not by
+itself mean that Daybreak treatment is disabled.
+
+Choose a compatible model available to your project and select Daybreak Blue
+explicitly:
+
+```bash
+codex-security scan /path/to/repository \
+  --auth api-key --model "<model>" --cyber-access-program daybreak_blue
+```
+
+In the SDK, select your model through `codexOverrides.model` and pass
+`auth: "api-key"` and `cyberAccessProgram: "daybreak_blue"` in the scan options.
+Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan.
+The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
+for configuration precedence and the API-key feature setting.
+
+The previously documented `gpt-daybreak-blue-latest` alias is
+[deprecated](https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest).
+Use a current model available to your project. `access_programs.cyber` is a
+Responses API field; use the supported selector instead of passing it as a
+`--codex` configuration key.
+
 ### Select a Cyber access program
 
 For the built-in OpenAI provider, choose `standard`, `daybreak_blue`, or
