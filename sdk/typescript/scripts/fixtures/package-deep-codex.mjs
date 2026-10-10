@@ -35,6 +35,45 @@ async function run() {
         case "initialize":
           result = { userAgent: "package-fixture" };
           break;
+        case "thread/start":
+          result = {
+            thread: {
+              id: process.env.PACKAGE_DEEP_PARENT_THREAD,
+              path: process.env.PACKAGE_DEEP_TRACE + ".session.jsonl",
+            },
+            model: "gpt-5.5",
+            reasoningEffort: "high",
+          };
+          break;
+        case "thread/inject_items":
+          assert.equal(
+            message.params.threadId,
+            process.env.PACKAGE_DEEP_PARENT_THREAD,
+          );
+          await writeFile(
+            process.env.PACKAGE_DEEP_TRACE + ".session.jsonl",
+            JSON.stringify({
+              type: "turn_context",
+              payload: {
+                permission_profile: {
+                  type: "managed",
+                  file_system: {
+                    type: "restricted",
+                    entries: [
+                      {
+                        path: { type: "special", value: { kind: "root" } },
+                        access: "read",
+                      },
+                    ],
+                  },
+                  network: "restricted",
+                },
+              },
+            }) + "\n",
+            { mode: 0o600 },
+          );
+          result = {};
+          break;
         case "config/read":
           result = {
             config: {
