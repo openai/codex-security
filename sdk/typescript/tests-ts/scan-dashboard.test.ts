@@ -176,6 +176,9 @@ describe("live scan dashboard", () => {
     ["split final byte", ["\u001B", "\u001BO1;5", "P\u0003"], 1],
     ["coalesced prefix then interrupt", ["\u001B\u001BO1;", "5P\u0003"], 1],
     ["repeated Escape prefix", ["\u001B\u001B\u001BO1;", "5P\u0003"], 1],
+    ["coalesced CSI prefix", ["\u001B\u001B[1;", "2Q"], 0],
+    ["split CSI prefix", ["\u001B", "\u001B[1;", "2Q\u0003"], 1],
+    ["repeated CSI prefix", ["\u001B\u001B\u001B[1;", "2Q\u0003"], 1],
   ] as const)(
     "keeps modified function keys and following controls across budget dismissal: %s",
     async (_name, chunks, interrupts) => {

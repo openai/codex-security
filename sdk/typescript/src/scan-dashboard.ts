@@ -152,7 +152,7 @@ export class ScanDashboard {
     request: ScanBudget;
     input: string;
     error: string;
-    finish: (limit?: number, ss3Parameters?: boolean) => void;
+    finish: (limit?: number, preserveInput?: boolean) => void;
   } | null = null;
   #timer: NodeJS.Timeout | null = null;
   #refreshPending = false;
@@ -192,7 +192,7 @@ export class ScanDashboard {
     this.#handleKeys(batch.keys);
   };
 
-  #setKeyInput(input: PassThrough | null, ss3Parameters = false): void {
+  #setKeyInput(input: PassThrough | null): void {
     const previous = this.#keyInput;
     if (previous !== null) {
       previous.removeAllListeners("keypress");
@@ -207,7 +207,7 @@ export class ScanDashboard {
     this.#keyInput = input;
     if (input === null) return;
     let pending = 0;
-    this.#ss3Parameters = ss3Parameters;
+    this.#ss3Parameters = false;
     input.setEncoding("utf8");
     input.on("data", (text: string) => {
       if (this.#inputKeys !== null) {
@@ -260,9 +260,11 @@ export class ScanDashboard {
           continued
         ) {
           // The buffered Escape belongs to the prior chunk's budget dismissal.
-          // Decode this chunk again after that transition, retaining its own keys.
+          // Replay the complete remaining key, including a prefix from prior chunks.
           this.#handleKeys(["\u001B"]);
-          batch.replay = true;
+          this.#setKeyInput(new PassThrough());
+          batch.replay =
+            key.sequence.slice(1) + (pending ? batch.text.slice(-pending) : "");
         } else if (keys.length > 1 && keys.every((key) => key === "\u001B")) {
           // Readline can consume a following key's Escape as a repeated Escape.
           // Keep that introducer with the remaining decoded text for replay.
@@ -286,7 +288,7 @@ export class ScanDashboard {
           budget.finish();
           this.#options.onInterrupt?.();
         } else if (key === "\u001B") {
-          budget.finish(undefined, this.#ss3Parameters);
+          budget.finish(undefined, true);
         } else if (key === "\r" || key === "\n") {
           const value = budget.input.trim();
           const limit = Number(value);
@@ -573,11 +575,11 @@ export class ScanDashboard {
     this.#setKeyInput(new PassThrough());
     return new Promise((resolve) => {
       const abort = () => finish();
-      const finish = (limit?: number, ss3Parameters = false) => {
+      const finish = (limit?: number, preserveInput = false) => {
         request.signal.removeEventListener("abort", abort);
         this.#budget = null;
-        if (this.#timer !== null)
-          this.#setKeyInput(new PassThrough(), ss3Parameters);
+        if (this.#timer !== null && !preserveInput)
+          this.#setKeyInput(new PassThrough());
         this.#refresh();
         resolve(limit);
       };
