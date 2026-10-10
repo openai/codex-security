@@ -8506,6 +8506,7 @@ async function snapshotPatchTree(
         : ["-C", repository, "ls-files", "--stage", "--full-name", "-z"],
       commandRoot,
       {
+        maxBuffer: Infinity,
         trim: false,
         environment:
           commandRoot === repository
