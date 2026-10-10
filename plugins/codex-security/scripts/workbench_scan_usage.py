@@ -263,12 +263,13 @@ def _discover_rollout_sessions(
     try:
         database.row_factory = sqlite3.Row
         database.execute("PRAGMA query_only = ON")
-        _require_state_columns(database, "threads", {"id", "rollout_path"})
-        _require_state_columns(
-            database,
-            "thread_spawn_edges",
-            {"parent_thread_id", "child_thread_id"},
-        )
+        for table, required in (
+            ("threads", {"id", "rollout_path"}),
+            ("thread_spawn_edges", {"parent_thread_id", "child_thread_id"}),
+        ):
+            columns = {str(row["name"]) for row in database.execute(f"PRAGMA table_info({table})")}
+            if not required.issubset(columns):
+                raise ValueError("Codex state graph does not expose the required thread columns.")
         sessions: dict[str, RolloutSession] = {}
         missing_thread_ids: set[str] = set()
         for root in roots:
@@ -346,20 +347,6 @@ def _discover_rollout_sessions(
         return list(sessions.values()), missing_thread_ids
     finally:
         database.close()
-
-
-def _require_state_columns(
-    connection: sqlite3.Connection,
-    table: str,
-    required: set[str],
-) -> None:
-    statements = {
-        "threads": "PRAGMA table_info(threads)",
-        "thread_spawn_edges": "PRAGMA table_info(thread_spawn_edges)",
-    }
-    columns = {str(row["name"]) for row in connection.execute(statements[table])}
-    if not required.issubset(columns):
-        raise ValueError("Codex state graph does not expose the required thread columns.")
 
 
 def _rollout_path(value: object) -> Path | None:
