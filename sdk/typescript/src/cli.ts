@@ -947,6 +947,7 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 
 interface ScanArguments extends ResolvedScanSettings {
   publicationOnly?: boolean;
+  restoreReplayConfiguration?: () => Promise<JsonObject>;
   rerunInputIdentity?: JsonValue;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
@@ -6525,6 +6526,12 @@ async function prepareScanArgumentsFromRecipe(
   return {
     repository,
     publicationOnly,
+    ...(publicationOnly
+      ? {
+          restoreReplayConfiguration: () =>
+            restoreReplayProfile(config, recipe["replayProfile"], environment),
+        }
+      : {}),
     inheritedPermissions:
       inheritedPermissions as ScanOptions["inheritedPermissions"],
     preserveProviderEnvironment: recipe["preserveProviderEnvironment"] === true,
@@ -9101,6 +9108,28 @@ async function executeScan(
       ),
     };
     try {
+      if (
+        selected.findings.length > 0 &&
+        arguments_.restoreReplayConfiguration
+      ) {
+        const restored = resolveCodexProfile(
+          await arguments_.restoreReplayConfiguration(),
+        );
+        const provider = scanModelProvider(restored);
+        if (typeof provider === "string") {
+          providerOptions = {
+            provider,
+            providerConfiguration:
+              (
+                restored["model_providers"] as
+                  Record<string, JsonObject> | undefined
+              )?.[provider] ??
+              (isExternalModelProvider(provider)
+                ? EXTERNAL_CODEX_PROVIDERS[provider]
+                : undefined),
+          };
+        }
+      }
       patches = await runFindingPatches(
         selected,
         {
