@@ -22,6 +22,7 @@ const bundle = await build({
       new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
     ),
     contents: `export * from "./src/artifact-scan-draft.ts";
+      export { recordCodexSecurityScanDraft } from "./tests/scan-draft-writer-fixture.ts";
       export * from "./src/deep-scan/artifacts.ts";
       export * from "./src/deep-scan/artifact-validation.ts";
       export * from "./src/deep-scan/worker-runner.ts";`,
