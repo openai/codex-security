@@ -23,6 +23,7 @@ import {
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import { DeepScanWorkerRunner } from "./worker-runner.js";
+import { isTransientPersistenceError } from "./store.js";
 import type {
   AcceptedDiscovery,
   DedupOutcome,
@@ -284,6 +285,7 @@ export class DeepScanCoordinator {
   }
 
   private async run(): Promise<void> {
+    let selectingFinalization = false;
     try {
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
@@ -300,6 +302,7 @@ export class DeepScanCoordinator {
           throw new Error(
             "The Deep Scan store cannot select finalization input.",
           );
+        selectingFinalization = true;
         this.state = await this.options.store.selectFinalization({
           scanId: this.state.scanId,
           reason: schedulerResult.reason,
@@ -307,6 +310,7 @@ export class DeepScanCoordinator {
           resultPath: schedulerResult.resultPath,
           omittedWorkerIds: schedulerResult.omittedWorkerIds,
         });
+        selectingFinalization = false;
         await this.completeSelectedFinalization();
         return;
       }
@@ -361,7 +365,12 @@ export class DeepScanCoordinator {
       if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
         return;
       }
-      if (this.state.finalizationInput) {
+      if (
+        this.state.finalizationInput ||
+        (selectingFinalization && isTransientPersistenceError(error))
+      ) {
+        // A lost selection response may hide a committed input even when the
+        // ownership read also fails. Leave that selection attempt resumable.
         // Publication can be retried from the committed input without model work.
         this.log({
           event: "coordinator_publication_pending",

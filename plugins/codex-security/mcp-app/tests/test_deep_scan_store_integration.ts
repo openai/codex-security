@@ -49,6 +49,8 @@ export { startDeepScanEngine } from "./src/deep-scan/engine.ts";`,
   },
 });
 
+await testSelectionResponseAndReadFailure(true);
+await testSelectionResponseAndReadFailure(false);
 await testNativeSelectedFinalizationWithoutCheckout("deleted");
 await testNativeSelectedFinalizationWithoutCheckout("moved");
 await testFreeformFailureMessagesAgainstRealWorkbench();
@@ -62,6 +64,185 @@ await testConcurrentParentDraftsPreserveBothCheckpoints();
 await testCoordinatorCommitResponseRecovery();
 await testCoordinatorCommitResponseRecovery("commit-deep-scan-dedup");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
+
+async function testSelectionResponseAndReadFailure(validationFailure: boolean) {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-selected-response-",
+  );
+  const threadId = "selection-response-owner";
+  const runWorkbench = createWorkbenchRunner(environment);
+  const readStore = new WorkbenchDeepScanStore(runWorkbench);
+  const lostReply = Object.assign(new Error("Synthetic selection reply lost"), {
+    code: "ETIMEDOUT",
+  });
+  let selectionWrites = 0;
+  let workerWrites = 0;
+  let failureWrites = 0;
+  let failedStatusReads = 0;
+  let committedSelection: unknown;
+  let prematurePublication = 0;
+  const store = new WorkbenchDeepScanStore(
+    async (
+      args: string[],
+      input?: string,
+      selectFinalization = false,
+      withExecutionSettings = false,
+      signal?: AbortSignal,
+      releaseCoordinator = false,
+    ) => {
+      if (args[0] === "fail-deep-scan") failureWrites += 1;
+      if (args[0] === "upsert-deep-scan-worker") workerWrites += 1;
+      if (
+        !validationFailure &&
+        args[0] === "get-deep-scan" &&
+        selectionWrites > 0 &&
+        failedStatusReads === 0
+      ) {
+        failedStatusReads += 1;
+        throw Object.assign(
+          new Error("Synthetic selected-state read unavailable"),
+          { code: "ETIMEDOUT" },
+        );
+      }
+      if (selectFinalization) {
+        selectionWrites += 1;
+        if (validationFailure) {
+          const invalid = [...args];
+          invalid[invalid.indexOf("--terminal-reason") + 1] =
+            "invalid-synthetic-reason";
+          return await runWorkbench(
+            invalid,
+            input,
+            true,
+            withExecutionSettings,
+            signal,
+            releaseCoordinator,
+          );
+        }
+      }
+      const result = await runWorkbench(
+        args,
+        input,
+        selectFinalization,
+        withExecutionSettings,
+        signal,
+        releaseCoordinator,
+      );
+      if (selectFinalization) {
+        const saved = await readStore.get(
+          args[args.indexOf("--scan-id") + 1],
+          threadId,
+        );
+        committedSelection ??= saved.finalizationInput;
+        assert.deepEqual(saved.finalizationInput, committedSelection);
+        throw lostReply;
+      }
+      return result;
+    },
+  );
+  try {
+    await mkdir(path.join(environment.CODEX_HOME, "codex-security"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(environment.CODEX_HOME, "codex-security", "config.toml"),
+      "[deep_scan]\nworkers = 1\nstop_after_no_new = 1\nmax_discovery_runs = 1\n",
+    );
+    const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
+      targetPath,
+      threadId,
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    const executor = new FakeExecutor();
+    const coordinator = new DeepScanCoordinator({
+      run: claim.run,
+      store,
+      pluginRoot,
+      threadId,
+      executor,
+      heartbeatIntervalMs: 60_000,
+      onComplete: async () => {
+        prematurePublication += 1;
+        throw new Error(
+          "Unexpected publication before selection acknowledgement",
+        );
+      },
+    });
+    coordinator.start();
+    if (validationFailure) {
+      const terminal = await coordinator.wait(undefined, 30_000);
+      assert.equal(terminal?.status, "failed");
+      assert.match(terminal?.error ?? "", /invalid-synthetic-reason/);
+      assert.equal(failureWrites, 1);
+      assert.equal(prematurePublication, 0);
+      assert.ok(!(await readStore.get(run.scanId, threadId)).finalizationInput);
+      return;
+    }
+    await assert.rejects(
+      coordinator.wait(undefined, 30_000),
+      (error: Error) => {
+        assert.match(error.message, /Synthetic selection reply lost/);
+        assert.equal(error.cause, lostReply);
+        return true;
+      },
+    );
+    assert.equal(failedStatusReads, 1);
+    assert.equal(failureWrites, 0);
+    assert.equal(prematurePublication, 0);
+    const selected = await store.get(run.scanId, threadId);
+    assert.equal(selected.status, "running");
+    assert.ok(selected.finalizationInput);
+    assert.deepEqual(selected.finalizationInput, committedSelection);
+    const parent = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+    assert.equal(parent.scan.progress.status, "running");
+    const workerIds = selected.persistedWorkers.map(
+      (worker: { id: string }) => worker.id,
+    );
+    const writesBeforeResume = { selectionWrites, workerWrites };
+    await store.releaseCoordinator(run.scanId);
+    let finalized = 0;
+    const resumed = await startDeepScanEngine({
+      run: selected,
+      store,
+      registry: new DeepScanCoordinatorRegistry(),
+      runWorkbench,
+      pluginRoot,
+      pythonCommand: process.env.PYTHON || "python3",
+      parentSandbox: { filesystemDenies: [] },
+      threadId,
+      onFinalized: async () => {
+        finalized += 1;
+      },
+    });
+    const terminal = await resumed.coordinator.wait(undefined, 30_000);
+    assert.equal(terminal?.status, "succeeded");
+    assert.equal(finalized, 1);
+    const persisted = await store.get(run.scanId, threadId);
+    assert.deepEqual(persisted.finalizationInput, committedSelection);
+    assert.deepEqual(
+      persisted.persistedWorkers.map((worker: { id: string }) => worker.id),
+      workerIds,
+    );
+    assert.deepEqual({ selectionWrites, workerWrites }, writesBeforeResume);
+    assert.equal(executor.discoveryCalls, 1);
+    assert.equal(executor.dedupCalls, 1);
+    assert.equal(failureWrites, 0);
+    assert.ok(
+      Array.isArray((await readJson(run.scanDir, "findings.json")).findings),
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
 
 async function testNativeSelectedFinalizationWithoutCheckout(
   targetChange: "deleted" | "moved",
