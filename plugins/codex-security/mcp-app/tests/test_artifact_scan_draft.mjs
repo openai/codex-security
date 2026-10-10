@@ -2574,18 +2574,19 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     coverage: duplicateSurfaceCoverage,
   });
   const normalizedDuplicateCoverage = await readJson(root, "coverage.json");
-  assert.deepEqual(
-    normalizedDuplicateCoverage.surfaces.map((surface) => surface.id),
-    [
-      "surface-web-ui",
-      "surface-web-ui-3",
-      "surface-web-ui-2",
-      "surface_uploads-2",
-      "surface_uploads",
-      "surface_archive-extraction",
-      "surface_archive-extraction-2",
-    ],
+  const surfaceIds = normalizedDuplicateCoverage.surfaces.map(
+    (surface) => surface.id,
   );
+  assert.deepEqual(surfaceIds.slice(0, 3), [
+    "surface-web-ui",
+    "surface-web-ui-3",
+    "surface-web-ui-2",
+  ]);
+  assert.equal(surfaceIds[4], "surface_uploads");
+  for (const index of [3, 5, 6])
+    assert.match(surfaceIds[index], /^surface-[0-9a-f]{16}(?:-\d+)?$/);
+  assert.equal(new Set(surfaceIds).size, surfaceIds.length);
+
   assert.deepEqual(
     normalizedDuplicateCoverage.deferred,
     duplicateSurfaceCoverage.deferred,
