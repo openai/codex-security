@@ -474,7 +474,8 @@ checkpointing, and publication behavior.
 ### Suggest finding owners
 
 Use `suggest-owners` or the SDK's `suggestOwners()` to suggest contributors based
-on source and Git history. Suggestions do not assign tickets. See
+on CODEOWNERS, source, and Git history. Declared owners take priority over Git
+contributors. Suggestions do not assign tickets. See
 [owner suggestions](docs/cli.md#suggest-finding-owners) for input and output examples.
 
 ### Publish findings to Cloud

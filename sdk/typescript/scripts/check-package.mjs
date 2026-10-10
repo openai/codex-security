@@ -151,6 +151,7 @@ const allowedFiles = new Set([
     "cli-signals",
     "classify-severity",
     "classify-scan-severity",
+    "codeowners",
     "severity-store",
     "cloud-publish",
     "codex-prompt",
