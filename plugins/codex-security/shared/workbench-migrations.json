@@ -393,5 +393,12 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
     ]
+  },
+  {
+    "version": 48,
+    "name": "freeze stopped scan checkpoint selections",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
+    ]
   }
 ]

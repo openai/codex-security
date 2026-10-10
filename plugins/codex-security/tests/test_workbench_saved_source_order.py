@@ -33,8 +33,9 @@ def call_workbench(monkeypatch, state, codex_home, *args):
 
 
 @pytest.mark.parametrize("latest_pending", [True, False])
+@pytest.mark.parametrize("failure_stage", ["publication", "source-order", "head-and-source-order"])
 def test_failed_publication_keeps_order_after_identical_result_rewrite(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, latest_pending: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, latest_pending: bool, failure_stage: str
 ) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
@@ -49,8 +50,20 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
     def fail_publication(*args, **kwargs):
         raise OSError("injected publication failure")
 
+    write = saved.write_scan_local_bytes
+
+    def fail_snapshot(root, relative, contents):
+        if relative.startswith("source-order/") or (
+            failure_stage == "head-and-source-order" and "/checkpoint-heads/" in relative
+        ):
+            raise OSError("injected snapshot failure")
+        return write(root, relative, contents)
+
     with monkeypatch.context() as patch:
-        patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        if failure_stage == "publication":
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        else:
+            patch.setattr(saved, "write_scan_local_bytes", fail_snapshot)
         call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         frozen = json.loads(
@@ -58,7 +71,32 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
                 "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
             ).fetchone()[0]
         )
-    assert result.relative_to(scan_dir).as_posix() in frozen
+    sources = frozen.get("sources", frozen)
+    assert result.relative_to(scan_dir).as_posix() in sources
+
+    if failure_stage != "publication":
+        with monkeypatch.context() as patch:
+            patch.setattr(saved, "write_scan_local_bytes", fail_snapshot)
+            with pytest.raises((saved.ContractError, OSError), match="snapshot failure"):
+                call_workbench(
+                    patch,
+                    state,
+                    codex_home,
+                    "preserve-scan-results",
+                    "--scan-id",
+                    scan_id,
+                    "--thread-id",
+                    "standard-worker-thread",
+                )
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                json.loads(
+                    connection.execute(
+                        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+                    ).fetchone()[0]
+                )
+                == frozen
+            )
 
     result.write_bytes(result.read_bytes())
     os.utime(result, ns=(300, 300))
@@ -74,10 +112,10 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
     )
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert any(row["id"] == "review" for row in coverage["deferred"]) is latest_pending
-    assert (
-        json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
-        == frozen
-    )
+    published_sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
+        "preservedSources"
+    ]
+    assert all(published_sources[path] == digest for path, digest in sources.items())
 
 
 @pytest.mark.parametrize("explicit_recovery", [False, True])

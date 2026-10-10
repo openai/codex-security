@@ -21,7 +21,8 @@
     "    VALUES",
     "        (0, 33, 40, 'index finding identity and comparison history'),",
     "        (1, 25, 26, 'persist scan completion warnings'),",
-    "        (2, 12, 20, 'phase-specific scan progress')",
+    "        (2, 12, 20, 'phase-specific scan progress'),",
+    "        (3, 47, 48, 'freeze stopped scan checkpoint selections')",
     ")",
     "SELECT 0 AS position, 'error' AS operation,",
     "        'The Codex Security database has an unsupported mirror migration history.' AS value",
@@ -37,6 +38,18 @@
     "        ' WHERE version = ' || version || ' AND name = ' || quote(name)",
     "    FROM moves JOIN schema_migrations USING (version, name)",
     "ORDER BY position;"
+  ],
+  [
+    "-- A main-branch reader may have added discovery context under the old checkpoint number.",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (47, ' ||",
+    "    quote(json_extract(value, '$.name')) || ', ?)' AS value",
+    "FROM json_each(:history) WHERE json_extract(value, '$.version') = 47",
+    "    AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 48",
+    "        AND name = 'freeze stopped scan checkpoint selections')",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 47)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info('deep_scan_runs')",
+    "        WHERE name = 'discovery_user_context_json');"
   ],
   [
     "-- profiles: preserve legacy columns before the later repairs.",

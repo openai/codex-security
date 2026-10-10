@@ -1123,3 +1123,50 @@ def test_older_attempt_selected_head_cannot_supersede_current_result(tmp_path):
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     for result in (first, replay):
         assert result[2]["surfaces"] == [current]
+
+
+@pytest.mark.parametrize("scan_id", ["legacy-tied-head", "frozen-worker-heads"])
+def test_legacy_tied_worker_heads_keep_pending_work_on_replay(tmp_path: Path, scan_id: str) -> None:
+    pending, closed = drafts(scan_id)
+    binding = saved_binding("deep_repository", repository="synthetic")
+    output = tmp_path / "worker"
+    completed = write_checkpoint(output / "checkpoints", closed)
+    reopened = write_checkpoint(output / "checkpoints", pending)
+    frozen = {}
+    for checkpoint in (completed, reopened):
+        os.utime(checkpoint, ns=(100, 100))
+        select(output, checkpoint, 500)
+        frozen.update(
+            {
+                path: digest
+                for path, (digest, _) in saved._capture_saved_source(
+                    tmp_path, "worker/checkpoint-head.json", scan_id
+                ).items()
+            }
+        )
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers, stopped=True)
+    repeated = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=replay[0]["scan"]["preservedSources"],
+        checkpoint_heads=replay[0]["scan"]["preservedCheckpointHeads"],
+    )
+    for documents in (first, replay, repeated):
+        assert pending["coverage"]["deferred"][0] in documents[2]["deferred"]
+        assert not documents[2].get("resolvedDeferred")
