@@ -3185,6 +3185,7 @@ def patch_artifact_preview(
     old_headers = 0
     new_headers = 0
     at_line_start = True
+    hunk_lines = 0
     try:
         with open_scan_local_file(scan_dir, relative_path) as patch:
             while chunk := patch.readline(1024 * 1024):
@@ -3194,16 +3195,25 @@ def patch_artifact_preview(
                 if at_line_start:
                     if chunk.startswith(b"diff --git "):
                         file_count += 1
-                    elif chunk.startswith(b"+++ "):
+                        hunk_lines = 0
+                    elif match := re.match(rb"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", chunk):
+                        hunk_lines = sum(
+                            int(count) if count is not None else 1 for count in match.groups()
+                        )
+                    elif hunk_lines == 0 and chunk.startswith(b"+++ "):
                         new_headers += 1
-                    elif chunk.startswith(b"--- "):
+                    elif hunk_lines == 0 and chunk.startswith(b"--- "):
                         old_headers += 1
                     elif chunk.startswith(b"+"):
                         additions += 1
+                        hunk_lines = max(0, hunk_lines - 1)
                     elif chunk.startswith(b"-"):
                         deletions += 1
+                        hunk_lines = max(0, hunk_lines - 1)
+                    elif chunk.startswith((b" ", b"\n")):
+                        hunk_lines = max(0, hunk_lines - 2)
                 at_line_start = chunk.endswith(b"\n")
-    except SystemExit:
+    except (SystemExit, ValueError):
         return None, None
     if f"sha256:{digest.hexdigest()}" != expected_digest:
         return None, None

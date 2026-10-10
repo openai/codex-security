@@ -286,7 +286,12 @@ export function dependencies(
         args,
         repository,
         commandOptions,
-      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
+      )) ??
+      (command === "gh" && args[0] === "pr" && args[1] === "list"
+        ? "[]"
+        : args.includes("--name-only")
+          ? "src/finding-1.ts\0"
+          : ""),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),

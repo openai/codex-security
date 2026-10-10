@@ -259,6 +259,22 @@ describe("interactive patch finding browser", () => {
     ]);
   });
 
+  test("cancels with Ctrl-C while editing instructions", async () => {
+    const selected: (PatchSelection | null)[] = [];
+    const app = render(
+      createElement(PatchTui, {
+        repository: "/work/example",
+        findings: findings(["high"]),
+        color: false,
+        onComplete: (value) => selected.push(value),
+      }),
+    );
+    await press(app, "i");
+    await press(app, "Unfinished instructions");
+    await press(app, "\u0003");
+    expect(selected).toEqual([null]);
+  });
+
   test("edits instructions per finding and only returns selected guidance", async () => {
     const selected: (PatchSelection | null)[] = [];
     const app = render(

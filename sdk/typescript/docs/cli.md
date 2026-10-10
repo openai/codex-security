@@ -1455,9 +1455,38 @@ GITLAB_HOST=gitlab.example.com codex-security patch --scan SCAN_ID --create-pr
 ```
 
 Both providers return `pullRequest: { branch, url }`. Supplied-issue patching
-requires a clean tree. If publication fails, run the printed
+requires a clean tree. Saved-scan publication also refuses patched files that had
+staged, unstaged, or untracked changes before patching; local edits and generated
+patches remain available for review. Existing patch branches and pull requests
+are checked before patching, including closed or merged requests. Review and
+publish further patches from the same scan separately.
+
+Automatic publication also compares changed files with in-memory digests of
+nonempty, ignored regular files enumerated by Git before patching. An exact
+content match is refused, including a move or copy into a new publishable path;
+the edits remain available for manual review and publication. This can also
+refuse independently generated content identical to an ignored template or build
+output. Empty files, files the current user cannot read, and external link targets
+are not fingerprinted. File permissions are left unchanged. This adds reads
+proportional to the ignored data and does not detect arbitrary transformed or
+partial copies. Existing tracked edits are protected by path overlap and
+Git's rename/copy recognition.
+
+All configured push destinations are checked for existing branch namespace
+collisions before patching. Separate remote servers cannot be updated atomically:
+a remote can change or fail after that check, leaving an earlier push complete.
+
+Publication uses Git's submodule availability check unless `push.recurseSubmodules`
+or `submodule.recurse` is configured. This default also checks retained local
+metadata for changed, deinitialized submodules. These checks use remote-tracking
+refs; they do not fetch or publish child commits. Existing recursion settings pass
+through to Git unchanged. If publication reports an unpublished submodule commit,
+publish that commit from the submodule first, then resume the saved parent commit.
+
+If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
-commit and refuses changed branches. Retain the GitLab host setting on resume.
+commit without rerunning Codex, but refuses changed branches or an existing
+request pointing to a different commit. Retain the GitLab host setting on resume.
 
 ### Patch Linear issues
 

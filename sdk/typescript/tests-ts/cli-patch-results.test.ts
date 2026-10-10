@@ -16,12 +16,14 @@ async function repositoryFixture({ initializeGit = true } = {}) {
   const runRepositoryCommand: NonNullable<
     FixtureOptions["onRepositoryCommand"]
   > = async (command, args, cwd, options) => {
-    const { stdout } = await execFileAsync(command, [...args], {
+    const child = execFileAsync(command, [...args], {
       cwd,
       encoding: "utf8",
       env: { ...process.env, ...options?.environment },
       windowsHide: true,
     });
+    child.child.stdin?.end(options?.input);
+    const { stdout } = await child;
     return options?.trim === false ? stdout : stdout.trim();
   };
   const git = (...args: string[]) =>

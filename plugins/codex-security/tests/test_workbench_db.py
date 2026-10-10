@@ -3317,6 +3317,60 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     assert "markdownReport" not in reopened["scan"]["artifacts"]
 
 
+@pytest.mark.parametrize("git_headers", [False, True])
+def test_patch_statistics_distinguish_hunk_content_from_file_headers(
+    tmp_path: Path, git_headers: bool
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT))
+    patch = b""
+    for filename in (b"first.txt", b"second.txt"):
+        if git_headers:
+            patch += b"diff --git a/" + filename + b" b/" + filename + b"\n"
+        patch += b"--- a/" + filename + b"\n+++ b/" + filename + b"\n"
+        patch += b"@@ -1,2 +1,2 @@\n--- deleted content\n+++ added content\n-old\n+new\n"
+    (tmp_path / "patch.diff").write_bytes(patch)
+    preview, stats = namespace["patch_artifact_preview"](
+        tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    )
+    assert preview == patch.decode()
+    assert stats == {"additions": 4, "deletions": 4, "fileCount": 2, "previewTruncated": False}
+
+
+@pytest.mark.parametrize("blank_context", [b" \n", b"\n"])
+def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_context: bytes) -> None:
+    namespace = runpy.run_path(str(SCRIPT))
+    patch = b""
+    for filename in (b"first.txt", b"second.txt"):
+        (tmp_path / filename.decode()).write_bytes(b"old\n\nlast\n")
+        patch += b"--- a/" + filename + b"\n+++ b/" + filename + b"\n"
+        patch += b"@@ -1,3 +1,3 @@\n-old\n+new\n" + blank_context + b" last\n"
+    (tmp_path / "patch.diff").write_bytes(patch)
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "apply", "patch.diff"], cwd=tmp_path, check=True)
+    for filename in ("first.txt", "second.txt"):
+        assert (tmp_path / filename).read_bytes() == b"new\n\nlast\n"
+    preview, stats = namespace["patch_artifact_preview"](
+        tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    )
+    assert preview == patch.decode()
+    assert stats == {"additions": 2, "deletions": 2, "fileCount": 2, "previewTruncated": False}
+
+
+def test_patch_preview_tolerates_integer_conversion_failure(tmp_path: Path) -> None:
+    namespace = runpy.run_path(str(SCRIPT))
+    count = b"0" * 5000 + b"1"
+    patch = (
+        b"--- a/file.txt\n+++ b/file.txt\n@@ -1," + count + b" +1," + count + b" @@\n-old\n+new\n"
+    )
+    (tmp_path / "file.txt").write_bytes(b"old\n")
+    (tmp_path / "patch.diff").write_bytes(patch)
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "apply", "--check", "patch.diff"], cwd=tmp_path, check=True)
+    assert namespace["patch_artifact_preview"](
+        tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    ) == (None, None)
+
+
 @pytest.mark.cross_platform
 def test_large_patch_preview_preserves_digest_checks(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]

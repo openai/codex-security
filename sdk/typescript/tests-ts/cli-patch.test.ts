@@ -1,151 +1,54 @@
-import { gitText } from "./support/shell.js";
 import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
 import { parse as parseToml } from "smol-toml";
-import { describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
-import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
+import type { Finding, JsonObject } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { capture, dependencies } from "./cli-fixtures.js";
+import {
+  temporaryDirectory,
+  createTemporaryDirectories,
+} from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
-
-const CURRENT_REPOSITORY = resolve("/current/repository");
-const SAVED_REPOSITORY = resolve("/saved/repository");
-const STATE_DIRECTORY = resolve("/tmp/codex-security-state");
-
-function resultWithFindings(severities: readonly SeverityLevel[]) {
-  const result = fakeResult(severities);
-  result.findings.findings.forEach((finding, index) => {
-    Object.assign(finding, {
-      findingId: `csf_${index + 1}`,
-      occurrenceId: `occ_${index + 1}`,
-      title: `Finding ${index + 1}`,
-      summary: `Summary ${index + 1}`,
-      locations: [
-        { path: `src/finding-${index + 1}.ts`, startLine: index + 1 },
-      ],
-    });
-  });
-  return result;
-}
-
-function savedScan(
-  result: ReturnType<typeof resultWithFindings>,
-  scanId = "scan-1",
-  targetPath = SAVED_REPOSITORY,
-): JsonObject {
-  return {
-    scan: {
-      scanId,
-      targetPath,
-      findings: result.findings.findings as unknown as JsonObject[],
-    },
-  };
-}
-
-function completePatches(
-  args: readonly string[],
-  output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
-  status: "verified" | "blocked" = "verified",
-): Finding[] {
-  const prompt = output?.appServer?.prompt ?? args.at(-1)!;
-  const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
-  output?.stdout.write(
-    JSON.stringify({
-      patches: findings.map((finding) => ({
-        occurrenceId: finding.occurrenceId,
-        status,
-        files: status === "verified" ? [finding.locations[0]!.path] : [],
-        ...(status === "verified"
-          ? { verification: "The exploit fails and focused tests pass." }
-          : { reason: "The required service is unavailable." }),
-      })),
-    }),
-  );
-  return findings;
-}
-
-function patchRiskSummary() {
-  return [
-    "### Recommendation: human review required",
-    "",
-    "The patch has moderate impact and low regression likelihood.",
-    "",
-    "- Protection: focused tests passed",
-    "- Recovery: revert the patch commit",
-  ].join("\n");
-}
-
-function patchRiskAssessment() {
-  const summary = patchRiskSummary();
-  return {
-    report: [
-      "<!-- codex-security:patch-risk-summary:start -->",
-      summary,
-      "<!-- codex-security:patch-risk-summary:end -->",
-      "",
-      "```json",
-      '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
-      "```",
-    ].join("\n"),
-  };
-}
-
-function patchRiskReport() {
-  return [
-    patchRiskSummary(),
-    "",
-    "```json",
-    '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
-    "```",
-  ].join("\n");
-}
-
-async function runWorkflow(
-  arguments_: string[],
-  fixtures: Parameters<typeof dependencies>[0] = {},
-  options: {
-    interactive?: boolean;
-    review?: boolean;
-    configure?: (value: ReturnType<typeof dependencies>) => void;
-  } = {},
-) {
-  const { stdout, stderr, runCli } = createCliTest(main, {
-    stderr: options.interactive,
-  });
-
-  const current = dependencies({
-    currentDirectory: CURRENT_REPOSITORY,
-    onCodex: (args, output) => {
-      completePatches(args, output);
-      return 0;
-    },
-    ...fixtures,
-  });
-  if (options.interactive) {
-    current.confirmPatchReview = async (question) => {
-      stderr.stream.write(`\n${question} (y/N)\n`);
-      return options.review ?? true;
-    };
-  }
-  options.configure?.(current);
-  return {
-    exitCode: await runCli(arguments_, current),
-    stdout: stdout.text(),
-    stderr: stderr.text(),
-  };
-}
+import {
+  CURRENT_REPOSITORY,
+  SAVED_REPOSITORY,
+  STATE_DIRECTORY,
+  readAppliedText,
+  resultWithFindings,
+  savedScan,
+  completePatches,
+  patchRiskSummary,
+  patchRiskAssessment,
+  patchRiskReport,
+  runWorkflow,
+  repositoryGit,
+  runGitRepositoryCommand,
+  publicationRepository as createPublicationRepository,
+} from "./cli-patch-fixtures.js";
 
 describe("scan and patch workflow", () => {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+
   test.each([false, true])(
     "shows progress during baseline preparation and cleans up on failure: %p",
     async (failSnapshot) => {
@@ -726,6 +629,7 @@ describe("scan and patch workflow", () => {
         onRepositoryCommand: (command, args) => {
           repositoryCommands.push({ command, args });
           if (command === "git") {
+            if (args.includes("--cached")) return "";
             if (args[0] === "remote") {
               return "https://github.example.test/example/repository.git";
             }
@@ -733,7 +637,7 @@ describe("scan and patch workflow", () => {
           }
           return args[1] === "create"
             ? "https://github.example.test/example/repository/pull/15"
-            : "";
+            : "[]";
         },
       },
       {
@@ -767,92 +671,126 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test("assesses only changes made during a literal patch run", async () => {
-    const directory = await temporaryDirectory("codex-security-patch-risk-");
-    const repository = join(directory, "repository");
-    await mkdir(repository, { recursive: true });
-    const git = repositoryGit(repository);
+  test.each(["literal", "saved rename"])(
+    "assesses only changes made during a %s patch run",
+    async (mode) => {
+      const directory = await temporaryDirectory("codex-security-patch-risk-");
+      const repository = join(directory, "repository");
+      await mkdir(join(repository, "sub"), { recursive: true });
+      const git = repositoryGit(repository);
 
-    try {
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
-      await writeFile(join(repository, "app.ts"), "original\n");
-      git("add", "--", "app.ts");
-      git("commit", "-m", "Initial synthetic checkout");
-      await writeFile(join(repository, "app.ts"), "original\nuser change\n");
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(repository, "sub", "app.ts"), "original\n");
+        git("add", "--", "sub/app.ts");
+        git("commit", "-m", "Initial synthetic checkout");
+        await writeFile(
+          join(repository, "sub", "app.ts"),
+          "original\nuser change\n",
+        );
 
-      const outcome = await runWorkflow(
-        [
-          "patch",
-          "--model",
-          "gpt-6.1-sol",
-          "--effort",
-          "max",
-          "Synthetic issue",
-          "--assess-patch-risk",
-          "--codex",
-          "analytics.enabled=false",
-          "--codex",
-          'model_provider="synthetic.gateway"',
-          "--codex",
-          'model_providers={"synthetic.gateway"={name="Synthetic",base_url="https://gateway.example.test/v1",wire_api="responses",env_key="SYNTHETIC_KEY"}}',
-        ],
-        {
-          currentDirectory: repository,
-          onCodex: async (args, output) => {
-            expect(args).toContain('model="gpt-6.1-sol"');
-            expect(args).toContain('model_reasoning_effort="max"');
-            expect(args).toContain("analytics.enabled=false");
-            expect(args).toContain('model_provider="synthetic.gateway"');
-            expect(output?.modelProvider).toBe("synthetic.gateway");
-            expect(output?.codexOverrides).toMatchObject({
-              model_providers: {
-                "synthetic.gateway": { env_key: "SYNTHETIC_KEY" },
-              },
-            });
-            expect(
-              parseToml(
-                args.find((arg) => arg.startsWith("model_providers="))!,
-              ),
-            ).toMatchObject({
-              model_providers: {
-                "synthetic.gateway": { env_key: "SYNTHETIC_KEY" },
-              },
-            });
-            if (
-              output?.appServer?.prompt.includes(
-                "$codex-security:assess-patch-risk",
-              )
-            ) {
-              const artifact = JSON.parse(
-                output.appServer.prompt
-                  .split("\n")
-                  .find((line) => line.startsWith('{"path":'))!,
-              ) as { path: string; sha256: string };
-              const patch = await readFile(artifact.path, "utf8");
-              expect(patch).toContain("+patch change");
-              expect(patch).not.toContain("+user change");
-              output.stdout.write(patchRiskAssessment().report);
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "--model",
+            "gpt-6.1-sol",
+            "--effort",
+            "max",
+            ...(mode === "literal"
+              ? ["Synthetic issue"]
+              : ["--scan", "scan-1"]),
+            "--assess-patch-risk",
+            "--codex",
+            "analytics.enabled=false",
+            "--codex",
+            'model_provider="synthetic.gateway"',
+            "--codex",
+            'model_providers={"synthetic.gateway"={name="Synthetic",base_url="https://gateway.example.test/v1",wire_api="responses",env_key="SYNTHETIC_KEY"}}',
+          ],
+          {
+            currentDirectory: join(repository, "sub"),
+            onWorkbench: () => {
+              const result = resultWithFindings(["high"]);
+              result.findings.findings[0]!.locations[0]!.path = "app.ts";
+              return savedScan(result, "scan-1", join(repository, "sub"));
+            },
+            onCodex: async (args, output) => {
+              expect(args).toContain('model="gpt-6.1-sol"');
+              expect(args).toContain('model_reasoning_effort="max"');
+              expect(args).toContain("analytics.enabled=false");
+              expect(args).toContain('model_provider="synthetic.gateway"');
+              expect(output?.modelProvider).toBe("synthetic.gateway");
+              expect(output?.codexOverrides).toMatchObject({
+                model_providers: {
+                  "synthetic.gateway": { env_key: "SYNTHETIC_KEY" },
+                },
+              });
+              expect(
+                parseToml(
+                  args.find((arg) => arg.startsWith("model_providers="))!,
+                ),
+              ).toMatchObject({
+                model_providers: {
+                  "synthetic.gateway": { env_key: "SYNTHETIC_KEY" },
+                },
+              });
+              if (
+                output?.appServer?.prompt.includes(
+                  "$codex-security:assess-patch-risk",
+                )
+              ) {
+                const artifact = JSON.parse(
+                  output.appServer.prompt
+                    .split("\n")
+                    .find((line) => line.startsWith('{"path":'))!,
+                ) as { path: string; sha256: string };
+                const patch = await readFile(artifact.path, "utf8");
+                expect(patch).toContain("+patch change");
+                if (mode === "literal")
+                  expect(patch).not.toContain("+user change");
+                else expect(patch).toContain("deleted file mode");
+                output.stdout.write(patchRiskAssessment().report);
+                return 0;
+              }
+              if (mode !== "literal")
+                await rm(join(repository, "sub", "app.ts"));
+              await writeFile(
+                join(
+                  repository,
+                  "sub",
+                  mode === "literal" ? "app.ts" : "new.ts",
+                ),
+                "original\nuser change\npatch change\n",
+              );
+              output?.stdout.write(
+                mode === "literal"
+                  ? "Patch complete."
+                  : JSON.stringify({
+                      patches: [
+                        {
+                          occurrenceId: "occ_1",
+                          status: "verified",
+                          files: ["new.ts"],
+                          verification: "Synthetic verification",
+                        },
+                      ],
+                    }),
+              );
               return 0;
-            }
-            await writeFile(
-              join(repository, "app.ts"),
-              "original\nuser change\npatch change\n",
-            );
-            output?.stdout.write("Patch complete.");
-            return 0;
+            },
+            onRepositoryCommand: runGitRepositoryCommand,
           },
-          onRepositoryCommand: runGitRepositoryCommand,
-        },
-      );
+        );
 
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(outcome.stderr).toContain("Patch risk assessment:");
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(outcome.stderr).toContain("Patch risk assessment:");
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("creates a draft pull request with the Linear patch-risk summary", async () => {
     const directory = await temporaryDirectory(
@@ -895,7 +833,7 @@ describe("scan and patch workflow", () => {
           "--create-pr",
         ],
         {
-          currentDirectory: repository,
+          currentDirectory: join(repository, "src"),
           linearClient: () =>
             ({
               issue: async () => ({
@@ -941,7 +879,14 @@ describe("scan and patch workflow", () => {
             workingDirectory,
             commandOptions,
           ) => {
-            expect(workingDirectory).toBe(repository);
+            if (
+              args.includes("--show-toplevel") ||
+              args.includes("--absolute-git-dir")
+            )
+              expect([repository, join(repository, "src")]).toContain(
+                workingDirectory,
+              );
+            else expect(workingDirectory).toBe(repository);
             if (command === "git") {
               return runGitRepositoryCommand(
                 command,
@@ -950,7 +895,7 @@ describe("scan and patch workflow", () => {
                 commandOptions,
               );
             }
-            if (args[1] === "list") return "";
+            if (args[1] === "list") return "[]";
             pullRequestArguments = args;
             return url;
           },
@@ -1419,7 +1364,7 @@ describe("scan and patch workflow", () => {
               );
             }
             githubCommands.push([...args]);
-            if (args[1] === "list") return "";
+            if (args[1] === "list") return "[]";
             pullRequestArguments = args;
             return url;
           },
@@ -1476,7 +1421,6 @@ describe("scan and patch workflow", () => {
     ["github", "create"],
     ["gitlab", "push"],
     ["gitlab", "create"],
-    ["gitlab", "missing client"],
   ])(
     "resumes %s publication after %s fails without patching again",
     async (provider, failure) => {
@@ -1520,11 +1464,28 @@ describe("scan and patch workflow", () => {
             completePatches(args, output);
             return 0;
           },
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
               if (gitlab && args[0] === "remote") {
-                expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
+                expect([
+                  ["remote", "get-url", "--push", "--all", "origin"],
+                  ["remote", "get-url", "origin"],
+                ]).toContainEqual([...args]);
                 return origin;
+              }
+              if (gitlab && args.includes("ls-remote")) {
+                const mapping = `--config-env=url.${origin}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`;
+                expect(args).toContain(mapping);
+                return runGitRepositoryCommand(
+                  command,
+                  args.map((value) =>
+                    value === mapping
+                      ? `--config-env=url.${remote}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`
+                      : value,
+                  ),
+                  cwd,
+                  options,
+                );
               }
               if (args[0] === "push") {
                 pushCalls += 1;
@@ -1533,14 +1494,25 @@ describe("scan and patch workflow", () => {
                   throw new Error("Synthetic push failure");
                 }
               }
-              return git(...args);
+              return runGitRepositoryCommand(command, args, cwd, options);
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
-            if (failure === "missing client" && failOnce) {
-              failOnce = false;
-              throw new Error("spawn glab ENOENT");
+            if (args[0] === "repo") return "synthetic-origin-id";
+            if (args[1] === "list") {
+              const candidate = {
+                url: publishedUrl,
+                head: publishedUrl
+                  ? git("rev-parse", `refs/heads/${branch}`)
+                  : "",
+                repository: "synthetic-origin-id",
+                crossRepository: false,
+              };
+              return gitlab
+                ? publishedUrl
+                  ? JSON.stringify(candidate)
+                  : ""
+                : JSON.stringify(publishedUrl ? [candidate] : []);
             }
-            if (args[1] === "list") return publishedUrl;
             expect(args[1]).toBe("create");
             if (failure === "create" && failOnce) {
               failOnce = false;
@@ -1558,10 +1530,6 @@ describe("scan and patch workflow", () => {
         );
         expect(first.exitCode).toBe(2);
         expect(first.stderr).toContain(`patch --resume-pr ${branch}`);
-        if (failure === "missing client") {
-          expect(first.stderr).toContain("spawn glab ENOENT");
-          expect(pushCalls).toBe(0);
-        }
         const commit = git("rev-parse", "HEAD");
         expect(
           git("config", "--get", `branch.${branch}.codexSecurityPatchCommit`),
@@ -1674,8 +1642,11 @@ describe("scan and patch workflow", () => {
           },
           onRepositoryCommand: (command, args) => {
             commandStarted ||=
-              command !== "git" ||
+              (command !== "git" &&
+                args[1] !== "list" &&
+                !(args[0] === "repo" && args[1] === "view")) ||
               ["checkout", "commit", "push"].includes(args[0]!);
+            if (command === "gh" && args[1] === "list") return "[]";
             return status === "outside" && args.includes("--name-only")
               ? "src/finding-1.ts\0"
               : "";
@@ -1696,7 +1667,7 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test("keeps verified scan results when pull request creation fails", async () => {
+  test("keeps completed scan results when publication preflight fails", async () => {
     const outcome = await runWorkflow(
       ["scan", "--patch", "--create-pr", "--json"],
       {
@@ -1712,8 +1683,7 @@ describe("scan and patch workflow", () => {
     expect(outcome.exitCode).toBe(2);
     expect(outcome.stderr).toContain("GitHub authentication failed.");
     expect(JSON.parse(outcome.stdout)).toMatchObject({
-      patchSeverity: "low",
-      patches: [{ occurrenceId: "occ_1", status: "verified" }],
+      patches: [],
     });
   });
 
@@ -1996,7 +1966,9 @@ describe("scan and patch workflow", () => {
       {
         result: resultWithFindings(["high"]),
         onRepositoryCommand: (command, args) => {
+          if (args.includes("--cached")) return "";
           published ||= command === "gh" && args[1] === "create";
+          if (command === "gh" && args[1] === "list") return "[]";
           return command === "gh" && args[1] === "create"
             ? url
             : args.includes("--name-only")
@@ -2082,6 +2054,7 @@ describe("scan and patch workflow", () => {
   ] as const)(
     "publishes saved-finding patches for origin %s with environment %j using %s",
     async (origin, environment, client) => {
+      const repository = await fixtures.create("patch-provider-repository-");
       const result = resultWithFindings(["high"]);
       const url =
         client === "glab"
@@ -2099,19 +2072,24 @@ describe("scan and patch workflow", () => {
         ],
         {
           environment,
-          onWorkbench: () => savedScan(result),
+          onWorkbench: () => savedScan(result, "scan-1", repository),
           onRepositoryCommand: (command, args, target) => {
-            expect(target).toBe(SAVED_REPOSITORY);
+            expect(target).toBe(repository);
             if (command === "git") {
+              if (args.includes("--show-toplevel")) return repository;
+              if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
-                expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
+                expect([
+                  ["remote", "get-url", "--push", "--all", "origin"],
+                  ["remote", "get-url", "origin"],
+                ]).toContainEqual([...args]);
                 return origin;
               }
               return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
             }
             expect(command).toBe(client);
             publicationCommands.push(args);
-            return args[1] === "create" ? url : "";
+            return args[1] === "create" ? url : command === "gh" ? "[]" : "";
           },
         },
         {
@@ -2126,10 +2104,11 @@ describe("scan and patch workflow", () => {
       expect(outcome.exitCode).toBe(0);
       expect(publicationCommands.map((args) => args[1])).toEqual([
         "list",
+        "list",
         "create",
       ]);
       if (client === "glab") {
-        expect(publicationCommands).toEqual([
+        expect(publicationCommands.slice(1)).toEqual([
           [
             "mr",
             "list",
@@ -2139,7 +2118,7 @@ describe("scan and patch workflow", () => {
             "--output",
             "json",
             "--jq",
-            ".[0].web_url // empty",
+            ".[0] | select(. != null) | {url: .web_url, head: .sha}",
             "--repo",
             origin,
           ],
@@ -2341,23 +2320,1950 @@ describe("scan and patch workflow", () => {
   });
 });
 
-function repositoryGit(repository: string) {
-  return (...args: string[]) =>
-    execFileSync("git", args, {
-      cwd: repository,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-}
+describe("patch publication integrity", () => {
+  const fixtures = createTemporaryDirectories(true);
+  test.each(
+    ["environment", "config"].flatMap((selection) =>
+      ["root", "package"].flatMap((scope) =>
+        ["absolute", "relative"].flatMap((spelling) =>
+          [false, true].map((assess) => ({
+            selection,
+            scope,
+            spelling,
+            assess,
+          })),
+        ),
+      ),
+    ),
+  )(
+    "preserves separately configured worktree metadata from $scope with $spelling $selection path and assessment=$assess",
+    async ({ selection, scope, spelling, assess }) => {
+      const root = await fixtures.create("patch-separate-worktree-");
+      const metadata = join(root, "metadata");
+      const tree = join(root, "selected-tree");
+      const directory = scope === "root" ? metadata : join(metadata, "package");
+      const nested = join(tree, "nested");
+      await mkdir(directory, { recursive: true });
+      await mkdir(nested, { recursive: true });
+      for (const repository of [metadata, nested]) {
+        const git = repositoryGit(repository);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+      }
+      await writeFile(join(nested, "app.ts"), "nested before\n");
+      const nestedGit = repositoryGit(nested);
+      nestedGit("add", ".");
+      nestedGit("commit", "-m", "Synthetic nested baseline");
+      await writeFile(join(tree, "app.ts"), "before\n");
+      await writeFile(join(tree, "unrelated.txt"), "original\n");
+      if (selection === "config")
+        repositoryGit(metadata)(
+          "config",
+          "core.worktree",
+          spelling === "absolute"
+            ? tree
+            : relative(join(metadata, ".git"), tree),
+        );
+      const environment =
+        selection === "environment"
+          ? {
+              GIT_WORK_TREE:
+                spelling === "absolute" ? tree : relative(directory, tree),
+            }
+          : {};
+      const beforeEnvironment = { ...environment };
+      const git = (...args: string[]) =>
+        runGitRepositoryCommand("git", args, directory, { environment });
+      await git("add", ".");
+      await git("commit", "-m", "Synthetic baseline");
+      await writeFile(join(tree, "unrelated.txt"), "staged user change\n");
+      await git("add", "--", join(tree, "unrelated.txt"));
+      const head = await git("rev-parse", "HEAD");
+      const staged = await git("diff", "--cached", "--binary");
+      const indexes = [metadata, nested].map((path) =>
+        join(path, ".git", "index"),
+      );
+      const beforeIndexes = await Promise.all(
+        indexes.map((path) => readFile(path)),
+      );
+      let modelCalls = 0;
+      let assessments = 0;
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic issue",
+          "--json",
+          ...(assess ? ["--assess-patch-risk"] : []),
+        ],
+        {
+          currentDirectory: directory,
+          environment,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            }),
+          onCodex: async (_args, output) => {
+            modelCalls++;
+            await writeFile(join(tree, "app.ts"), "fixed\n");
+            if (!assess)
+              await writeFile(join(nested, "app.ts"), "nested fixed\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+        {
+          configure: (current) => {
+            current.assessPatchRisk = async (request) => {
+              assessments++;
+              expect(request.repository).toBe(tree);
+              expect(request.files).toEqual(["app.ts"]);
+              expect(
+                await runGitRepositoryCommand(
+                  "git",
+                  ["rev-parse", "HEAD"],
+                  tree,
+                  {
+                    environment: request.environment,
+                  },
+                ),
+              ).toBe(head);
+              expect(
+                await runGitRepositoryCommand(
+                  "git",
+                  ["diff", "--name-only"],
+                  tree,
+                  {
+                    environment: request.environment,
+                  },
+                ),
+              ).toBe("app.ts");
+              return patchRiskAssessment();
+            };
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(modelCalls).toBe(1);
+      expect(assessments).toBe(assess ? 1 : 0);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: assess ? ["app.ts"] : ["app.ts", "nested/app.ts"],
+      });
+      expect(await git("rev-parse", "HEAD")).toBe(head);
+      expect(await git("diff", "--cached", "--binary")).toBe(staged);
+      expect(await Promise.all(indexes.map((path) => readFile(path)))).toEqual(
+        beforeIndexes,
+      );
+      expect(await readFile(join(tree, "unrelated.txt"), "utf8")).toBe(
+        "staged user change\n",
+      );
+      expect(environment).toEqual(beforeEnvironment);
+    },
+  );
 
-const runGitRepositoryCommand: NonNullable<
-  NonNullable<Parameters<typeof dependencies>[0]>["onRepositoryCommand"]
-> = (command, args, workingDirectory, options) => {
-  expect(command).toBe("git");
-  const result = gitText(args, {
-    cwd: workingDirectory,
-    env: { ...process.env, ...options?.environment },
-    stdio: ["ignore", "pipe", "pipe"],
+  test.each(
+    ["ordinary", "absolute", "relative", "empty"].flatMap((settings) =>
+      [
+        { command: "patch", flag: undefined },
+        { command: "patch", flag: "--assess-patch-risk" },
+        { command: "patch", flag: "--create-pr" },
+        { command: "scan", flag: undefined },
+        { command: "scan", flag: "--create-pr" },
+      ].map((entry) => ({ settings, ...entry })),
+    ),
+  )(
+    "preserves $command patch scope with $settings Git settings and $flag",
+    async ({ settings, command, flag }) => {
+      const root = await fixtures.create("patch-direct-scope-");
+      const directory = join(root, "package");
+      await mkdir(directory);
+      const gitSettings =
+        settings === "ordinary"
+          ? {}
+          : {
+              GIT_DIR:
+                settings === "relative"
+                  ? "../.git"
+                  : settings === "empty"
+                    ? ""
+                    : join(root, ".git"),
+              GIT_WORK_TREE:
+                settings === "relative"
+                  ? ".."
+                  : settings === "empty"
+                    ? ""
+                    : root,
+            };
+      const settingsBefore = JSON.stringify(gitSettings);
+      let inputDependencies: ReturnType<typeof dependencies> | undefined;
+      let inputRunner:
+        ReturnType<typeof dependencies>["runRepositoryCommand"] | undefined;
+      let modelCalls = 0;
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, "app.ts"), "unsafe\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const remote = await fixtures.create("patch-direct-scope-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const scanResult = resultWithFindings(["high"]);
+      scanResult.findings.findings[0]!.locations[0]!.path = "app.ts";
+      const fixture: Parameters<typeof dependencies>[0] = {
+        result: scanResult,
+        currentDirectory: directory,
+        environment: gitSettings,
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          const gitOptions = {
+            ...options,
+            environment: { ...gitSettings, ...options?.environment },
+          };
+          if (command === "git")
+            return runGitRepositoryCommand(command, args, cwd, gitOptions);
+          if (args[1] === "list") {
+            expect(
+              resolve(
+                await runGitRepositoryCommand(
+                  "git",
+                  ["rev-parse", "--show-toplevel"],
+                  cwd,
+                  gitOptions,
+                ),
+              ),
+            ).toBe(root);
+            return "[]";
+          }
+          return "https://github.example.test/example/repository/pull/1";
+        },
+        onCodex: async (_args, output) => {
+          modelCalls++;
+          expect(output?.appServer?.directory).toBe(directory);
+          await writeFile(join(directory, "app.ts"), "fixed\n");
+          if (command === "scan") completePatches(_args, output);
+          else output?.stdout.write("Fixed and checked.");
+          return 0;
+        },
+      };
+      const outcome = await runWorkflow(
+        [
+          ...(command === "scan"
+            ? ["scan", ".", "--patch"]
+            : ["patch", "Synthetic issue"]),
+          "--json",
+          ...(flag ? [flag] : []),
+        ],
+        fixture,
+        {
+          configure: (current) => {
+            inputDependencies = current;
+            inputRunner = current.runRepositoryCommand;
+            current.assessPatchRisk = async (request) => {
+              expect(request.repository).toBe(root);
+              expect(request.files).toEqual(["package/app.ts"]);
+              expect(
+                resolve(
+                  await runGitRepositoryCommand(
+                    "git",
+                    ["rev-parse", "--show-toplevel"],
+                    request.repository,
+                    {
+                      environment: request.environment ?? current.environment,
+                    },
+                  ),
+                ),
+              ).toBe(root);
+              return patchRiskAssessment();
+            };
+          },
+        },
+      );
+      expect(inputDependencies!.runRepositoryCommand).toBe(inputRunner!);
+      expect(JSON.stringify(inputDependencies!.environment)).toBe(
+        settingsBefore,
+      );
+      expect(JSON.stringify(gitSettings)).toBe(settingsBefore);
+      if (settings === "empty") {
+        expect(outcome.exitCode).toBe(flag === undefined ? 0 : 2);
+        expect(modelCalls).toBe(flag === undefined ? 1 : 0);
+        return;
+      }
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(modelCalls).toBe(1);
+      if (flag === "--create-pr") {
+        const resumed = await runWorkflow(
+          ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
+          fixture,
+        );
+        expect(resumed.exitCode, resumed.stderr).toBe(0);
+        expect(modelCalls).toBe(1);
+      }
+      const result = JSON.parse(outcome.stdout);
+      if (command === "patch")
+        expect({
+          repository: relative(directory, result.repository),
+          files: result.files,
+        }).toEqual({ repository: "", files: ["package/app.ts"] });
+      else
+        expect(result.patches).toMatchObject([
+          { status: "verified", files: ["app.ts"] },
+        ]);
+    },
+  );
+
+  test.each(
+    ["staged", "unstaged", "assume-unchanged", "clean", "deleted-before"]
+      .flatMap((dirty) =>
+        ["new.ts", "old.ts/new.ts"].map((file) => [dirty, file] as const),
+      )
+      .concat(
+        [
+          "clean-staged-rename",
+          "clean-staged-rename-supplied",
+          "clean-source-directory",
+          "clean-selected-source-directory",
+          "clean-selected-absent",
+          "clean-ignored-directory",
+        ].flatMap((state) =>
+          [
+            "new.ts",
+            ...(state.startsWith("clean-staged-rename") ||
+            state.startsWith("clean-selected")
+              ? [
+                  "src/new.ts",
+                  ...(process.platform === "win32" ? ["src\\new.ts"] : []),
+                ]
+              : []),
+          ].map((file) => [state, file] as const),
+        ),
+      ),
+  )("handles a renamed %s file at %s", async (dirty, file) => {
+    const directory = await fixtures.create("patch-renamed-local-edits-");
+    const git = repositoryGit(directory);
+    const source = /^src[/\\]/u.test(file) ? "src/old.ts" : "old.ts";
+    await mkdir(dirname(join(directory, source)), { recursive: true });
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(directory, source), "unsafe\noriginal\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic baseline");
+    const supplied = dirty === "clean-staged-rename-supplied";
+    const hasLocalEdits =
+      !dirty.startsWith("clean") && dirty !== "deleted-before";
+    const content = hasLocalEdits ? "synthetic local edit" : "original";
+    if (hasLocalEdits)
+      await writeFile(join(directory, source), `unsafe\n${content}\n`);
+    if (dirty === "deleted-before") await rm(join(directory, source));
+    if (dirty === "staged") git("add", ".");
+    if (dirty === "assume-unchanged")
+      git("update-index", "--assume-unchanged", source);
+    await writeFile(join(directory, "unrelated.ts"), "original\n");
+    await writeFile(join(directory, "hidden.ts"), "hidden\n");
+    git("add", "unrelated.ts", "hidden.ts");
+    git(
+      "commit",
+      "--only",
+      "-m",
+      "Unrelated baseline",
+      "--",
+      "unrelated.ts",
+      "hidden.ts",
+    );
+    if (!supplied) {
+      await writeFile(join(directory, "unrelated.ts"), "staged work\n");
+      git("add", "unrelated.ts");
+      await writeFile(join(directory, "unrelated.ts"), "working work\n");
+      git("update-index", "--skip-worktree", "hidden.ts");
+      await writeFile(join(directory, "intent.ts"), "intent\n");
+      git("add", "--intent-to-add", "intent.ts");
+    }
+    const unrelated = git(
+      "ls-files",
+      "--stage",
+      "--debug",
+      "--",
+      "unrelated.ts",
+      "hidden.ts",
+      "intent.ts",
+    );
+    const head = git("rev-parse", "HEAD");
+    const index = git("write-tree");
+    const remote = await fixtures.create("patch-renamed-local-remote-");
+    git("init", "--bare", remote);
+    git("remote", "add", "origin", remote);
+    const result = resultWithFindings(["high"]);
+    result.findings.findings[0]!.locations[0]!.path = source;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        ...(supplied ? ["Synthetic issue"] : ["--scan", "scan-1"]),
+        "--create-pr",
+        "--json",
+      ],
+      {
+        currentDirectory: directory,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+        onCodex: async (_args, output) => {
+          if (dirty.startsWith("clean-staged-rename")) git("mv", source, file);
+          else await rm(join(directory, source), { force: true });
+          if (
+            dirty.endsWith("source-directory") ||
+            dirty === "clean-ignored-directory"
+          ) {
+            await mkdir(join(directory, source));
+            await writeFile(
+              join(directory, source, "unverified.txt"),
+              "unverified\n",
+            );
+            if (dirty === "clean-ignored-directory")
+              await writeFile(
+                join(directory, ".git/info/exclude"),
+                "old.ts/\n",
+              );
+          }
+          await mkdir(dirname(join(directory, file)), { recursive: true });
+          await writeFile(join(directory, file), `fixed\n${content}\n`);
+          output?.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: [
+                    file,
+                    ...(dirty.startsWith("clean-selected") ? [source] : []),
+                  ],
+                  verification: "Synthetic regression passed.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(hasLocalEdits ? 2 : 0);
+    if (hasLocalEdits) {
+      expect(outcome.stderr).toContain("uncommitted changes before patching");
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(git("write-tree")).toBe(index);
+      expect(git("ls-remote", "origin")).toBe("");
+    } else {
+      expect(git("show", `HEAD:${file.replaceAll("\\", "/")}`)).toBe(
+        `fixed\n${content}`,
+      );
+      if (dirty.startsWith("clean"))
+        expect(
+          git("diff", "--name-status", "--no-renames", "HEAD^", "HEAD"),
+        ).toContain(`D\t${source}`);
+      expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+    }
+    expect(
+      git(
+        "ls-files",
+        "--stage",
+        "--debug",
+        "--",
+        "unrelated.ts",
+        "hidden.ts",
+        "intent.ts",
+      ),
+    ).toBe(unrelated);
+    expect(await readFile(join(directory, "unrelated.ts"), "utf8")).toBe(
+      supplied ? "original\n" : "working work\n",
+    );
+    if (
+      dirty.endsWith("source-directory") ||
+      dirty === "clean-ignored-directory"
+    ) {
+      expect(
+        await readFile(join(directory, source, "unverified.txt"), "utf8"),
+      ).toBe("unverified\n");
+      expect(
+        git("ls-tree", "-r", "--name-only", "HEAD").includes("unverified.txt"),
+      ).toBe(dirty === "clean-selected-source-directory");
+    }
+    expect(await readFile(join(directory, file), "utf8")).toBe(
+      `fixed\n${content}\n`,
+    );
   });
-  return options?.trim === false ? result : result.trim();
-};
+
+  afterEach(fixtures.cleanup);
+  test.each(["commit", "commit result", "checkpoint"])(
+    "preserves local work when patch %s fails",
+    async (failure) => {
+      const directory = await fixtures.create("patch-creation-failure-");
+      const git = repositoryGit(directory);
+      const result = resultWithFindings(["high"]);
+      await mkdir(join(directory, "src"));
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, "src/finding-1.ts"), "unsafe\n");
+      await writeFile(join(directory, "other.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const remote = await fixtures.create("patch-creation-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      await writeFile(join(directory, "other.ts"), "staged work\n");
+      git("add", "other.ts");
+      const base = git("rev-parse", "HEAD");
+      const index = git("write-tree");
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onCodex: async (args, output) => {
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command !== "git") return "[]";
+            if (failure === "commit result" && args.includes("commit")) {
+              runGitRepositoryCommand(command, args, cwd, options);
+              throw new Error("Synthetic commit result failure");
+            }
+            if (
+              (failure === "commit" && args.includes("commit")) ||
+              (failure === "checkpoint" &&
+                args[0] === "config" &&
+                args[1] === "--local")
+            )
+              throw new Error(`Synthetic ${failure} failure`);
+            return runGitRepositoryCommand(command, args, cwd, options);
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(`Synthetic ${failure} failure`);
+      expect(outcome.stderr).not.toContain("Retry from this repository");
+      expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
+        "fixed\n",
+      );
+      expect(git("diff", "--cached", "--name-only")).toBe("other.ts");
+      if (failure === "commit") {
+        expect(git("branch", "--show-current")).toBe("main");
+        expect(git("rev-parse", "HEAD")).toBe(base);
+        expect(git("write-tree")).toBe(index);
+        expect(
+          git(
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/codex-security/patch-scan-1",
+          ),
+        ).toBe("");
+      } else {
+        expect(git("branch", "--show-current")).toBe(
+          "codex-security/patch-scan-1",
+        );
+        expect(git("rev-parse", "HEAD")).not.toBe(base);
+        expect(outcome.stderr).toContain("checkpoint could not be saved");
+      }
+    },
+  );
+
+  test.each(["gh", "glab"])(
+    "refuses a %s resume when the published head differs from the saved commit",
+    async (client) => {
+      const onCodex = mock(() => 0);
+      let pushes = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--resume-pr", "codex-security/patch-scan-1", "--json"],
+        {
+          onCodex,
+          onRepositoryCommand: (command, args) => {
+            if (command === "git") {
+              if (args[0] === "config")
+                return args.at(-1)?.endsWith("PatchCommit")
+                  ? "verified-commit"
+                  : "Synthetic body";
+              if (args[0] === "rev-parse") return "verified-commit";
+              if (args[0] === "remote")
+                return `https://${client === "glab" ? "gitlab.com" : "github.example.test"}/example/repository.git`;
+              if (args[0] === "push") pushes += 1;
+              return "";
+            }
+            expect(command).toBe(client);
+            if (args[0] === "repo") return "synthetic-origin-id";
+            const candidate = {
+              url: `https://${client === "glab" ? "gitlab.com" : "github.example.test"}/example/repository/requests/1`,
+              head: "earlier-commit",
+              repository: "synthetic-origin-id",
+              crossRepository: false,
+            };
+            return JSON.stringify(client === "glab" ? candidate : [candidate]);
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(
+        "does not contain the saved patch commit",
+      );
+      expect(pushes).toBe(0);
+      expect(onCodex).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    ["staged", "src/finding-1.ts"],
+    ["staged", "src"],
+    ["unstaged", "src/finding-1.ts"],
+    ["unstaged", "src"],
+    ["assume-unchanged", "src/finding-1.ts"],
+    ["assume-unchanged", "src"],
+    ["untracked-and-ignored", "src"],
+  ])("keeps %s edits out of publication of %s", async (dirty, reportedPath) => {
+    for (const command of ["patch", "scan"]) {
+      const directory = await fixtures.create("patch-publication-");
+      const git = repositoryGit(directory);
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = reportedPath;
+      await mkdir(join(directory, "src"));
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(
+        join(directory, "src/finding-1.ts"),
+        "unsafe\noriginal\n",
+      );
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const originalHead = git("rev-parse", "HEAD");
+      await writeFile(
+        join(directory, "src/finding-1.ts"),
+        "unsafe\nlocal edit\n",
+      );
+      if (dirty === "staged") git("add", ".");
+      if (dirty === "assume-unchanged")
+        git("update-index", "--assume-unchanged", "src/finding-1.ts");
+      let expectedIndex = git("write-tree");
+      const remote = await fixtures.create("patch-publication-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const outcome = await runWorkflow(
+        command === "patch"
+          ? ["patch", "--scan", "scan-1", "--create-pr", "--json"]
+          : ["scan", directory, "--patch", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          result,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (args, output) => {
+            await writeFile(
+              join(directory, "src/finding-1.ts"),
+              "fixed\nlocal edit\n",
+            );
+            if (dirty === "untracked-and-ignored") {
+              await writeFile(
+                join(directory, ".gitignore"),
+                "src/finding-1.ts\n",
+              );
+              git("rm", "--cached", "--force", "src/finding-1.ts");
+              expectedIndex = git("write-tree");
+            }
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("uncommitted changes before patching");
+      expect(git("rev-parse", "HEAD")).toBe(originalHead);
+      expect(git("write-tree")).toBe(expectedIndex);
+      expect(git("ls-remote", "origin")).toBe("");
+      expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
+        "fixed\nlocal edit\n",
+      );
+    }
+  });
+
+  test.each(["local", "remote", "push remote", "OPEN", "CLOSED", "MERGED"])(
+    "preserves an existing %s patch publication",
+    async (existing) => {
+      const directory = await fixtures.create("patch-repeat-");
+      const git = repositoryGit(directory);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await mkdir(join(directory, "src"));
+      await writeFile(join(directory, "src/finding-1.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const remote = await fixtures.create("patch-repeat-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      if (existing === "local") git("branch", "codex-security/patch-scan-1");
+      if (existing === "push remote") {
+        const pushRemote = await fixtures.create("patch-repeat-push-remote-");
+        git("init", "--bare", pushRemote);
+        git("remote", "set-url", "--push", "origin", pushRemote);
+      }
+      if (existing === "remote" || existing === "push remote")
+        git("push", "origin", "HEAD:refs/heads/codex-security/patch-scan-1");
+      const branch = "codex-security/patch-scan-1";
+      const pushRemote = git("remote", "get-url", "--push", "origin");
+      const before = git("ls-remote", pushRemote, `refs/heads/${branch}`);
+      const result = resultWithFindings(["high"]);
+      const onCodex = mock(
+        async (
+          args: readonly string[],
+          output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
+        ) => {
+          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+          completePatches(args, output);
+          return 0;
+        },
+      );
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onCodex,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : existing === "remote" || existing === "push remote"
+                ? "[]"
+                : JSON.stringify([
+                    {
+                      url: "https://github.example.test/example/repository/pull/1",
+                      head: git("rev-parse", "HEAD"),
+                      repository: "synthetic-origin-id",
+                      crossRepository: false,
+                      state: existing,
+                    },
+                  ]),
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(onCodex).toHaveBeenCalledTimes(0);
+      expect(git("ls-remote", pushRemote, `refs/heads/${branch}`)).toBe(before);
+      expect(outcome.stderr).toContain("already exists");
+    },
+  );
+
+  test.each([130, 143])(
+    "retains completed and partial patch changes after exit %s",
+    async (status) => {
+      const directory = await fixtures.create("patch-interrupted-");
+      const git = repositoryGit(directory);
+      const result = resultWithFindings(["high", "high"]);
+      await mkdir(join(directory, "src"));
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      for (const index of [1, 2])
+        await writeFile(join(directory, `src/finding-${index}.ts`), "unsafe\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      let calls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--json"],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (args, output) => {
+            calls += 1;
+            await writeFile(
+              join(directory, `src/finding-${calls}.ts`),
+              "changed\n",
+            );
+            if (calls === 2) return status;
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(status);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        filesChanged: 2,
+        patches: [
+          { occurrenceId: "occ_1", status: "verified" },
+          {
+            occurrenceId: "occ_2",
+            status: "failed",
+            files: ["src/finding-2.ts"],
+          },
+        ],
+      });
+    },
+  );
+
+  test.each(["outer", "nested"])(
+    "ignores %s build output when a repository contains a gitlink",
+    async (location) => {
+      const directory = await fixtures.create("patch-git-ignore-");
+      const git = repositoryGit(directory);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, ".gitignore"), "build.log\n");
+      const nested = join(directory, "nested");
+      await mkdir(nested);
+      const inner = repositoryGit(nested);
+      inner("init", "--initial-branch=main");
+      inner("config", "user.name", "Synthetic User");
+      inner("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, ".gitignore"), "build.log\n");
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: directory,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            await writeFile(
+              join(location === "outer" ? directory : nested, "build.log"),
+              "build finished\n",
+            );
+            output?.stdout.write("No source changes were needed.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: false,
+        files: [],
+      });
+      expect(git("status", "--porcelain")).toBe("");
+    },
+  );
+
+  test.each([false, true])(
+    "resolves pre-existing dirty paths from the Git root for a subdirectory scan: overlap=%s",
+    async (overlap) => {
+      const directory = await fixtures.create(
+        "patch-subdirectory-publication-",
+      );
+      const git = repositoryGit(directory);
+      const scanned = join(directory, "package");
+      await mkdir(scanned);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, "package.json"), "root original\n");
+      await writeFile(join(scanned, "package.json"), "unsafe\noriginal\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const dirty = overlap ? "package/package.json" : "package.json";
+      await writeFile(join(directory, dirty), "unsafe\nlocal edit\n");
+      git("add", dirty);
+      const originalHead = git("rev-parse", "HEAD");
+      const originalIndex = git("write-tree");
+      const remote = await fixtures.create("patch-subdirectory-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = "package.json";
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: scanned,
+          onWorkbench: () => savedScan(result, "scan-1", scanned),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (args, output) => {
+            await writeFile(
+              join(scanned, "package.json"),
+              overlap ? "fixed\nlocal edit\n" : "fixed\noriginal\n",
+            );
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(overlap ? 2 : 0);
+      if (overlap) {
+        expect(outcome.stderr).toContain("uncommitted changes before patching");
+        expect(git("rev-parse", "HEAD")).toBe(originalHead);
+        expect(git("write-tree")).toBe(originalIndex);
+        expect(git("ls-remote", "origin")).toBe("");
+      } else {
+        expect(git("diff", "--cached", "--name-only")).toBe("package.json");
+        expect(git("diff", "--name-only", originalHead, "HEAD")).toBe(
+          "package/package.json",
+        );
+        expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      }
+    },
+  );
+
+  test("keeps the original branch when a verified file belongs to a nested repository", async () => {
+    const directory = await fixtures.create("patch-nested-publication-");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    const nested = join(directory, "nested");
+    await mkdir(nested);
+    const inner = repositoryGit(nested);
+    inner("init", "--initial-branch=main");
+    inner("config", "user.name", "Synthetic User");
+    inner("config", "user.email", "synthetic@example.test");
+    await writeFile(join(nested, "app.ts"), "unsafe\n");
+    inner("add", ".");
+    inner("commit", "-m", "Synthetic nested baseline");
+    git("add", ".");
+    git("commit", "-m", "Synthetic baseline");
+    const head = git("rev-parse", "HEAD");
+    const index = git("write-tree");
+    const remote = await fixtures.create("patch-nested-remote-");
+    git("init", "--bare", remote);
+    git("remote", "add", "origin", remote);
+    const result = resultWithFindings(["high"]);
+    result.findings.findings[0]!.locations[0]!.path = "nested/app.ts";
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : "[]",
+        onCodex: async (args, output) => {
+          await writeFile(join(nested, "app.ts"), "fixed\n");
+          completePatches(args, output);
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("submodule");
+    expect(git("branch", "--show-current")).toBe("main");
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(git("write-tree")).toBe(index);
+    expect(
+      git(
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads/codex-security/patch-scan-1",
+      ),
+    ).toBe("");
+    expect(git("ls-remote", "origin")).toBe("");
+    expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing spaces in worktree roots during risk assessment and publication",
+    async () => {
+      for (const flag of ["--assess-patch-risk", "--create-pr"]) {
+        const parent = await fixtures.create("patch-space-root-");
+        const directory = join(parent, "checkout ");
+        await mkdir(directory);
+        const git = repositoryGit(directory);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(directory, "app.ts"), "unsafe\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic baseline");
+        const remote = await fixtures.create("patch-space-remote-");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        const outcome = await runWorkflow(
+          ["patch", "Synthetic issue", flag, "--json"],
+          {
+            currentDirectory: directory,
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : args[1] === "list"
+                  ? "[]"
+                  : "https://github.example.test/example/repository/pull/1",
+            onCodex: async (_args, output) => {
+              await writeFile(join(directory, "app.ts"), "fixed\n");
+              output?.stdout.write("Fixed and checked.");
+              return 0;
+            },
+          },
+          {
+            configure: (current) => {
+              current.assessPatchRisk = async (request) => {
+                expect(request.repository).toBe(directory);
+                return patchRiskAssessment();
+              };
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(JSON.parse(outcome.stdout)).toMatchObject({ applied: true });
+      }
+    },
+  );
+
+  test("patches a repository with a Git tree listing larger than one MiB", async () => {
+    const directory = await fixtures.create("patch-large-tree-");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    const name = "a".repeat(70);
+    await Promise.all(
+      Array.from({ length: 10000 }, (_, index) =>
+        writeFile(
+          join(directory, `${name}${index.toString().padStart(5, "0")}.ts`),
+          "original\n",
+        ),
+      ),
+    );
+    git("add", ".");
+    git("commit", "-m", "Synthetic baseline");
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: directory,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async (_args, output) => {
+        await writeFile(join(directory, "fix.ts"), "fixed\n");
+        output?.stdout.write("Fixed and checked.");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      applied: true,
+      files: ["fix.ts"],
+    });
+  });
+
+  test.each(["saved", "supplied"])(
+    "patches an unrelated file with an unresolved index in %s mode",
+    async (mode) => {
+      const { directory, git } = await createPublicationRepository(fixtures);
+      const conflictPath = join(directory, "conflict [literal].txt");
+      await writeFile(conflictPath, "baseline\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic conflict baseline");
+      git("switch", "-c", "other");
+      await writeFile(conflictPath, "theirs\n");
+      git("commit", "-am", "Synthetic other change");
+      git("switch", "main");
+      await writeFile(conflictPath, "ours\n");
+      git("commit", "-am", "Synthetic main change");
+      expect(() => git("merge", "other")).toThrow();
+      const unmerged = git("ls-files", "--unmerged", "-z");
+      expect(unmerged).not.toBe("");
+      const indexPath = join(directory, ".git/index");
+      const index = await readFile(indexPath);
+      const indexMode = (await stat(indexPath)).mode;
+      const conflict = await readFile(conflictPath);
+      const conflictMode = (await stat(conflictPath)).mode;
+      let modelCalls = 0;
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          ...(mode === "saved" ? ["--scan", "scan-1"] : ["Synthetic issue"]),
+          "--json",
+        ],
+        {
+          currentDirectory: directory,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            modelCalls++;
+            expect(await readFile(indexPath)).toEqual(index);
+            expect(await readFile(conflictPath)).toEqual(conflict);
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            if (mode === "saved") completePatches(args, output);
+            else output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(modelCalls).toBe(1);
+      expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
+        "fixed\n",
+      );
+      expect(git("ls-files", "--unmerged", "-z")).toBe(unmerged);
+      expect(await readFile(indexPath)).toEqual(index);
+      expect((await stat(indexPath)).mode).toBe(indexMode);
+      expect(await readFile(conflictPath)).toEqual(conflict);
+      expect((await stat(conflictPath)).mode).toBe(conflictMode);
+    },
+  );
+
+  test.each(["unborn", "nested"])(
+    "detects local patches in %s Git repositories",
+    async (kind) => {
+      const directory = await fixtures.create("patch-git-state-");
+      const git = repositoryGit(directory);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, "app.ts"), "unsafe\n");
+      let path = "app.ts";
+      if (kind === "nested") {
+        git("add", ".");
+        git("commit", "-m", "Synthetic baseline");
+        const nested = join(directory, "nested");
+        await mkdir(nested);
+        const inner = repositoryGit(nested);
+        inner("init", "--initial-branch=main");
+        inner("config", "user.name", "Synthetic User");
+        inner("config", "user.email", "synthetic@example.test");
+        await writeFile(join(nested, "app.ts"), "unsafe\n");
+        inner("add", ".");
+        inner("commit", "-m", "Synthetic nested baseline");
+        path = "nested/app.ts";
+      }
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: directory,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            await writeFile(join(directory, path), "fixed\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: [path],
+      });
+    },
+  );
+});
+
+describe("patch change tracking", () => {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+  const publicationRepository = () => createPublicationRepository(fixtures);
+
+  test.each(
+    ["pre-commit", "post-checkout"].flatMap((hook) =>
+      ["src/finding-1.ts", "src/finding-1.ts/fixed.ts"].map(
+        (file) => [hook, file] as const,
+      ),
+    ),
+  )("restores the complete index after %s fails for %s", async (hook, file) => {
+    const { directory, git } = await publicationRepository();
+    await writeFile(join(directory, "other.ts"), "original\n");
+    await writeFile(join(directory, "hidden.ts"), "hidden original\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic unrelated files");
+    await writeFile(join(directory, "other.ts"), "staged local edit\n");
+    git("add", "other.ts");
+    git("update-index", "--skip-worktree", "hidden.ts");
+    await writeFile(join(directory, "intent.ts"), "local intent\n");
+    git("add", "--intent-to-add", "intent.ts");
+    const head = git("rev-parse", "HEAD");
+    const entries = git("ls-files", "--stage", "-v");
+    let indexBefore: Buffer<ArrayBuffer> | undefined;
+    const indexPath = git(
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      "index",
+    );
+    const result = resultWithFindings(["high"]);
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          if (command !== "git") return "[]";
+          if (args[0] === "switch" && args[1] === "-c")
+            indexBefore = await readFile(indexPath);
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+        onCodex: async (_args, output) => {
+          await rm(join(directory, "src/finding-1.ts"));
+          await mkdir(dirname(join(directory, file)), { recursive: true });
+          await writeFile(join(directory, file), "fixed\n");
+          const hookPath = git("rev-parse", "--git-path", `hooks/${hook}`);
+          const absoluteHook = resolve(directory, hookPath);
+          await writeFile(
+            absoluteHook,
+            "#!/bin/sh\necho 'Synthetic hook failure' >&2\nexit 1\n",
+          );
+          await chmod(absoluteHook, 0o755);
+          output?.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: [file],
+                  verification: "Synthetic regression passed.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("Synthetic hook failure");
+    expect(git("branch", "--show-current")).toBe("main");
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(indexPath)).toEqual(indexBefore!);
+    expect(git("ls-files", "--stage", "-v")).toBe(entries);
+    expect(
+      git(
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads/codex-security/patch-scan-1",
+      ),
+    ).toBe("");
+    expect(git("ls-remote", "origin")).toBe("");
+    expect(await readFile(join(directory, file), "utf8")).toBe("fixed\n");
+  });
+
+  test.each([false, true])(
+    "risk assessment and publication agree when a rename source becomes a directory (selected: %p)",
+    async (selectDirectory) => {
+      const { directory, git } = await publicationRepository();
+      await writeFile(join(directory, "z.ts"), "Verified rename source\n");
+      await writeFile(join(directory, "zz.ts"), "Unrelated rename source\n");
+      git("add", "z.ts", "zz.ts");
+      git("commit", "-m", "Synthetic rename sources");
+      const before = git("rev-parse", "HEAD");
+      const result = resultWithFindings(["high"]);
+      let assessedFiles: string[] = [];
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--scan",
+          "scan-1",
+          "--assess-patch-risk",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { path: string; changedFiles: string[] };
+              assessedFiles = artifact.changedFiles;
+              const patch = await readFile(artifact.path, "utf8");
+              expect(patch).toContain("diff --git a/new.ts b/new.ts");
+              expect(patch).toContain("diff --git a/z.ts b/z.ts");
+              if (selectDirectory) {
+                expect(patch).toContain("z.ts/inside.ts");
+                expect(patch).toContain("diff --git a/zz.ts b/zz.ts");
+              } else {
+                expect(patch).not.toContain("z.ts/inside.ts");
+                expect(patch).not.toContain("zz.ts");
+              }
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            await rename(join(directory, "z.ts"), join(directory, "new.ts"));
+            await mkdir(join(directory, "z.ts"));
+            await rename(
+              join(directory, "zz.ts"),
+              join(directory, "z.ts/inside.ts"),
+            );
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: selectDirectory ? ["new.ts", "z.ts"] : ["new.ts"],
+                    verification: "Synthetic verification.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(assessedFiles.sort()).toEqual(
+        selectDirectory
+          ? ["new.ts", "z.ts", "z.ts/inside.ts", "zz.ts"]
+          : ["new.ts", "z.ts"],
+      );
+      expect(git("diff", "--name-status", "--no-renames", before, "HEAD")).toBe(
+        selectDirectory
+          ? "A\tnew.ts\nD\tz.ts\nA\tz.ts/inside.ts\nD\tzz.ts"
+          : "A\tnew.ts\nD\tz.ts",
+      );
+      expect(
+        git("show", selectDirectory ? "HEAD:z.ts/inside.ts" : "HEAD:zz.ts"),
+      ).toBe("Unrelated rename source");
+      expect(git("show", "HEAD:new.ts")).toBe("Verified rename source");
+      expect(await readFile(join(directory, "z.ts/inside.ts"), "utf8")).toBe(
+        "Unrelated rename source\n",
+      );
+      expect(git("diff", "--cached", "--name-only")).toBe("");
+      expect(git("diff", "--name-only")).toBe(selectDirectory ? "" : "zz.ts");
+      expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+    },
+  );
+
+  test.each(
+    ["staged", "unstaged", "assume-unchanged", "clean"].flatMap((state) =>
+      ["copy", "rename", "symlink", "gitlink"].map(
+        (transfer) => [state, transfer] as const,
+      ),
+    ),
+  )("protects %s content transferred by %s", async (state, transfer) => {
+    const { directory, git } = await publicationRepository();
+    const original = "unsafe\n" + "synthetic baseline line\n".repeat(12);
+    const local =
+      state === "clean" ? original : original + "synthetic local work\n";
+    await writeFile(join(directory, "old.ts"), original);
+    git("add", "old.ts");
+    git("commit", "-m", "Synthetic source");
+    await writeFile(join(directory, "old.ts"), local);
+    if (state === "staged") git("add", "old.ts");
+    if (state === "assume-unchanged")
+      git("update-index", "--assume-unchanged", "old.ts");
+    const head = git("rev-parse", "HEAD");
+    const index = git("write-tree");
+    const result = resultWithFindings(["high"]);
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+        onCodex: async (_args, output) => {
+          await writeFile(
+            join(directory, "new.ts"),
+            local.replace("unsafe", "fixed"),
+          );
+          if (transfer !== "copy") await rm(join(directory, "old.ts"));
+          if (transfer === "symlink")
+            await symlink("new.ts", join(directory, "old.ts"));
+          if (transfer === "gitlink") {
+            await mkdir(join(directory, "old.ts"));
+            git("-C", "old.ts", "init", "--initial-branch=main");
+            git("-C", "old.ts", "config", "user.name", "Synthetic User");
+            git(
+              "-C",
+              "old.ts",
+              "config",
+              "user.email",
+              "synthetic@example.test",
+            );
+            git(
+              "-C",
+              "old.ts",
+              "commit",
+              "--allow-empty",
+              "-m",
+              "Synthetic nested baseline",
+            );
+          }
+          output?.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: ["new.ts"],
+                  verification: "Synthetic regression passed.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(state === "clean" ? 0 : 2);
+    if (state !== "clean") {
+      expect(outcome.stderr).toContain("uncommitted changes before patching");
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(git("write-tree")).toBe(index);
+      expect(git("ls-remote", "origin")).toBe("");
+    } else {
+      expect(git("show", "HEAD:new.ts")).toBe(
+        local.replace("unsafe", "fixed").trim(),
+      );
+      if (transfer === "rename")
+        expect(git("ls-tree", "HEAD", "old.ts")).toBe("");
+    }
+  });
+
+  test.each(
+    ["saved", "supplied"].flatMap((mode) =>
+      [
+        "move",
+        "copy",
+        "different",
+        "vanished",
+        "empty",
+        "generated-template",
+        "generated-build",
+        "symlink",
+      ].map((change) => [mode, change] as const),
+    ),
+  )("checks ignored content before publishing %s/%s", async (mode, change) => {
+    const { directory, git } = await publicationRepository();
+    await writeFile(join(directory, ".gitignore"), ".env\n.cache/\ndist/\n");
+    git("add", ".gitignore");
+    git("commit", "-m", "Synthetic ignored paths");
+    const content =
+      change === "empty"
+        ? ""
+        : change === "generated-template"
+          ? "export const enabled = true;\n"
+          : change === "generated-build"
+            ? "export const answer = 42;\n"
+            : "SYNTHETIC_LOCAL_CONTENT\n";
+    const publishedContent =
+      change === "different" || change === "vanished"
+        ? "New independent content\n"
+        : content;
+    const source =
+      change === "generated-template"
+        ? ".cache/template.ts"
+        : change === "generated-build"
+          ? "dist/generated.js"
+          : ".env";
+    await mkdir(dirname(join(directory, source)), { recursive: true });
+    if (change === "symlink") {
+      const outside = await fixtures.create("ignored-link-target-");
+      await writeFile(join(outside, "file"), content);
+      await symlink(join(outside, "file"), join(directory, source));
+    } else await writeFile(join(directory, source), content);
+    let removed = false;
+    const before = git("rev-parse", "HEAD");
+    const index = await readFile(join(directory, ".git/index"));
+    const result = resultWithFindings(["high"]);
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        ...(mode === "saved" ? ["--scan", "scan-1"] : ["Synthetic issue"]),
+        "--create-pr",
+        "--json",
+      ],
+      {
+        currentDirectory: directory,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          if (command === "git") {
+            const result = await runGitRepositoryCommand(
+              command,
+              args,
+              cwd,
+              options,
+            );
+            if (
+              change === "vanished" &&
+              !removed &&
+              args[0] === "ls-files" &&
+              args.includes("--ignored")
+            ) {
+              await rm(join(directory, source));
+              removed = true;
+            }
+            return result;
+          }
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        },
+        onCodex: async (_args, output) => {
+          if (change === "move")
+            await rename(join(directory, source), join(directory, "new.ts"));
+          else await writeFile(join(directory, "new.ts"), publishedContent);
+          output?.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: ["new.ts"],
+                  verification: "Synthetic verification.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      },
+    );
+    if (change === "vanished") expect(removed).toBe(true);
+    const blocked = [
+      "move",
+      "copy",
+      "generated-template",
+      "generated-build",
+    ].includes(change);
+    expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
+    if (blocked) {
+      expect(outcome.stderr).toContain("matches pre-existing ignored content");
+      expect(git("rev-parse", "HEAD")).toBe(before);
+      expect(await readFile(join(directory, ".git/index"))).toEqual(index);
+      expect(git("ls-remote", "origin")).toBe("");
+    }
+    expect(await readFile(join(directory, "new.ts"), "utf8")).toBe(
+      publishedContent,
+    );
+  });
+
+  test
+    .skipIf(process.platform === "win32" || process.getuid?.() === 0)
+    .each(["saved", "supplied"])(
+    "stops before patching when ignored content cannot be read (%s)",
+    async (mode) => {
+      const { directory, git } = await publicationRepository();
+      await writeFile(join(directory, ".gitignore"), ".env\n");
+      git("add", ".gitignore");
+      git("commit", "-m", "Synthetic ignored paths");
+      const ignored = join(directory, ".env");
+      await writeFile(ignored, "SYNTHETIC_LOCAL_CONTENT\n");
+      await chmod(ignored, 0);
+      const before = git("rev-parse", "HEAD");
+      const index = await readFile(join(directory, ".git/index"));
+      let codexCalls = 0;
+      try {
+        await expect(readFile(ignored)).rejects.toMatchObject({
+          code: "EACCES",
+        });
+        const result = resultWithFindings(["high"]);
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            ...(mode === "saved" ? ["--scan", "scan-1"] : ["Synthetic issue"]),
+            "--create-pr",
+            "--json",
+          ],
+          {
+            currentDirectory: directory,
+            onWorkbench: () => savedScan(result, "scan-1", directory),
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : Promise.resolve(
+                    args[1] === "list"
+                      ? "[]"
+                      : "https://github.example.test/example/repository/pull/1",
+                  ),
+            onCodex: async (_args, output) => {
+              codexCalls++;
+              await chmod(ignored, 0o600);
+              await writeFile(
+                join(directory, "new.ts"),
+                await readFile(ignored),
+              );
+              output?.stdout.write(
+                JSON.stringify({
+                  patches: [
+                    {
+                      occurrenceId: "occ_1",
+                      status: "verified",
+                      files: ["new.ts"],
+                      verification: "Synthetic verification.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain("EACCES");
+        expect(codexCalls).toBe(0);
+        expect(git("rev-parse", "HEAD")).toBe(before);
+        expect(await readFile(join(directory, ".git/index"))).toEqual(index);
+        expect(git("ls-remote", "origin")).toBe("");
+        expect((await stat(ignored)).mode & 0o777).toBe(0);
+      } finally {
+        await chmod(ignored, 0o600);
+      }
+    },
+  );
+
+  test.each(
+    ["root", "src"].flatMap((scope) =>
+      ["file", "directory"].map((selection) => ({ scope, selection })),
+    ),
+  )(
+    "preserves newly tracked ignored patch content from $scope with $selection selection",
+    async ({ scope, selection }) => {
+      const { directory, git, remote } = await publicationRepository();
+      await mkdir(join(directory, "src/nested"));
+      await writeFile(join(directory, "src/nested/app.ts"), "old\n");
+      await writeFile(join(directory, ".gitignore"), "generated.txt\n");
+      await writeFile(join(directory, "unrelated.txt"), "baseline\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic ignored output baseline");
+      await writeFile(
+        join(directory, "unrelated.txt"),
+        "unrelated staged work\n",
+      );
+      git("add", "unrelated.txt");
+      const unrelated = git(
+        "ls-files",
+        "--stage",
+        "--debug",
+        "--",
+        "unrelated.txt",
+      );
+      const cwd = scope === "root" ? directory : join(directory, "src");
+      const prefix = scope === "root" ? "src/nested" : "nested";
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = `${prefix}/app.ts`;
+      let calls = 0;
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--scan",
+          "scan-1",
+          "--create-pr",
+          "--assess-patch-risk",
+          "--json",
+        ],
+        {
+          currentDirectory: cwd,
+          onWorkbench: () => savedScan(result, "scan-1", cwd),
+          onRepositoryCommand: (command, args, repository, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, repository, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            calls++;
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { path: string; changedFiles: string[] };
+              expect(artifact.changedFiles).toEqual([
+                "src/nested/app.ts",
+                "src/nested/generated.txt",
+              ]);
+              const verification = await fixtures.create(
+                "ignored-staged-risk-apply-",
+              );
+              await mkdir(join(verification, "src/nested"), {
+                recursive: true,
+              });
+              await writeFile(join(verification, "src/nested/app.ts"), "old\n");
+              repositoryGit(verification)("apply", "--check", artifact.path);
+              repositoryGit(verification)("apply", artifact.path);
+              expect(
+                await readAppliedText(join(verification, "src/nested/app.ts")),
+              ).toBe("fixed\n");
+              expect(
+                await readAppliedText(
+                  join(verification, "src/nested/generated.txt"),
+                ),
+              ).toBe("new generated fix\n");
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            await writeFile(join(directory, "src/nested/app.ts"), "fixed\n");
+            await writeFile(
+              join(directory, "src/nested/generated.txt"),
+              "new generated fix\n",
+            );
+            git("add", "-f", "src/nested/generated.txt");
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files:
+                      selection === "file"
+                        ? [`${prefix}/app.ts`, `${prefix}/generated.txt`]
+                        : [prefix],
+                    verification: "Synthetic check.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(calls).toBe(2);
+      const commit = git("rev-parse", "HEAD");
+      expect(
+        repositoryGit(remote)("show", `${commit}:src/nested/generated.txt`),
+      ).toBe("new generated fix");
+      expect(git("show", "HEAD:unrelated.txt")).toBe("baseline");
+      expect(git("ls-files", "--stage", "--debug", "--", "unrelated.txt")).toBe(
+        unrelated,
+      );
+      expect(git("diff", "--cached", "--name-only")).toBe("unrelated.txt");
+    },
+  );
+
+  for (const mode of ["saved", "supplied"]) {
+    test.each([
+      "file",
+      "directory",
+      "info",
+      "global",
+      "unchanged",
+      "unchanged-directory",
+      "removed",
+      "removed-unignored",
+      "force-added",
+      "new",
+    ])(
+      `preserves pre-existing ignored paths during ${mode} publication (%s)`,
+      async (kind) => {
+        const { directory: root, git, remote } = await publicationRepository();
+        const removed = kind === "removed" || kind === "removed-unignored";
+        const forced = kind === "force-added";
+        const directory = kind === "unchanged-directory" || removed || forced;
+        const file =
+          kind === "directory"
+            ? "cache/nested/local.txt"
+            : directory
+              ? "src/local.pyc"
+              : "local.env";
+        const pattern = `${kind === "directory" ? "cache/" : file}\n`;
+        const unchanged =
+          kind === "unchanged" || kind === "unchanged-directory";
+        const rule =
+          kind === "info"
+            ? join(root, ".git", "info", "exclude")
+            : kind === "global"
+              ? join(remote, "excludes")
+              : join(root, ".gitignore");
+        await writeFile(
+          join(root, ".gitignore"),
+          rule === join(root, ".gitignore") ? pattern : "",
+        );
+        git("add", ".gitignore");
+        git("commit", "-m", "Synthetic ignore rule");
+        await writeFile(rule, pattern);
+        if (kind === "global") git("config", "core.excludesFile", rule);
+        if (kind !== "new") {
+          await mkdir(dirname(join(root, file)), { recursive: true });
+          await writeFile(join(root, file), "synthetic local data\n");
+        }
+        const head = git("rev-parse", "HEAD");
+        let expectedIndex = git("write-tree");
+        const result = resultWithFindings(["high"]);
+        result.findings.findings[0]!.locations[0]!.path = file;
+        const blocked = !unchanged && !removed && kind !== "new";
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            ...(mode === "saved"
+              ? ["--scan", "scan-1"]
+              : ["Synthetic ignore update"]),
+            "--create-pr",
+            "--json",
+          ],
+          {
+            currentDirectory: root,
+            onWorkbench: () => savedScan(result, "scan-1", root),
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : args[1] === "list"
+                  ? "[]"
+                  : "https://github.example.test/example/repository/pull/1",
+            onCodex: async (_args, output) => {
+              if (!unchanged && kind !== "removed" && !forced)
+                await writeFile(rule, "");
+              if (kind === "new")
+                await writeFile(join(root, file), "synthetic generated data\n");
+              if (unchanged || removed || forced)
+                await writeFile(join(root, "src/finding-1.ts"), "fixed\n");
+              if (removed) await rm(join(root, file));
+              if (forced) {
+                git("add", "--force", file);
+                expectedIndex = git("write-tree");
+              }
+              output?.stdout.write(
+                JSON.stringify({
+                  patches: [
+                    {
+                      occurrenceId: "occ_1",
+                      status: "verified",
+                      files: directory
+                        ? [
+                            "src",
+                            ...(kind === "removed-unignored"
+                              ? [".gitignore"]
+                              : []),
+                          ]
+                        : unchanged
+                          ? ["src/finding-1.ts"]
+                          : [".gitignore", file],
+                      verification: "Synthetic verification.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
+        if (blocked) {
+          expect(outcome.stderr).toContain(
+            "uncommitted changes before patching",
+          );
+          expect(git("rev-parse", "HEAD")).toBe(head);
+          expect(git("write-tree")).toBe(expectedIndex);
+          expect(git("ls-remote", "origin")).toBe("");
+          expect(await readFile(rule, "utf8")).toBe(forced ? pattern : "");
+        } else {
+          expect(git("ls-remote", "origin")).toContain(
+            git("rev-parse", "HEAD"),
+          );
+          expect(
+            git("show", `HEAD:${kind === "new" ? file : "src/finding-1.ts"}`),
+          ).toBe(kind === "new" ? "synthetic generated data" : "fixed");
+        }
+        if (unchanged || removed)
+          expect(
+            git("ls-tree", "-r", "--name-only", "HEAD").split("\n"),
+          ).not.toContain(file);
+        if (removed)
+          await expect(
+            readFile(join(root, file), "utf8"),
+          ).rejects.toMatchObject({ code: "ENOENT" });
+        else
+          expect(await readFile(join(root, file), "utf8")).toBe(
+            kind === "new"
+              ? "synthetic generated data\n"
+              : "synthetic local data\n",
+          );
+      },
+    );
+  }
+});
+
+describe("directory replacement publication", () => {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+  for (const state of ["clean", "unrelated", "dirty-nested", "staged-nested"])
+    test(`directory replacement ${state}`, async () => {
+      const root = await fixtures.create("synthetic-directory-replacement-");
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await mkdir(join(root, "entry"));
+      await writeFile(join(root, "entry/old.ts"), "original\n");
+      await writeFile(join(root, "other.ts"), "unrelated\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const dirtyNested = state.endsWith("nested");
+      if (state !== "clean")
+        await writeFile(join(root, "other.ts"), "unrelated local edits\n");
+      if (dirtyNested)
+        await writeFile(
+          join(root, "entry/old.ts"),
+          "original plus local edits\n",
+        );
+      if (state === "staged-nested") git("add", "entry/old.ts");
+      const remote = await fixtures.create("synthetic-local-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const before = git("rev-parse", "HEAD");
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = "entry";
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: root,
+          onWorkbench: () => savedScan(result, "scan-1", root),
+          onRepositoryCommand: (command, args, cwd, options) => {
+            return command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[0] === "repo"
+                ? "synthetic-repository-id"
+                : args[1] === "list"
+                  ? "[]"
+                  : "https://github.example.test/synthetic/project/pull/1";
+          },
+          onCodex: async (args, output) => {
+            const previous = await readFile(join(root, "entry/old.ts"), "utf8");
+            await rm(join(root, "entry"), { recursive: true });
+            await writeFile(join(root, "entry"), `fixed\n${previous}`);
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+      const after = git("rev-parse", "HEAD"),
+        remoteRef = git("ls-remote", "origin");
+      expect(outcome.exitCode, outcome.stderr).toBe(dirtyNested ? 2 : 0);
+      if (dirtyNested) {
+        expect(outcome.stderr).toContain("uncommitted changes before patching");
+        expect(after).toBe(before);
+        expect(remoteRef).toBe("");
+        expect(await readFile(join(root, "entry"), "utf8")).toContain(
+          "original plus local edits",
+        );
+      } else {
+        expect(git("show", "HEAD:entry")).toBe("fixed\noriginal");
+        expect(remoteRef).toContain(after);
+      }
+      expect(await readFile(join(root, "other.ts"), "utf8")).toBe(
+        state === "clean" ? "unrelated\n" : "unrelated local edits\n",
+      );
+    });
+});

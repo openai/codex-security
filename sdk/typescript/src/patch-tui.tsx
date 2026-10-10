@@ -413,6 +413,11 @@ export function PatchTui({
   );
 
   useInput((input, key) => {
+    if (key.ctrl && input === "c") {
+      onComplete(null);
+      exit();
+      return;
+    }
     if (editing !== null) {
       if (key.escape) {
         setEditing(null);
@@ -432,7 +437,7 @@ export function PatchTui({
       return;
     }
 
-    if (key.escape || input === "q" || (key.ctrl && input === "c")) {
+    if (key.escape || input === "q") {
       onComplete(null);
       exit();
     } else if (key.return || input === "p") {
