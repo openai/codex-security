@@ -136,7 +136,7 @@ export async function importScan(
       signal,
     );
     const findings = await parseImportedFindings(
-      source.toString("utf8"),
+      new TextDecoder("utf-8", { fatal: true }).decode(source),
       options.format,
       pluginRoot,
     );
@@ -270,15 +270,17 @@ export async function importScan(
       "coverage.json": {
         completeness: "unknown",
         inventoryStrategy: "custom",
-        surfaces: [
-          {
-            id: "import",
-            label: basename(inputPath),
-            disposition: "reported",
-            receiptRefs: [sourceRef],
-            notes: IMPORT_DESCRIPTION,
-          },
-        ],
+        surfaces: findings.length
+          ? [
+              {
+                id: "import",
+                label: basename(inputPath),
+                disposition: "reported",
+                receiptRefs: [sourceRef],
+                notes: IMPORT_DESCRIPTION,
+              },
+            ]
+          : [],
         explicitExclusions: [],
         deferred: [],
       },

@@ -363,7 +363,7 @@ def test_later_offset_completion_supersedes_false_positive_feedback(tmp_path: Pa
             timestamp = timestamp.astimezone(timezone(timedelta(hours=-5)))
         manifest["scan"].update(
             startedAt="2026-10-08T00:00:00Z",
-            completedAt=timestamp.isoformat().replace("+00:00", "Z"),
+            completedAt=timestamp.isoformat().replace("+00:00", "Z").lower(),
         )
         manifest_path.write_text(json.dumps(manifest))
         _seal_draft(scan_dir, target)

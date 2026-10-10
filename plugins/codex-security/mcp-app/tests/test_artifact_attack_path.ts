@@ -1,7 +1,7 @@
 import { jsonLines, readJson, readJsonLines } from "./support/json.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import type { RawDiscoveryCandidate } from "../src/artifact-discovery.js";
-import type { CandidateValidationRecord } from "../src/artifact-validation-phase.js";
+import type { CandidateValidationRecord } from "../src/artifact-candidate-ledger.js";
 import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -11,7 +11,7 @@ const {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
 } = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-attack-path.ts"),
+  path.join(import.meta.dirname, "../src/artifact-candidate-ledger.ts"),
 );
 
 const scanId = "11111111-1111-4111-8111-111111111111";
