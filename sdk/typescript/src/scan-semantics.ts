@@ -738,15 +738,20 @@ function semanticIdentifier(value: string, fallback: string): string {
 export function normalizeSurfaces(surfaces: SemanticCoverage["surfaces"]) {
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
-      typeof surface["id"] === "string" ? [surface["id"]] : [],
+      [surface.id, surface["candidateId"]].filter(
+        (id): id is string => typeof id === "string",
+      ),
     ),
   );
   const surfaceIds = new Set<string>();
-  const normalizedSurfaces = surfaces.map((surface, index) => {
-    const explicitId = typeof surface["id"] === "string";
+  return surfaces.map((surface) => {
+    const explicitId = typeof surface.id === "string";
     const baseId = explicitId
-      ? surface.id!
-      : `surface_${semanticIdentifier(surface.label, String(index + 1))}`;
+      ? (surface.id as string)
+      : `surface-${createHash("sha256")
+          .update(JSON.stringify(surface))
+          .digest("hex")
+          .slice(0, 16)}`;
     let id = baseId;
     if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
       let suffix = 2;
@@ -756,13 +761,8 @@ export function normalizeSurfaces(surfaces: SemanticCoverage["surfaces"]) {
       } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
     }
     surfaceIds.add(id);
-    return {
-      ...surface,
-      id,
-      receiptRefs: surface["receiptRefs"] ?? [],
-    };
+    return { ...surface, id, receiptRefs: surface.receiptRefs ?? [] };
   });
-  return normalizedSurfaces;
 }
 
 export function normalizeDeferred(deferred: SemanticCoverage["deferred"]) {

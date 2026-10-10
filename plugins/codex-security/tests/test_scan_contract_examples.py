@@ -9,6 +9,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
+from workbench_test_support import saved_coverage
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 EXAMPLE_DIR = PLUGIN_DIR / "examples" / "completed-scan"
@@ -332,12 +333,7 @@ class ScanContractExamplesTest(unittest.TestCase):
         draft = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [draft_finding],
-            "coverage": {
-                "completeness": "complete",
-                "surfaces": [],
-                "explicitExclusions": [],
-                "deferred": [],
-            },
+            "coverage": saved_coverage(),
         }
         draft_validator.validate(draft)
 

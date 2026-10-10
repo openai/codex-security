@@ -1,3 +1,4 @@
+import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { resolving } from "./support/promises.js";
 import { createHash } from "node:crypto";
 import {
@@ -53,6 +54,10 @@ describe("CLI", () => {
       exportEnvironment({
         Path: "C:\\Python;C:\\Windows\\System32",
         PYTHON: "/managed/python",
+        XDG_CACHE_HOME: "/managed/cache",
+        LD_LIBRARY_PATH: "/managed/libraries",
+        DYLD_LIBRARY_PATH: "/managed/dylibs",
+        DYLD_FALLBACK_LIBRARY_PATH: "/managed/fallback-libraries",
         TMPDIR: "/tmp",
         OPENAI_API_KEY: "openai-secret",
         CODEX_API_KEY: "codex-secret",
@@ -62,29 +67,104 @@ describe("CLI", () => {
     ).toEqual({
       Path: "C:\\Python;C:\\Windows\\System32",
       PYTHON: "/managed/python",
+      XDG_CACHE_HOME: "/managed/cache",
       PYTHONUTF8: "1",
       TMPDIR: "/tmp",
     });
   });
 
   test("exports findings to stdout without initializing Codex", async () => {
-    for (const [format, expected] of [
-      ["csv", "occurrence_id,finding_id\n"],
-      ["json", '{"documentType":"codex-security.findings"}\n'],
-      ["sarif", '{"version":"2.1.0"}\n'],
-    ] as const) {
-      const { stdout, stderr, runCli } = createCliTest(main);
+    const dataHome = await temporaryDirectory("export-skills-");
+    const previousDataHome = process.env["XDG_DATA_HOME"];
+    process.env["XDG_DATA_HOME"] = dataHome;
+    try {
+      const skillPath = join(dataHome, "skills", "codex-security-export");
+      await mkdir(join(dataHome, "incur"), { recursive: true });
+      await mkdir(skillPath, { recursive: true });
+      await writeFile(
+        join(skillPath, "SKILL.md"),
+        "Previously installed skill.",
+      );
+      await writeFile(
+        join(dataHome, "incur", "codex-security.json"),
+        JSON.stringify({
+          hash: "previous-command-hash",
+          skills: ["codex-security-export"],
+          paths: [skillPath],
+        }),
+      );
+      for (const [format, expected] of [
+        ["csv", "occurrence_id,finding_id\n"],
+        ["json", '{"documentType":"codex-security.findings"}\n'],
+        ["sarif", '{"version":"2.1.0"}\n'],
+        ["md", "# Synthetic threat model\n"],
+      ] as const) {
+        for (const metadata of [[], ["--full-output"], ["--token-count"]]) {
+          const { stdout, stderr, runCli } = createCliTest(main);
 
-      const deps = dependencies();
-      deps.createSecurity = mustNotInitializeCodex;
-      expect(
-        await runCli(
-          ["export", "scan", "--export-format", format, "--output", "-"],
-          deps,
-        ),
-      ).toBe(0);
-      expect(stdout.text()).toBe(expected);
-      expect(stderr.text()).toBe("");
+          const deps = dependencies();
+          deps.createSecurity = mustNotInitializeCodex;
+          deps.exportFindings = async () => Buffer.from(expected);
+          expect(
+            await runCli(
+              [
+                "export",
+                "scan",
+                "--export-format",
+                format,
+                "--output",
+                "-",
+                ...(format === "md" ? ["--artifact", "threat-model"] : []),
+                ...metadata,
+              ],
+              deps,
+            ),
+          ).toBe(0);
+          expect(stdout.text()).toBe(expected);
+          expect(stderr.text()).toBe("");
+        }
+      }
+      const failure = dependencies();
+      failure.exportFindings = async () => {
+        throw new Error("EACCES: synthetic export denied");
+      };
+      failure.runWorkbench = async () => {
+        throw new Error("Synthetic setup read failure");
+      };
+      for (const [args, diagnostic] of [
+        [
+          ["export", "scan", "--output", "-"],
+          "EACCES: synthetic export denied",
+        ],
+        [
+          ["export", "scan", "--export-format", "md", "--output", "-"],
+          "Findings exports support",
+        ],
+        [["export", "--output", "-"], "Synthetic setup read failure"],
+        [
+          ["export", "scan", "--export-format", "invalid", "--output", "-"],
+          "Invalid option:",
+        ],
+      ] as const) {
+        const failed = createCliTest(main);
+        expect(await failed.runCli([...args], failure)).toBe(2);
+        expect(failed.stdout.text()).toBe("");
+        expect(failed.stderr.text()).toContain(diagnostic);
+      }
+      for (const metadata of ["--help", "--schema"]) {
+        const result = createCliTest(main);
+        expect(
+          await result.runCli(
+            ["export", "scan", "--output", "-", metadata],
+            failure,
+          ),
+        ).toBe(0);
+        expect(result.stdout.text()).not.toBe("");
+      }
+    } finally {
+      if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
+      else process.env["XDG_DATA_HOME"] = previousDataHome;
+      await rm(dataHome, { recursive: true, force: true });
     }
   });
 
@@ -152,20 +232,9 @@ describe("CLI", () => {
       };
       const workbench = (args: readonly string[]) =>
         runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args);
-      const registered = await workbench([
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify({
-          config: {},
-          mode: "standard",
-          repository,
-          target: { kind: "repository", paths: [] },
-        }),
-      ]);
+      const registered = await workbench(
+        scanRegistrationArguments(repository, scanDir),
+      );
       const scanId = registered["scanId"] as string;
       await copyCompletedScan(root);
       const content = "# Saved model\n\nSynthetic component boundaries.\n";

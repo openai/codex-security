@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import type { WorkbenchCommandOptions } from "../src/runtime.js";
+import type { WorkbenchCommandOptions as RequiredWorkbenchCommandOptions } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { mockWorkbench, TestClient } from "./support/api-client.js";
 import {
@@ -95,3 +95,8 @@ test.each(["runtime", "sqlite override", "database override"] as const)(
     }
   },
 );
+
+type WorkbenchCommandOptions = Omit<
+  RequiredWorkbenchCommandOptions,
+  "python"
+> & { python?: string };

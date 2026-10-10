@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ScanCostTrackingError } from "../src/deep-scan.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { ScanPermissionError } from "../src/scan-execution.js";
-import type { WorkbenchCommandOptions } from "../src/runtime.js";
+import type { WorkbenchCommandOptions as RequiredWorkbenchCommandOptions } from "../src/runtime.js";
 import {
   cancellationSetup,
   mockWorkbench,
@@ -86,3 +86,8 @@ test.each(["ordinary", "permission", "cost tracking"] as const)(
     }
   },
 );
+
+type WorkbenchCommandOptions = Omit<
+  RequiredWorkbenchCommandOptions,
+  "python"
+> & { python?: string };

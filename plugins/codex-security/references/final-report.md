@@ -38,7 +38,7 @@ An MCP `-32602` input rejection, an `isError: true` result reporting `Input vali
 
 For any other required scan phase, canonical-artifact write, or on-disk existence check that fails before completion, stop the current response and surface the exact workflow blocker. Do not call completion with missing artifacts, return a final report or no-findings result, or satisfy a structured output schema. Leave the durable scan available for a later continuation instead of canceling or failing it solely because canonical assembly is blocked.
 
-If `complete_codex_security_scan` or the terminal/chat finalizer fails, stop the current response and surface the exact MCP or finalizer error. Do not retry completion in the same response, return a final report or no-findings result, or satisfy a structured output schema. Leave the durable scan available for a later continuation instead of canceling or failing it solely because completion failed.
+If `complete_codex_security_scan` fails, stop the current response and surface the exact MCP or finalizer error. Do not retry completion in the same response, return a final report or no-findings result, or satisfy a structured output schema. Leave the durable scan available for a later continuation instead of canceling or failing it solely because completion failed.
 
 Canonical report semantics live in these fields:
 
@@ -67,7 +67,7 @@ Canonical `severity.changeConditions` must be one non-empty string; when `attack
 
 For workbench-backed diff candidates, apply row outcomes in this order: validation disposition `reportable` plus attack-path decision `reportable` becomes a finding with its distinct instance and all relevant entrypoint, root-control, sink, and supporting locations; otherwise, a `deferred` result from either phase becomes `needs_follow_up` coverage and a `coverage.deferred` entry using the recorded uncertainty or proof gap; otherwise, validation disposition `not_applicable` becomes `not_applicable` coverage; otherwise, validation disposition `suppressed` or attack-path decision `ignore` becomes `rejected` coverage. A missing required phase record leaves the candidate unresolved and prevents complete coverage. Do not require phase receipts, per-candidate narratives, or another reconciliation pass.
 
-Terminal diff scans without a `scanId` may provide per-candidate ledgers, validation closure tables, and repository coverage ledgers. When those artifacts exist, retain their traceability: start from reportable/surviving rows, preserve exact affected locations, and map suppressed, not-applicable, or deferred rows to public-facing coverage outcomes. Do not silently drop a seeded row because a same-family neighbor survived.
+Explicitly SDK-owned diff scans may provide per-candidate ledgers, validation closure tables, and repository coverage ledgers. When those artifacts exist, retain their traceability: start from reportable/surviving rows, preserve exact affected locations, and map suppressed, not-applicable, or deferred rows to public-facing coverage outcomes. Do not silently drop a seeded row because a same-family neighbor survived.
 
 ## Report Structure
 
@@ -159,8 +159,6 @@ Recommended outcomes:
 - `Rejected`: plausible-looking candidate was ruled out with specific counterevidence.
 - `Not applicable`: the risk class does not apply to that surface.
 - `Needs follow-up`: plausible but not fully closed because of a concrete blocker or proof gap.
-
-Write the same content, or a slightly more detailed version, to `<coverage_dir>/reviewed_surfaces.md`.
 
 For broad scans where the completed coverage is useful for triage but too large for high-precision review, include a concise `## Open Questions And Follow Up` section near the end of the report. Use concrete, copyable prompt ideas that narrow the next review to individual commits from the current scan. Do not include this section for precise scans where the requested scope was already sufficient.
 

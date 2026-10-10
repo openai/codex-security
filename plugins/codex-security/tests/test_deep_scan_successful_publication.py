@@ -257,7 +257,8 @@ def test_stopped_scan_salvages_saved_parent_checkpoints(
     checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", saved)
     checkpoint_bytes = checkpoint.read_bytes()
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
@@ -277,8 +278,8 @@ def test_stopped_scan_salvages_saved_parent_checkpoints(
 
     artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["findingCount"] == len(expected_summaries)
     assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
@@ -301,7 +302,8 @@ def test_stopped_deep_scan_preserves_checkpoint_without_coverage(
     source_bytes = source_path.read_bytes()
     source_relative = source_path.relative_to(scan.scan_dir).as_posix()
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
@@ -323,8 +325,8 @@ def test_stopped_deep_scan_preserves_checkpoint_without_coverage(
     artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
 
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
 
     assert recovered["findingCount"] == 1

@@ -202,6 +202,12 @@ describe("custom validation", () => {
       "not_applicable",
       "deferred",
     );
+    const counterEvidence =
+      "The protected caller checks a separate precondition.";
+    const limitations = "The alternate configuration was not exercised.";
+    output.validations[0]!.validation.counterevidence_or_proof_gap =
+      counterEvidence;
+    output.validations[0]!.validation.remaining_uncertainty = limitations;
     output.validations[0]!.severity = {
       level: "medium",
       rationale: "Requires an uncommon configuration.",
@@ -254,7 +260,11 @@ describe("custom validation", () => {
       severity: output.validations[0]!.severity,
       confidence: { level: "medium" },
       attackPath: { impact: output.validations[0]!.impact },
-      validation: { disposition: "reportable" },
+      validation: {
+        disposition: "reportable",
+        counterEvidence: [counterEvidence],
+        limitations: [limitations],
+      },
     });
     const coverage = await json<CoverageDocument>(
       join(f.scanDir, "coverage.json"),
@@ -353,6 +363,10 @@ describe("custom validation", () => {
     );
     expect(saved.findings).toHaveLength(3);
     for (const [index, finding] of saved.findings.entries()) {
+      expect(finding.validation).toMatchObject({
+        counterEvidence: [],
+        limitations: [],
+      });
       expect(finding.identity).toEqual(f.findings.findings[index]!.identity);
       expect(finding.locations).toEqual(f.findings.findings[index]!.locations);
       expect(finding.attackPath).toEqual({
@@ -513,6 +527,12 @@ describe("custom validation", () => {
       const commands: string[] = [];
       const activities: ScanActivity[] = [];
       const validationActivity = "Synthetic validation activity.";
+      const profileDisabledTools =
+        scenario === "standard"
+          ? []
+          : diff
+            ? ["profile_disabled_tool"]
+            : undefined;
       const workbench = (args: readonly string[], input?: string) =>
         runWorkbench(
           {
@@ -527,7 +547,22 @@ describe("custom validation", () => {
           input,
         );
       const client = new TestClient(
-        {},
+        profileDisabledTools === undefined
+          ? {}
+          : {
+              codexOverrides: {
+                profile: "synthetic.validation",
+                profiles: {
+                  "synthetic.validation": {
+                    mcp_servers: {
+                      "codex-security": {
+                        disabled_tools: profileDisabledTools,
+                      },
+                    },
+                  },
+                },
+              },
+            },
         {
           environment: { CODEX_SECURITY_STATE_DIR: stateDir },
           prepareRuntime: async () => {
@@ -545,7 +580,13 @@ describe("custom validation", () => {
             expect(options.config?.["mcp_servers"]).toMatchObject({
               "codex-security": {
                 disabled_tools: expect.arrayContaining([
+                  "start_codex_security_standard_scan",
+                  "start_codex_security_prompt_only_scan",
+                  "start_codex_security_deep_scan",
                   "complete_codex_security_scan",
+                  "record_codex_security_candidate_validations",
+                  "record_candidate_attack_paths",
+                  ...(profileDisabledTools ?? []),
                 ]),
               },
             });
@@ -608,6 +649,10 @@ describe("custom validation", () => {
                     const output = result(
                       scenario === "dismissed" ? "suppressed" : "reportable",
                     );
+                    output.validations[0]!.validation.counterevidence_or_proof_gap =
+                      "Synthetic counterevidence from validation.";
+                    output.validations[0]!.validation.remaining_uncertainty =
+                      "Synthetic limitation from validation.";
                     if (scenario === "incomplete") {
                       output.status = "incomplete";
                       output.reason =
@@ -722,6 +767,11 @@ describe("custom validation", () => {
         }
         const completed = await pending;
         if (scenario === "standard") {
+          const report = await readFile(join(scanDir, "report.md"), "utf8");
+          expect(report).toContain(
+            "Synthetic counterevidence from validation.",
+          );
+          expect(report).toContain("Synthetic limitation from validation.");
           expect(
             activities.filter(
               ({ description }) => description === validationActivity,
@@ -771,7 +821,7 @@ describe("custom validation", () => {
 
   test("rejects Deep and empty prompts before starting Codex", async () => {
     const root = await temporaryDirectory();
-    const client = new TestClient({}, {});
+    const client = TestClient.withDependencies({});
     await expect(
       client.run(root, { mode: "deep", validationPrompt: "Validate." }),
     ).rejects.toThrow("not supported for Deep");

@@ -1,8 +1,13 @@
 import { spawnSync } from "node:child_process";
+
 import { mkdtempSync, rmSync } from "node:fs";
+
 import { tmpdir } from "node:os";
+
 import { join } from "node:path";
+
 import { afterEach, expect, test } from "bun:test";
+
 import { fileURLToPath } from "node:url";
 
 const PLUGIN_ROOT = fileURLToPath(
@@ -12,9 +17,8 @@ const PLUGIN_ROOT = fileURLToPath(
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
-  for (const path of temporaryDirectories.splice(0)) {
-    rmSync(path, { recursive: true, force: true });
-  }
+  for (const root of temporaryDirectories.splice(0))
+    rmSync(root, { recursive: true, force: true });
 });
 
 const stoppedScanProbe = [

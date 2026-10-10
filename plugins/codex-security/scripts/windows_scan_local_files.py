@@ -663,6 +663,7 @@ def atomic_write(
                 try:
                     _mark_handle_for_deletion(temp_handle.value)
                 except OSError:
+                    # Cleanup must not replace the original write or rename failure.
                     pass
                 raise
 

@@ -7,6 +7,8 @@ export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 export type NativeParentSandbox = {
   /** Trusted parent denials retained by the ordinary scan permission profile. */
   readonly filesystemDenies: readonly string[];
+  /** Literal paths with glob characters retain native point-deny semantics. */
+  readonly literalFilesystemDenies?: readonly string[];
   readonly globScanMaxDepth?: number;
 };
 
@@ -20,12 +22,6 @@ export function resolveNativeParentSandbox(
   if (!profile || profile.type !== "managed") {
     throw unsupportedParentSandbox(
       "the parent must provide a managed filesystem permission profile",
-    );
-  }
-
-  if (profile.network !== "enabled" && profile.network !== "restricted") {
-    throw unsupportedParentSandbox(
-      "the parent network permission is missing or invalid",
     );
   }
 
@@ -50,6 +46,7 @@ export function resolveNativeParentSandbox(
 
   let hasRootRead = false;
   const filesystemDenies: string[] = [];
+  const literalFilesystemDenies: string[] = [];
   for (const value of filesystem.entries) {
     const entry = record(value);
     if (!entry || !isKnownFilesystemAccess(entry.access)) {
@@ -95,12 +92,10 @@ export function resolveNativeParentSandbox(
             "a parent filesystem denial path cannot be preserved",
           );
         }
-        if (hasGlobMetacharacters(path.path)) {
-          throw unsupportedParentSandbox(
-            "a parent filesystem denial path with glob characters cannot be preserved",
-          );
-        }
-        filesystemDenies.push(path.path);
+        (hasGlobMetacharacters(path.path)
+          ? literalFilesystemDenies
+          : filesystemDenies
+        ).push(path.path);
       }
     } else if (path.type === "glob_pattern") {
       if (!isNonEmptyString(path.pattern)) {
@@ -131,6 +126,12 @@ export function resolveNativeParentSandbox(
     }
   }
 
+  if (literalFilesystemDenies.some((path) => filesystemDenies.includes(path))) {
+    throw unsupportedParentSandbox(
+      "literal path and glob denials with the same key cannot be preserved",
+    );
+  }
+
   if (!hasRootRead) {
     throw unsupportedParentSandbox(
       "the parent restricts readable paths beyond the supported ordinary scan sandbox",
@@ -139,6 +140,7 @@ export function resolveNativeParentSandbox(
 
   return {
     filesystemDenies,
+    ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),
   };
 }

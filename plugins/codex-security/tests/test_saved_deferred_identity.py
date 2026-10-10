@@ -13,7 +13,7 @@ from test_workbench_standard_deep_results import (
     write_saved_parent,
 )
 from workbench_test_support import (
-    run_workbench,
+    preserve_scan_results,
     saved_discovery_worker,
     saved_draft,
     write_checkpoint,
@@ -144,14 +144,8 @@ def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir,
         patch.setattr(saved_results, "_write_prepared_scan_finalization", fail_publication)
         call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
     assert len(prepared_coverage) == 1
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
     return prepared_coverage[0], json.loads((scan_dir / "coverage.json").read_text())
 

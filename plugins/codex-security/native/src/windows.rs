@@ -1,20 +1,31 @@
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::{
-    ffi::OsString,
+    ffi::{CStr, OsString},
     fs::{self, File},
     io::{self, Read, Write},
     mem::{offset_of, size_of, MaybeUninit},
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
         fs::FileTypeExt,
-        io::{AsRawHandle, FromRawHandle},
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     ptr::{copy_nonoverlapping, null, null_mut},
 };
 use windows_sys::Win32::{
-    Foundation::{GetLastError, SetLastError, ERROR_INVALID_HANDLE, HANDLE, INVALID_HANDLE_VALUE},
+    Foundation::{
+        GetLastError, LocalFree, SetLastError, ERROR_INVALID_HANDLE, HANDLE, INVALID_HANDLE_VALUE,
+    },
+    Security::{
+        Authorization::{
+            ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            SDDL_REVISION_1,
+        },
+        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, TOKEN_QUERY,
+        TOKEN_USER,
+    },
     Storage::FileSystem::*,
+    System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 
 fn invalid(message: &str) -> napi::Error {
@@ -273,6 +284,70 @@ pub fn open_windows_file(
 #[napi]
 pub fn create_windows_directories(path: Buffer) -> napi::Result<u32> {
     Ok(io_status(fs::create_dir_all(os_string(path)?)))
+}
+
+#[napi]
+pub fn create_private_windows_directory(path: Buffer) -> napi::Result<u32> {
+    let path = wide_path(path)?;
+    let mut token = null_mut();
+    let error = status(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) });
+    if error != 0 {
+        return Ok(error);
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    // TOKEN_USER is followed by the SID; use Windows' defined maximum SID size.
+    #[repr(C)]
+    struct TokenUserBuffer {
+        user: TOKEN_USER,
+        sid: [u8; SECURITY_MAX_SID_SIZE as usize],
+    }
+    let mut user = TokenUserBuffer {
+        user: TOKEN_USER::default(),
+        sid: [0; SECURITY_MAX_SID_SIZE as usize],
+    };
+    let mut length = 0;
+    let error = status(unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            (&mut user as *mut TokenUserBuffer).cast(),
+            size_of::<TokenUserBuffer>() as u32,
+            &mut length,
+        )
+    });
+    if error != 0 {
+        return Ok(error);
+    }
+    let mut sid = null_mut();
+    let error = status(unsafe { ConvertSidToStringSidA(user.user.User.Sid, &mut sid) });
+    if error != 0 {
+        return Ok(error);
+    }
+    let descriptor = format!(
+        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{})",
+        unsafe { CStr::from_ptr(sid.cast()) }.to_str().unwrap()
+    );
+    unsafe { LocalFree(sid.cast()) };
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        ..Default::default()
+    };
+    // Match the credential-home policy: current user, SYSTEM and administrators.
+    let descriptor = descriptor.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let error = status(unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor.as_ptr(),
+            SDDL_REVISION_1,
+            &mut attributes.lpSecurityDescriptor,
+            null_mut(),
+        )
+    });
+    if error != 0 {
+        return Ok(error);
+    }
+    let error = status(unsafe { CreateDirectoryW(path.as_ptr(), &attributes) });
+    unsafe { LocalFree(attributes.lpSecurityDescriptor) };
+    Ok(error)
 }
 
 #[napi]

@@ -9,9 +9,9 @@ import { importSource } from "./import-module.ts";
 
 const {
   candidateValidationsInputSchema,
-  recordCodexSecurityCandidateValidations,
+  recordCodexSecurityCandidateValidations: writeValidations,
 } = await importSource(
-  new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-candidate-ledger.ts"),
 );
 
 const toolSchema = await readJson(
@@ -22,7 +22,8 @@ assert.equal(
   toolSchema.$schema,
   "https://json-schema.org/draft/2020-12/schema",
 );
-assert.deepEqual(toolSchema.required, ["scanId", "validations"]);
+assert.deepEqual(toolSchema.$defs.input.required, ["scanId", "validations"]);
+assert.equal(toolSchema.$ref, "#/$defs/input");
 assert.deepEqual(toolSchema.$defs.validationUpdate.required, [
   "candidateId",
   "validation",
@@ -280,4 +281,11 @@ async function assertNoMutation(
     expectedError,
   );
   assert.equal(await readFile(ledger, "utf8"), before);
+}
+
+async function recordCodexSecurityCandidateValidations(context, input) {
+  return writeValidations(
+    context,
+    candidateValidationsInputSchema.parse({ scanId: context.scanId, ...input }),
+  );
 }

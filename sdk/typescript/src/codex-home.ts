@@ -17,10 +17,10 @@ export function environmentEntry(
 
 /** @internal */
 export function configuredCodexHome(environment: ProcessEnvironment): string {
+  const configured = environmentEntry(environment, "CODEX_HOME");
   return resolve(
     expandHome(
-      environmentEntry(environment, "CODEX_HOME")?.trim() ||
-        join(homedir(), ".codex"),
+      configured?.trim() ? configured : join(homedir(), ".codex"),
       environment,
     ),
   );
@@ -47,8 +47,10 @@ export function expandHome(
 export function environmentValue(
   environment: ProcessEnvironment,
   requested: string,
+  preserveWhitespace = false,
 ): string | undefined {
-  return rawEnvironmentValue(environment, requested)?.trim();
+  const value = rawEnvironmentValue(environment, requested);
+  return preserveWhitespace ? value : value?.trim();
 }
 
 export function rawEnvironmentValue(

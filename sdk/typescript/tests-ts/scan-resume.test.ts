@@ -1,7 +1,14 @@
+import { createCliTest } from "./support/cli-run.js";
+import { readdir } from "node:fs/promises";
+import { fail } from "./support/errors.js";
 import { publishDraft } from "./support/scan-publication.js";
+
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
+
 import { randomUUID } from "node:crypto";
+
 import { execFileSync } from "node:child_process";
+
 import {
   appendFile,
   cp,
@@ -11,29 +18,48 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+
 import { join } from "node:path";
+
 import { tmpdir } from "node:os";
+
 import { parse as parseToml } from "smol-toml";
+
 import { fileURLToPath } from "node:url";
+
 import { afterEach, expect, test } from "bun:test";
+
 import { main } from "../src/cli.js";
+
 import type { ScanOptions } from "../src/api.js";
+
 import type { JsonObject } from "../src/config.js";
+
 import { loadContract } from "../src/contract.js";
+
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
+
 import { ScanInterruptedError } from "../src/errors.js";
+
 import {
   DEEP_SCAN_CHECKPOINT,
   ScanCostTrackingError,
   TerminalDeepScanError,
   type DeepScanCheckpoint,
 } from "../src/deep-scan.js";
+
 import type { SemanticScan } from "../src/scan-semantics.js";
+
 import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
+
 import { ScanTransportClosedError } from "../src/scan-execution.js";
+
 import { capture, dependencies } from "./cli-fixtures.js";
+
 import { TestClient } from "./support/api-client.js";
+
 import { tokenUsageEvent } from "./support/usage-rollout.js";
+
 import {
   completedEvents,
   createApiTestFixtures,
@@ -45,6 +71,7 @@ const PLUGIN_ROOT = fileURLToPath(
 );
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
+
 afterEach(cleanup);
 
 function preparedRuntime(codexHome: string) {
@@ -60,6 +87,8 @@ async function interruptedScan(
   bulk = false,
   settings: Pick<
     ScanOptions,
+    | "knowledgeBasePaths"
+    | "cyberAccessProgram"
     | "maxCostUsd"
     | "safetyIdentifier"
     | "postScanPrompt"
@@ -2815,3 +2844,156 @@ test.each(
     }
   },
 );
+
+import { stripVTControlCharacters } from "node:util";
+
+function resumeDependencies(
+  f: Awaited<ReturnType<typeof interruptedScan>>,
+  createCodex: NonNullable<
+    ConstructorParameters<typeof TestClient>[1]["createCodex"]
+  >,
+  runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
+) {
+  return {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: (config: ConstructorParameters<typeof TestClient>[0]) =>
+      new TestClient(config, {
+        environment: f.environment,
+        prepareRuntime: async () => {
+          const runtime = {
+            ...preparedRuntime(f.codexHome),
+            ...runtimeOverrides,
+          };
+          runtime.configPath = join(f.root, "resumed-runtime.toml");
+          runtime.environment = Object.fromEntries(
+            Object.entries(f.environment).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          );
+          runtime.plugin.version = JSON.parse(
+            await readFile(
+              join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
+              "utf8",
+            ),
+          ).version;
+          return runtime;
+        },
+        resolvePluginPython: async () => f.python,
+        runWorkbench,
+        createCodex,
+      }),
+  };
+}
+
+test.each([false, true])(
+  "resumed CLI starts with terminal Deep progress (interactive=%p)",
+  async (interactive) => {
+    const f = await interruptedScan();
+    await finishDiscovery(f);
+    const { stderr, runCli } = createCliTest(main, { stderr: interactive });
+    const progress = Promise.withResolvers<void>();
+    const deps = resumeDependencies(f, () => ({
+      startThread: () => fail("Unexpected new session"),
+      resumeThread(threadId) {
+        expect(threadId).toBe(f.threadId);
+        return {
+          id: threadId,
+          async runStreamed() {
+            await progress.promise;
+            const text = stripVTControlCharacters(stderr.text()).replace(
+              /\s+/gu,
+              " ",
+            );
+            expect(text).toContain("consolidating results");
+            expect(text).toContain("Reviews: 0 completed, 0 active, cap 40");
+            expect(text).not.toContain("Scan phase: discovery");
+            throw new Error("Terminal progress captured");
+          },
+        };
+      },
+    }));
+    const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+      ...deps,
+      createSecurity: (config) => {
+        const security = deps.createSecurity(config);
+        const run = security.run.bind(security);
+        security.run = (repository, options = {}) =>
+          run(repository, {
+            ...options,
+            onDeepProgress(update) {
+              options.onDeepProgress?.(update);
+              progress.resolve();
+            },
+          });
+        return security;
+      },
+    });
+    expect(code).toBe(2);
+    expect(stderr.text()).toContain("Terminal progress captured");
+  },
+);
+
+test("bulk Deep resume stages campaign knowledge after its source is removed", async () => {
+  const documentRoot = await temporaryDirectory();
+  const document = join(documentRoot, "architecture.md");
+  await writeFile(document, "Original architecture.");
+  const f = await interruptedScan("deep", true, {
+    knowledgeBasePaths: [document],
+  });
+  const stdout = capture();
+  const stderr = capture();
+  let resumed = false;
+  const code = await main(
+    [
+      "bulk-scan",
+      f.input,
+      "--output-dir",
+      f.root,
+      "--recover",
+      "--knowledge-base",
+      document,
+      "--json",
+    ],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...resumeDependencies(f, (codex) => ({
+        startThread() {
+          throw new Error("Expected original session");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+              expect(await readdir(directory)).toEqual([
+                "0-architecture.md.txt",
+              ]);
+              expect(
+                await readFile(
+                  join(directory, "0-architecture.md.txt"),
+                  "utf8",
+                ),
+              ).toBe("Original architecture.");
+              resumed = true;
+              await finishDiscovery(f);
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
+      runWorkbench: async (args, input) => {
+        if (args[0] === "get-cli-scan-resume") await rm(document);
+        return f.command(args, input);
+      },
+    },
+  );
+  expect(resumed, stderr.text()).toBe(true);
+  expect(code, stderr.text()).toBe(2);
+  expect(JSON.parse(stdout.text())).toMatchObject({ incomplete: 1, failed: 0 });
+  expect(
+    (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
+  ).toMatchObject({ knowledgeBasePaths: [document] });
+});

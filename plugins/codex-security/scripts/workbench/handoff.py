@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from collections.abc import Callable
 from typing import Any
 
 from workbench_validation import optional_text, require_uuid
@@ -61,21 +60,17 @@ def validate_handoff_delivery_thread(
 
 
 def claim_handoff_delivery(
+    wb: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
-    *,
-    now: Callable[[], str],
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    stale_claim_before: Callable[[], str],
-    workspace_state: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     claim_token = require_handoff_claim_token(args.claim_token)
-    timestamp = now()
+    timestamp = wb.now()
     with connection:
-        scan = require_scan(connection, scan_id)
+        scan = wb.require_scan(connection, scan_id)
         if scan["handoff_status"] != "pending" or scan["handoff_claim_token"] == claim_token:
-            return workspace_state(connection, scan["workspace_id"])
+            return wb.workspace_state(connection, scan["workspace_id"])
         updated = connection.execute(
             """
             UPDATE scans
@@ -104,27 +99,24 @@ def claim_handoff_delivery(
                 timestamp,
                 scan["id"],
                 int(args.take_over_stale),
-                stale_claim_before(),
+                wb.stale_claim_before(),
             ),
         )
         if updated.rowcount != 1:
-            return workspace_state(connection, scan["workspace_id"])
-    return workspace_state(connection, scan["workspace_id"])
+            return wb.workspace_state(connection, scan["workspace_id"])
+    return wb.workspace_state(connection, scan["workspace_id"])
 
 
 def release_handoff_delivery(
+    wb: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
-    *,
-    now: Callable[[], str],
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    workspace_state: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     claim_token = require_handoff_claim_token(args.claim_token)
-    timestamp = now()
+    timestamp = wb.now()
     with connection:
-        scan = require_scan(connection, scan_id)
+        scan = wb.require_scan(connection, scan_id)
         connection.execute(
             """
             UPDATE scans
@@ -136,16 +128,13 @@ def release_handoff_delivery(
             """,
             (timestamp, scan["id"], claim_token),
         )
-    return workspace_state(connection, scan["workspace_id"])
+    return wb.workspace_state(connection, scan["workspace_id"])
 
 
 def attach_scan_continuation_thread(
+    wb: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
-    *,
-    now: Callable[[], str],
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    workspace_state: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     claim_token = require_handoff_claim_token(args.claim_token)
@@ -153,9 +142,9 @@ def attach_scan_continuation_thread(
     if thread_id is None:
         raise SystemExit("Codex Security continuation thread ID is required.")
     connection.execute("BEGIN IMMEDIATE")
-    try:
-        timestamp = now()
-        scan = require_scan(connection, scan_id)
+    with connection:
+        timestamp = wb.now()
+        scan = wb.require_scan(connection, scan_id)
         if scan["handoff_claim_token"] != claim_token:
             raise SystemExit("Codex Security continuation thread claim token does not match.")
         if scan["continuation_thread_id"] is not None:
@@ -164,8 +153,8 @@ def attach_scan_continuation_thread(
                     "Codex Security scan continuation is owned by another continuation."
                 )
             connection.commit()
-            return workspace_state(connection, scan["workspace_id"])
-        updated = connection.execute(
+            return wb.workspace_state(connection, scan["workspace_id"])
+        connection.execute(
             """
             UPDATE scans
             SET continuation_thread_id = ?,
@@ -178,33 +167,23 @@ def attach_scan_continuation_thread(
             """,
             (thread_id, thread_id, timestamp, scan["id"], claim_token),
         )
-        if updated.rowcount != 1:
-            raise SystemExit("Codex Security continuation thread could not be attached.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
-    return workspace_state(connection, scan["workspace_id"])
+    return wb.workspace_state(connection, scan["workspace_id"])
 
 
 def mark_handoff_delivered(
+    wb: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
-    *,
-    now: Callable[[], str],
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    require_workspace: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    workspace_state: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     claim_token = require_handoff_claim_token(args.claim_token)
     thread_id = optional_text(args.thread_id, maximum=512)
     connection.execute("BEGIN IMMEDIATE")
-    try:
-        timestamp = now()
-        scan = require_scan(connection, scan_id)
+    with connection:
+        timestamp = wb.now()
+        scan = wb.require_scan(connection, scan_id)
         if thread_id is not None:
-            workspace = require_workspace(connection, scan["workspace_id"])
+            workspace = wb.require_workspace(connection, scan["workspace_id"])
             validate_handoff_delivery_thread(
                 owning_thread(scan, workspace),
                 thread_id,
@@ -216,7 +195,7 @@ def mark_handoff_delivered(
                     "Codex Security handoff delivery is owned by another continuation."
                 )
             connection.commit()
-            return workspace_state(connection, scan["workspace_id"])
+            return wb.workspace_state(connection, scan["workspace_id"])
         updated = connection.execute(
             """
             UPDATE scans
@@ -241,8 +220,4 @@ def mark_handoff_delivered(
                 """,
                 (timestamp, scan["id"]),
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
-    return workspace_state(connection, scan["workspace_id"])
+    return wb.workspace_state(connection, scan["workspace_id"])

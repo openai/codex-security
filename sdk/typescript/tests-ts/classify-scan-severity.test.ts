@@ -1,5 +1,8 @@
+import { sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
+
 import { createHash } from "node:crypto";
+
 import {
   chmod,
   cp,
@@ -9,28 +12,42 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+
 import { tmpdir } from "node:os";
+
 import { join } from "node:path";
+
 import { afterEach, expect, test } from "bun:test";
+
 import {
   classifyScanDirectorySeverity,
   classifyScanSeverityInternal,
   readScanSeverityClassification,
 } from "../src/classify-scan-severity.js";
+
 import {
   classifySeverity,
   type ClassifySeverityOptions,
 } from "../src/classify-severity.js";
+
 import { loadContract } from "../src/contract.js";
+
 import type { JsonObject } from "../src/config.js";
+
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
+
 import { prepareScanPublication } from "../src/publication.js";
+
 import { publishScanInternal } from "../src/publish.js";
+
 import { resolvePluginPython } from "../src/runtime.js";
+
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const directories: string[] = [];
+
 const destination = { destination: "linear", teamId: "team-example" } as const;
+
 afterEach(async () => {
   await Promise.all(
     directories
@@ -114,23 +131,17 @@ function classifier(
   finding: Finding,
   excluded = false,
 ): NonNullable<ClassifySeverityOptions["codex"]> {
-  return {
-    startThread: () => ({
-      run: async () => ({
-        finalResponse: JSON.stringify({
-          findingId: finding.findingId,
-          decision: excluded ? "excluded" : "assessed",
-          level: excluded ? null : "medium",
-          rubricLabel: excluded ? null : "MEDIUM",
-          rationale: excluded
-            ? "Administrative record"
-            : "Only bounded impact is established.",
-          confidence: "high",
-          reviewTrigger: null,
-        }),
-      }),
-    }),
-  };
+  return jsonCodex(() => ({
+    findingId: finding.findingId,
+    decision: excluded ? "excluded" : "assessed",
+    level: excluded ? null : "medium",
+    rubricLabel: excluded ? null : "MEDIUM",
+    rationale: excluded
+      ? "Administrative record"
+      : "Only bounded impact is established.",
+    confidence: "high",
+    reviewTrigger: null,
+  }));
 }
 
 async function query(environment: NodeJS.ProcessEnv, sql: string) {
@@ -570,14 +581,12 @@ test("failed or canceled reassessment leaves the last successful assessment inta
   ).rejects.toThrow("invalid assessment");
   expect(await readFile(path)).toEqual(before);
   const controller = new AbortController();
-  const codex: NonNullable<ClassifySeverityOptions["codex"]> = {
-    startThread: () => ({
-      run: async () => {
-        controller.abort(new Error("stop"));
-        return { finalResponse: "{}" };
-      },
-    }),
-  };
+  const codex: NonNullable<ClassifySeverityOptions["codex"]> = codexWithRun(
+    async () => {
+      controller.abort(new Error("stop"));
+      return { finalResponse: "{}" };
+    },
+  );
   await expect(
     classifyScanDirectorySeverity(scanDirectory, {
       environment,
@@ -711,4 +720,54 @@ test("migrates existing databases without changing findings and reads older stat
   expect(
     await query(environment, "SELECT * FROM findings ORDER BY id"),
   ).toEqual(original);
+});
+
+import { codexWithRun, jsonCodex } from "./support/codex.js";
+
+test("classifying another scan preserves both recurring-finding assessments", async () => {
+  const first = await fixture();
+  const second = await fixture();
+  const manifestPath = join(second.scanDirectory, "scan-manifest.json");
+  const manifest = JSON.parse(
+    await readFile(manifestPath, "utf8"),
+  ) as ScanManifest;
+  manifest.scan.id = "scan_example_002";
+  for (const file of ["findings.json", "coverage.json"]) {
+    const path = join(second.scanDirectory, file);
+    const document = JSON.parse(await readFile(path, "utf8"));
+    document.scanId = manifest.scan.id;
+    if (file === "findings.json") {
+      for (const finding of document.findings as Finding[]) {
+        finding.occurrenceId = `occ_${sha256([manifest.scan.id, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
+      }
+    }
+    await writeFile(path, JSON.stringify(document));
+  }
+  for (const artifact of manifest.scan.artifacts)
+    artifact.sha256 = sha256(
+      await readFile(join(second.scanDirectory, artifact.path)),
+    );
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const { codex, calls } = recordingClassifier();
+  const options = {
+    environment: first.environment,
+    rubricPath: first.rubricPath,
+    codex,
+  };
+  await classifyScanDirectorySeverity(first.scanDirectory, options);
+  await classifyScanDirectorySeverity(second.scanDirectory, options);
+  expect(calls).toHaveLength(4);
+  calls.length = 0;
+  for (const scan of [first, second, first, second]) {
+    expect(
+      (
+        await prepareScanPublication(scan.scanDirectory, {
+          ...destination,
+          environment: first.environment,
+        })
+      ).issues,
+    ).toHaveLength(2);
+    await classifyScanDirectorySeverity(scan.scanDirectory, options);
+  }
+  expect(calls).toEqual([]);
 });

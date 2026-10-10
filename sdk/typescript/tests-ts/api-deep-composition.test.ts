@@ -25,7 +25,10 @@ import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import type { ScanSessionEvent } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
-import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
+import {
+  runWorkbench,
+  type WorkbenchCommandOptions as RequiredWorkbenchCommandOptions,
+} from "../src/runtime.js";
 import { publishDraft } from "./support/scan-publication.js";
 import { createApiTestFixtures } from "./support/api-events.js";
 import { tokenUsageEvent } from "./support/usage-rollout.js";
@@ -1440,3 +1443,8 @@ process.exit(0);
     }
   },
 );
+
+type WorkbenchCommandOptions = Omit<
+  RequiredWorkbenchCommandOptions,
+  "python"
+> & { python?: string };

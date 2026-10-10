@@ -2,21 +2,16 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
-    "dashboard/**/*.ts",
-    "dashboard/**/*.tsx",
     "tests-ts/**/*.ts",
     "../../.github/scripts/*.mts",
     "../../plugins/codex-security/native/*.mts",
     "../../examples/custom-validation/*.mts",
     "scripts/compare-test-reports.mts",
-    "scripts/smoke-findings-service.ts",
     "scripts/merge-eval/*.ts",
-    "scripts/fixtures/findings-service-sqlite.ts",
-    "scripts/fixtures/prepare-runner-scan.ts",
     "scripts/run-ci-tests.mts"
   ],
   "compilerOptions": {
-    "allowJs": false,
+    "allowJs": true,
     "checkJs": false,
     "incremental": true,
     "isolatedModules": true,

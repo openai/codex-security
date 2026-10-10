@@ -1,26 +1,25 @@
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
+  renameSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { userInfo } from "node:os";
 import { dirname, join, relative, sep, win32 } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { writeSource as write } from "./support/shell.js";
 
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
 function fixture(name = "repository") {
-  const directory = mkdtempSync(join(tmpdir(), "security-policy-helper-"));
-  temporaryDirectories.push(directory);
+  const directory = temporaryDirectories.create("security-policy-helper-");
   const root = join(directory, name);
   const output = join(directory, "output");
   mkdirSync(root);
@@ -62,11 +61,7 @@ function expectGuidance(text: string, policies: [string, string][]): void {
   );
 }
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 describe("built SECURITY.md helper", () => {
   test("accepts dash-prefixed paths with equals syntax", () => {
@@ -250,6 +245,54 @@ describe("built SECURITY.md helper", () => {
     expect(existsSync(join(root, "temporary.tmp"))).toBe(false);
   });
 
+  test
+    .skipIf(process.platform === "win32")
+    .each(["ENOENT", "ENOTDIR", "EACCES"])(
+    "handles %s for an unrelated raw directory entry",
+    (code) => {
+      const { root, output } = fixture();
+      write(root, "SECURITY.md", "root policy\n");
+      write(root, "unrelated.txt", "temporary file\n");
+      const hook = join(output, "raw-entry-race.cjs");
+      write(
+        output,
+        "raw-entry-race.cjs",
+        `
+        const fs = require("node:fs");
+        const readdir = fs.readdirSync;
+        const lstat = fs.lstatSync;
+        const directory = fs.realpathSync.native(${JSON.stringify(root)});
+        const unrelated = require("node:path").join(directory, "unrelated.txt");
+        fs.readdirSync = (path, options) => {
+          if (String(path) !== directory) return readdir(path, options);
+          const entries = readdir(path, { encoding: "buffer" });
+          if (${JSON.stringify(code)} === "ENOENT") fs.unlinkSync(unrelated);
+          return entries;
+        };
+        fs.lstatSync = (path, ...args) => {
+          if (String(path) === unrelated && ${JSON.stringify(code)} !== "ENOENT") {
+            throw Object.assign(new Error("synthetic raw entry ${code}"), { code: ${JSON.stringify(code)} });
+          }
+          return lstat(path, ...args);
+        };
+        require("node:module").syncBuiltinESMExports();
+      `,
+      );
+      const result = run(["--repo", root, "--list"], {
+        ...process.env,
+        NODE_OPTIONS: `${process.env["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(hook)}`,
+      });
+      if (code === "EACCES") {
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("synthetic raw entry EACCES");
+      } else {
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toBe('["SECURITY.md"]\n');
+        expect(result.stderr).toBe("");
+      }
+    },
+  );
+
   test("frames Unicode paths as ASCII JSON in standard string order", () => {
     const { root } = fixture();
     for (const name of ["\u{10000}", "\ue000", "\u0080", "\u007f"]) {
@@ -291,12 +334,71 @@ describe("built SECURITY.md helper", () => {
       );
       write(root, "é\ue000/SECURITY.md", "BMP policy\n");
       write(root, "é\u{10000}/SECURITY.md", "supplementary policy\n");
-      const result = inventory(root);
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe(
-        '["SECURITY.md", "\\u00e9\\ud800\\udc00/SECURITY.md", "\\u00e9\\udcff/SECURITY.md", "\\u00e9\\ue000/SECURITY.md"]\n',
+      const rawRoot = Buffer.concat([Buffer.from(root), Buffer.from([0xff])]);
+      renameSync(root, rawRoot);
+      symlinkSync(rawRoot, root);
+      for (const runtime of ["node", process.execPath]) {
+        const result = spawnSync(
+          runtime,
+          [helper, "resolve-security-md", "--repo", root, "--list"],
+          { encoding: "utf8" },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toBe(
+          '["SECURITY.md", "\\u00e9\\ud800\\udc00/SECURITY.md", "\\u00e9\\udcff/SECURITY.md", "\\u00e9\\ue000/SECURITY.md"]\n',
+        );
+        expect(result.stderr).toBe("");
+        const scoped = spawnSync(
+          runtime,
+          [helper, "resolve-security-md", "--repo", root, "--scope", "."],
+          { encoding: "utf8" },
+        );
+        expect(scoped.status, scoped.stderr).toBe(0);
+        expectGuidance(scoped.stdout, [["SECURITY.md", "root policy"]]);
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "reads policies when filesystem directory entry types are unknown",
+    () => {
+      const { root } = fixture();
+      write(root, "SECURITY.md", "root policy\n");
+      write(root, "nested/SECURITY.md", "nested policy\n");
+      const preload = join(dirname(root), "unknown-entry-types.cjs");
+      writeFileSync(
+        preload,
+        `
+const binding = process.binding("fs");
+const original = binding.readdir;
+binding.readdir = function (...args) {
+  const result = original.apply(this, args);
+  if (args[2] === true && result?.[1]) result[1].fill(0);
+  return result;
+};
+`,
       );
-      expect(result.stderr).toBe("");
+      for (const args of [["--list"], ["--scope", "."]]) {
+        const result = spawnSync(
+          "node",
+          [
+            "--require",
+            preload,
+            helper,
+            "resolve-security-md",
+            "--repo",
+            root,
+            ...args,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        if (args[0] === "--list") {
+          expect(result.stdout).toBe('["SECURITY.md", "nested/SECURITY.md"]\n');
+        } else {
+          expectGuidance(result.stdout, [["SECURITY.md", "root policy"]]);
+        }
+      }
     },
   );
 

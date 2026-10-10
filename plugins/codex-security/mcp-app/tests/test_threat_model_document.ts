@@ -15,13 +15,14 @@ import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
 import { importModule } from "./import-module.ts";
-import { draftFixture } from "./scan-draft-recovery-fixture.ts";
+import {
+  draftFixture,
+  recordCodexSecurityScanDraft,
+} from "./scan-draft-recovery-fixture.ts";
 
 const pluginRoot = join(import.meta.dirname, "../../");
 const {
-  recordCodexSecurityScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
-  recordCodexSecurityWorkerScanDraft,
   saveThreatModelDocument,
   scanDraftInputSchema,
 } = await importModule({
@@ -48,80 +49,95 @@ const threatModel = {
 };
 
 for (const complete of [true, undefined]) {
-  for (const publication of ["direct", "workbench"]) {
-    test(`terminal Deep ${publication} drafts retain an omitted model (${complete})`, async () => {
-      const root = await temporaryDirectory("threatmodel-deep-final-");
-      try {
-        const { context, draft } = draftFixture(root, "deep");
-        context.pluginRoot = pluginRoot;
-        await recordCodexSecurityScanDraft(context, {
-          ...draft({ deferred: [{ reason: "Earlier unfinished review." }] }),
-          threatModel,
-        });
-        // A final Deep result replaces old review documents without parsing them.
-        await writeFile(join(root, "findings.json"), "unfinished findings");
-        await writeFile(join(root, "coverage.json"), "unfinished coverage");
-        const replacement = {
-          format: "markdown",
-          content: "# Replacement model\n",
-        };
-        for (const model of [undefined, replacement]) {
-          const terminal = draft({}, true);
-          if (complete === undefined) delete terminal.complete;
-          if (model !== undefined) terminal.threatModel = model;
-          const expectedModel = model ?? threatModel;
-          if (publication === "direct") {
-            await recordCodexSecurityScanDraft(context, terminal);
-            const manifest = await readJson(root, "scan-manifest.json");
-            assert.deepEqual(manifest.scan.threatModel, expectedModel);
-            const checkpoints = await Promise.all(
-              (await readdir(join(root, "checkpoints"))).map(
-                async (name) => await readJson(root, "checkpoints", name),
-              ),
-            );
-            assert.ok(
-              checkpoints.some(
-                (checkpoint) =>
-                  checkpoint.complete !== false &&
-                  checkpoint.threatModel?.content === expectedModel.content &&
-                  checkpoint.coverage.deferred.length === 0,
-              ),
-            );
-            const savedCoverage = await readJson(root, "coverage.json");
-            assert.deepEqual(savedCoverage.deferred, []);
-            assert.ok(
-              (await readFile(join(root, "threatmodel.md"), "utf8")).startsWith(
-                expectedModel.content,
-              ),
-            );
-          } else {
-            await recordCodexSecurityScanDraftViaWorkbench(
-              context,
-              terminal,
-              async (args: string[]) => {
-                const staged = await readJson(
-                  args[args.indexOf("--draft-path") + 1],
-                );
-                const checkpoint = await readJson(
-                  args[args.indexOf("--checkpoint-path") + 1],
-                );
-                assert.deepEqual(
-                  staged.manifest.scan.threatModel,
-                  expectedModel,
-                );
-                assert.deepEqual(checkpoint.threatModel, expectedModel);
-                assert.deepEqual(staged.coverage.deferred, []);
-                assert.deepEqual(staged.findings.findings, []);
-              },
-            );
-          }
-          assert.equal(terminal.threatModel, model);
+  test(`terminal Deep drafts retain an omitted model (${complete})`, async () => {
+    const root = await temporaryDirectory("threatmodel-deep-final-");
+    try {
+      const { context, draft } = draftFixture(root, "deep");
+      context.pluginRoot = pluginRoot;
+      const target = context.targetContract!.target as Record<string, unknown>;
+      target.requiredSnapshotDigest =
+        "codex-security-snapshot/v1:sha256:" + "a".repeat(64);
+      await recordCodexSecurityScanDraft(context, {
+        ...draft({ deferred: [{ reason: "Earlier unfinished review." }] }),
+        threatModel,
+      });
+      assert.ok(
+        (await readFile(join(root, "threatmodel.md"), "utf8")).includes(
+          `Snapshot: ${target.requiredSnapshotDigest}`,
+        ),
+      );
+      // A final Deep result replaces old review documents without parsing them.
+      await writeFile(join(root, "findings.json"), "unfinished findings");
+      await writeFile(join(root, "coverage.json"), "unfinished coverage");
+      const replacement = {
+        format: "markdown",
+        content: "# Replacement model\n",
+      };
+      for (const model of [undefined, replacement]) {
+        const terminal = draft({}, true);
+        if (complete === undefined) delete terminal.complete;
+        if (model !== undefined) terminal.threatModel = model;
+        const expectedModel = model ?? threatModel;
+        const before = new Set(await readdir(join(root, "checkpoints")));
+        await recordCodexSecurityScanDraft(context, terminal);
+        const manifest = await readJson(root, "scan-manifest.json");
+        assert.deepEqual(manifest.scan.threatModel, expectedModel);
+        const checkpoints = await Promise.all(
+          (await readdir(join(root, "checkpoints")))
+            .filter((name) => !before.has(name))
+            .map(async (name) => await readJson(root, "checkpoints", name)),
+        );
+        assert.ok(checkpoints.length > 0);
+        for (const checkpoint of checkpoints) {
+          assert.notEqual(checkpoint.complete, false);
+          assert.deepEqual(checkpoint.threatModel, expectedModel);
+          assert.deepEqual(checkpoint.coverage.deferred, []);
         }
-      } finally {
-        await rm(root, { recursive: true, force: true });
+        const savedCoverage = await readJson(root, "coverage.json");
+        assert.deepEqual(savedCoverage.deferred, []);
+        assert.ok(
+          (await readFile(join(root, "threatmodel.md"), "utf8")).startsWith(
+            expectedModel.content,
+          ),
+        );
+        assert.deepEqual((await readJson(root, "findings.json")).findings, []);
+        assert.equal(terminal.threatModel, model);
       }
-    });
-  }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const kind of ["working_tree", "commit", "range"]) {
+  test(`diff threat model includes its saved ${kind} snapshot`, async () => {
+    const root = await temporaryDirectory("threatmodel-diff-");
+    try {
+      const { context, draft } = draftFixture(root, "diff");
+      context.pluginRoot = pluginRoot;
+      const target = context.targetContract!.target as Record<string, unknown>;
+      const diffTarget = context.targetContract!.diffTarget as Record<
+        string,
+        unknown
+      >;
+      delete target.requiredSnapshotDigest;
+      diffTarget.kind = kind;
+      if (kind === "working_tree")
+        diffTarget.contentDigest =
+          "codex-security-snapshot/v1:sha256:" + "c".repeat(64);
+      await recordCodexSecurityScanDraft(context, { ...draft(), threatModel });
+      const manifest = await readJson(root, "scan-manifest.json");
+      const digest = manifest.scan.target.snapshotDigest;
+      assert.match(
+        digest,
+        /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
+      );
+      const document = await readFile(join(root, "threatmodel.md"), "utf8");
+      assert.ok(document.includes(`Snapshot: ${digest}`), document);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 }
 
 test("terminal Deep model inheritance retries a changed canonical draft", async () => {
@@ -159,36 +175,13 @@ test("terminal Deep model inheritance retries a changed canonical draft", async 
   }
 });
 
-test("terminal Deep input remains checkpointed when reading the previous model fails", async () => {
-  const root = await temporaryDirectory("threatmodel-deep-read-failure-");
-  try {
-    const { context, draft } = draftFixture(root, "deep");
-    await writeFile(join(root, "scan-manifest.json"), "unfinished manifest");
-    await assert.rejects(
-      recordCodexSecurityScanDraft(context, draft({}, true)),
-      /previous scan draft manifest/,
-    );
-    const checkpoints = await readdir(join(root, "checkpoints"));
-    assert.equal(checkpoints.length, 1);
-    const saved = await readJson(root, "checkpoints", checkpoints[0]);
-    assert.equal(saved.complete, true);
-    assert.deepEqual(saved.findings, []);
-    assert.deepEqual(saved.coverage.deferred, []);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("model-only worker checkpoints save Markdown before findings and retain it on retry", async () => {
+test("model-only scan checkpoints save Markdown before findings and retain it on retry", async () => {
   const root = await temporaryDirectory("threatmodel-worker-");
   try {
     const context = {
-      root,
-      repoRoot: root,
-      layout: "worker",
-      scanId,
+      ...draftFixture(root, "standard").context,
+      handoffClaimToken: undefined,
       pluginRoot,
-      scope: ".",
     };
     const checkpoint = {
       scanId,
@@ -220,24 +213,29 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
         .threatModel,
       legacyModel,
     );
-    const result = await recordCodexSecurityWorkerScanDraft(
-      context,
-      checkpoint,
-    );
+    const result = await recordCodexSecurityScanDraft(context, checkpoint);
     assert.equal(result.warnings, undefined);
     const contents = await readFile(join(root, "threatmodel.md"), "utf8");
     assert.ok(contents.startsWith(markdown));
     assert.match(contents, /Model scope: services\/api/);
     assert.match(contents, /provisional/);
-    assert.equal((await readdir(join(root, "checkpoints"))).length, 1);
-    await recordCodexSecurityWorkerScanDraft(context, {
+    const checkpoints = (await readdir(join(root, "checkpoints"))).filter(
+      (name) => name.endsWith(".json"),
+    );
+    assert.ok(checkpoints.length > 0);
+    for (const name of checkpoints)
+      assert.deepEqual(
+        (await readJson(root, "checkpoints", name)).threatModel,
+        threatModel,
+      );
+    await recordCodexSecurityScanDraft(context, {
       scanId,
       complete: false,
       findings: [],
       coverage,
     });
-    const saved = await readJson(root, "result.json");
-    assert.deepEqual(saved.threatModel, threatModel);
+    const saved = await readJson(root, "scan-manifest.json");
+    assert.deepEqual(saved.scan.threatModel, threatModel);
     assert.equal(
       await readFile(join(root, "threatmodel.md"), "utf8"),
       contents,
@@ -247,17 +245,21 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
   }
 });
 
-test("a convenience-document failure preserves the worker result and reports a warning", async () => {
+test("a convenience-document failure preserves the scan result and reports a warning", async () => {
   const root = await temporaryDirectory("threatmodel-write-failure-");
   try {
     await mkdir(join(root, "threatmodel.md"));
-    const result = await recordCodexSecurityWorkerScanDraft(
-      { root, repoRoot: root, layout: "worker", scanId, pluginRoot },
+    const result = await recordCodexSecurityScanDraft(
+      {
+        ...draftFixture(root, "standard").context,
+        handoffClaimToken: undefined,
+        pluginRoot,
+      },
       { scanId, complete: false, threatModel, findings: [], coverage },
     );
     assert.match(result.warnings[0], /threatmodel\.md could not be written/);
     assert.deepEqual(
-      (await readJson(root, "result.json")).threatModel,
+      (await readJson(root, "scan-manifest.json")).scan.threatModel,
       threatModel,
     );
   } finally {
@@ -265,15 +267,13 @@ test("a convenience-document failure preserves the worker result and reports a w
   }
 });
 
-test("the configured worker interpreter is honored without losing the canonical model on failure", async () => {
+test("the configured scan interpreter is honored without losing the canonical model on failure", async () => {
   const root = await temporaryDirectory("threatmodel-python-");
   try {
-    const result = await recordCodexSecurityWorkerScanDraft(
+    const result = await recordCodexSecurityScanDraft(
       {
-        root,
-        repoRoot: root,
-        layout: "worker",
-        scanId,
+        ...draftFixture(root, "standard").context,
+        handoffClaimToken: undefined,
         pluginRoot,
         pythonCommand: join(root, "missing-interpreter"),
       },
@@ -281,7 +281,7 @@ test("the configured worker interpreter is honored without losing the canonical 
     );
     assert.match(result.warnings[0], /missing-interpreter/);
     assert.deepEqual(
-      (await readJson(root, "result.json")).threatModel,
+      (await readJson(root, "scan-manifest.json")).scan.threatModel,
       threatModel,
     );
   } finally {
@@ -342,27 +342,24 @@ test("overlapping draft projections retain the latest committed model", async (t
   });
   syncBuiltinESMExports();
   const context = {
-    root,
-    repoRoot: root,
-    layout: "worker",
-    scanId,
+    ...draftFixture(root, "standard").context,
+    handoffClaimToken: undefined,
     pluginRoot,
     pythonCommand: "fixture-python",
     targetRevision: "example-revision",
-    targetContract: { requiredSnapshotDigest: "example-snapshot" },
   };
   const firstModel = { format: "markdown", content: "# First model\n" };
   const latestModel = { format: "markdown", content: "# Latest model\n" };
   const events = watch(root);
   const latestCommitted = (async () => {
     for await (const event of events) {
-      if (event.filename !== "result.json") continue;
-      const value = await readJson(root, "result.json");
-      if (value.threatModel.content === latestModel.content) return;
+      if (event.filename !== "scan-manifest.json") continue;
+      const value = await readJson(root, "scan-manifest.json");
+      if (value.scan.threatModel.content === latestModel.content) return;
     }
   })();
   try {
-    const first = recordCodexSecurityWorkerScanDraft(context, {
+    const first = recordCodexSecurityScanDraft(context, {
       scanId,
       complete: false,
       threatModel: firstModel,
@@ -373,9 +370,9 @@ test("overlapping draft projections retain the latest committed model", async (t
     assert.equal(input.provenance.revision, context.targetRevision);
     assert.equal(
       input.provenance.snapshotDigest,
-      context.targetContract.requiredSnapshotDigest,
+      context.targetContract.target.requiredSnapshotDigest,
     );
-    const latest = recordCodexSecurityWorkerScanDraft(context, {
+    const latest = recordCodexSecurityScanDraft(context, {
       scanId,
       complete: false,
       threatModel: latestModel,
@@ -401,7 +398,7 @@ test("overlapping draft projections retain the latest committed model", async (t
       latestModel.content,
     );
     assert.deepEqual(
-      (await readJson(root, "result.json")).threatModel,
+      (await readJson(root, "scan-manifest.json")).scan.threatModel,
       latestModel,
     );
   } finally {

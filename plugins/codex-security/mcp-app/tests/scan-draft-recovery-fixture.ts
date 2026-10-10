@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
@@ -7,25 +8,116 @@ import path from "node:path";
 import type { TestContext } from "node:test";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { ArtifactContext } from "../src/artifact-io.js";
-import { importSource } from "./import-module.ts";
+import { importModule, importSource } from "./import-module.ts";
 export const draftApi = await importSource("../src/artifact-scan-draft.ts", {
   absWorkingDir: import.meta.dirname,
 });
+
+const {
+  artifactDestination,
+  replaceArtifactJson,
+  replaceArtifactText,
+  saveThreatModelDocument,
+  semanticScanDraft,
+} = await importModule({
+  stdin: {
+    contents:
+      'export * from "./artifact-io.ts"; export * from "./threat-model-document.ts"; export { semanticScanDraft } from "../../../../sdk/typescript/src/scan-semantics.ts";',
+    resolveDir: path.join(import.meta.dirname, "../src"),
+  },
+});
+
+// Unit publication boundary; real lock/binding behavior is covered by the workbench integration suite.
+export async function recordCodexSecurityScanDraft(
+  context: ArtifactContext,
+  input: unknown,
+) {
+  return draftApi.recordCodexSecurityScanDraft(
+    context,
+    input,
+    async (draft, _digest, checkpoint, reconciled) => {
+      const raw = await saveScanDraftCheckpoint(context, checkpoint);
+      const accepted = await saveScanDraftCheckpoint(
+        context,
+        semanticScanDraft(
+          context.scanId,
+          draft.manifest.scan,
+          draft.findings.findings,
+          draft.coverage,
+        ),
+        false,
+        false,
+      );
+      await replaceArtifactJson(
+        await artifactDestination(
+          context,
+          ["checkpoint-head.json"],
+          "checkpoint head",
+        ),
+        { checkpoint: path.basename(accepted) },
+      );
+      for (const [key, name] of [
+        ["findings", "findings.json"],
+        ["coverage", "coverage.json"],
+        ["manifest", "scan-manifest.json"],
+      ]) {
+        await replaceArtifactJson(
+          await artifactDestination(context, [name], "scan draft"),
+          draft[key],
+        );
+      }
+      for (const name of [...reconciled, path.basename(raw)])
+        await rm(path.join(context.root, "checkpoints", "pending", name), {
+          force: true,
+        });
+      const warning = await saveThreatModelDocument(
+        context,
+        draft.manifest.scan.threatModel,
+      );
+      return warning === undefined ? undefined : [warning];
+    },
+  );
+}
+
+export async function saveScanDraftCheckpoint(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+  _validate = true,
+  pending = true,
+) {
+  const { handoffClaimToken: _claim, ...snapshot } = input;
+  const contents = JSON.stringify(snapshot);
+  const name = createHash("sha256").update(contents).digest("hex") + ".json";
+  await replaceArtifactText(
+    await artifactDestination(context, ["checkpoints", name], "checkpoint"),
+    contents,
+  );
+  if (pending)
+    await replaceArtifactText(
+      await artifactDestination(
+        context,
+        ["checkpoints", "pending", name],
+        "pending checkpoint",
+      ),
+      "",
+    );
+  return path.join(context.root, "checkpoints", name);
+}
+
 export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 export const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
 
-type Layout = "standard" | "diff" | "deep" | "worker";
+type Layout = "standard" | "diff" | "deep";
 
 export function draftFixture(root: string, layout: Layout) {
   const context: ArtifactContext = {
     root,
     repoRoot: root,
     scanId,
-    layout: layout === "worker" ? "worker" : "scan",
     mode: layout,
     scope: ".",
     status: "running",
-    ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
+    ...{ handoffClaimToken: claimToken },
     targetRevision: "1234567890abcdef",
     targetContract: {
       target: {
@@ -51,7 +143,7 @@ export function draftFixture(root: string, layout: Layout) {
     complete = false,
   ): ScanDraftInput => ({
     scanId,
-    ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
+    ...{ handoffClaimToken: claimToken },
     complete,
     findings: [],
     coverage: {
@@ -68,13 +160,8 @@ export function draftFixture(root: string, layout: Layout) {
     context,
     draft,
     write: (input: ScanDraftInput) =>
-      layout === "worker"
-        ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
-        : draftApi.recordCodexSecurityScanDraft(context, input),
-    read: async () =>
-      layout === "worker"
-        ? (await readJson(root, "result.json")).coverage
-        : await readJson(root, "coverage.json"),
+      recordCodexSecurityScanDraft(context, input),
+    read: async () => await readJson(root, "coverage.json"),
   };
 }
 
@@ -91,12 +178,17 @@ export async function interruptDraftWrite(
   action: () => Promise<unknown>,
 ) {
   const rename = fs.rename;
+  let interrupted = false;
   fs.rename = async (source, target) => {
-    if (target === destination) throw new Error("interrupted draft write");
+    if (target === destination) {
+      interrupted = true;
+      throw new Error("interrupted draft write");
+    }
     return rename(source, target);
   };
   try {
     await assert.rejects(action(), /interrupted draft write/);
+    assert.equal(interrupted, true);
   } finally {
     fs.rename = rename;
   }

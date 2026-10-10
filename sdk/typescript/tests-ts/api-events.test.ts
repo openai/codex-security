@@ -1,22 +1,37 @@
+import { chmod } from "node:fs/promises";
+import { rm } from "node:fs/promises";
+import { mock } from "bun:test";
+import { ContractValidationError } from "../src/index.js";
+import { completedTurn } from "./support/api-events.js";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+
 import { execFileSync } from "node:child_process";
+
 import { pathToFileURL } from "node:url";
+
 import { existsSync } from "node:fs";
+
 import { join } from "node:path";
+
 import {
   Codex,
   type McpToolCallItem,
   type ThreadEvent,
 } from "@openai/codex-sdk";
+
 import { afterEach, describe, expect, test } from "bun:test";
+
 import { runScanEvents, scanRuntimeCodexConfig } from "../src/api.js";
+
 import { parse as parseToml } from "smol-toml";
+
 import {
   deepMerge,
   resolveCodexProfile,
   scanCompositionOverrides,
   type JsonObject,
 } from "../src/config.js";
+
 import {
   CodexSecurityError,
   IncompleteScanError,
@@ -28,7 +43,9 @@ import {
   type ScanTrustedAccessStatus,
   type ScanWorkerStatus,
 } from "../src/index.js";
+
 import { PLUGIN_ROOT } from "./plugin-root.js";
+
 import {
   completedEvents,
   createApiTestFixtures,
@@ -47,6 +64,7 @@ import {
   type ExecutionPolicy,
   type PreparedExecution,
 } from "../src/execution-preparation.js";
+
 import { readCodexTurn } from "../src/scan-events.js";
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
@@ -82,24 +100,12 @@ function tacToolCall(
 async function* tacEvents(
   items: readonly McpToolCallItem[],
 ): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: "thread-1" };
-  yield { type: "turn.started" };
   for (const item of items) {
     yield { type: "item.completed", item };
   }
   yield {
     type: "item.completed",
     item: { id: "message-1", type: "agent_message", text: "scan complete" },
-  };
-  yield {
-    type: "turn.completed",
-    usage: {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    },
   };
 }
 
@@ -111,7 +117,7 @@ function runTacEvents(
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void,
   authentication?: ScanAuthentication,
 ): ReturnType<typeof runEvents> {
-  return runEvents(scanDir, tacEvents(items), {
+  return runEvents(scanDir, completedEvents("thread-1", tacEvents(items)), {
     authentication,
     onObserverError,
     onTrustedAccessStatus,
@@ -727,16 +733,7 @@ describe("one-shot scan events", () => {
             text: "scan complete",
           },
         };
-        yield {
-          type: "turn.completed",
-          usage: {
-            input_tokens: 10,
-            cached_input_tokens: 2,
-            cache_write_input_tokens: 0,
-            output_tokens: 3,
-            reasoning_output_tokens: 1,
-          },
-        };
+        yield completedTurn();
       } finally {
         closed = true;
       }
@@ -998,8 +995,6 @@ describe("one-shot scan events", () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const statuses: ScanWorkerStatus[] = [];
     async function* workerEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       yield {
         type: "item.completed",
         item: {
@@ -1031,20 +1026,10 @@ describe("one-shot scan events", () => {
           text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":6,"started":3}',
         },
       };
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, workerEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", workerEvents()), {
         onWorkerStatus: (status) => statuses.push(status),
       }),
     ).resolves.toBeDefined();
@@ -1059,8 +1044,6 @@ describe("one-shot scan events", () => {
     const activities: ScanActivity[] = [];
 
     async function* activityEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       for (const [type, status] of [
         ["item.started", "in_progress"],
         ["item.completed", "completed"],
@@ -1076,20 +1059,10 @@ describe("one-shot scan events", () => {
           },
         };
       }
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, activityEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", activityEvents()), {
         onActivity: (activity) => activities.push(activity),
       }),
     ).resolves.toBeDefined();
@@ -1116,8 +1089,6 @@ describe("one-shot scan events", () => {
     const activities: ScanActivity[] = [];
 
     async function* reasoningEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       yield {
         type: "item.completed",
         item: {
@@ -1128,19 +1099,9 @@ describe("one-shot scan events", () => {
             "**Planning batch file size verification and progress output**",
         },
       };
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
-    await runEvents(scanDir, reasoningEvents(), {
+    await runEvents(scanDir, completedEvents("thread-1", reasoningEvents()), {
       onActivity: (activity) => activities.push(activity),
     });
 
@@ -1164,8 +1125,6 @@ describe("one-shot scan events", () => {
     const updates: ScanProgress[] = [];
 
     async function* progressEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       for (const text of [
         'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}',
         'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
@@ -1180,20 +1139,10 @@ describe("one-shot scan events", () => {
           },
         };
       }
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, progressEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", progressEvents()), {
         onProgress: (progress) => updates.push(progress),
       }),
     ).resolves.toBeDefined();
@@ -1250,6 +1199,69 @@ describe("one-shot scan events", () => {
       { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
       { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
     ]);
+  });
+
+  test("captures warning observers before payload evaluation and isolates failures", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const observerErrors: Array<[ScanObserverName, string]> = [];
+    const replacement = mock();
+    let warningPending = false;
+    let onWarning: () => void = function (this: void) {
+      expect(this).toBeUndefined();
+      throw new Error("TAC warning observer failed");
+    };
+    let onObserverError = function (
+      this: void,
+      observer: ScanObserverName,
+      error: unknown,
+    ) {
+      expect(this).toBeUndefined();
+      observerErrors.push([observer, (error as Error).message]);
+    };
+    const result = await runScanEvents({
+      thread: {
+        id: null,
+        async runStreamed() {
+          throw new Error("Unexpected resumed turn");
+        },
+      },
+      events: completedEvents(
+        "thread-1",
+        tacEvents([tacToolCall("not_granted")]),
+      ),
+      signal: new AbortController().signal,
+      scanDir,
+      pluginRoot: PLUGIN_ROOT,
+      expectation: {
+        repository: "/repository",
+        repositoryRevision: "deadbeef",
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: "0.1.0",
+      },
+      get onTrustedAccessStatus() {
+        warningPending = true;
+        return undefined;
+      },
+      get authentication() {
+        if (warningPending) {
+          onWarning = replacement;
+          onObserverError = replacement;
+        }
+        return undefined;
+      },
+      get onWarning() {
+        return onWarning;
+      },
+      get onObserverError() {
+        return onObserverError;
+      },
+    });
+    expect(result.turnResult.status).toBe("completed");
+    expect(observerErrors).toEqual([
+      ["onWarning", "TAC warning observer failed"],
+    ]);
+    expect(replacement).not.toHaveBeenCalled();
   });
 });
 
@@ -1313,8 +1325,13 @@ describe("Deep worker terminal lifecycle", () => {
         : policy === "merge"
           ? prepareMergeExecution(session, settings.subagents)
           : prepareDiscoveryExecution(session);
-    return createExecutionCodex({ surface: "sdk", createCodex }, prepared, {})
-      .codex;
+    return (
+      await createExecutionCodex(
+        { surface: "sdk", command: "scan", createCodex },
+        prepared,
+        {},
+      )
+    ).codex;
   }
 
   test.each(
@@ -1632,3 +1649,26 @@ describe("Deep worker terminal lifecycle", () => {
     },
   );
 });
+
+test("missing required artifacts remain incomplete scans", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  await rm(join(scanDir, "report.md"));
+  await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+    name: IncompleteScanError.name,
+    message:
+      "Codex Security scan completed without required artifacts: report.md",
+  });
+});
+
+test.skipIf(process.platform === "win32")(
+  "preserves unsafe scan-root diagnostics instead of reporting missing files",
+  async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    await chmod(scanDir, 0o755);
+    await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+      name: ContractValidationError.name,
+      message: expect.stringContaining("chmod 700"),
+      cause: expect.any(Error),
+    });
+  },
+);

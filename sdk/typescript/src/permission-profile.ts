@@ -14,11 +14,10 @@ import { ScanPermissionError } from "./scan-execution.js";
 import { VERSION } from "./version.js";
 
 /** Verify managed permissions before each fresh or resumed Deep Scan worker turn. */
-export function createPermissionCheckedCodex({
-  config,
-  configOverrides,
-  ...options
-}: CodexOptions) {
+export function createPermissionCheckedCodex(
+  { config, configOverrides, ...options }: CodexOptions,
+  dependencies: { codex?: Codex; preflightConfigOverrides?: string[] } = {},
+) {
   // Raw tables preserve literal MCP server names and filesystem selectors.
   const overrides = [
     ...Object.entries((config ?? {}) as JsonObject).map(
@@ -29,11 +28,13 @@ export function createPermissionCheckedCodex({
   const environment = { ...options.env };
   environment["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] ||= "codex_sdk_ts";
   if (options.apiKey) environment["CODEX_API_KEY"] = options.apiKey;
-  const codex = new Codex({
-    ...options,
-    env: environment,
-    configOverrides: overrides,
-  });
+  const codex =
+    dependencies.codex ??
+    new Codex({
+      ...options,
+      env: environment,
+      configOverrides: overrides,
+    });
   const wrap = (thread: Thread, threadOptions: ThreadOptions) => ({
     get id() {
       return thread.id;
@@ -106,7 +107,10 @@ export function createPermissionCheckedCodex({
           executable: options.codexPathOverride,
           cwd: threadOptions.workingDirectory ?? process.cwd(),
           environment,
-          overrides: effectiveOverrides,
+          overrides: [
+            ...(dependencies.preflightConfigOverrides ?? []),
+            ...effectiveOverrides,
+          ],
           profileId,
           expectedProfile,
           signal,

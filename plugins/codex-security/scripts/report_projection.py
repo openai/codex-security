@@ -31,12 +31,10 @@ class ReportProjectionError(ValueError):
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if not normalized:
-        return ""
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return "".join(
-        part if index % 2 else re.sub(r"([\\`*\[\]<>])", r"\\\1", part)
+        part if index % 2 else re.sub(r"([\\`*_\[\]<>])", r"\\\1", part)
         for index, part in enumerate(re.split(r"((?<!`)`[^`\n]+`(?!`))", normalized))
     )
 
@@ -46,12 +44,7 @@ def _strings(value: Any) -> list[str]:
         value = [value]
     if not isinstance(value, list):
         return []
-    normalized: list[str] = []
-    for item in value:
-        text = _text(item, "")
-        if text:
-            normalized.append(text)
-    return normalized
+    return [text for item in value if (text := _text(item, ""))]
 
 
 def _cell(value: Any) -> str:
@@ -99,7 +92,7 @@ def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
     )
 
 
-def _uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
+def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
     if coverage.get("mode") == "deep_repository":
         return True
     if coverage.get("mode") != "scoped_path":
@@ -221,8 +214,8 @@ def _hardening_portfolio_path(scan: dict[str, Any]) -> str | None:
     return portfolio_path
 
 
-def _bullets(items: list[str], fallback: str) -> list[str]:
-    return [f"- {item}" for item in (items or [fallback])]
+def _bullet_section(heading: str, items: list[str]) -> list[str]:
+    return ["", heading, *(f"- {item}" for item in items)] if items else []
 
 
 def _code_evidence_catalog(finding: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -287,8 +280,6 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
             details.append({"summary": detail})
         elif isinstance(detail, dict):
             details.append(detail)
-        elif detail is not None:
-            continue
     if not details:
         return keys[0], None
 
@@ -411,16 +402,16 @@ def _code_evidence_location(item: dict[str, Any]) -> str:
     return f"{path}:{start}" if end == start else f"{path}:{start}-{end}"
 
 
-def _code_fence(code: str) -> str:
+def _code_fence(code: str, minimum: int = 3) -> str:
     longest_run = max((len(match.group(0)) for match in re.finditer(r"`+", code)), default=0)
-    return "`" * max(3, longest_run + 1)
+    return "`" * max(minimum, longest_run + 1)
 
 
 def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for index, item in enumerate(evidence):
         label = _text(item.get("label"), f"Code evidence {index + 1}")
-        location = _text(_code_evidence_location(item), "")
+        location = " ".join(_code_evidence_location(item).split())
         explanation = _text(item.get("explanation"), "")
         language = item.get("language") if isinstance(item.get("language"), str) else ""
         language = language if re.fullmatch(r"[A-Za-z0-9_+.-]*", language) else ""
@@ -428,7 +419,9 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
         fence = _code_fence(code)
         heading = f"**{label}**"
         if location:
-            heading += f" — `{location}`"
+            marker = _code_fence(location, minimum=1)
+            padding = " " if location.startswith("`") or location.endswith("`") else ""
+            heading += f" — {marker}{padding}{location}{padding}{marker}"
         lines.extend(["", heading])
         if explanation:
             lines.extend(["", explanation])
@@ -436,22 +429,9 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _severity_mix(findings: list[dict[str, Any]]) -> str:
-    counts = Counter(finding["severity"]["level"] for finding in findings)
-    return (
-        ", ".join(f"{level}: {counts[level]}" for level in SEVERITY_ORDER if counts[level])
-        or "none"
-    )
-
-
-def _confidence_mix(findings: list[dict[str, Any]]) -> str:
-    counts = Counter(finding["confidence"]["level"] for finding in findings)
-    return (
-        ", ".join(
-            f"{level}: {counts[level]}" for level in ("high", "medium", "low") if counts[level]
-        )
-        or "none"
-    )
+def _level_mix(findings: list[dict[str, Any]], field: str, order: dict[str, int]) -> str:
+    counts = Counter(finding[field]["level"] for finding in findings)
+    return ", ".join(f"{level}: {counts[level]}" for level in order if counts[level]) or "none"
 
 
 def _locations(finding: dict[str, Any]) -> str:
@@ -549,8 +529,7 @@ def _remediation_section(finding: dict[str, Any]) -> list[str]:
                 value for _, original in originals for value in _strings(original.get(field))
             )
         )
-        if values:
-            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+        lines.extend(_bullet_section(f"{label}:", values))
     return lines
 
 
@@ -647,12 +626,9 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         dataflow.get("summary"),
         f"The canonical finding records the affected path at {_locations(finding)}, but no expanded source-to-sink narrative was recorded.",
     )
-    reachability_summary = _text(
-        reachability.get("summary"),
-        _text(
-            attack_path.get("summary"),
-            "Reachability was not recorded beyond the canonical finding summary and affected locations.",
-        ),
+    reachability_summary = _text(reachability.get("summary"), "") or _text(
+        attack_path.get("summary"),
+        "Reachability was not recorded beyond the canonical finding summary and affected locations.",
     )
     severity_rationale = _text(
         severity.get("rationale"),
@@ -662,7 +638,6 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         severity.get("changeConditions"),
         "Additional runtime or deployment evidence could raise or lower this severity.",
     )
-    attack_steps = _strings(attack_path.get("steps"))
     lines = [
         *_finding_header(number, finding),
         "",
@@ -687,18 +662,13 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         ("Counterevidence and remaining uncertainty", "counterEvidence"),
         ("Limitations", "limitations"),
     ):
-        values = _strings(validation.get(key))
-        if values:
-            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+        lines.extend(_bullet_section(f"{label}:", _strings(validation.get(key))))
     lines.extend(["", "#### Dataflow", "", dataflow_summary])
-    if attack_steps:
-        lines.extend(["", "Attack steps:", *_bullets(attack_steps, "None recorded.")])
+    lines.extend(_bullet_section("Attack steps:", _strings(attack_path.get("steps"))))
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
         if dataflow.get(key):
             lines.extend(["", f"- **{label}:** {_text(dataflow[key], 'not recorded')}"])
-    transformations = _strings(dataflow.get("transformations"))
-    if transformations:
-        lines.extend(["", "Transformations:", *_bullets(transformations, "None recorded.")])
+    lines.extend(_bullet_section("Transformations:", _strings(dataflow.get("transformations"))))
     lines.extend(_code_evidence_lines(dataflow_code_evidence))
     lines.extend(["", "#### Reachability", "", reachability_summary])
     for label, key in (
@@ -718,17 +688,14 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             ]
         )
     )
-    if preconditions:
-        lines.extend(["", "Preconditions:", *_bullets(preconditions, "None recorded.")])
+    lines.extend(_bullet_section("Preconditions:", preconditions))
     for label, key in (
         ("Assumptions", "assumptions"),
         ("Existing controls", "controls"),
         ("Blind spots", "blindspots"),
         ("Limitations", "limitations"),
     ):
-        values = _strings(attack_path.get(key))
-        if values:
-            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+        lines.extend(_bullet_section(f"{label}:", _strings(attack_path.get(key))))
     lines.extend(_code_evidence_lines(reachability_code_evidence))
     lines.extend(
         [
@@ -806,7 +773,7 @@ def build_report_markdown(
             "reportable findings have duplicate writeup reportPath values: "
             + ", ".join(duplicate_writeup_paths)
         )
-    deep_presentation = _uses_deep_presentation(coverage, findings)
+    deep_presentation = uses_deep_presentation(coverage, findings)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
@@ -841,20 +808,19 @@ def build_report_markdown(
                 f"Excluded {_text(exclusion.get('pattern'), 'unspecified')}: "
                 f"{_text(exclusion.get('reason'), 'reason not recorded')}"
             )
-    if limitations:
-        lines.extend(["", "Limitations and exclusions:", *_bullets(limitations, "None recorded.")])
+    lines.extend(_bullet_section("Limitations and exclusions:", limitations))
     summary_count_lines = (
         [
             f"| Reportable DSS findings | {len(deep_finding_groups)} |",
             f"| Report instances | {len(findings)} |",
-            f"| Report severity mix | {_severity_mix(findings)} |",
-            f"| Report confidence mix | {_confidence_mix(findings)} |",
+            f"| Report severity mix | {_level_mix(findings, 'severity', SEVERITY_ORDER)} |",
+            f"| Report confidence mix | {_level_mix(findings, 'confidence', CONFIDENCE_ORDER)} |",
         ]
         if deep_presentation
         else [
             f"| Reportable findings | {len(findings)} |",
-            f"| Severity mix | {_severity_mix(findings)} |",
-            f"| Confidence mix | {_confidence_mix(findings)} |",
+            f"| Severity mix | {_level_mix(findings, 'severity', SEVERITY_ORDER)} |",
+            f"| Confidence mix | {_level_mix(findings, 'confidence', CONFIDENCE_ORDER)} |",
         ]
     )
     lines.extend(
@@ -885,20 +851,16 @@ def build_report_markdown(
                 "No explicit canonical threat-model summary was recorded.",
             )
         )
-        for heading, key, fallback in (
-            ("Assets", "assets", "No assets were recorded."),
-            ("Trust Boundaries", "trustBoundaries", "No trust boundaries were recorded."),
-            (
-                "Attacker Capabilities",
-                "attackerCapabilities",
-                "No attacker capabilities were recorded.",
-            ),
-            ("Security Objectives", "securityObjectives", "No security objectives were recorded."),
-            ("Assumptions", "assumptions", "No assumptions were recorded."),
+        for heading, key in (
+            ("Assets", "assets"),
+            ("Trust Boundaries", "trustBoundaries"),
+            ("Attacker Capabilities", "attackerCapabilities"),
+            ("Security Objectives", "securityObjectives"),
+            ("Assumptions", "assumptions"),
         ):
             values = _strings(threat_model.get(key))
             if values:
-                lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
+                lines.extend(["", f"### {heading}", "", *(f"- {value}" for value in values)])
     lines.extend(["", "## Findings", ""])
     if findings:
         if deep_presentation:

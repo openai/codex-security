@@ -17,7 +17,10 @@ import { parse as parseToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
-import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
+import {
+  runWorkbench,
+  type WorkbenchCommandOptions as RequiredWorkbenchCommandOptions,
+} from "../src/runtime.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 
 const roots: string[] = [];
@@ -286,3 +289,8 @@ test("CLI resume restores saved native permissions into the shared SDK operation
     safetyIdentifier: "synthetic-saved-identifier",
   });
 });
+
+type WorkbenchCommandOptions = Omit<
+  RequiredWorkbenchCommandOptions,
+  "python"
+> & { python?: string };

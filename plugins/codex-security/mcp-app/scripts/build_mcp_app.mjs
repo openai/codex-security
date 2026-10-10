@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -6,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
+import { buildNativeWrappers } from "./build_native_wrappers.mjs";
 import { mcpBundleOptions } from "./bundle_options.mjs";
 
 const root = resolve(import.meta.dirname, "..");
@@ -18,6 +20,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
   if (native !== "universal" && native !== "host") {
     throw new Error("Native packaging must be universal or host.");
   }
+  await buildNativeWrappers();
   const mcpDir = resolve(output);
   const nativeRoot = join(
     root,
@@ -63,9 +66,31 @@ export async function buildMcpApp({ output, native = "universal" }) {
     }
     const destination = join(mcpDir, "native", path);
     await mkdir(dirname(destination), { recursive: true });
-    await copyFile(join(nativeRoot, path), destination);
+    try {
+      await copyFile(join(nativeRoot, path), destination);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const preparation =
+        native === "host"
+          ? "Run node plugins/codex-security/mcp-app/scripts/build_native.mjs first."
+          : "Download a source-matched native-universal artifact as described in plugins/codex-security/native/README.md before running SDK tests or universal builds.";
+      throw new Error(
+        `Missing native payload ${path}. ${preparation} ${error.message}`,
+        {
+          cause: error,
+        },
+      );
+    }
   }
   await writeRuntime("helpers", "helpers-main.ts");
+  await build({
+    bundle: true,
+    entryPoints: [join(root, "src/deep-scan/permission-profile-preflight.ts")],
+    format: "esm",
+    outfile: join(mcpDir, "permission-profile-preflight.mjs"),
+    platform: "node",
+    target: "node20",
+  });
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
@@ -101,11 +126,27 @@ export async function buildMcpApp({ output, native = "universal" }) {
   }
 }
 
-const invokedPath = process.argv[1];
-if (
-  invokedPath !== undefined &&
-  pathToFileURL(resolve(invokedPath)).href === import.meta.url
-) {
+function isMain() {
+  if (
+    process.execArgv.some(
+      (argument) =>
+        /^(?:--(?:eval|print)(?:=|$)|-(?:e|p|pe)$)/u.test(argument) ||
+        (process.versions["bun"] !== undefined && /^-[ep]/u.test(argument)),
+    )
+  )
+    return false;
+  try {
+    return (
+      process.argv[1] !== undefined &&
+      process.argv[1] !== "-" &&
+      realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   const args = process.argv.slice(2);
   if (
     args[0] !== "--output" ||

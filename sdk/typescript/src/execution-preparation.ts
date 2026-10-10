@@ -15,9 +15,9 @@ import {
   hasCommandAuth,
   inlineToml,
   isExternalModelProvider,
-  modelProviderConfigOverride,
   resolveCodexProfile,
   scanModelProvider,
+  structuredCodexConfig,
   scanCompositionOverrides,
   setScanSubagentBudget,
   writeCodexConfig,
@@ -50,6 +50,12 @@ import {
   type PluginInstall,
   type ProcessEnvironment,
 } from "./runtime.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import {
+  createProfileCodex,
+  providerPreflightCommand,
+  type ProviderProfile,
+} from "./provider-profile.js";
 import { createPermissionCheckedCodex } from "./permission-profile.js";
 import type { ScanAuthMode } from "./scan-settings.js";
 import type { InspectedExecutable } from "./trusted-executable.js";
@@ -60,7 +66,10 @@ const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 export type ExecutionPolicy = "ordinary" | "discovery" | "merge";
 interface ExecutionClient {
   surface: "cli" | "sdk";
-  createCodex?: (options: CodexOptions) => CodexClientLike;
+  command: string;
+  createCodex?: (
+    options: CodexOptions & { nativeProfile?: string },
+  ) => CodexClientLike | Promise<CodexClientLike>;
 }
 
 /** One per-scan snapshot; worker construction never consults a mutable parent environment. */
@@ -147,6 +156,7 @@ export interface CodexClientLike {
 }
 
 export interface PreparedRuntime {
+  providerProfile?: ProviderProfile;
   codexHome: string;
   persistentCredentialHome?: boolean;
   /** Native runs use the invoking account without rewriting its home config. */
@@ -200,14 +210,14 @@ export async function lockExecutionConfiguration(
   }
 }
 
-export function createExecutionCodex(
+export async function createExecutionCodex(
   client: ExecutionClient,
   session: PreparedExecution,
   runtimePaths: Record<string, string>,
   config?: JsonObject,
   configOverrides: string[] = [],
   git?: InspectedExecutable,
-): { codex: CodexClientLike; environment: ProcessEnvironment } {
+): Promise<{ codex: CodexClientLike; environment: ProcessEnvironment }> {
   const { runtime, python, sessionConfig } = session;
   const {
     environment: scanEnvironment,
@@ -215,7 +225,6 @@ export function createExecutionCodex(
     apiKey,
     preserveProviderEnvironment,
   } = session.source;
-  const commandAuth = hasCommandAuth(sessionConfig);
   const environment: ProcessEnvironment = {
     ...environmentWithGit(
       pluginExecutionEnvironment(python, withoutCodexHome(scanEnvironment)),
@@ -234,12 +243,11 @@ export function createExecutionCodex(
   if (session.safetyIdentifier !== undefined) {
     environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
   }
-  const sdkCodexConfig = { ...(config ?? sessionConfig) };
+  const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
   // Projects and permissions already live in generated TOML files; the SDK
   // cannot safely encode their path and selector keys as dotted overrides.
   delete sdkCodexConfig["projects"];
   delete sdkCodexConfig["permissions"];
-  if (commandAuth) delete sdkCodexConfig["model_providers"];
   const checkPermissions =
     (session.policy !== "ordinary" ||
       session.inheritedPermissions !== undefined) &&
@@ -276,33 +284,60 @@ export function createExecutionCodex(
       sdkEnvironment,
     );
   }
-  const createCodex =
-    client.createCodex ??
-    (checkPermissions
-      ? createPermissionCheckedCodex
-      : (options: CodexOptions) => new Codex(options));
-  const codex = createCodex({
+  const metadata = {
+    ...configuredResponsesMetadata,
+    ...codexSecurityRequestMetadata(
+      client.surface,
+      client.command,
+      runtime.plugin.version,
+    ),
+  };
+  delete sdkCodexConfig["responses_api_metadata"];
+  const codexOptions: CodexOptions = {
     ...(codexPathOverride === undefined
       ? {}
       : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
     ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-    ...(commandAuth || configOverrides.length > 0
-      ? {
-          configOverrides: [
-            ...(commandAuth ? modelProviderConfigOverride(sessionConfig) : []),
-            ...configOverrides,
-          ],
-        }
-      : {}),
+    configOverrides: [
+      ...configOverrides,
+      `responses_api_metadata=${inlineToml(metadata)}`,
+    ],
     env: sdkEnvironment,
-    config: {
-      ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-      responses_api_metadata: {
-        ...configuredResponsesMetadata,
-        codex_security_surface: client.surface,
-      },
-    },
-  });
+    config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
+  };
+  let codex: CodexClientLike;
+  if (client.createCodex !== undefined) {
+    codex = await client.createCodex({
+      ...codexOptions,
+      ...(runtime.providerProfile === undefined
+        ? {}
+        : { nativeProfile: runtime.providerProfile.name }),
+    });
+  } else {
+    const profileCodex =
+      runtime.providerProfile === undefined
+        ? undefined
+        : await createProfileCodex(
+            codexOptions,
+            runtime.providerProfile.name,
+            checkPermissions ? SCAN_PERMISSION_PROFILE : undefined,
+          );
+    if (checkPermissions) {
+      const preflightCommand = await providerPreflightCommand(
+        { command: session.source.command.command },
+        config ?? sessionConfig,
+      );
+      const providerOverrides = (preflightCommand.args ?? []).filter(
+        (_, index) => index % 2 === 1,
+      );
+      codex = createPermissionCheckedCodex(codexOptions, {
+        codex: profileCodex,
+        preflightConfigOverrides: providerOverrides,
+      });
+    } else {
+      codex = profileCodex ?? new Codex(codexOptions);
+    }
+  }
   const deepWorker = session.policy !== "ordinary";
   if (session.runtimeConfig === undefined && !deepWorker)
     return { codex, environment };

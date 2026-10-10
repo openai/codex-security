@@ -1,4 +1,5 @@
 import { execFile as nodeExecFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as z from "zod/v4";
@@ -6,8 +7,8 @@ import commonSchema from "../../schemas/definitions/artifact-common.schema.json"
 import reviewItemsSchema from "../../schemas/tools/review-items.schema.json";
 import {
   artifactDestination,
+  artifactSourcePath,
   paginateArtifactRows,
-  readArtifactText,
   type ArtifactContext,
   type ArtifactPage,
 } from "./artifact-io.js";
@@ -19,23 +20,23 @@ import {
   missingPythonHelperMessage,
   resolvePythonCommand,
 } from "./python_command.js";
+import { decodeUtf8 } from "./helpers/utf8.js";
 
 const execFile = promisify(nodeExecFile);
 const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const label = "review_items";
 
-export interface ReviewItem {
-  path: string;
+export interface PreparedReviewItems {
+  reviewItemsTotal: number;
 }
-
 export interface ReviewItemsResult {
   items: ReviewItem[];
   nextCursor?: string;
 }
 
-export interface PreparedReviewItems {
-  reviewItemsTotal: number;
+export interface ReviewItem {
+  path: string;
 }
 
 export const prepareReviewItemsInputSchema = loadArtifactZodSchema(
@@ -44,23 +45,11 @@ export const prepareReviewItemsInputSchema = loadArtifactZodSchema(
   "prepareInput",
 ) as z.ZodType<{ scanId: string; handoffClaimToken?: string }>;
 
-export const prepareReviewItemsOutputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "prepareOutput",
-) as z.ZodType<PreparedReviewItems>;
-
 export const reviewItemsReaderInputSchema = loadArtifactZodSchema(
   documents,
   reviewItemsSchema.$id,
   "reviewItemsInput",
 ) as z.ZodType<{ scanId: string; handoffClaimToken?: string } & ArtifactPage>;
-
-export const reviewItemsReaderOutputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsOutput",
-) as z.ZodType<ReviewItemsResult>;
 
 const reviewItemSchema = loadArtifactZodSchema(
   documents,
@@ -96,8 +85,7 @@ export async function prepareCodexSecurityReviewItems(
     helper,
     "--repo",
     context.repoRoot,
-    "--scope",
-    context.scope ?? ".",
+    `--scope=${context.scope ?? "."}`,
     "--out",
     destination,
   ];
@@ -157,7 +145,7 @@ export async function prepareCodexSecurityReviewItems(
 export async function listCodexSecurityReviewItems(
   context: ArtifactContext,
   page: ArtifactPage = {},
-): Promise<ReviewItemsResult> {
+) {
   const result = paginateArtifactRows(
     await readReviewItems(context),
     page,
@@ -172,7 +160,14 @@ export async function listCodexSecurityReviewItems(
 async function readReviewItems(
   context: ArtifactContext,
 ): Promise<ReviewItem[]> {
-  const source = await readArtifactText(context, inventoryComponents, label);
+  const path = await artifactSourcePath(context, inventoryComponents, label);
+  const contents = await readFile(path).catch((error: unknown) => {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  });
+  const source = decodeUtf8(contents);
   const rows: ReviewItem[] = [];
 
   for (const [index, line] of source.split(/\r?\n/u).entries()) {
@@ -192,12 +187,12 @@ async function readReviewItems(
   return rows;
 }
 
-function helperError(error: unknown): string | undefined {
-  if (!error || typeof error !== "object" || !("stderr" in error))
-    return undefined;
-  const stderr = error.stderr;
-  if (typeof stderr === "string") return stderr.trim() || undefined;
-  if (Buffer.isBuffer(stderr))
-    return stderr.toString("utf8").trim() || undefined;
-  return undefined;
+function helperError(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = error.stderr;
+    if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
+    if (Buffer.isBuffer(stderr) && stderr.length)
+      return stderr.toString("utf8").trim();
+  }
+  return error instanceof Error ? error.message : String(error);
 }

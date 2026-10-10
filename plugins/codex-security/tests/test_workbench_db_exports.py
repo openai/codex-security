@@ -18,13 +18,28 @@ import pytest
 from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
+    create_workspace,
     empty_target_scan,
+    fail_scan,
+    get_scan,
     initialize_git_repository,
     mark_deep_aggregate_ready,
+    request_remediation,
+    request_remediation_action,
+    resume_deep_scan,
     run_workbench,
+    save_workspace,
+    saved_coverage,
+    saved_draft,
+    scan_command,
+    set_remediation,
+    set_triage,
     start_delivered_scan,
     start_saved_scan,
+    start_scan_command,
     start_workspace_scan,
+    update_progress,
+    workspace_command,
     write_checkpoint,
     write_completed_contract,
 )
@@ -37,9 +52,9 @@ def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, terminati
     extra = (
         ("--message", "Stopped after recording a finding.") if termination == "fail-scan" else ()
     )
-    run_workbench(state_dir, termination, "--scan-id", scan_id, *extra)
+    scan_command(state_dir, termination, scan_id, *extra)
 
-    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    stopped = get_scan(state_dir, scan_id)["scan"]
     expected_status = "failed" if termination == "fail-scan" else "canceled"
     assert stopped["progress"]["status"] == expected_status
     assert stopped["findingCount"] == 1
@@ -51,14 +66,7 @@ def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, terminati
     )
     assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
     for export_format in ("json", "csv", "sarif"):
-        exported = run_workbench(
-            state_dir,
-            "export-findings",
-            "--scan-id",
-            scan_id,
-            "--format",
-            export_format,
-        )
+        exported = scan_command(state_dir, "export-findings", scan_id, "--format", export_format)
         assert Path(str(exported["export"]["path"])).is_file()
         assert exported["scan"]["progress"]["status"] == expected_status
     sarif = json.loads((scan_dir / "exports" / "results.sarif").read_text())
@@ -66,15 +74,7 @@ def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, terminati
 
     original = (scan_dir / "scan-manifest.json").read_bytes()
     (scan_dir / "scan-manifest.json").write_bytes(original + b" ")
-    rejected = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "json",
-        check=False,
-    )
+    rejected = scan_command(state_dir, "export-findings", scan_id, "--format", "json", check=False)
     assert rejected["returncode"] != 0
     assert "sealed scan manifest changed" in str(rejected["stderr"])
 
@@ -92,8 +92,8 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
             ("coverage", "coverage.json"),
         )
     }
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
-    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    fail_scan(state_dir, scan_id, "Stopped.")
+    stopped = get_scan(state_dir, scan_id)["scan"]
     seal = (scan_dir / "scan-manifest.json").read_bytes()
     documents["findings"]["findings"][0]["identity"]["anchor"] = "late-independent-finding"
     documents["coverage"]["completeness"] = "partial"
@@ -111,20 +111,14 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     drafts.mkdir()
     staged = drafts / f"{uuid.uuid4()}.json"
     staged.write_text(json.dumps(documents))
-    rejected = run_workbench(
-        state_dir,
-        "write-scan-draft",
-        "--scan-id",
-        scan_id,
-        "--draft-path",
-        str(staged),
-        check=False,
+    rejected = scan_command(
+        state_dir, "write-scan-draft", scan_id, "--draft-path", str(staged), check=False
     )
     assert rejected["returncode"] != 0
     assert "saved checkpoint" in str(rejected["stderr"])
     assert (scan_dir / "scan-manifest.json").read_bytes() == seal
     assert checkpoint_path.read_bytes() == json.dumps(payload).encode()
-    recovered = run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)["scan"]
+    recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
     assert recovered["findingCount"] == 2
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert any(item.get("id") == "late-review" for item in coverage["deferred"])
@@ -135,7 +129,7 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["completedAt"]
         == json.loads(seal)["scan"]["completedAt"]
     )
-    unchanged = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    unchanged = get_scan(state_dir, scan_id)["scan"]
     assert unchanged["progress"]["updatedAt"] == recovered["progress"]["updatedAt"]
     assert unchanged["updatedAt"] == recovered["updatedAt"]
 
@@ -147,19 +141,14 @@ def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
+    started = start_scan_command(
+        state_dir, str(saved["id"]), "--scan-root", str(tmp_path / "scans")
     )["results"]
     scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
 
-    run_workbench(state_dir, "cancel-scan", "--scan-id", scan_id)
-    canceled = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    scan_command(state_dir, "cancel-scan", scan_id)
+    canceled = get_scan(state_dir, scan_id)["scan"]
     sealed_manifest = (scan_dir / "scan-manifest.json").read_bytes()
     late_finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     late_finding["identity"]["anchor"] = "late-after-cancellation"
@@ -171,7 +160,7 @@ def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
     }
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
 
-    unchanged = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    unchanged = get_scan(state_dir, scan_id)["scan"]
 
     assert canceled["progress"]["status"] == "canceled"
     assert unchanged["findingCount"] == canceled["findingCount"] == 1
@@ -184,32 +173,17 @@ def test_stopped_clean_git_checkpoint_uses_revision_target(tmp_path: Path) -> No
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     saved = create_saved_git_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET target_snapshot_digest = NULL WHERE id = ?", (scan_id,)
         )
-    checkpoint = {
-        "scanId": scan_id,
-        "complete": False,
-        "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [{"id": "pending-review", "reason": "Review stopped early."}],
-        },
-    }
+    checkpoint = saved_draft(
+        scan_id, deferred=[{"id": "pending-review", "reason": "Review stopped early."}]
+    )
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
 
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    fail_scan(state_dir, scan_id, "Stopped.")
 
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["kind"] == "git_revision"
@@ -236,20 +210,12 @@ def test_stopped_diff_checkpoint_uses_canonical_snapshot_digest(
             """,
             (diff_kind, base_revision, head_revision, scan_id),
         )
-    checkpoint = {
-        "scanId": scan_id,
-        "complete": False,
-        "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [{"id": "pending-review", "reason": "Review stopped early."}],
-        },
-    }
+    checkpoint = saved_draft(
+        scan_id, deferred=[{"id": "pending-review", "reason": "Review stopped early."}]
+    )
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
 
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    fail_scan(state_dir, scan_id, "Stopped.")
 
     target_contract = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["target"]
     expected = hashlib.sha256(
@@ -268,14 +234,11 @@ def test_stopped_diff_checkpoint_uses_canonical_snapshot_digest(
 def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
-    original = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["findings"][0]
-    run_workbench(
+    fail_scan(state_dir, scan_id, "Stopped.")
+    original = get_scan(state_dir, scan_id)["scan"]["findings"][0]
+    set_triage(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         str(original["occurrenceId"]),
-        "--status",
         "closed",
         "--close-reason",
         "wont_fix",
@@ -313,7 +276,7 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
     }
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
 
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    refreshed = get_scan(state_dir, scan_id)["scan"]
 
     assert refreshed["findingCount"] == 1
     updated = refreshed["findings"][0]
@@ -326,9 +289,7 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
     assert updated["triage"]["closeReason"] == "wont_fix"
     assert updated["triage"]["note"] == ("Retain this review decision across checkpoint refreshes.")
     assert updated["triage"]["status"] == "closed"
-    exported = run_workbench(state_dir, "export-findings", "--scan-id", scan_id, "--format", "csv")[
-        "export"
-    ]
+    exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
     with Path(str(exported["path"])).open(newline="") as source:
         row = next(csv.DictReader(source))
     assert row["title"] == original["title"]
@@ -342,7 +303,7 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
 def test_frozen_stopped_results_skip_late_checkpoint_reindexing(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    fail_scan(state_dir, scan_id, "Stopped.")
     finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     finding["identity"]["anchor"] = "late-independent-finding"
     checkpoint = {
@@ -400,7 +361,7 @@ def test_frozen_stopped_results_skip_late_checkpoint_reindexing(tmp_path: Path) 
             == digest_before
         )
     assert checkpoint_path.exists()
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    refreshed = get_scan(state_dir, scan_id)["scan"]
     assert refreshed["findingCount"] == 1
     assert refreshed["reportAvailable"] is True
 
@@ -408,7 +369,7 @@ def test_frozen_stopped_results_skip_late_checkpoint_reindexing(tmp_path: Path) 
 def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    fail_scan(state_dir, scan_id, "Stopped.")
     foreign = {
         "scanId": str(uuid.uuid4()),
         "complete": False,
@@ -417,14 +378,11 @@ def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path:
     }
     write_checkpoint(scan_dir / "checkpoints", foreign)
 
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    refreshed = get_scan(state_dir, scan_id)["scan"]
 
     assert all("belongs to a different scan" not in warning for warning in refreshed["warnings"])
     seal = (scan_dir / "scan-manifest.json").read_bytes()
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["warnings"]
-        == (refreshed["warnings"])
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["warnings"] == (refreshed["warnings"])
     assert (scan_dir / "scan-manifest.json").read_bytes() == seal
 
 
@@ -434,17 +392,9 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
 ) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    pending = {
-        "scanId": scan_id,
-        "complete": False,
-        "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [{"candidateId": "candidate-x", "reason": "Validation is pending."}],
-        },
-    }
+    pending = saved_draft(
+        scan_id, deferred=[{"candidateId": "candidate-x", "reason": "Validation is pending."}]
+    )
     checkpoint = write_checkpoint(scan_dir / "checkpoints", pending)
     findings = json.loads((scan_dir / "findings.json").read_text())
     if disposition == "provenance-reported":
@@ -462,7 +412,7 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     for path in (checkpoint, scan_dir / "coverage.json"):
         os.utime(path, ns=(200, 200))
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     final_coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert completed["progress"]["status"] == "complete"
     assert final_coverage["completeness"] == "complete"
@@ -474,20 +424,15 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
 
 
 def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> None:
-    state_dir, target = tmp_path / "state", tmp_path / "target"
-    target.mkdir()
-    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     manifest["scan"]["complete"] = False
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
-    rejected = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id, check=False)
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
     assert rejected["returncode"] != 0
     assert "incomplete" in str(rejected["stderr"]).lower()
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
-        == "running"
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
 
 
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
@@ -499,15 +444,8 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
-    run_workbench(state_dir, "update-progress", "--scan-id", scan_id, "--phase", "threat_model")
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
+    update_progress(state_dir, scan_id, "--phase", "threat_model")
     write_completed_contract(scan_dir, scan_id, target)
     documents = {
         key: json.loads((scan_dir / filename).read_text())
@@ -529,10 +467,10 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     draft = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
     draft.parent.mkdir()
     draft.write_text(json.dumps(documents))
-    run_workbench(state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(draft))
-    active = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    scan_command(state_dir, "write-scan-draft", scan_id, "--draft-path", str(draft))
+    active = get_scan(state_dir, scan_id)["scan"]
     assert active["progress"]["phase"] == "threat_model"
-    workspace = run_workbench(state_dir, "get-workspace", "--workspace-id", str(saved["id"]))
+    workspace = workspace_command(state_dir, "get-workspace", str(saved["id"]))
     assert "threatModel" not in workspace["results"]
     assert workspace["results"]["threatModelAvailable"] is True
     assert active["threatModelAvailable"] is True
@@ -545,13 +483,11 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
         {"id": "pending-review", "reason": "A discovery review is pending."}
     ]
     draft.write_text(json.dumps(documents))
-    run_workbench(state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(draft))
-    reviewing = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    scan_command(state_dir, "write-scan-draft", scan_id, "--draft-path", str(draft))
+    reviewing = get_scan(state_dir, scan_id)["scan"]
     assert reviewing["progress"]["phase"] == "discovery"
     before = (scan_dir / "scan-manifest.json").read_bytes()
-    exported = run_workbench(
-        state_dir, "export-findings", "--scan-id", scan_id, "--artifact", "threat-model"
-    )
+    exported = scan_command(state_dir, "export-findings", scan_id, "--artifact", "threat-model")
     assert exported["export"] == {
         "artifact": "threat-model",
         "format": "md",
@@ -563,8 +499,8 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
         document.unlink()
         document.mkdir()
     extra = ("--message", "Stopped after saving the model.") if termination == "fail-scan" else ()
-    run_workbench(state_dir, termination, "--scan-id", scan_id, *extra)
-    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    scan_command(state_dir, termination, scan_id, *extra)
+    stopped = get_scan(state_dir, scan_id)["scan"]
     assert "threatModel" not in stopped
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert stopped["threatModelProvenance"]["provisional"] is True
@@ -575,21 +511,16 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     if projection_failure_at == "refresh":
         document.unlink()
         document.mkdir()
-        stopped = run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)["scan"]
+        stopped = scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]
     if projection_failure_at is not None:
         warnings = stopped["warnings"]
         assert len(warnings) == 1
         assert warnings[0].startswith("Automatic threat model save failed:")
         assert "threatModelPath" not in stopped
         assert "threatModel" not in stopped["artifacts"]
+        assert get_scan(state_dir, scan_id)["scan"]["warnings"] == warnings
         assert (
-            run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["warnings"]
-            == warnings
-        )
-        assert (
-            run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)["scan"][
-                "warnings"
-            ]
+            scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]["warnings"]
             == warnings
         )
         assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
@@ -605,7 +536,7 @@ def test_history_does_not_expose_a_model_from_changed_sealed_artifacts(
     manifest = json.loads(manifest_path.read_text())
     manifest["scan"]["threatModel"] = {"summary": "Original queue boundaries."}
     manifest_path.write_text(json.dumps(manifest))
-    complete = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    complete = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     assert complete["threatModelAvailable"] is True
     if changed_file == "scan-manifest.json":
         manifest = json.loads(manifest_path.read_text())
@@ -614,7 +545,7 @@ def test_history_does_not_expose_a_model_from_changed_sealed_artifacts(
     else:
         path = scan_dir / changed_file
         path.write_bytes(path.read_bytes() + b" ")
-    retained = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    retained = get_scan(state_dir, scan_id)["scan"]
     assert retained["progress"]["status"] == "complete"
     assert retained["threatModelAvailable"] is False
     assert "threatModel" not in retained
@@ -629,14 +560,7 @@ def test_invalid_model_or_binding_keeps_history_available_for_semantic_repair(
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     documents = {
         key: json.loads((scan_dir / filename).read_text())
@@ -665,10 +589,10 @@ def test_invalid_model_or_binding_keeps_history_available_for_semantic_repair(
         (scan_dir / "threatmodel.md").write_text("# Earlier model\n")
     stored = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
 
-    active = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    active = get_scan(state_dir, scan_id)["scan"]
     assert active["progress"]["status"] == "running"
     assert active["threatModelAvailable"] is False
-    reopened = run_workbench(state_dir, "get-workspace", "--workspace-id", str(saved["id"]))
+    reopened = workspace_command(state_dir, "get-workspace", str(saved["id"]))
     assert reopened["results"]["scanId"] == scan_id
     assert reopened["results"]["threatModelAvailable"] is False
     for result in (active, reopened["results"]):
@@ -680,11 +604,9 @@ def test_invalid_model_or_binding_keeps_history_available_for_semantic_repair(
     draft = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
     draft.parent.mkdir()
     draft.write_text(json.dumps(documents))
-    repaired = run_workbench(
-        state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(draft)
-    )
+    repaired = scan_command(state_dir, "write-scan-draft", scan_id, "--draft-path", str(draft))
     assert repaired["status"] == "draft_written"
-    active = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    active = get_scan(state_dir, scan_id)["scan"]
     assert active["threatModelAvailable"] is True
     assert "threatModel" not in active
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
@@ -697,7 +619,7 @@ def test_export_validation_checks_binding_without_writing_or_pinning_legacy_arti
 ) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    scan_command(state_dir, "complete-scan", scan_id)
     artifacts = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan_id,))
@@ -753,44 +675,23 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     source.write_text("".join(f"line {line}\n" for line in range(1, 46)))
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     assert completed["artifacts"]["sarifReport"] == str(scan_dir / "exports" / "results.sarif")
     sarif_path = scan_dir / "exports" / "results.sarif"
     sealed_sarif = sarif_path.read_bytes()
     source.write_text("".join(f"changed line {line}\n" for line in range(1, 46)))
     sarif_path.write_text("{}")
 
-    sarif_exported = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "sarif",
-    )
+    sarif_exported = scan_command(state_dir, "export-findings", scan_id, "--format", "sarif")
     assert sarif_exported["export"] == {"format": "sarif", "path": str(sarif_path)}
     assert sarif_path.read_bytes() == sealed_sarif
 
-    exported = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "csv",
-    )
+    exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")
     csv_path = scan_dir / "exports" / "findings.csv"
     assert exported["export"] == {"format": "csv", "path": str(csv_path)}
     assert csv_path.read_text().startswith("occurrence_id,finding_id,title,summary")
 
-    json_exported = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "json",
-    )
+    json_exported = scan_command(state_dir, "export-findings", scan_id, "--format", "json")
     assert json_exported["export"] == {
         "format": "json",
         "path": str(scan_dir / "findings.json"),
@@ -800,23 +701,11 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     mutated_manifest = json.loads(sealed_manifest_bytes)
     mutated_manifest["scan"]["target"]["displayName"] = "forged-target"
     manifest_path.write_text(json.dumps(mutated_manifest))
-    repeated_completion = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        check=False,
-    )
+    repeated_completion = scan_command(state_dir, "complete-scan", scan_id, check=False)
     assert "sealed scan manifest changed after completion" in str(repeated_completion["stderr"])
     assert sarif_path.read_bytes() == sealed_sarif
-    mutated_export = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "json",
-        check=False,
+    mutated_export = scan_command(
+        state_dir, "export-findings", scan_id, "--format", "json", check=False
     )
     assert "sealed scan manifest changed after completion" in str(mutated_export["stderr"])
     assert sarif_path.read_bytes() == sealed_sarif
@@ -832,29 +721,17 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
         if artifact["path"] == "findings.json":
             artifact["sha256"] = hashlib.sha256(mutated_findings_bytes).hexdigest()
     manifest_path.write_text(json.dumps(coordinated_manifest))
-    coordinated_export = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "json",
-        check=False,
+    coordinated_export = scan_command(
+        state_dir, "export-findings", scan_id, "--format", "json", check=False
     )
     assert "sealed scan manifest changed after completion" in str(coordinated_export["stderr"])
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    refreshed = get_scan(state_dir, scan_id)
     assert refreshed["scan"]["findings"][0]["summary"] != ("Coordinated post-completion rewrite")
     findings_path.write_bytes(sealed_findings_bytes)
     manifest_path.write_bytes(sealed_manifest_bytes)
     findings_path.write_text("{}")
-    tampered_json = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "json",
-        check=False,
+    tampered_json = scan_command(
+        state_dir, "export-findings", scan_id, "--format", "json", check=False
     )
     assert "sealed artifact changed" in str(tampered_json["stderr"])
 
@@ -877,37 +754,13 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--thread-id",
-        "thread-deep-export",
-        "--target-path",
-        str(target),
+    create_workspace(
+        state_dir, workspace_id, "--thread-id", "thread-deep-export", "--target-path", str(target)
     )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-    )
+    save_workspace(state_dir, workspace_id, str(target), ".", "deep")
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
-    run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-export",
-        environment={"CODEX_HOME": str(codex_home)},
+    resume_deep_scan(
+        state_dir, scan_id, "thread-deep-export", environment={"CODEX_HOME": str(codex_home)}
     )
     mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(
@@ -924,15 +777,8 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     finding["extensions"] = extensions
     findings_path.write_text(json.dumps(findings_document))
 
-    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
-    exported = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "csv",
-    )["export"]
+    scan_command(state_dir, "complete-scan", scan_id)
+    exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
     with Path(exported["path"]).open(newline="") as source:
         reader = csv.DictReader(source)
         rows = list(reader)
@@ -971,15 +817,8 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
     finding["remediation"] = " \t＋1+1"
     findings_path.write_text(json.dumps(findings_document))
 
-    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
-    exported = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "csv",
-    )["export"]
+    scan_command(state_dir, "complete-scan", scan_id)
+    exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
     with Path(exported["path"]).open(newline="") as source:
         row = next(csv.DictReader(source))
 
@@ -1076,24 +915,9 @@ def test_completed_findings_are_returned_in_bounded_pages(
 
 
 def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute("UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan_id,))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     occurrence_id = completed["findings"][0]["occurrenceId"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         details = json.loads(
@@ -1124,10 +948,8 @@ def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -
             "UPDATE finding_locations SET relative_path = ?, role = ? WHERE occurrence_id = ?",
             ("p" * 4_097, "o" * 129, occurrence_id),
         )
-    embedded = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
-    paged = run_workbench(state_dir, "list-findings", "--scan-id", scan_id)["findingsPage"][
-        "findings"
-    ]
+    embedded = get_scan(state_dir, scan_id)["scan"]["findings"]
+    paged = scan_command(state_dir, "list-findings", scan_id)["findingsPage"]["findings"]
     assert embedded == paged
     assert len(embedded) == 1
     finding = embedded[0]
@@ -1146,7 +968,7 @@ def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -
         connection.execute(
             "UPDATE finding_locations SET role = NULL WHERE occurrence_id = ?", (occurrence_id,)
         )
-    roleless = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    roleless = get_scan(state_dir, scan_id)
     assert roleless["scan"]["findings"][0]["locations"][0]["role"] is None
 
 
@@ -1189,7 +1011,7 @@ def test_embedded_and_paged_findings_normalize_scalar_attack_path_assessments(
     }
     findings_path.write_text(json.dumps(document))
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     assert completed["findingCount"] == 22
     assert completed["findingsTruncated"] is True
     assert len(completed["findings"]) == 20
@@ -1201,7 +1023,7 @@ def test_embedded_and_paged_findings_normalize_scalar_attack_path_assessments(
     assert returned_embedded_finding["attackPath"]["impact"] == {"level": "high"}
     assert returned_embedded_finding["attackPath"]["likelihood"] == {"level": "medium"}
 
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    refreshed = get_scan(state_dir, scan_id)["scan"]
     refreshed_embedded_finding = next(
         finding
         for finding in refreshed["findings"]
@@ -1210,15 +1032,8 @@ def test_embedded_and_paged_findings_normalize_scalar_attack_path_assessments(
     assert refreshed_embedded_finding["attackPath"]["impact"] == {"level": "high"}
     assert refreshed_embedded_finding["attackPath"]["likelihood"] == {"level": "medium"}
 
-    second_page = run_workbench(
-        state_dir,
-        "list-findings",
-        "--scan-id",
-        scan_id,
-        "--offset",
-        "20",
-        "--limit",
-        "50",
+    second_page = scan_command(
+        state_dir, "list-findings", scan_id, "--offset", "20", "--limit", "50"
     )["findingsPage"]
     assert second_page["offset"] == 20
     assert second_page["nextOffset"] is None
@@ -1281,17 +1096,10 @@ def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     ] + [{"path": "root.py", "startLine": 1, "role": "root_control"}]
     findings_path.write_text(json.dumps(document))
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     assert len(completed["findings"][0]["locations"]) == 8
     assert completed["findings"][0]["locations"][0]["path"] == "root.py"
-    exported = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "csv",
-    )["export"]
+    exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
     with Path(exported["path"]).open(newline="") as source:
         row = next(csv.DictReader(source))
     assert row["path"] == "root.py"
@@ -1352,19 +1160,11 @@ def test_csv_export_rejects_symlinked_exports_directory(tmp_path: Path) -> None:
     outside.mkdir()
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
-    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    scan_command(state_dir, "complete-scan", scan_id)
     (scan_dir / "exports" / "results.sarif").unlink()
     (scan_dir / "exports").rmdir()
     (scan_dir / "exports").symlink_to(outside, target_is_directory=True)
-    failed = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "csv",
-        check=False,
-    )
+    failed = scan_command(state_dir, "export-findings", scan_id, "--format", "csv", check=False)
     assert "expected a regular directory inside the scan directory" in str(failed["stderr"])
     assert not (outside / "findings.csv").exists()
 
@@ -1377,19 +1177,11 @@ def test_export_rejects_replaced_scan_directory(tmp_path: Path) -> None:
     outside.mkdir()
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
-    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    scan_command(state_dir, "complete-scan", scan_id)
     moved_scan_dir = scan_dir.with_name(f"{scan_dir.name}.moved")
     scan_dir.rename(moved_scan_dir)
     scan_dir.symlink_to(outside, target_is_directory=True)
-    failed = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "csv",
-        check=False,
-    )
+    failed = scan_command(state_dir, "export-findings", scan_id, "--format", "csv", check=False)
     assert failed["returncode"] != 0
     assert not (outside / "exports" / "findings.csv").exists()
 
@@ -1397,7 +1189,7 @@ def test_export_rejects_replaced_scan_directory(tmp_path: Path) -> None:
 def test_csv_export_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    scan_command(state_dir, "complete-scan", scan_id)
     stored_parent = scan_dir.parent
     moved_parent = stored_parent.with_name(f"{stored_parent.name}.moved")
     stored_parent.rename(moved_parent)
@@ -1405,15 +1197,7 @@ def test_csv_export_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> 
     shutil.copytree(moved_parent, replacement_parent)
     stored_parent.symlink_to(replacement_parent, target_is_directory=True)
     replacement_scan_dir = replacement_parent / scan_dir.name
-    failed = run_workbench(
-        state_dir,
-        "export-findings",
-        "--scan-id",
-        scan_id,
-        "--format",
-        "csv",
-        check=False,
-    )
+    failed = scan_command(state_dir, "export-findings", scan_id, "--format", "csv", check=False)
     assert failed["returncode"] != 0
     assert not (replacement_scan_dir / "exports" / "findings.csv").exists()
 
@@ -1424,7 +1208,7 @@ def test_completion_rejects_replaced_scan_directory(tmp_path: Path) -> None:
     moved_scan_dir = scan_dir.with_name(f"{scan_dir.name}.moved")
     scan_dir.rename(moved_scan_dir)
     scan_dir.symlink_to(moved_scan_dir, target_is_directory=True)
-    failed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id, check=False)
+    failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
     assert failed["returncode"] != 0
     assert not (moved_scan_dir / "exports" / "results.sarif").exists()
 
@@ -1439,7 +1223,7 @@ def test_completion_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> 
     shutil.copytree(moved_parent, replacement_parent)
     stored_parent.symlink_to(replacement_parent, target_is_directory=True)
     replacement_scan_dir = replacement_parent / scan_dir.name
-    failed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id, check=False)
+    failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
     assert failed["returncode"] != 0
     assert not (replacement_scan_dir / "exports" / "results.sarif").exists()
 
@@ -1447,34 +1231,19 @@ def test_completion_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> 
 def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
     request_id = str(uuid.uuid4())
     generation_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        generation_token,
-    )
+    request_remediation(state_dir, occurrence_id, request_id, generation_token)
     patch_path = scan_dir / "remediation.patch"
     patch_path.write_text("diff --git a/src/extract.py b/src/extract.py\n")
-    run_workbench(
+    set_remediation(
         state_dir,
-        "set-finding-remediation",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         request_id,
-        "--action-token",
         generation_token,
-        "--expected-version",
         "1",
-        "--state",
         "generated",
         "--patch-path",
         patch_path.name,
@@ -1487,20 +1256,8 @@ def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Pa
     replacement_parent = tmp_path / "replacement-parent"
     shutil.copytree(moved_parent, replacement_parent)
     stored_parent.symlink_to(replacement_parent, target_is_directory=True)
-    failed = run_workbench(
-        state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--expected-version",
-        "2",
-        "--action",
-        "apply",
-        "--action-token",
-        str(uuid.uuid4()),
-        check=False,
+    failed = request_remediation_action(
+        state_dir, occurrence_id, request_id, "2", "apply", str(uuid.uuid4()), check=False
     )
     assert "canonical non-symlink directory" in str(failed["stderr"])
 
@@ -1540,15 +1297,13 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
     raw = {
         "scanId": scan_id,
         "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [
+        "coverage": saved_coverage(
+            completeness="partial",
+            deferred=[
                 {key: value for key, value in row.items() if key != "id"}
                 for row in documents["coverage"]["deferred"]
             ],
-        },
+        ),
     }
     drafts = scan_dir / "drafts"
     drafts.mkdir()

@@ -10,7 +10,7 @@ import pytest
 class Python310DateTime(datetime):
     @classmethod
     def fromisoformat(cls, value: str) -> datetime:
-        if value.endswith(("Z", "z")):
+        if isinstance(value, str) and value.endswith(("Z", "z")):
             raise ValueError("Python 3.10 rejects Z-suffixed timestamps")
         return datetime.fromisoformat(value)
 
@@ -44,3 +44,6 @@ def test_remediation_leases_on_python310(monkeypatch, fields, active) -> None:
         **fields,
     }
     assert remediation.remediation_claim_is_active(claim) is active
+
+
+pytestmark = pytest.mark.cross_platform

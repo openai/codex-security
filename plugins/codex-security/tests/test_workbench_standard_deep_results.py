@@ -15,7 +15,11 @@ import pytest
 from workbench_test_support import (
     begin_legacy_scan,
     finding_fixture,
+    get_scan,
+    preserve_scan_results,
     run_workbench,
+    saved_coverage,
+    scan_command,
     worker_paths,
     write_checkpoint,
     write_completed_contract,
@@ -459,12 +463,8 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     assert (scan_dir / "scan-manifest.json").read_bytes() == manifest_before_failed_recovery
     assert (scan_dir / "findings.json").read_bytes() == findings_before_failed_recovery
 
-    recovered = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
 
     assert recovered["findingCount"] == 2
@@ -482,12 +482,8 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     later["findings"] = [later_finding]
     write_checkpoint(scan_dir / "checkpoints", later)
 
-    recovered_again = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered_again = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
 
     assert recovered_again["findingCount"] == 3
@@ -599,17 +595,10 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
         ).fetchone()
     assert seal_digest is not None
     assert json.loads(frozen_before)
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
-        is True
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
 
-    recovered = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
 
     assert recovered["resultsRecoveryNeeded"] is False
@@ -656,7 +645,7 @@ def test_unsealed_manifest_without_saved_results_does_not_offer_recovery(
             (scan_id,),
         )
 
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
 
     assert failed["resultsRecoveryNeeded"] is False
 
@@ -946,12 +935,9 @@ def test_canceled_scan_reports_noop_coordinator_publication(tmp_path: Path) -> N
             is None
         )
 
-    preserved = run_workbench(
+    preserved = preserve_scan_results(
         state_dir,
-        "preserve-scan-results",
-        "--scan-id",
         scan_id,
-        "--thread-id",
         "standard-worker-thread",
         environment={"CODEX_HOME": str(codex_home)},
         check=False,
@@ -1593,12 +1579,7 @@ def accepted_standard_worker(
             {
                 "scanId": scan_id,
                 "findings": [],
-                "coverage": {
-                    "completeness": "complete",
-                    "surfaces": [],
-                    "explicitExclusions": [],
-                    "deferred": [],
-                },
+                "coverage": saved_coverage(),
                 "threatModel": {"summary": "The ordinary Standard worker threat model."},
             }
         )

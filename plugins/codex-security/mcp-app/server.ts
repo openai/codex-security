@@ -1,9 +1,12 @@
+import {
+  readingAnnotations,
+  writingAnnotations,
+} from "./src/server/tool-annotations.js";
 import type { ScanResults, JsonObject } from "./src/types.js";
 import { isRecord as isJsonObject } from "./src/record.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -26,21 +29,13 @@ import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveNativeParentSandbox,
 } from "./src/native-permissions.js";
+import { WORKBENCH_PYTHON } from "./src/server/workbench-process.js";
 
 const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
-const CONFIGURED_WORKBENCH_STATE_DIR =
-  process.env.CODEX_SECURITY_STATE_DIR?.trim();
-const PLUGIN_ROOT = resolve(__dirname, "..");
+const PLUGIN_ROOT =
+  process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
-const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
-  "resolve-scan-root",
-  "inspect-target",
-  "inspect-setup",
-  "save-artifact",
-  "read-artifact",
-]);
-
 export class AsyncLock {
   private tail: Promise<void> = Promise.resolve();
 
@@ -59,19 +54,18 @@ export class AsyncLock {
   }
 }
 
-let fallbackWorkbenchStateDir: Promise<string> | undefined;
-let fallbackWorkbenchStateLogged = false;
-let persistentWorkbenchStateSucceeded = false;
-const workbenchStateSelectionLock = new AsyncLock();
-
 const userContextSchema = z.string().trim().min(1);
 const editableUserContextSchema = z.string().trim();
+const pathSchema = z
+  .string()
+  .min(1)
+  .max(4096)
+  .refine((value) => value.trim().length > 0, "Path must not be blank.");
 const verifiedAccessGrantSchema = z
-  .object({
+  .strictObject({
     level: z.enum(["tac1", "tac2", "tac3", "government"]),
     source: z.enum(["user", "project", "current_account"]),
   })
-  .strict()
   .refine(
     ({ level, source }) =>
       level === "tac1" ||
@@ -79,7 +73,7 @@ const verifiedAccessGrantSchema = z
     "Unsupported Daybreak grant source.",
   );
 const verifiedAccessSnapshotSchema = z
-  .object({
+  .strictObject({
     schemaVersion: z.literal(1),
     status: z.enum(["granted", "not_granted", "unknown"]),
     grants: z.array(verifiedAccessGrantSchema),
@@ -87,7 +81,6 @@ const verifiedAccessSnapshotSchema = z
     stale: z.boolean(),
     enrollmentUrl: z.url().optional(),
   })
-  .strict()
   .superRefine((snapshot, context) => {
     if (snapshot.status === "granted" && snapshot.grants.length === 0) {
       context.addIssue({
@@ -114,18 +107,6 @@ const daybreakEntitlementContextSchema = z.object({
 });
 
 async function scanRoot(): Promise<string> {
-  if (
-    !CONFIGURED_SCAN_ROOT &&
-    !CONFIGURED_WORKBENCH_STATE_DIR &&
-    !persistentWorkbenchStateSucceeded &&
-    !fallbackWorkbenchStateDir
-  ) {
-    // Select the workbench state before choosing its default artifact directory.
-    await runWorkbench(["list-scans", "--limit", "1"]);
-  }
-  if (!CONFIGURED_SCAN_ROOT && fallbackWorkbenchStateDir) {
-    return join(await fallbackWorkbenchStateDir, "scans");
-  }
   const result = await runWorkbench([
     "resolve-scan-root",
     ...optionalArg("--scan-root", CONFIGURED_SCAN_ROOT),
@@ -136,37 +117,29 @@ async function scanRoot(): Promise<string> {
 }
 
 const diffTargetSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("working_tree"),
-      baseRevision: z.string().trim().min(1).max(512).optional(),
-      contentDigest: z.string().trim().min(1).max(128).optional(),
-      headRevision: z.string().trim().min(1).max(512).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("commit"),
-      baseRevision: z.string().trim().min(1).max(512).optional(),
-      headRevision: z.string().trim().min(1).max(512),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("range"),
-      baseRevision: z.string().trim().min(1).max(512),
-      headRevision: z.string().trim().min(1).max(512),
-    })
-    .strict(),
+  z.strictObject({
+    kind: z.literal("working_tree"),
+    baseRevision: z.string().trim().min(1).max(512).optional(),
+    contentDigest: z.string().trim().min(1).max(128).optional(),
+    headRevision: z.string().trim().min(1).max(512).optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("commit"),
+    baseRevision: z.string().trim().min(1).max(512).optional(),
+    headRevision: z.string().trim().min(1).max(512),
+  }),
+  z.strictObject({
+    kind: z.literal("range"),
+    baseRevision: z.string().trim().min(1).max(512),
+    headRevision: z.string().trim().min(1).max(512),
+  }),
 ]);
-const currentScanPreflightCheckSchema = z
-  .object({
-    capability: z.string().trim().min(1).max(128),
-    reason: z.string().trim().min(1).max(1200),
-    severity: z.enum(["block", "warn", "suggest"]),
-    status: z.enum(["pass", "fail", "unknown"]),
-  })
-  .strict();
+const currentScanPreflightCheckSchema = z.strictObject({
+  capability: z.string().trim().min(1).max(128),
+  reason: z.string().trim().min(1).max(1200),
+  severity: z.enum(["block", "warn", "suggest"]),
+  status: z.enum(["pass", "fail", "unknown"]),
+});
 const openSchema = {
   diffTarget: diffTargetSchema
     .optional()
@@ -175,11 +148,7 @@ const openSchema = {
     .enum(["diff", "standard", "deep"])
     .optional()
     .describe("Initial scan mode inferred from the user's request."),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  scope: pathSchema
     .optional()
     .describe(
       "Optional directory inside targetPath. Use '.' or omit it for the whole target. Target-relative paths are preferred; absolute paths inside targetPath are normalized.",
@@ -191,11 +160,7 @@ const openSchema = {
     .describe(
       "Existing workspace ID to reopen without changing its setup. When provided, omit all other fields.",
     ),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema
     .optional()
     .describe("Optional resolved local target path."),
   targetSummary: z
@@ -231,18 +196,10 @@ const startPromptOnlyScanSchema = {
     .describe(
       "Prompt-driven scan mode. Deep Scan uses start_codex_security_deep_scan instead.",
     ),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Directory inside targetPath. Use '.' for the whole target."),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Resolved local target path."),
+  scope: pathSchema.describe(
+    "Directory inside targetPath. Use '.' for the whole target.",
+  ),
+  targetPath: pathSchema.describe("Resolved local target path."),
   targetSummary: z
     .string()
     .trim()
@@ -255,17 +212,8 @@ const startPromptOnlyScanSchema = {
     .describe("Optional security focus supplied by the user."),
 };
 const startHeadlessStandardScanSchema = {
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .describe("Resolved local target path."),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema.describe("Resolved local target path."),
+  scope: pathSchema
     .optional()
     .describe(
       "Optional directory inside targetPath. Omit it or use '.' for the whole target.",
@@ -288,14 +236,12 @@ type PromptOnlyScanInput = {
   targetSummary?: string;
   userContext?: string;
 };
-const userInputOptionSchema = z
-  .object({
-    description: z.string().trim().min(1).max(1200),
-    label: z.string().trim().min(1).max(200),
-  })
-  .strict();
+const userInputOptionSchema = z.strictObject({
+  description: z.string().trim().min(1).max(1200),
+  label: z.string().trim().min(1).max(200),
+});
 const userInputQuestionSchema = z
-  .object({
+  .strictObject({
     header: z.string().trim().min(1).max(64),
     id: z
       .string()
@@ -310,7 +256,6 @@ const userInputQuestionSchema = z
     options: z.array(userInputOptionSchema).min(2).max(3),
     question: z.string().trim().min(1).max(1200),
   })
-  .strict()
   .superRefine((question, context) => {
     const labels = new Set<string>();
     for (const [index, option] of question.options.entries()) {
@@ -347,22 +292,22 @@ const requestUserInputSchema = {
   ),
 };
 const targetInspectionSchema = {
-  targetPath: z.string().trim().min(1).max(4096),
+  targetPath: pathSchema,
 };
 const submissionSchema = {
   diffTarget: diffTargetSchema.optional(),
   mode: z.enum(["diff", "standard", "deep"]),
-  scope: z.string().trim().min(1).max(4096),
+  scope: pathSchema,
   sessionId: z.string().uuid(),
-  targetPath: z.string().trim().min(1).max(4096),
+  targetPath: pathSchema,
   targetSummary: z.string().trim().max(2400).optional(),
   userContext: editableUserContextSchema.optional(),
 };
 const setupInspectionSchema = {
   diffTarget: diffTargetSchema.optional(),
   mode: z.enum(["diff", "standard", "deep"]),
-  scope: z.string().trim().min(1).max(4096),
-  targetPath: z.string().trim().min(1).max(4096),
+  scope: pathSchema,
+  targetPath: pathSchema,
 };
 const scanSchema = { scanId: z.string().uuid() };
 const startDeepScanSchema = {
@@ -371,20 +316,12 @@ const startDeepScanSchema = {
     .uuid()
     .optional()
     .describe("Existing app-created or previously returned Deep Scan ID."),
-  targetPath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  targetPath: pathSchema
     .optional()
     .describe(
       "Resolved local target path for a first terminal or headless Deep Scan call.",
     ),
-  scope: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
+  scope: pathSchema
     .optional()
     .describe(
       "Scope inside targetPath. Deep Scan currently requires the whole target.",
@@ -537,16 +474,11 @@ const findingRemediationSchema = {
     .string()
     .regex(/^sha256:[a-f0-9]{64}$/)
     .optional(),
-  patchPath: z.string().trim().min(1).max(4096).optional(),
+  patchPath: pathSchema.optional(),
   requestId: z.string().uuid(),
   state: z.enum(["generated", "applied", "verifying", "verified", "failed"]),
   summary: z.string().trim().max(2400).optional(),
   verificationSummary: z.string().trim().max(2400).optional(),
-};
-const findingRemediationRequestSchema = {
-  actionToken: z.string().uuid(),
-  occurrenceId: occurrenceIdSchema,
-  requestId: z.string().uuid(),
 };
 const findingRemediationActionRequestSchema = {
   action: z.enum(["apply", "verify"]),
@@ -631,6 +563,14 @@ export function createCodexSecurityServer(): McpServer {
   };
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
+  const destructiveAnnotations = {
+    ...writingAnnotations,
+    destructiveHint: true,
+  };
+  const nonIdempotentWritingAnnotations = {
+    ...writingAnnotations,
+    idempotentHint: false,
+  };
 
   server.registerTool(
     "get_codex_security_daybreak_access",
@@ -638,13 +578,8 @@ export function createCodexSecurityServer(): McpServer {
       title: "Check Codex Security Daybreak Access",
       description:
         "Check this ChatGPT account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan. Skip it for Amazon Bedrock scans: it does not check AWS model access or access to local CLI results.",
-      inputSchema: z.object({}).strict(),
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      inputSchema: z.strictObject({}),
+      annotations: readingAnnotations,
       _meta: {
         ...modelActionMeta,
         "openai/requestedEntitlements": ["cyber_trusted_access"],
@@ -697,15 +632,10 @@ export function createCodexSecurityServer(): McpServer {
         access.status === "not_granted"
           ? " This ChatGPT account check is advisory: a scan may run, but protected results associated with this account may not be displayable. It does not determine Amazon Bedrock model access or access to local CLI results."
           : "";
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Codex Security Daybreak access: status=${access.status}; programs=${programs.join(", ") || "none"}; checkedAt=${access.checkedAt}; stale=${access.stale}.${warning}`,
-          },
-        ],
-        structuredContent: access,
-      };
+      return scanActionResult(
+        access,
+        `Codex Security Daybreak access: status=${access.status}; programs=${programs.join(", ") || "none"}; checkedAt=${access.checkedAt}; stale=${access.stale}.${warning}`,
+      );
     },
   );
 
@@ -716,12 +646,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Headless and CLI only. Start or rejoin a Standard security scan. Do not use for desktop scans, Review changes, Deep Scan, or an existing SDK-owned scan. Use the returned authoritative scanId, scanDir, and handoffClaimToken throughout preflight, reporting, and completion.",
       inputSchema: startHeadlessStandardScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ targetPath, scope, targetSummary, userContext }, extra) => {
@@ -772,20 +697,15 @@ export function createCodexSecurityServer(): McpServer {
         claimToken: handoffClaimToken,
         threadId,
       });
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, complete security_scan preflight before reviewing the target or creating a goal. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
-          },
-        ],
-        structuredContent: {
-          ...scanResponseContext(redactHandoffClaimToken(started)),
+      return scanActionResult(
+        {
+          ...redactHandoffClaimToken(started),
           scanId,
           scanDir,
           handoffClaimToken,
         },
-      };
+        `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, complete security_scan preflight before reviewing the target or creating a goal. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
+      );
     },
   );
 
@@ -796,12 +716,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Start or rejoin a Standard or diff Codex Security scan from its owning conversation. Use the returned authoritative scanId and scanDir. Standard and diff scans save progress checkpoints before their final semantic draft; the workbench writes the unsealed canonical artifacts. Complete the same scan once. Deep Scan uses start_codex_security_deep_scan instead.",
       inputSchema: startPromptOnlyScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async (
@@ -845,12 +760,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Fallback for interactive Codex Security workflows when the host-native request_user_input tool is unavailable. Presents one to three non-sensitive multiple-choice questions through standard MCP form elicitation and waits for the user's response. Never call this tool in headless, automation, or other non-interactive sessions.",
       inputSchema: requestUserInputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: { ...readingAnnotations, idempotentHint: false },
       _meta: modelActionMeta,
     },
     async ({ questions }, extra) => {
@@ -876,19 +786,10 @@ export function createCodexSecurityServer(): McpServer {
             "Accepted user input did not contain structured answers.",
           );
         }
-        const answers: Record<string, string> = {};
-        for (const question of questions) {
-          const answer = result.content[question.id];
-          if (
-            typeof answer !== "string" ||
-            !question.options.some((option) => option.label === answer)
-          ) {
-            throw new Error(
-              `User input did not contain a valid answer for ${question.id}.`,
-            );
-          }
-          answers[question.id] = answer;
-        }
+        // elicitInput validates accepted content against requestedSchema.
+        const answers = Object.fromEntries(
+          questions.map(({ id }) => [id, result.content![id] as string]),
+        );
         return userInputToolResult("accepted", answers);
       } catch (error) {
         if (signal?.aborted) throw error;
@@ -905,12 +806,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Create a native Codex Security workspace with the target and requested standard, diff, or deep mode, or reopen one owned by this thread by passing only sessionId. Scope is inside targetPath; use '.' or omit scope for the whole target.",
       inputSchema: openSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: nonIdempotentWritingAnnotations,
       _meta: appMeta,
     },
     async (input, extra) => {
@@ -960,12 +856,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Validate a local target directory and derive its display and Git metadata without saving setup.",
       inputSchema: targetInspectionSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ targetPath }) => {
@@ -974,15 +865,10 @@ export function createCodexSecurityServer(): McpServer {
         "--target-path",
         targetPath,
       ]);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "Validated the local Codex Security target.",
-          },
-        ],
-        structuredContent: { target },
-      };
+      return scanActionResult(
+        { target },
+        "Validated the local Codex Security target.",
+      );
     },
   );
 
@@ -993,12 +879,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Resolve and validate the complete local target, scope, mode, and exact Git change set without saving setup.",
       inputSchema: setupInspectionSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ targetPath, scope, mode, diffTarget }) => {
@@ -1006,21 +887,15 @@ export function createCodexSecurityServer(): McpServer {
         "inspect-setup",
         "--target-path",
         targetPath,
-        "--scope",
-        scope,
+        `--scope=${scope}`,
         "--mode",
         mode,
         ...diffTargetArgs(diffTarget),
       ]);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "Validated the local Codex Security setup.",
-          },
-        ],
-        structuredContent: { setup },
-      };
+      return scanActionResult(
+        { setup },
+        "Validated the local Codex Security setup.",
+      );
     },
   );
 
@@ -1031,12 +906,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Validate and save bounded target, scope, mode, and optional context selections.",
       inputSchema: submissionSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({
@@ -1056,8 +926,7 @@ export function createCodexSecurityServer(): McpServer {
             sessionId,
             "--target-path",
             targetPath,
-            "--scope",
-            scope,
+            `--scope=${scope}`,
             "--mode",
             mode,
             ...definedArg("--target-summary", targetSummary),
@@ -1077,12 +946,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Create a scan record and its local artifact directory before Codex analysis begins.",
       inputSchema: startScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: nonIdempotentWritingAnnotations,
       _meta: appMeta,
     },
     async ({ sessionId, model, reasoningEffort }) => {
@@ -1106,12 +970,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate is complete, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the sealed parent scan-manifest.json and reportPath identifies the generated report.md. Follow the returned instructions.",
       inputSchema: startDeepScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async (
@@ -1200,9 +1059,6 @@ export function createCodexSecurityServer(): McpServer {
             parentSandbox,
             pluginRoot: PLUGIN_ROOT,
             pythonPath: await resolvePythonCommand(),
-            stateDirectory: fallbackWorkbenchStateDir
-              ? await fallbackWorkbenchStateDir
-              : undefined,
           },
           abortSignalFromExtra(extra),
         );
@@ -1250,12 +1106,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Stop a running scan from its owning Codex thread, prevent further progress or completion updates, and cancel its active ordinary scans.",
       inputSchema: scanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: destructiveAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId }, extra) => {
@@ -1276,12 +1127,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Stop a running scan from the native Codex Security workbench, prevent further progress or completion updates, and cancel its active ordinary scans.",
       inputSchema: scanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: destructiveAnnotations,
       _meta: appMeta,
     },
     async ({ scanId }) => cancelSecurityScan(scanId),
@@ -1294,12 +1140,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Explicitly validate and republish retained checkpoints for one stopped scan, updating its artifacts, finding index, and counts.",
       inputSchema: scanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: destructiveAnnotations,
       _meta: appMeta,
     },
     async ({ scanId }) =>
@@ -1318,12 +1159,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Read plugin-owned scan state for native Security monitoring without claiming a pending Codex handoff.",
       inputSchema: scanReadSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, occurrenceId }) =>
@@ -1345,12 +1181,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Read persisted plugin-owned scan summaries for native Security navigation.",
       inputSchema: scanListSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ limit, mode, offset, query, status, targetId }) =>
@@ -1375,12 +1206,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Read the latest plugin-owned finding occurrence for each stable repository target and finding identity.",
       inputSchema: globalFindingsPageSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ limit, offset, query, severity, status, targetId }) =>
@@ -1405,12 +1231,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Read plugin-owned repository summaries and their latest scan state.",
       inputSchema: repositoryListSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ limit, offset, query, status, targetId }) =>
@@ -1434,12 +1255,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Load the authoritative target, mode, optional user context, artifact directory, live progress, and optional selected finding for a launched scan. Validated legacy finding details may be migrated.",
       inputSchema: scanContextSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId, occurrenceId, handoffClaimToken }, extra) => {
@@ -1490,6 +1306,27 @@ export function createCodexSecurityServer(): McpServer {
     },
   );
 
+  server.registerTool(
+    "rename_codex_security_scan",
+    {
+      title: "Rename Codex Security Scan",
+      description: "App-only. Change the display name of a saved scan.",
+      inputSchema: { ...scanSchema, name: z.string() },
+      annotations: writingAnnotations,
+      _meta: appMeta,
+    },
+    async ({ scanId, name }) =>
+      scanActionResult(
+        await runWorkbench([
+          "rename-scan",
+          "--scan-id",
+          scanId,
+          `--name=${name}`,
+        ]),
+        "Renamed Codex Security scan.",
+      ),
+  );
+
   const updateRunningScanContext = async (input: {
     claimToken?: string;
     scanId: string;
@@ -1519,12 +1356,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Replace the context for a running scan. The next phase uses the new value; workers in the current phase keep their original context.",
       inputSchema: scanContextUpdateSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId, userContext, handoffClaimToken }, extra) => {
@@ -1550,12 +1382,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Replace the context for the running scan attached to this workspace.",
       inputSchema: appScanContextUpdateSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, userContext }) => {
@@ -1583,12 +1410,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Record a meaningful live scan phase or coverage milestone in the Codex Security workbench.",
       inputSchema: progressSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async (
@@ -1700,12 +1522,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId, handoffClaimToken }) => {
@@ -1732,12 +1549,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Permanently mark a launched Codex Security scan as failed only after a confirmed unrecoverable blocker. For explicit user cancellation, use cancel_codex_security_scan instead. This terminal action cannot be resumed; incomplete or otherwise resumable work must remain running.",
       inputSchema: failSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: destructiveAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId, message, handoffClaimToken }) => {
@@ -1746,8 +1558,7 @@ export function createCodexSecurityServer(): McpServer {
         "--scan-id",
         scanId,
         "--defer-publication",
-        "--message",
-        message,
+        `--message=${message}`,
         ...optionalArg("--claim-token", handoffClaimToken),
       ]);
       const failed = await finalizeNativeStoppedScan(scanId, nativeScans, {
@@ -1767,12 +1578,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Persist a completed finding's local open or closed triage status. Closed findings require one bounded close reason; reopening clears it.",
       inputSchema: findingTriageSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, status, closeReason, note }) =>
@@ -1796,13 +1602,8 @@ export function createCodexSecurityServer(): McpServer {
       title: "Request Codex Security Finding Remediation",
       description:
         "App-only. Queue a completed finding for Codex remediation before sending the host a generate or regenerate request.",
-      inputSchema: findingRemediationRequestSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      inputSchema: findingRemediationClaimSchema,
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, requestId, actionToken }) =>
@@ -1827,12 +1628,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Durably claim an apply or verify handoff before asking Codex to perform the local working-tree operation.",
       inputSchema: findingRemediationActionRequestSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, requestId, expectedVersion, action, actionToken }) =>
@@ -1854,125 +1650,69 @@ export function createCodexSecurityServer(): McpServer {
       ),
   );
 
-  server.registerTool(
-    "claim_codex_security_finding_remediation_resend",
+  for (const { name, title, description, annotations, command, message } of [
     {
+      name: "claim_codex_security_finding_remediation_resend",
       title: "Claim Codex Security Finding Remediation Resend",
       description:
         "App-only. Atomically take ownership of an unowned or stale remediation host request before resending it.",
-      inputSchema: findingRemediationClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-      _meta: appMeta,
+      annotations: writingAnnotations,
+      command: "claim-finding-remediation-resend",
+      message: "Claimed the local Codex Security finding remediation resend.",
     },
-    async ({ occurrenceId, requestId, actionToken }) =>
-      scanActionResult(
-        await runWorkbench([
-          "claim-finding-remediation-resend",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
-        "Claimed the local Codex Security finding remediation resend.",
-      ),
-  );
-
-  server.registerTool(
-    "release_codex_security_finding_remediation_claim",
     {
+      name: "release_codex_security_finding_remediation_claim",
       title: "Release Codex Security Finding Remediation Claim",
       description:
         "App-only. Release a locally owned remediation host request after message delivery fails.",
-      inputSchema: findingRemediationClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-      _meta: appMeta,
+      annotations: writingAnnotations,
+      command: "release-finding-remediation-claim",
+      message: "Released the local Codex Security finding remediation claim.",
     },
-    async ({ occurrenceId, requestId, actionToken }) =>
-      scanActionResult(
-        await runWorkbench([
-          "release-finding-remediation-claim",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
-        "Released the local Codex Security finding remediation claim.",
-      ),
-  );
-
-  server.registerTool(
-    "cancel_codex_security_finding_remediation_request",
     {
+      name: "cancel_codex_security_finding_remediation_request",
       title: "Cancel Codex Security Finding Remediation Request",
       description:
         "App-only. Roll back an owned remediation request after the user declines its host follow-up.",
-      inputSchema: findingRemediationClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-      _meta: appMeta,
+      annotations: destructiveAnnotations,
+      command: "cancel-finding-remediation-request",
+      message: "Canceled the local Codex Security finding remediation request.",
     },
-    async ({ occurrenceId, requestId, actionToken }) =>
-      scanActionResult(
-        await runWorkbench([
-          "cancel-finding-remediation-request",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
-        "Canceled the local Codex Security finding remediation request.",
-      ),
-  );
-
-  server.registerTool(
-    "mark_codex_security_finding_remediation_delivered",
     {
+      name: "mark_codex_security_finding_remediation_delivered",
       title: "Mark Codex Security Finding Remediation Delivered",
       description:
         "App-only. Seal host-message delivery ownership before Codex starts a remediation worker.",
-      inputSchema: findingRemediationClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-      _meta: appMeta,
-    },
-    async ({ occurrenceId, requestId, actionToken }) =>
-      scanActionResult(
-        await runWorkbench([
-          "mark-finding-remediation-delivered",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
+      annotations: writingAnnotations,
+      command: "mark-finding-remediation-delivered",
+      message:
         "Marked the local Codex Security finding remediation request as delivered.",
-      ),
-  );
+    },
+  ]) {
+    server.registerTool(
+      name,
+      {
+        title,
+        description,
+        inputSchema: findingRemediationClaimSchema,
+        annotations,
+        _meta: appMeta,
+      },
+      async ({ occurrenceId, requestId, actionToken }) =>
+        scanActionResult(
+          await runWorkbench([
+            command,
+            "--occurrence-id",
+            occurrenceId,
+            "--request-id",
+            requestId,
+            "--action-token",
+            actionToken,
+          ]),
+          message,
+        ),
+    );
+  }
 
   server.registerTool(
     "set_codex_security_finding_remediation",
@@ -1981,12 +1721,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Persist the bounded local remediation workflow state for a completed finding. The UI may mark a request as queued; Codex records generated, applied, verifying, verified, or failed states after performing the corresponding work.",
       inputSchema: findingRemediationSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
+      annotations: nonIdempotentWritingAnnotations,
       _meta: modelActionMeta,
     },
     async ({
@@ -2030,12 +1765,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Export retained local findings as JSON, SARIF, or CSV, or the saved threat model as Markdown without running another analysis. Findings require completed or preserved stopped results; threat models may be provisional. Defaults to findings in CSV, or Markdown when artifact is threat-model. Exported copies remain in the scan's exports directory, except canonical findings JSON.",
       inputSchema: findingsExportSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, artifact, format }) =>
@@ -2061,12 +1791,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Load one bounded page of indexed findings for a completed local scan, migrating validated legacy finding details when needed.",
       inputSchema: findingsPageSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ limit, offset, query, scanId, severity, status }) =>
@@ -2156,8 +1881,7 @@ async function startPromptOnlyScan(
       threadId,
       "--target-path",
       targetPath,
-      "--scope",
-      scope,
+      `--scope=${scope}`,
       "--mode",
       mode,
       ...optionalArg("--model", modelSettings.model),
@@ -2189,8 +1913,7 @@ async function startHeadlessStandardScan(
       threadId,
       "--target-path",
       input.targetPath,
-      "--scope",
-      input.scope ?? ".",
+      `--scope=${input.scope ?? "."}`,
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
       ...optionalArg("--target-summary", input.targetSummary),
@@ -2212,8 +1935,8 @@ function wholeTargetScope(
 
 function openWorkspaceResult(workspace: WorkspaceState) {
   const result = workspaceResult(workspace);
-  if (result.structuredContent.workspace.results) {
-    delete result.structuredContent.workspace.results.handoffClaimToken;
+  if (workspace.results) {
+    delete workspace.results.handoffClaimToken;
   }
   return result;
 }
@@ -2245,12 +1968,7 @@ function workspaceResult(workspace: WorkspaceState) {
     results && typeof results.scanDir === "string"
       ? ` Scan state is attached at ${results.scanDir}.`
       : "";
-  return {
-    content: [
-      { type: "text" as const, text: `${setupSummary}${resultsSummary}` },
-    ],
-    structuredContent: { workspace },
-  };
+  return scanActionResult({ workspace }, `${setupSummary}${resultsSummary}`);
 }
 
 function promptOnlyScanResult(promptOnly: JsonObject) {
@@ -2276,15 +1994,10 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
       "Codex Security prompt-only scan returned malformed context; no prompt-driven scan was started.",
     );
   }
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Author scan-manifest.json as an unsealed draft: omit scan.sealedAt and scan.artifacts because completion supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Then call complete_codex_security_scan once to index the completed findings.`,
-      },
-    ],
-    structuredContent: scanResponseContext(promptOnly),
-  };
+  return scanActionResult(
+    promptOnly,
+    `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
+  );
 }
 
 function scanResponseContext(result: JsonObject) {
@@ -2292,7 +2005,7 @@ function scanResponseContext(result: JsonObject) {
   return context;
 }
 
-function scanActionResult(result: JsonObject, summary: string) {
+function scanActionResult<T extends JsonObject>(result: T, summary: string) {
   return {
     content: [{ type: "text" as const, text: summary }],
     structuredContent: scanResponseContext(result),
@@ -2312,9 +2025,17 @@ function buildUserInputElicitation(
   const isSingleQuestion = questions.length === 1;
   return {
     mode: "form" as const,
-    message: isSingleQuestion
-      ? questions[0]!.question
-      : "Codex Security needs your input before it can continue.",
+    message: questions
+      .map((question) =>
+        [
+          ...(isSingleQuestion ? [] : [question.header]),
+          question.question,
+          ...question.options.map(
+            (option) => `- ${option.label}: ${option.description}`,
+          ),
+        ].join("\n"),
+      )
+      .join("\n\n"),
     requestedSchema: {
       type: "object" as const,
       properties: Object.fromEntries(
@@ -2323,6 +2044,7 @@ function buildUserInputElicitation(
           {
             type: "string" as const,
             title: question.header,
+            description: question.question,
             oneOf: question.options.map((option) => ({
               const: option.label,
               title: option.label,
@@ -2347,13 +2069,7 @@ function userInputToolResult(
         : status === "cancelled"
           ? "The Codex Security input request was cancelled. Do not infer an answer."
           : "Structured Codex Security input is unavailable in this host. Use the documented plain-chat fallback.";
-  return {
-    content: [{ type: "text" as const, text }],
-    structuredContent: {
-      status,
-      ...(answers ? { answers } : {}),
-    },
-  };
+  return scanActionResult({ status, ...(answers ? { answers } : {}) }, text);
 }
 
 async function logUserInputFailure(
@@ -2505,13 +2221,13 @@ async function runWorkbench(
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbenchWithStateSelection(pythonCommand, args, input);
+    return await executeWorkbench(pythonCommand, args, input);
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
       : undefined;
     if (launchError) {
-      throw new Error(launchError);
+      throw new Error(launchError, { cause: error });
     }
     if (isExecError(error) && error.stderr.trim()) {
       throw new Error(error.stderr.trim(), { cause: error });
@@ -2520,98 +2236,75 @@ async function runWorkbench(
   }
 }
 
-async function executeWorkbenchWithStateSelection(
-  pythonCommand: string,
-  args: string[],
-  input?: string | Buffer,
-): Promise<JsonObject> {
-  if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
-  if (CONFIGURED_WORKBENCH_STATE_DIR) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
-  if (fallbackWorkbenchStateDir) {
-    return await executeWorkbench(
-      pythonCommand,
-      args,
-      await fallbackWorkbenchStateDir,
-      input,
-    );
-  }
-  if (persistentWorkbenchStateSucceeded) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
-  return await workbenchStateSelectionLock.run(async () => {
-    if (fallbackWorkbenchStateDir) {
-      return await executeWorkbench(
-        pythonCommand,
-        args,
-        await fallbackWorkbenchStateDir,
-        input,
-      );
-    }
-    if (persistentWorkbenchStateSucceeded) {
-      return await executeWorkbench(pythonCommand, args, undefined, input);
-    }
-    try {
-      const result = await executeWorkbench(
-        pythonCommand,
-        args,
-        undefined,
-        input,
-      );
-      persistentWorkbenchStateSucceeded = true;
-      return result;
-    } catch (error) {
-      if (!isUnwritableSqliteOpenError(error)) throw error;
-      const fallbackStateDir = await pinFallbackWorkbenchStateDir();
-      logWorkbenchStateFallback();
-      return await executeWorkbench(
-        pythonCommand,
-        args,
-        fallbackStateDir,
-        input,
-      );
-    }
-  });
-}
-
 async function executeWorkbench(
   pythonCommand: string,
   args: string[],
-  stateDir?: string,
   input?: string | Buffer,
 ): Promise<JsonObject> {
-  const userContextIndex = args.indexOf("--user-context");
-  const userContext =
-    userContextIndex === -1 ? undefined : args[userContextIndex + 1];
-  const workbenchArgs = [...args];
-  if (userContextIndex !== -1) {
-    workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
-  }
-  const workbenchInput = input ?? userContext;
+  const timeout = [
+    "begin-deep-scan",
+    "cancel-scan",
+    "fail-scan",
+    "claim-deep-scan-dedup",
+    "commit-deep-scan-dedup",
+    "complete-scan",
+    "export-findings",
+    "finish-deep-scan",
+    "get-scan",
+    "get-deep-scan",
+    "get-workspace",
+    "inspect-setup",
+    "list-findings",
+    "preserve-scan-results",
+    "recover-scan-results",
+    "request-finding-remediation",
+    "request-finding-remediation-action",
+    "save-workspace",
+    "set-finding-triage",
+    "set-finding-remediation",
+    "start-headless-standard-scan",
+    "start-prompt-only-scan",
+    "start-scan",
+    "upsert-deep-scan-worker",
+  ].includes(args[0] ?? "")
+    ? 300_000
+    : 30_000;
   const execution = execFileAsync(
     pythonCommand,
-    [workbenchScriptPath(), ...workbenchArgs],
+    ["-c", WORKBENCH_PYTHON, workbenchScriptPath()],
     {
       cwd: PLUGIN_ROOT,
-      env: stateDir
-        ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
-        : process.env,
+      windowsHide: true,
+      env: process.env,
       encoding: "utf8" as const,
       // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
       maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
       timeout: workbenchCommandTimeout(args[0]),
     },
   );
-  if (workbenchInput !== undefined) {
-    execution.child.stdin!.on("error", () => {
-      // The workbench may exit before consuming stdin; surface its process error.
-    });
-    execution.child.stdin!.end(workbenchInput);
-  }
-  const { stdout } = await execution;
+  execution.child.stdin!.on("error", () => {
+    // The workbench may exit before consuming stdin; surface its process error.
+  });
+  // Match native argv's UTF-8 encoding while framing NUL separately from stdin.
+  execution.child.stdin!.write(
+    `${JSON.stringify(args.map((argument) => argument.toWellFormed()))}\n`,
+  );
+  execution.child.stdin!.end(input);
+  const { stdout } = await execution.catch((error: unknown) => {
+    if (
+      error instanceof Error &&
+      "killed" in error &&
+      error.killed === true &&
+      "signal" in error &&
+      error.signal === "SIGTERM"
+    ) {
+      throw new Error(
+        `Codex Security workbench ${args[0]} timed out after ${timeout / 1000} seconds: ${error.message}`,
+        { cause: error },
+      );
+    }
+    throw error;
+  });
   const result = JSON.parse(stdout) as unknown;
   if (!isJsonObject(result)) {
     throw new Error("Codex Security workbench helper returned invalid JSON.");
@@ -2619,39 +2312,16 @@ async function executeWorkbench(
   return result;
 }
 
-async function pinFallbackWorkbenchStateDir(): Promise<string> {
-  fallbackWorkbenchStateDir ??= (async () => {
-    const stateDir = CONFIGURED_SCAN_ROOT
-      ? join(await scanRoot(), "workbench-state")
-      : await fs.mkdtemp(join(tmpdir(), "codex-security-state-"));
-    await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
-    return stateDir;
-  })();
-  return await fallbackWorkbenchStateDir;
-}
-
-function logWorkbenchStateFallback(): void {
-  if (fallbackWorkbenchStateLogged) return;
-  fallbackWorkbenchStateLogged = true;
-  console.error(
-    JSON.stringify({
-      component: "codex_security_workbench",
-      event: "state_fallback_pinned",
-      reason: "persistent_sqlite_unwritable",
-    }),
-  );
-}
-
 function workbenchScriptPath(): string {
   return join(PLUGIN_ROOT, "scripts", "workbench_db.py");
 }
 
 function optionalArg(name: string, value: string | undefined): string[] {
-  return value ? [name, value] : [];
+  return value ? [`${name}=${value}`] : [];
 }
 
 function definedArg(name: string, value: string | undefined): string[] {
-  return value === undefined ? [] : [name, value];
+  return value === undefined ? [] : [`${name}=${value}`];
 }
 
 function optionalNumberArg(name: string, value: number | undefined): string[] {

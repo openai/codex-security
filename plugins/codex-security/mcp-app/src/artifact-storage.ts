@@ -24,21 +24,17 @@ const locationShape = {
   path: z.string().min(1).optional(),
 };
 
-export const saveArtifactInputSchema = z
-  .object({
-    ...locationShape,
-    content: z.string().optional(),
-    sourcePath: z.string().min(1).optional(),
-  })
-  .strict();
+export const saveArtifactInputSchema = z.strictObject({
+  ...locationShape,
+  content: z.string().optional(),
+  sourcePath: z.string().min(1).optional(),
+});
 
-export const readArtifactInputSchema = z
-  .object({
-    ...locationShape,
-    path: z.string().min(1),
-    encoding: z.enum(["utf8", "base64"]).default("utf8"),
-  })
-  .strict();
+export const readArtifactInputSchema = z.strictObject({
+  ...locationShape,
+  path: z.string().min(1),
+  encoding: z.enum(["utf8", "base64"]).default("utf8"),
+});
 
 export type ArtifactLocation = z.infer<typeof saveArtifactInputSchema>;
 
@@ -67,9 +63,13 @@ export async function standaloneArtifactContext(
     // the persistent collection. storageContext prepares the temporary root.
     return { root: await resolveStoragePath(root), repoRoot };
   }
-  const existingRoot = await resolveStoragePath(scanRoot);
-  if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
-    throw new Error("Artifact storage must be outside the target repository.");
+  for (const storagePath of [scanRoot, root]) {
+    const existingRoot = await resolveStoragePath(storagePath);
+    if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
+      throw new Error(
+        "Artifact storage must be outside the target repository.",
+      );
+    }
   }
   if (create) await fs.mkdir(root, { recursive: true, mode: 0o700 });
   return {
