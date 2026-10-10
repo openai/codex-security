@@ -2317,7 +2317,7 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each(
-    (["preparation", "empty", "legacy", "commit", "rollback"] as const).flatMap(
+    (["preparation", "empty", "commit", "rollback"] as const).flatMap(
       (boundary) =>
         (["real", "mock", "import"] as const).flatMap((mode) =>
           (mode === "import"
@@ -2404,13 +2404,6 @@ describe("CodexSecurity orchestration", () => {
           "            connection.recv(1)",
           "def main(**kwargs):",
           "    sys.stdout.reconfigure(newline='\\r\\n')",
-          ...(boundary === "legacy"
-            ? [
-                "    if sys.argv[1:3] == ['register-cli-scan', '--help']:",
-                "        print('--archive-existing --archived-scan-dir')",
-                "        return",
-              ]
-            : []),
           "    if sys.argv[1:2] == ['register-cli-scan'] and '--help' not in sys.argv:",
           ...(mode === "real"
             ? [

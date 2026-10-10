@@ -26,7 +26,6 @@ interface WorkbenchModule {
   executeWorkbench(
     python: string,
     args: string[],
-    stateDir?: string,
     input?: string | Buffer,
     options?: { isolatedPython?: boolean },
   ): Promise<Record<string, unknown>>;
@@ -157,7 +156,6 @@ for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
       const result = await executeFixture(
         python,
         ["list-scans", "--limit", "1"],
-        path.join(root, "state"),
         undefined,
         { isolatedPython: true },
       );
@@ -213,7 +211,10 @@ await test("workbench can import dependencies installed in the Python user site"
   }
 });
 const root = await temporaryDirectory("workbench-framing-", true);
+const stateDir = path.join(root, "state");
+const previousStateDir = process.env.CODEX_SECURITY_STATE_DIR;
 try {
+  process.env.CODEX_SECURITY_STATE_DIR = stateDir;
   const target = path.join(root, "target");
   await mkdir(target);
   const title = "--message\0café\n日本語😀high\ud800low\udfff";
@@ -235,12 +236,15 @@ try {
           ? "--user-context-stdin"
           : `--user-context=${input.toString("utf8")}`,
       ],
-      path.join(root, "state"),
       stdin ? input : undefined,
     );
     assert.equal(result.targetTitle, Buffer.from(title).toString("utf8"));
     assert.equal(result.userContext, input.toString("utf8"));
   }
+  assert.equal(
+    (await stat(path.join(stateDir, "workbench.sqlite3"))).isFile(),
+    true,
+  );
   const artifactRoot = path.join(root, "artifacts");
   await mkdir(artifactRoot, { mode: 0o700 });
   const binary = Buffer.from([0xff, 0x00, 0x0a, 0x0d, 0xfe]);
@@ -253,7 +257,6 @@ try {
   await executeWorkbench(
     process.env.PYTHON?.trim() || "python3",
     ["save-artifact", ...artifactArgs],
-    undefined,
     binary,
   );
   const saved = await executeWorkbench(
@@ -285,5 +288,8 @@ try {
     );
   }
 } finally {
+  if (previousStateDir === undefined)
+    delete process.env.CODEX_SECURITY_STATE_DIR;
+  else process.env.CODEX_SECURITY_STATE_DIR = previousStateDir;
   await rm(root, { recursive: true, force: true });
 }

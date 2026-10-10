@@ -247,11 +247,6 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
       `Findings CSV must use the Codex Security export columns: ${REQUIRED_CSV_COLUMNS.join(", ")} (candidate_id is optional).`,
     );
   }
-  if (rows.length === 0) {
-    throw new CodexSecurityError(
-      "Findings CSV must contain at least one finding.",
-    );
-  }
 
   const occurrenceIds = new Set<string>();
   return rows.map((record, index) => {

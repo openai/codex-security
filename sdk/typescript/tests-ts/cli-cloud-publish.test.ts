@@ -4,6 +4,7 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   symlink,
@@ -80,6 +81,39 @@ describe("publish scan to Cloud", () => {
     ).toBe(0);
     expect(stdout.text()).toContain("--csv <file>");
     expect(stdout.text()).toContain("Findings CSV");
+  });
+
+  test("preserves native CSV read and decode failures in CLI output", async () => {
+    const root = await temporaryDirectory();
+    const invalid = join(root, "invalid.csv");
+    await writeFile(invalid, Buffer.from([0xff]));
+    const deps = dependencies({
+      onConfig: throwing("unexpected model setup"),
+      onWorkbench: throwing("unexpected scan lookup"),
+    });
+    const fetchMock = mock(rejecting("unexpected request"));
+    deps.cloudFetch = fetchMock;
+    for (const path of [invalid, join(root, "missing.csv")]) {
+      let nativeError: Error | undefined;
+      try {
+        new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path));
+      } catch (error) {
+        nativeError = error as Error;
+      }
+      expect(nativeError).toBeInstanceOf(Error);
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["publish", "scan", "--to", "cloud", "--csv", path, "--dry-run"],
+          deps,
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        `Could not read findings CSV. ${nativeError!.message}`,
+      );
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("passes --dry-run through when publishing a findings CSV", async () => {
