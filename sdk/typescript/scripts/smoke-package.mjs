@@ -801,8 +801,14 @@ try {
   run(
     process.execPath,
     [
-      join(packageRoot, "scripts", "fixtures", "package-deep-scan.mjs"),
+      join(
+        packageRoot,
+        "scripts",
+        "fixtures",
+        "package-composed-deep-scan.mjs",
+      ),
       installedRoot,
+      consumer,
     ],
     { cwd: consumer },
   );

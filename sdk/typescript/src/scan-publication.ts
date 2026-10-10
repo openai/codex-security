@@ -426,7 +426,15 @@ export async function collectResult(
     coverage,
     scanDir,
     threadId,
-    turnResult,
+    turnResult:
+      expectation.mode === "deep"
+        ? {
+            ...turnResult,
+            finalResponse: (
+              await readScanFile(scanDir, "report.md", "report.md", signal)
+            ).toString("utf8"),
+          }
+        : turnResult,
     cost,
     sarifPath,
     threatModelPath: await readThreatModelPath(scanDir, {

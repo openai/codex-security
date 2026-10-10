@@ -1655,11 +1655,14 @@ test.each([false, true])(
       )![0];
     }
     await using client = h.makeClient();
-    await client.run(h.repository, {
+    const result = await client.run(h.repository, {
       ...h.options,
       ...(resumed ? { resumeScanId, signal: undefined } : {}),
       postScanPrompt: "Write follow-up notes",
     });
+    expect(result.turnResult.finalResponse).toBe(
+      await readFile(result.reportPath, "utf8"),
+    );
     const followUp = h.launches.at(-1)!;
     const output = followUp.threadOptions.workingDirectory!;
     expect(dirname(output)).toBe(join(h.outputDir, "artifacts/follow-up"));

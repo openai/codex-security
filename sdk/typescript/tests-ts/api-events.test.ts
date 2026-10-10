@@ -1489,7 +1489,7 @@ describe("Deep worker terminal lifecycle", () => {
             [
               'import { writeFileSync } from "node:fs";',
               "await new Promise((resolve) => { process.stdin.once('end', resolve); process.stdin.resume(); });",
-              `writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv, key: process.env.CODEX_API_KEY, inherited: process.env.SYNTHETIC_INHERITED }));`,
+              `writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv, key: process.env.CODEX_API_KEY, inherited: process.env.SYNTHETIC_INHERITED, node: process.env.CODEX_MCP_NODE_PATH }));`,
               ...events.map(
                 (event) =>
                   `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")});`,
@@ -1529,6 +1529,7 @@ describe("Deep worker terminal lifecycle", () => {
               environment: {
                 OPENAI_API_KEY: `synthetic-key-${subagents}`,
                 SYNTHETIC_INHERITED: `inherited-${subagents}`,
+                CODEX_MCP_NODE_PATH: join(root, `selected-node-${subagents}`),
               },
             },
           );
@@ -1546,9 +1547,11 @@ describe("Deep worker terminal lifecycle", () => {
             argv: string[];
             key: string;
             inherited: string;
+            node: string;
           };
           expect(observed.key).toBe(`synthetic-key-${subagents}`);
           expect(observed.inherited).toBe(`inherited-${subagents}`);
+          expect(observed.node).toBe(join(root, `selected-node-${subagents}`));
           expect(observed.argv.includes("resume")).toBe(resume);
           let config: JsonObject = {};
           for (let index = 0; index < observed.argv.length; index++) {
