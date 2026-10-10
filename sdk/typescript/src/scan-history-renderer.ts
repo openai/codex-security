@@ -35,6 +35,9 @@ const SEVERITY_COLORS: Record<string, number> = {
   INFORMATIONAL: 37,
 };
 
+const SEVERITY_BADGE_WIDTH = 8;
+const FINDING_INDENT = 4 + SEVERITY_BADGE_WIDTH + 2;
+
 const KNOWN_SINCE_DATE = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
@@ -115,8 +118,12 @@ export function renderScanHistory(
   const finding = (entry: JsonObject, includeReason = true): void => {
     const severity = findingSeverity(entry);
     const title = clean(entry["title"]);
-    const badge = paint(severity.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
-    wrap(title, 14, `    ${badge}  `);
+    const label = severity === "INFORMATIONAL" ? "INFO" : severity;
+    const badge = paint(
+      label.padEnd(SEVERITY_BADGE_WIDTH),
+      SEVERITY_COLORS[severity] ?? 37,
+    );
+    wrap(title, FINDING_INDENT, `    ${badge}  `);
     const before = entry["beforeOccurrenceIds"] as string[] | undefined;
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
     const grouped =
@@ -138,30 +145,34 @@ export function renderScanHistory(
       entry["path"] ??
       entry["locationPath"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
-    lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
+    lines.push(
+      `${" ".repeat(FINDING_INDENT)}${dim(clean(path))}${grouped}${knownSince}`,
+    );
     const showLinkedFindings = command !== "show" || options.showLinkedFindings;
     if (matches?.length && showLinkedFindings) {
-      lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
+      lines.push(
+        `${" ".repeat(FINDING_INDENT)}${accent("↔")} ${strong("LINKED FINDINGS")}`,
+      );
       for (const match of matches) {
         lines.push(
-          `                ${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
+          `${" ".repeat(FINDING_INDENT + 2)}${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
         );
-        wrap(`↳ ${clean(match["title"])}`, 18);
+        wrap(`↳ ${clean(match["title"])}`, FINDING_INDENT + 4);
       }
     }
     if (related?.length) {
       lines.push(
-        `              ${accent("↔")} ${related.length} related finding${related.length === 1 ? "" : "s"}, kept separate`,
+        `${" ".repeat(FINDING_INDENT)}${accent("↔")} ${related.length} related finding${related.length === 1 ? "" : "s"}, kept separate`,
       );
       if (showLinkedFindings) {
         for (const relation of related) {
           if (relation["scanId"] !== undefined) {
             lines.push(
-              `                ${strong("RELATED SCAN")} ${accent(clean(relation["scanId"]).slice(0, 8))}`,
+              `${" ".repeat(FINDING_INDENT + 2)}${strong("RELATED SCAN")} ${accent(clean(relation["scanId"]).slice(0, 8))}`,
             );
           }
-          wrap(`↳ ${clean(relation["title"])}`, 18);
-          wrap(clean(relation["reason"]), 20);
+          wrap(`↳ ${clean(relation["title"])}`, FINDING_INDENT + 4);
+          wrap(clean(relation["reason"]), FINDING_INDENT + 6);
         }
       }
     }
@@ -175,10 +186,12 @@ export function renderScanHistory(
         : undefined);
     if (includeReason && reason && (!matches?.length || showLinkedFindings)) {
       if (matches?.length) {
-        lines.push(`                ${strong("SAME ROOT CAUSE")}`);
-        wrap(clean(reason), 18);
+        lines.push(
+          `${" ".repeat(FINDING_INDENT + 2)}${strong("SAME ROOT CAUSE")}`,
+        );
+        wrap(clean(reason), FINDING_INDENT + 4);
       } else {
-        wrap(`↳ ${clean(reason)}`, 14);
+        wrap(`↳ ${clean(reason)}`, FINDING_INDENT);
       }
     }
   };
