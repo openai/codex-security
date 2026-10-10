@@ -268,6 +268,10 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
+    const repository =
+      this.#options.onActivity === undefined
+        ? undefined
+        : this.#options.repository;
     let recordedAttribution = this.#attribution;
     if (this.#readAttribution) {
       const record = await this.#readAttribution();
@@ -316,7 +320,7 @@ export class ScanCostTracker {
             await readSessionUsage(
               path,
               session,
-              this.#options.repository,
+              repository,
               this.#attribution,
             );
           } catch (error) {
@@ -401,12 +405,7 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage();
         session.events = [];
-        await readSessionUsage(
-          path,
-          session,
-          this.#options.repository,
-          this.#attribution,
-        );
+        await readSessionUsage(path, session, repository, this.#attribution);
         this.#sessions.set(path, session);
       }
       let worker: number | undefined;

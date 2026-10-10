@@ -6,6 +6,7 @@ import type { DeepScanExecutionSettings } from "./recovery-settings.js";
 import {
   boundedDeepScanErrorMessage,
   DeepScanNonRetryableError,
+  DeepScanOwnershipChangedError,
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
@@ -361,7 +362,7 @@ export class WorkbenchDeepScanStore {
           ? ["--result-manifest-path", update.resultManifestPath]
           : []),
         ...(update.threadId ? ["--sdk-thread-id", update.threadId] : []),
-        ...(update.error ? ["--error-message", update.error] : []),
+        ...(update.error ? [`--error-message=${update.error}`] : []),
         ...(update.replaceableFailureKind
           ? ["--replaceable-failure-kind", update.replaceableFailureKind]
           : []),
@@ -525,8 +526,7 @@ export class WorkbenchDeepScanStore {
         "--scan-id",
         scanId,
         ...this.coordinatorLeaseArgs(scanId),
-        "--message",
-        message,
+        `--message=${message}`,
         ...(manifestPath ? ["--manifest-path", manifestPath] : []),
         ...(stagedManifestPath
           ? ["--staged-manifest-path", stagedManifestPath]
@@ -550,8 +550,7 @@ export class WorkbenchDeepScanStore {
           ...(coordinatorGeneration === undefined
             ? this.coordinatorLeaseArgs(scanId)
             : ["--coordinator-generation", String(coordinatorGeneration)]),
-          "--message",
-          message,
+          `--message=${message}`,
         ],
         true,
       ),
@@ -626,8 +625,23 @@ export class WorkbenchDeepScanStore {
             );
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
-        if (scanId && isStaleCoordinatorGenerationError(error)) {
-          this.coordinatorLeases.delete(scanId);
+        const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;
+        if (lease && isStaleCoordinatorGenerationError(error)) {
+          // Diagnostics can contain paths or user text; only state establishes ownership.
+          const current = await this.get(
+            lease.input.scanId,
+            lease.input.threadId,
+          ).catch(() => undefined);
+          if (
+            current &&
+            (current.status !== "running" ||
+              (current.coordinatorGeneration !== undefined &&
+                lease.run.coordinatorGeneration !== undefined &&
+                current.coordinatorGeneration >
+                  lease.run.coordinatorGeneration))
+          ) {
+            throw new DeepScanOwnershipChangedError(current, error);
+          }
         }
         throw error;
       }
@@ -669,19 +683,11 @@ export class WorkbenchDeepScanStore {
               workerId: failure.workerId,
               attempts: failure.attempts,
               elapsedMs: failure.elapsedMs,
-              ...(failure.code === undefined ? {} : { code: failure.code }),
-              ...(failure.exitCode === undefined
-                ? {}
-                : { exitCode: failure.exitCode }),
-              ...(failure.signal === undefined
-                ? {}
-                : { signal: failure.signal }),
-              ...(failure.killed === undefined
-                ? {}
-                : { killed: failure.killed }),
-              ...(failure.timeoutMs === undefined
-                ? {}
-                : { timeoutMs: failure.timeoutMs }),
+              code: failure.code,
+              exitCode: failure.exitCode,
+              signal: failure.signal,
+              killed: failure.killed,
+              timeoutMs: failure.timeoutMs,
               error: boundedDeepScanErrorMessage(error),
             }),
           );
@@ -732,6 +738,8 @@ export function isTransientPersistenceError(error: unknown): boolean {
   }
 
   for (const record of persistenceErrorRecords(error)) {
+    // A committed workbench mutation can lose or truncate its JSON stdout.
+    if (record.name === "SyntaxError") return true;
     if (
       typeof record.code === "string" &&
       /^(?:SQLITE_BUSY(?:_[A-Z]+)?|SQLITE_LOCKED(?:_[A-Z]+)?|SQLITE_IOERR(?:_[A-Z]+)?|EAGAIN|EBUSY|EINTR|ETIMEDOUT|ETIME)$/i.test(

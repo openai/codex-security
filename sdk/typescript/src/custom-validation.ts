@@ -397,6 +397,12 @@ export async function runCustomValidation(options: {
     finding.validation = {
       ...validation,
       summary: validation.evidence.join("\n"),
+      counterEvidence: validation.counterevidence_or_proof_gap
+        ? [validation.counterevidence_or_proof_gap]
+        : [],
+      limitations: validation.remaining_uncertainty
+        ? [validation.remaining_uncertainty]
+        : [],
     };
     finding.confidence = {
       level: validation.confidence,

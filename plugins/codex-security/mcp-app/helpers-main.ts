@@ -1,10 +1,13 @@
 import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
 import { decodePosixBytes } from "./src/helpers/posix-path";
 import { windowsBinding } from "./src/native";
-import { normalizeCandidatesCommand } from "./src/helpers/normalize-candidates";
+import {
+  normalizeCandidateBatch,
+  normalizeCandidatesCommand,
+} from "./src/helpers/normalize-candidates";
 import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
 import { rankShardsCommand } from "./src/helpers/rank-shards";
@@ -13,6 +16,7 @@ import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
 
+import { fileURLToPath } from "node:url";
 export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
 export { resumeSelectedDeepScan } from "./src/deep-scan/finalization.js";
 
@@ -29,8 +33,8 @@ if (
   runHelper();
 
 function runHelper(): void {
-  let commandLine = process.argv.slice(2);
-  if (process.platform === "win32") {
+  let commandLine = isMainThread ? process.argv.slice(2) : [];
+  if (isMainThread && process.platform === "win32") {
     const original = windowsBinding().windowsArguments();
     commandLine = original
       .slice(original.length - commandLine.length)
@@ -66,10 +70,10 @@ function runHelper(): void {
       "Usage: store-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.groups containing arrays of finding IDs.",
     "list-dedupe-groups":
       "Usage: list-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.findingId.",
-    dashboard:
-      "Usage: dashboard\nReads a JSON object from stdin with an absolute stateDirectory and payload containing view (findings or groups), sort, limit and offset; direction, query, repository and id are optional.",
   };
-  if (command === "resolve-security-md") {
+  if (!isMainThread) {
+    parentPort!.postMessage(normalizeCandidateBatch(workerData));
+  } else if (command === "resolve-security-md") {
     process.exitCode = resolveSecurityMdCommand(args, posixHome);
   } else if (command === "normalize-candidates") {
     process.exitCode = normalizeCandidatesCommand(args, posixHome);

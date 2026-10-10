@@ -14,6 +14,7 @@ function triageResult(verdict: string, inputId = "sastbench-000000") {
         input_id: inputId,
         source_type: "scanner_ticket",
         verdict,
+        evidence: ['Literal ```code``` fence, "quoted" and \\ escaped text'],
       },
     ],
   };
@@ -30,13 +31,56 @@ assert.equal(
   extractTriageResult("```json\ninvalid\n```\n" + fenced).findings[0].verdict,
   "confirmed",
 );
-assert.throws(
-  () =>
-    extractTriageResult(
-      "```json\ninvalid\n```\n" + JSON.stringify(triageResult("confirmed")),
-    ),
-  { message: "Could not find a parseable triage-finding/v0 JSON result" },
-);
+for (const output of [
+  "```json\ninvalid\n```\n" + JSON.stringify(triageResult("confirmed")),
+  "Summary: " + JSON.stringify(triageResult("confirmed")),
+  "```json " + JSON.stringify(triageResult("confirmed")) + "```",
+  "```json\ntruncated output\n".repeat(16_000),
+]) {
+  assert.throws(() => extractTriageResult(output), {
+    message: "Could not find a parseable triage-finding/v0 JSON result",
+  });
+}
+const truncated =
+  '```json\n{"schema_version":"triage-finding/v0","findings":[{"evidence":["' +
+  '\\"x'.repeat(32_000);
+assert.throws(() => extractTriageResult(truncated), {
+  message: "Could not find a parseable triage-finding/v0 JSON result",
+});
+const truncatedMetrics = addSastBenchMetrics(
+  extensionContext({
+    caseId: "sastbench-000000",
+    expectedGroundTruth: "true_positive",
+    output: truncated,
+  }),
+).result;
+assert.equal(truncatedMetrics.metadata.sastbench.status, "invalid_output");
+assert.equal(truncatedMetrics.namedScores.invalid_output, 1);
+for (const output of [
+  JSON.stringify(triageResult("confirmed")),
+  JSON.stringify(triageResult("confirmed"), null, 2),
+  fenced.replace("```json", "```"),
+  fenced.replaceAll("\n", "\r\n"),
+  "```typescript\nconst value = 1;\n```\n\n" + fenced,
+  truncated + "\n```\n" + fenced,
+  'Prose {"other": true}\n' + fenced.replaceAll("```", "   ```"),
+  '```json\n"invalid\n```\n' + fenced,
+]) {
+  assert.equal(
+    parseCaseOutcome(output, "sastbench-000000").verdict,
+    "confirmed",
+  );
+  const result = addSastBenchMetrics(
+    extensionContext({
+      caseId: "sastbench-000000",
+      expectedGroundTruth: "true_positive",
+      output,
+    }),
+  ).result;
+  assert.equal(result.metadata.sastbench.status, "ok");
+  assert.equal(result.namedScores.strict_tp, 1);
+  assert.equal(result.namedScores.strict_fn, 0);
+}
 assert.throws(
   () =>
     parseCaseOutcome(

@@ -194,6 +194,7 @@ import {
   type ScanWorkerStatus,
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
@@ -355,12 +356,10 @@ const VALIDATION_DISPOSITIONS = [
   "deferred",
 ] as const;
 
-const validationResponseSchema = z
-  .object({
-    disposition: z.enum(VALIDATION_DISPOSITIONS),
-    report: z.string().trim().min(1),
-  })
-  .strict();
+const validationResponseSchema = z.strictObject({
+  disposition: z.enum(VALIDATION_DISPOSITIONS),
+  report: z.string().trim().min(1),
+});
 
 export interface ValidationResult {
   disposition: (typeof VALIDATION_DISPOSITIONS)[number];
@@ -717,6 +716,7 @@ export class CodexSecurity {
       };
       const { codex } = await this.#createSessionCodex(
         session,
+        "validate",
         {
           CODEX_SECURITY_REPOSITORY: inputs.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1016,6 +1016,7 @@ export class CodexSecurity {
       ].filter((path, index, roots) => roots.indexOf(path) === index);
       const { codex } = await this.#createSessionCodex(
         session,
+        "policy",
         {
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1473,6 +1474,16 @@ export class CodexSecurity {
         );
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
+        responses_api_metadata: {
+          ...(isRecord(workerRuntimeConfig["responses_api_metadata"])
+            ? workerRuntimeConfig["responses_api_metadata"]
+            : {}),
+          ...codexSecurityRequestMetadata(
+            this.#surface,
+            "scan",
+            runtime.plugin.version,
+          ),
+        },
         ...(workerEnvironment === undefined
           ? {}
           : { environment: workerEnvironment }),
@@ -1564,10 +1575,21 @@ export class CodexSecurity {
           "onProgress",
         )({ ...progress, filesTotal: scopeFileCount });
       };
+      const reportedInaccessibleSessionLogs = new Set<string>();
       const reportTrackingError = (error: unknown): void => {
         if (options.maxCostUsd !== undefined) {
           costAbortController.abort(error);
           return;
+        }
+        if (
+          isRecord(error) &&
+          (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+          error["syscall"] === "open" &&
+          typeof error["path"] === "string"
+        ) {
+          const path = error["path"];
+          if (reportedInaccessibleSessionLogs.has(path)) return;
+          reportedInaccessibleSessionLogs.add(path);
         }
         notifyObserver(
           options,
@@ -1730,9 +1752,7 @@ export class CodexSecurity {
               JSON.stringify({
                 recipe,
                 userContext: options.scanPrompt,
-                ...(options.workflowId === undefined
-                  ? {}
-                  : { workflowId: options.workflowId }),
+                workflowId: options.workflowId,
               }),
             );
       const scanId = registration["scanId"];
@@ -2012,6 +2032,7 @@ export class CodexSecurity {
       };
       const { codex, environment } = await this.#createSessionCodex(
         session,
+        "scan",
         runtimePaths,
         options.auth,
         git,
@@ -2547,8 +2568,7 @@ export class CodexSecurity {
             budgetScanId,
             "--cost-json",
             JSON.stringify(budgetCost),
-            "--message",
-            failure.message.slice(0, 2400),
+            `--message=${failure.message.slice(0, 2400)}`,
           ]).catch((error) =>
             recoverCompletedScan(completionOptions, budgetScanId, error, [
               "complete-scan",
@@ -2652,8 +2672,7 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
-            "--message",
-            errorMessage(failure).slice(0, 2400),
+            `--message=${errorMessage(failure).slice(0, 2400)}`,
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
@@ -2962,6 +2981,7 @@ export class CodexSecurity {
 
   async #createSessionCodex(
     session: PreparedSession,
+    command: string,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
@@ -3034,7 +3054,11 @@ export class CodexSecurity {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         responses_api_metadata: {
           ...configuredResponsesMetadata,
-          codex_security_surface: this.#surface,
+          ...codexSecurityRequestMetadata(
+            this.#surface,
+            command,
+            runtime.plugin.version,
+          ),
         },
       },
     });
@@ -3506,9 +3530,7 @@ export class CodexSecurity {
             mock: true,
           },
           userContext: options.scanPrompt,
-          ...(options.workflowId === undefined
-            ? {}
-            : { workflowId: options.workflowId }),
+          workflowId: options.workflowId,
         }),
       );
       const scanId = registration["scanId"];
@@ -3608,8 +3630,7 @@ export class CodexSecurity {
           "fail-scan",
           "--scan-id",
           activeScan.id,
-          "--message",
-          errorMessage(error).slice(0, 2400),
+          `--message=${errorMessage(error).slice(0, 2400)}`,
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();
@@ -4059,8 +4080,13 @@ export async function runScanEvents(
     };
     const accept = async () => {
       // Matching, custom validation and the canonical seal remain with the caller.
-      const readDocuments = () =>
-        Promise.all(
+      const readDocuments = async () => {
+        await requireScanArtifacts(
+          options.scanDir,
+          ["scan-manifest.json", "findings.json", "coverage.json"],
+          options.signal,
+        );
+        return Promise.all(
           ["scan-manifest.json", "findings.json", "coverage.json"].map(
             async (name) =>
               JSON.parse(
@@ -4075,6 +4101,7 @@ export async function runScanEvents(
               ),
           ),
         );
+      };
       let [manifest, findings, coverage] = await readDocuments();
       if (manifest?.scan?.complete === false && options.reconcileCheckpoint) {
         await options.reconcileCheckpoint();
@@ -4510,6 +4537,31 @@ function addScanCosts(
   };
 }
 
+async function requireScanArtifacts(
+  scanDir: string,
+  required: readonly string[],
+  signal: AbortSignal,
+): Promise<void> {
+  const missing: string[] = [];
+  for (const name of required) {
+    try {
+      await requireScanFile(scanDir, name, name, signal);
+    } catch (error) {
+      if (signal.aborted) throw signal.reason ?? error;
+      let cause = error;
+      while (cause instanceof Error && cause.cause !== undefined)
+        cause = cause.cause;
+      if (!isRecord(cause) || cause["code"] !== "ENOENT") throw error;
+      missing.push(name);
+    }
+  }
+  if (missing.length > 0) {
+    throw new IncompleteScanError(
+      `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
+    );
+  }
+}
+
 async function collectResult(
   turnResult: TurnResultMetadata,
   threadId: string,
@@ -4521,26 +4573,11 @@ async function collectResult(
   pythonPath?: string,
   protectedRoot?: string,
 ): Promise<ScanResult> {
-  const required = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
-  const missing: string[] = [];
-  for (const name of required) {
-    try {
-      await requireScanFile(scanDir, name, name, signal);
-    } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      missing.push(name);
-    }
-  }
-  if (missing.length > 0) {
-    throw new IncompleteScanError(
-      `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
-    );
-  }
+  await requireScanArtifacts(
+    scanDir,
+    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    signal,
+  );
   const { manifest, findings, coverage } = await loadContract(scanDir, {
     pluginRoot,
     expectation,
@@ -5054,12 +5091,15 @@ function selectedWorkerRuntimeConfig(
   return {
     ...Object.fromEntries(
       [
+        "analytics",
+        "responses_api_metadata",
         "openai_base_url",
         "features",
         "model_auto_compact_token_limit",
         "model_context_window",
         "model_instructions_file",
         "model_verbosity",
+        "shell_environment_policy",
         "web_search",
         "windows",
       ]

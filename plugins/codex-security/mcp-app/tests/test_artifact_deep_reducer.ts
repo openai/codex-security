@@ -22,7 +22,7 @@ const {
   readDeepReductionSources,
   recordCodexSecurityDeepReduction,
 } = (await importSource(
-  new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-deep-reducer.ts"),
 )) as typeof import("../src/artifact-deep-reducer.js");
 
 async function getCodexSecurityDeepReducerInputs(

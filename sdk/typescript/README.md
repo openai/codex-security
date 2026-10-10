@@ -14,17 +14,12 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
-[findings service guide](docs/findings-service.md), or
+[findings guide](docs/findings-service.md), or
 [online documentation](https://learn.chatgpt.com/docs/security) for setup and examples.
 
 Before version `1.0.0`, minor releases may change the public API.
 
 ## Install
-
-```bash
-npm install @openai/codex-security
-npx @openai/codex-security --version
-```
 
 Supported runtimes:
 
@@ -43,20 +38,55 @@ work on all supported runtimes.
 `PluginBootstrapError`, so existing catches keep working. Knowledge-base
 preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
 
+### Install the CLI
+
+Install the CLI globally:
+
+```bash
+npm install --global @openai/codex-security
+cs --version
+```
+
+`cs` is a short alias for `codex-security`; both commands run the same CLI.
+The installation creates both commands in npm's global executable directory,
+which must be on your `PATH`. If `cs` already resolves to another tool, use
+`codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
+`npx @openai/codex-security` without a global installation.
+
+Continue with the [CLI walkthrough](#cli). To run without a global installation,
+replace `cs` in the CLI examples with `npx @openai/codex-security`.
+
+### Install the TypeScript SDK
+
+Install the package locally in your TypeScript project:
+
+```bash
+npm install @openai/codex-security
+```
+
 ## Authentication
 
 Sign in with ChatGPT:
 
 ```bash
+cs login
+```
+
+If you installed only the SDK locally, sign in from your project directory:
+
+```bash
 npx @openai/codex-security login
 ```
+
+In the following CLI examples, replace `cs` with `npx @openai/codex-security`
+when using a local SDK installation, including the API-key login example below.
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
 These keys apply to the current command without replacing your saved login.
 To save an API key instead, pass it on stdin:
 
 ```bash
-printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
+printenv OPENAI_API_KEY | cs login --with-api-key
 ```
 
 SDK calls accept `auth: "auto" | "chatgpt" | "api-key"`. The default, `"auto"`,
@@ -78,7 +108,7 @@ allows it. Otherwise, open an SSH tunnel from your local machine:
 ssh -L 1455:localhost:1455 user@remote-host
 ```
 
-Run `npx @openai/codex-security login` in that SSH session, then open its sign-in
+Run `cs login` in that SSH session, then open its sign-in
 URL in your local browser. Keep SSH connected until login finishes.
 
 ### Amazon Bedrock
@@ -209,6 +239,11 @@ same effective provider for both the parent and workers. Otherwise, the scan
 stops before model work with the plugin upgrade message.
 When no provider is selected, discovery, reducer, and resumed workers inherit the
 same native configuration as the parent.
+
+Custom plugins must support the current workbench protocol for scan comparison
+and archival. Update an older custom plugin or omit `pluginPath` to use the
+bundled version. The SDK no longer adapts payloads or archives scan directories
+on behalf of older workbench implementations.
 
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
@@ -370,11 +405,36 @@ To validate GitHub code scanning alerts, first import them with
 
 ## CLI
 
+After [installing the CLI](#install-the-cli), sign in if needed:
+
 ```bash
-npx @openai/codex-security scan .
-npx @openai/codex-security scan . --path src --path tests
-npx @openai/codex-security scan . --diff origin/main --json
-npx @openai/codex-security scan . --dry-run
+cs login
+```
+
+From your repository directory, optionally draft security guidance before scanning:
+
+```bash
+cs policy .
+```
+
+The command saves a draft outside the checkout. Review the proposed diff and
+notes, edit the draft as needed, then copy it to the displayed `Policy target`
+so future scans use it. Generating the draft alone does not install it.
+Skip this step to keep an existing policy or scan without one. See
+[Generate a security policy](#generate-a-security-policy) for details.
+
+Then scan the repository:
+
+```bash
+cs scan .
+```
+
+To narrow the scan scope or check the configuration before scanning:
+
+```bash
+cs scan . --path src --path tests
+cs scan . --diff origin/main --json
+cs scan . --dry-run
 ```
 
 Use `--help` to find commands and `<command> --help` for options. Scans are
@@ -386,13 +446,13 @@ scans, custom validation, imports, patching, and integrations.
 
 ### Generate a security policy
 
+To draft guidance for a selected path:
+
 ```bash
-npx @openai/codex-security policy .
-npx @openai/codex-security policy . --path services/api
+cs policy . --path services/api
 ```
 
-`policy` drafts `SECURITY.md` outside the checkout. Review the draft before
-installing it; it guides future scans. The SDK provides `generatePolicy()`,
+The SDK provides `generatePolicy()`,
 `preflightPolicy()`, and `previewPolicy()`. See
 [policy generation](docs/cli.md#generate-a-security-policy) for SDK examples,
 headless use, artifacts, and review requirements.
@@ -402,8 +462,8 @@ headless use, artifacts, and review requirements.
 Export saved findings or a threat model without starting another analysis:
 
 ```bash
-npx @openai/codex-security export --scan SCAN_ID --export-format sarif --output results.sarif
-npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export --scan SCAN_ID --export-format sarif --output results.sarif
+cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 ```
 
 The SDK provides `exportArtifact()` for the same offline operations. See
@@ -436,33 +496,20 @@ grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-clou
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
 
-## Findings service (preview)
+## Findings storage and deduplication
 
-The findings service stores findings and duplicate groups in SQLite and provides
-a read-only dashboard. It has no built-in authentication; keep it on loopback or
-behind an authenticated TLS proxy. Imports send complete finding JSON to the
-configured embeddings endpoint.
-
-See the [findings service guide](docs/findings-service.md) for its HTTP API,
-Docker setup, publishing, and deduplication. For records stored in your own
-system, see [SDK records deduplication](docs/dedupe-records.md).
-
-### Running without Docker
+Saved-scan deduplication uses local SQLite directly:
 
 ```bash
-npx @openai/codex-security serve --port 3000
+cs dedupe --scan SCAN_ID --json
 ```
 
-Open `http://127.0.0.1:3000/dashboard`. Startup and listing need no API key;
-imports that generate embeddings need `OPENAI_API_KEY` or `CODEX_API_KEY`.
-A ChatGPT login is not an embedding API credential. See
-[local service setup](docs/findings-service.md#run-without-docker) for storage settings.
-
-### Upgrades and backups
-
-Stop the service and back up its entire state directory before upgrading.
-Keep the state volume when replacing a container. See
-[backup and restore instructions](docs/findings-service.md#storage-upgrades-and-backups).
+The [findings guide](docs/findings-service.md) covers local storage, embedding
+credentials, deduplication, backups, and independently operated HTTP endpoints.
+The local `serve` command and browser dashboard have been removed. Existing
+scans, findings, and duplicate groups remain in the workbench database.
+For records stored in your own system, see
+[SDK records deduplication](docs/dedupe-records.md).
 
 ## Containerized bulk scans
 
@@ -492,6 +539,6 @@ paths. Keep state and scan artifacts private and outside the repository.
 
 - [Online SDK guide](https://learn.chatgpt.com/docs/security/sdk)
 - [CLI reference](docs/cli.md)
-- [Findings service guide](docs/findings-service.md)
+- [Findings guide](docs/findings-service.md)
 - [GitHub issues](https://github.com/openai/codex-security/issues) for bugs and feature requests
 - [Security policy](https://github.com/openai/codex-security/blob/main/SECURITY.md) for private vulnerability reporting

@@ -65,8 +65,11 @@ export async function readArtifactText(
   const canonical = await artifactSourcePath(context, components, label);
   try {
     return await fs.readFile(canonical, "utf8");
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
+  } catch (error) {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -85,12 +88,15 @@ export async function readArtifactTextWithMetadata(
     } finally {
       await handle.close();
     }
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
+  } catch (error) {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
-async function artifactSourcePath(
+export async function artifactSourcePath(
   context: ArtifactContext,
   components: readonly string[],
   label: string,
@@ -101,7 +107,7 @@ async function artifactSourcePath(
 
   for (const [index, component] of components.entries()) {
     current = join(current, component);
-    const metadata = await fs.lstat(current).catch(() => undefined);
+    const metadata = await inspectOptionalPath(current, label);
     if (!metadata) {
       throw new Error(label + ": the requested artifact is unavailable.");
     }
@@ -182,20 +188,13 @@ export function paginateArtifactRows<Row>(
   page: ArtifactPage,
   label: string,
 ): ArtifactPageResult<Row> {
-  const cursor = page.cursor ?? "0";
-  if (!/^(?:0|[1-9][0-9]*)$/u.test(cursor)) {
-    throw new Error(label + ": cursor must be a non-negative integer string.");
-  }
-  const start = Number(cursor);
+  // The MCP tool schemas validate cursor syntax and limit bounds.
+  const start = Number(page.cursor ?? "0");
   if (!Number.isSafeInteger(start) || start > rows.length) {
     throw new Error(label + ": cursor is outside the available rows.");
   }
 
   const limit = page.limit ?? 200;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
-    throw new Error(label + ": limit must be an integer from 1 through 1000.");
-  }
-
   const end = Math.min(rows.length, start + limit);
   return {
     rows: rows.slice(start, end),
@@ -324,7 +323,10 @@ async function inspectOptionalPath(
     return await fs.lstat(path);
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return undefined;
-    throw new Error(label + ": artifact path cannot be inspected.");
+    throw new Error(
+      `${label}: artifact path cannot be inspected: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 

@@ -444,7 +444,9 @@ def _deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, 
         "model": scan["model"],
         "reasoningEffort": scan["reasoning_effort"],
         "userContext": (
-            run["discovery_user_context"]
+            json.loads(run["discovery_user_context_json"])
+            if run["discovery_user_context_json"] is not None
+            else run["discovery_user_context"]
             if "discovery_user_context" in run.keys()
             else scan["user_context"]
         ),
@@ -672,9 +674,9 @@ def ensure_deep_scan_run(
         INSERT INTO deep_scan_runs (
             scan_id, schema_version, workflow_version, status, phase,
             workers, subagents, stop_after_no_new, stop_after_consecutive_errors,
-            max_discovery_runs, max_time_hours, discovery_user_context,
+            max_discovery_runs, max_time_hours, discovery_user_context, discovery_user_context_json,
             created_at, updated_at, execution_settings_json
-        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan["id"],
@@ -686,6 +688,7 @@ def ensure_deep_scan_run(
             config["maxDiscoveryRuns"],
             config["maxTimeHours"],
             scan["user_context"],
+            json.dumps(scan["user_context"]),
             timestamp,
             timestamp,
             json.dumps(saved_settings) if saved_settings is not None else None,
@@ -727,6 +730,7 @@ def terminal_deep_scan_for_target_snapshot(
     thread_id: str,
     target_path: str,
     scope: str,
+    user_context: str | None,
     revision: str,
     snapshot_digest: str,
     target_device: int | str,
@@ -736,7 +740,8 @@ def terminal_deep_scan_for_target_snapshot(
 
     A continuation may safely consume a finished coordinator manifest while the
     parent scan is still open. It must not adopt live orchestration owned by a
-    different thread, or reuse results after the repository snapshot changed.
+    different thread, or reuse results for a different repository snapshot or
+    original discovery context.
     """
     return connection.execute(
         """
@@ -746,6 +751,7 @@ def terminal_deep_scan_for_target_snapshot(
         JOIN workspaces ON workspaces.id = scans.workspace_id
         WHERE scans.target_path = ?
             AND scans.scope = ?
+            AND deep_scan_runs.discovery_user_context_json = ?
             AND scans.mode = 'deep'
             AND scans.status = 'running'
             AND scans.canceled_at IS NULL
@@ -769,6 +775,7 @@ def terminal_deep_scan_for_target_snapshot(
         (
             target_path,
             scope,
+            json.dumps(user_context),
             revision,
             snapshot_digest,
             target_device,
@@ -876,6 +883,7 @@ def begin_deep_scan_for_target(
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
+    user_context = user_context_argument(args)
     target_metadata = target.stat()
     target_identity = dependencies().scan_target_identity(target, None, metadata=target_metadata)
     revision, target_snapshot_digest, target_device, target_inode = target_identity
@@ -919,6 +927,7 @@ def begin_deep_scan_for_target(
             thread_id,
             target_path,
             scope,
+            user_context,
             revision,
             target_snapshot_digest,
             target_device,
@@ -940,7 +949,6 @@ def begin_deep_scan_for_target(
         if target_root == target or target in target_root.parents:
             raise SystemExit("The scan artifact directory must be outside the selected target.")
         create_private_directory(target_root)
-        user_context = user_context_argument(args)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())

@@ -105,7 +105,7 @@ def test_supported_old_run_snapshots_context_on_upgrade(
     )["deepScan"]
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN discovery_user_context")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 47")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 48")
     upgraded = run_workbench(
         state,
         "get-deep-scan",

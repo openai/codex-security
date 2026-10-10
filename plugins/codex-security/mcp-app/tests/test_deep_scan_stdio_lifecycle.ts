@@ -15,6 +15,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -23,7 +24,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
-import * as streams from "./support/streams.ts";
+import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -592,7 +593,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
           "tools/call",
           toolCall(
             "start_codex_security_deep_scan",
-            { targetPath, scope: "." },
+            { targetPath, scope: ".", userContext: "Original discovery input" },
             "independent-snapshot-observer",
           ),
         );
@@ -806,7 +807,7 @@ async function testDeepScanStdioLifecycle() {
     "fake-codex-signal-checkpoint-control.txt",
   );
   const fakeCodexPath = path.join(fixtureRoot, "fake-codex.mjs");
-  const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper.mjs");
+  const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper ");
   const cancelFailureControlPath = path.join(
     fixtureRoot,
     "fail-next-cancel-scan",
@@ -878,7 +879,8 @@ profile = "selected"
 model_reasoning_summary = "none"
 `,
   );
-  await writePythonWrapper(pythonWrapperPath);
+  await writePythonWrapper(`${pythonWrapperPath}.mjs`);
+  await symlink(`${pythonWrapperPath}.mjs`, pythonWrapperPath);
   if (!installedPluginRoot)
     await buildServer(serverBundlePath, { target: "node20" });
 
@@ -893,6 +895,7 @@ model_reasoning_summary = "none"
     CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
+    CODEX_SECURITY_PYTHON_COMMAND: pythonWrapperPath,
     REAL_PYTHON: process.env.PYTHON?.trim() || "python3",
     FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL: cancelFailureControlPath,
     FAKE_WORKBENCH_CANCEL_LOG: cancelLogPath,
@@ -1308,7 +1311,7 @@ model_reasoning_summary = "none"
     assert.equal(activeFailureState.workers[0].status, "running");
     assertProcessAlive(failedWorker.pid);
 
-    const failureMessage = "fixture unrecoverable failure";
+    const failureMessage = "fixture unrecoverable failure\0source";
     const failureResponse = await server.request(
       21,
       "tools/call",
@@ -1776,11 +1779,13 @@ model_reasoning_summary = "none"
       const helperLaunches = await readLogLines(workbenchLaunchLogPath);
       for (const command of ["get-scan", "write-scan-draft", "complete-scan"]) {
         const launches = helperLaunches.filter(
-          (launch) => launch.args[1] === command,
+          (launch) => launch.workbenchArgs[0] === command,
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.equal(launch.args[0], workbenchPath);
+          assert.equal(launch.args[0], "-c");
+          assert.equal(launch.args[2], workbenchPath);
+          assert.equal(launch.args.length, 3);
           assert.equal(launch.cwd, pluginRoot);
         }
       }
@@ -1834,11 +1839,16 @@ model_reasoning_summary = "none"
 }
 
 function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
-  return streams.startServer(serverPath, env, {
-    cwd: pluginRoot,
-    component: "codex_security_deep_scan",
-    timeoutMessage: (id) => `Timed out waiting for JSON-RPC response ${id}.`,
-  });
+  return startRpcServer(
+    {
+      command: process.execPath,
+      args: [serverPath, "--stdio"],
+      cwd: pluginRoot,
+      env: env,
+      stderr: "pipe",
+    },
+    { component: "codex_security_deep_scan", timeoutMs: 15_000 },
+  );
 }
 
 function toolCall(
@@ -2078,18 +2088,21 @@ async function writePythonWrapper(executablePath: string) {
       'import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";',
       'import { spawnSync } from "node:child_process";',
       "const args = process.argv.slice(2);",
-      "appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, cwd: process.cwd() }) + '\\n');",
+      "const input = Buffer.concat(await process.stdin.toArray());",
+      "const framed = args[0] === '-c' && args[1].includes('json.loads(sys.stdin.buffer.readline())');",
+      "const workbenchArgs = framed ? JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8')) : args.slice(1);",
+      "appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');",
       "const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;",
-      "if (args[1] === 'cancel-scan') {",
+      "if (workbenchArgs[0] === 'cancel-scan') {",
       "  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(args) + '\\n');",
       "}",
-      "if (args[1] === 'cancel-scan' && control && existsSync(control)) {",
+      "if (workbenchArgs[0] === 'cancel-scan' && control && existsSync(control)) {",
       "  unlinkSync(control);",
       "  console.error('injected cancel-scan failure');",
       "  process.exit(1);",
       "}",
       "let finalizerMode;",
-      "if (args[1] === 'complete-scan' && process.env.FAKE_WORKBENCH_FINALIZER_LOG) {",
+      "if (workbenchArgs[0] === 'complete-scan' && process.env.FAKE_WORKBENCH_FINALIZER_LOG) {",
       "  appendFileSync(process.env.FAKE_WORKBENCH_FINALIZER_LOG, JSON.stringify(args) + '\\n');",
       "  const finalizerControl = process.env.FAKE_WORKBENCH_FINALIZER_CONTROL;",
       "  const readFinalizerControl = () => {",
@@ -2104,9 +2117,9 @@ async function writePythonWrapper(executablePath: string) {
       "  }",
       "  if (finalizerMode === 'failure') { console.error('injected complete-scan failure'); process.exit(1); }",
       "}",
-      "const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { stdio: 'inherit' });",
+      "const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { input, stdio: ['pipe', 'inherit', 'inherit'] });",
       "const committedControl = process.env.FAKE_WORKBENCH_COMMITTED_CONTROL;",
-      "if (args[1] === 'complete-scan' && result.status === 0 && committedControl && existsSync(committedControl)) {",
+      "if (workbenchArgs[0] === 'complete-scan' && result.status === 0 && committedControl && existsSync(committedControl)) {",
       "  appendFileSync(process.env.FAKE_WORKBENCH_COMMITTED_LOG, JSON.stringify({ pid: process.pid, committed: true }) + '\\n');",
       "  while (existsSync(committedControl)) await new Promise((resolve) => setTimeout(resolve, 25));",
       "}",

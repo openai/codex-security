@@ -44,7 +44,7 @@ export async function withEvalState(
   let root;
   let home;
   try {
-    root = await mkdtemp(join(tmpdir(), "source-audit-"));
+    root = await realpath(await mkdtemp(join(tmpdir(), "source-audit-")));
     // Share saved login updates without importing the caller's configuration.
     let auth;
     try {

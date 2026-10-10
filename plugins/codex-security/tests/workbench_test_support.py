@@ -403,6 +403,18 @@ def workspace_command(
     return run_workbench(state_dir, command, "--workspace-id", workspace_id, *extra, **options)
 
 
+def write_remediation_patch(patch_path: Path, **text_options: Any) -> None:
+    patch_path.write_text(
+        "diff --git a/source.txt b/source.txt\n"
+        "--- a/source.txt\n"
+        "+++ b/source.txt\n"
+        "@@ -1 +1 @@\n"
+        "-vulnerable\n"
+        "+fixed\n",
+        **text_options,
+    )
+
+
 def request_remediation(
     state_dir: Path,
     occurrence_id: str,

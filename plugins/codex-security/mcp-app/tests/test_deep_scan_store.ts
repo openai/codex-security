@@ -9,7 +9,7 @@ import { importSource } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 
 const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
-  new URL("../src/deep-scan/store.ts", import.meta.url).pathname,
+  join(import.meta.dirname, "../src/deep-scan/store.ts"),
 );
 
 await testBeginProtocolAndParsing();
@@ -329,11 +329,12 @@ async function testOwnershipReadClearsStaleLease() {
   const store = new WorkbenchDeepScanStore(async (args: string[]) => {
     calls.push(args);
     if (args[0] === "update-progress") {
+      generation = 4;
       throw new Error(
         "Deep Scan coordinator lease belongs to a newer generation.",
       );
     }
-    if (args[0] === "get-deep-scan") generation = 3;
+    if (args[0] === "get-deep-scan" && generation === 2) generation = 3;
     return {
       ...stateResult(scanId, {
         deepScan: { coordinatorGeneration: generation },
@@ -358,13 +359,36 @@ async function testOwnershipReadClearsStaleLease() {
     store.updateProgress({ scanId, phase: "discovery" }),
     /newer generation/,
   );
-  generation = 4;
   await store.claimCoordinator(lease);
   assert.equal(
-    calls[4].includes("--coordinator-generation"),
+    calls.at(-1)!.includes("--coordinator-generation"),
     false,
-    "a fenced mutation must also clear the cached lease",
+    "a confirmed newer generation after a fenced mutation must clear the cached lease",
   );
+
+  for (const readFails of [false, true]) {
+    const original = new Error(
+      "Permission denied: /fixture/Deep Scan coordinator lease belongs to a newer generation./lock",
+    );
+    const owned = new WorkbenchDeepScanStore(async (args: string[]) => {
+      if (args[0] === "update-progress") throw original;
+      if (args[0] === "get-deep-scan" && readFails)
+        throw new Error("read failed");
+      return {
+        ...stateResult(scanId, { deepScan: { coordinatorGeneration: 2 } }),
+        coordinatorDisposition: "claimed",
+      };
+    });
+    await owned.claimCoordinator(lease);
+    await assert.rejects(
+      owned.updateProgress({ scanId, phase: "discovery" }),
+      (error: unknown) => error === original,
+    );
+    assert.deepEqual(owned.coordinatorLeaseArgs(scanId), [
+      "--coordinator-generation",
+      "2",
+    ]);
+  }
 }
 
 async function testWorkerResponseParsing() {
