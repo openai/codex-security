@@ -1,4 +1,4 @@
-// Exercise the published, locked CLI and exporter without credentials or model calls.
+// Exercise the locked CLI or an installed release candidate without model calls.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
@@ -9,9 +9,15 @@ import { analyzeResults } from '../src/results.js';
 import { captureRunnerPath, checkPython, resolveTool, runtimeEnvironment, writeRuntimeLauncher } from '../src/runtime.js';
 import runtimeManifest from '../runtime/package.json' with { type: 'json' };
 
-const cliPackage = resolve(import.meta.dirname, '../runtime/node_modules/@openai/codex-security');
+const [candidatePackage, candidateVersion] = process.argv.slice(2);
+assert.equal(process.argv.length === 2 || process.argv.length === 4, true,
+  'Expected no arguments, or an installed CLI package directory and version');
+const cliPackage = candidatePackage === undefined
+  ? resolve(import.meta.dirname, '../runtime/node_modules/@openai/codex-security')
+  : resolve(candidatePackage);
 const installed = JSON.parse(await readFile(join(cliPackage, 'package.json'), 'utf8'));
-assert.equal(installed.version, runtimeManifest.dependencies['@openai/codex-security']);
+assert.equal(installed.name, '@openai/codex-security');
+assert.equal(installed.version, candidateVersion ?? runtimeManifest.dependencies['@openai/codex-security']);
 const cli = join(cliPackage, 'bin/codex-security.mjs');
 const root = await mkdtemp(join(await realpath(tmpdir()), 'codex-action-cli-test-'));
 try {
@@ -80,6 +86,16 @@ try {
   assert.equal(deepPreflight.mode, 'deep');
   assert.equal(deepPreflight.maxTimeHours, 0.25);
   assert.deepEqual(deepPreflight.target.paths, ['example.ts']);
+
+  // Validate explicit program selection against the locked CLI, without model calls.
+  for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
+    const values: Record<string, string> = {mode, 'cyber-access-program':program, 'dry-run':'true'};
+    const args = scanArguments(parseInputs(name => values[name] ?? '', repository),
+      {repository}, join(root, `cyber-${mode}-${program}`));
+    const preflight = JSON.parse(run(args, 0));
+    assert.equal(preflight.dryRun, true);
+    assert.equal(preflight.mode, mode);
+  }
 
   // Normalization must not let a literal repository path become a framework option.
   await mkdir(join(repository, '--help'));
@@ -220,7 +236,7 @@ try {
   assert.equal(result.policyStatus, 'not-evaluated');
   assert.equal(result.sarifUploadReady, false);
   assert.ok(result.errors.some(error => error.includes(cliError.message)));
-  console.log(`Pinned CLI ${installed.version}: real JSON results, severity exits, SARIF export, Deep Scan, literal-path and virtualenv preflights, sandbox readiness and filesystem enforcement, MCP runner tracking, and failures passed without model calls.`);
+  console.log(`${candidatePackage === undefined ? 'Pinned' : 'Candidate'} CLI ${installed.version}: real JSON results, severity exits, SARIF export, Deep Scan, literal-path and virtualenv preflights, sandbox readiness and filesystem enforcement, MCP runner tracking, and failures passed without model calls.`);
 } finally {
   await rm(root, { recursive: true, force: true });
 }

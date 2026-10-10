@@ -1,9 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, toNamespacedPath } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PassThrough } from "node:stream";
 import { afterEach, expect, test } from "bun:test";
 import { sendFeedback } from "../src/feedback.js";
 import { codexSecurityCredentialHome } from "../src/runtime.js";
@@ -14,6 +16,7 @@ const fixture = fileURLToPath(
   new URL("fixtures/feedback.mjs", import.meta.url),
 );
 const directories: string[] = [];
+const diagnostic = "Synthetic configuration failure: café 日本語";
 afterEach(async () => {
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
@@ -28,6 +31,7 @@ async function setup() {
     CODEX_CLI_PATH: process.execPath,
     FEEDBACK_REQUEST_FILE: join(directory, "requests.json"),
     FEEDBACK_SCENARIO: "success",
+    FEEDBACK_STDERR: `${diagnostic}\n`,
   };
   const home = codexSecurityCredentialHome(environment);
   await mkdir(join(home, "sessions"), { recursive: true });
@@ -245,21 +249,70 @@ test("without log opt-in, does not read or attach saved sessions", async () => {
   expect(attachments).toEqual([]);
 });
 
-for (const [scenario, message] of [
+for (const [index, [scenario, message, stderr]] of [
   ["error", "Upload failed"],
-  ["exit", "Codex exited before feedback was uploaded"],
+  ["exit", "Codex exited before feedback was uploaded", ""],
+  ["exit-diagnostic", `  ${diagnostic}\n  `, `  ${diagnostic}\n  `],
+  ["exit-diagnostic", " \n\t", " \n\t"],
   ["missing-id", "Codex did not return a feedback ID"],
   ["malformed", "JSON"],
-]) {
-  test(`upload ${scenario} leaves no temporary logs or running child`, async () => {
+].entries()) {
+  test(`upload ${scenario} case ${index + 1} leaves no temporary logs or running child`, async () => {
     const context = await setup();
     context.environment.FEEDBACK_SCENARIO = scenario!;
+    if (stderr !== undefined) context.environment.FEEDBACK_STDERR = stderr;
     await expect(
       sendFeedback(context.options, context.startCodex),
     ).rejects.toThrow(message);
     const { attachments } = await context.transcript();
     expect(existsSync(attachments[0].path)).toBe(false);
     context.expectClosed();
+  });
+}
+
+for (const [index, stderr] of [
+  diagnostic,
+  `  ${diagnostic}\n  `,
+  " \n\t",
+  "",
+].entries()) {
+  test(`stdin failure case ${index + 1} preserves ${stderr ? "stderr through cleanup" : "the transport error without stderr"}`, async () => {
+    const context = await setup();
+    const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+    const bytes = Buffer.from(stderr);
+    const split = bytes.indexOf(0xc3) + 1;
+    let closed = false;
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => {
+        queueMicrotask(() => {
+          child.stderr.end(bytes.subarray(split));
+          child.stdout.end();
+          closed = true;
+          child.emit("close", 1, null);
+        });
+        return true;
+      },
+    });
+    const operation = sendFeedback(context.options, () => {
+      queueMicrotask(() => {
+        child.stderr.write(bytes.subarray(0, split));
+        child.stdin.emit("error", error);
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    if (stderr) {
+      await expect(operation).rejects.toMatchObject({
+        name: "CodexSecurityError",
+        message: stderr,
+        cause: error,
+      });
+    } else {
+      await expect(operation).rejects.toBe(error);
+    }
+    expect(closed).toBe(true);
   });
 }
 

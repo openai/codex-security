@@ -75,6 +75,27 @@ function insertScan(database: DatabaseSync, target = "/synthetic/repository") {
     .run(target);
 }
 
+test("retains SQLite open errors and recovery guidance", async () => {
+  const directory = await temporary.create("workbench-database-error-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  await mkdir(databasePath);
+  await assert.rejects(
+    openWorkbenchDatabase(databasePath),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { errcode: number }).errcode, 14);
+      assert.equal(
+        (error as Error & { code: string }).code,
+        "ERR_SQLITE_ERROR",
+      );
+      assert.ok(error.message.includes("unable to open database file"));
+      assert.ok(error.message.includes(databasePath));
+      assert.ok(error.message.includes("CODEX_SECURITY_STATE_DIR"));
+      return true;
+    },
+  );
+});
+
 test("opens a private WAL database at the configured state path", async () => {
   const directory = await temporary.create("workbench-database-");
   const home = join(directory, "codex-home");
@@ -96,11 +117,7 @@ test("opens a private WAL database at the configured state path", async () => {
       database.prepare("PRAGMA journal_mode").get()?.journal_mode,
       "wal",
     );
-    assert.equal(
-      database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()
-        ?.count,
-      migrations.length,
-    );
+    assertMigrationNames(database, ...migrations.map(({ version }) => version));
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     if (process.platform !== "win32") {
       assert.equal((await stat(databasePath)).mode & 0o777, 0o600);
@@ -151,33 +168,68 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
-for (const missingVersions of [[47], [43], [44, 45, 46]]) {
-  test(`database-info retains stopped-scan checkpoints when adding migration ${missingVersions.join(",")}`, async () => {
+for (const { missingVersions, legacyCheckpoint, mainReader } of [
+  { missingVersions: [48], legacyCheckpoint: false, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: true, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: true, mainReader: true },
+  { missingVersions: [43], legacyCheckpoint: true, mainReader: false },
+  { missingVersions: [44, 45, 46], legacyCheckpoint: true, mainReader: false },
+]) {
+  test(`database-info retains stopped-scan checkpoints when adding migration ${missingVersions.join(",")} (legacy checkpoint: ${legacyCheckpoint}, main reader: ${mainReader})`, async () => {
     const directory = await temporary.create("workbench-checkpoint-upgrade-");
     const databasePath = join(directory, "workbench.sqlite3");
     const sources = JSON.stringify({ "results.json": "retained-digest" });
     const heads = JSON.stringify({ worker: "accepted-checkpoint" });
+    const context = JSON.stringify("Original discovery context");
+    let originalDiscoveryMigration: Record<string, unknown> | undefined;
     let originalCheckpointMigration: Record<string, unknown> | undefined;
     const old = new DatabaseSync(databasePath);
     try {
       applyMigrations(
         old,
-        migrations.filter((item) => !missingVersions.includes(item.version)),
+        migrations
+          .filter(
+            (item) =>
+              !missingVersions.includes(item.version) &&
+              !(legacyCheckpoint && item.version === 47),
+          )
+          .map((item) =>
+            legacyCheckpoint && item.version === 48
+              ? { ...item, version: 47 }
+              : item,
+          ),
       );
+      if (mainReader)
+        old.exec(
+          migrations.find((item) => item.version === 47)!.statements.join("\n"),
+        );
       insertScan(old);
+      old.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
+        workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
+        VALUES ('scan', 1, 'v1', 'failed', 'terminal', 1, 0, 7, 10, 'created', 'updated')`);
+      if (!legacyCheckpoint || mainReader) {
+        old
+          .prepare("UPDATE deep_scan_runs SET discovery_user_context_json = ?")
+          .run(context);
+        originalDiscoveryMigration = old
+          .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+          .get();
+      }
       old
         .prepare(
           "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
         )
         .run(sources);
-      if (!missingVersions.includes(47)) {
+      if (!missingVersions.includes(48)) {
         old
           .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
           .run(heads);
       }
       originalCheckpointMigration = old
-        .prepare("SELECT * FROM schema_migrations WHERE version = 47")
-        .get();
+        .prepare(
+          "SELECT name, applied_at FROM schema_migrations WHERE version = ?",
+        )
+        .get(legacyCheckpoint ? 47 : 48);
     } finally {
       old.close();
     }
@@ -188,7 +240,7 @@ for (const missingVersions of [[47], [43], [44, 45, 46]]) {
         upgraded
           .prepare("SELECT retained_checkpoint_heads_json FROM scans")
           .get()?.retained_checkpoint_heads_json,
-        !missingVersions.includes(47) ? heads : null,
+        !missingVersions.includes(48) ? heads : null,
       );
       upgraded
         .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
@@ -206,7 +258,9 @@ for (const missingVersions of [[47], [43], [44, 45, 46]]) {
       if (originalCheckpointMigration !== undefined) {
         assert.deepEqual(
           reopened
-            .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+            .prepare(
+              "SELECT name, applied_at FROM schema_migrations WHERE version = 48",
+            )
             .get(),
           originalCheckpointMigration,
         );
@@ -221,9 +275,9 @@ for (const missingVersions of [[47], [43], [44, 45, 46]]) {
         reopened
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        47,
+        48,
       );
-      for (const version of [43, 44, 45, 46]) {
+      for (const version of [43, 44, 45, 46, 47, 48]) {
         assert.equal(
           reopened
             .prepare(
@@ -236,12 +290,19 @@ for (const missingVersions of [[47], [43], [44, 45, 46]]) {
       assert.deepEqual(reopened.prepare("PRAGMA foreign_key_check").all(), []);
       assert.equal(
         reopened
-          .prepare(
-            "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 47",
-          )
-          .get()?.count,
-        1,
+          .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+          .get()?.discovery_user_context_json,
+        !legacyCheckpoint || mainReader ? context : null,
       );
+      assertMigrationNames(reopened, 47, 48);
+      if (!legacyCheckpoint) {
+        assert.deepEqual(
+          reopened
+            .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+            .get(),
+          originalDiscoveryMigration,
+        );
+      }
     } finally {
       reopened.close();
     }
@@ -336,11 +397,9 @@ test(
         database.prepare("SELECT value FROM retained").get()?.value,
         "original",
       );
-      assert.equal(
-        database
-          .prepare("SELECT MAX(version) AS version FROM schema_migrations")
-          .get()?.version,
-        migrations.at(-1)!.version,
+      assertMigrationNames(
+        database,
+        ...migrations.map(({ version }) => version),
       );
     } finally {
       database.close();
@@ -438,7 +497,7 @@ test("legacy execution profiles retain values while allowing independent model s
     database.exec(
       "UPDATE scans SET execution_model = 'synthetic-model', reasoning_effort = 'future-effort'",
     );
-    applyMigrations(database);
+    applyMigrations(database, []);
     const row = database
       .prepare(
         "SELECT model, reasoning_effort, legacy_execution_model, legacy_reasoning_effort FROM scans",
@@ -454,6 +513,7 @@ test("legacy execution profiles retain values while allowing independent model s
       },
     );
     database.exec("UPDATE scans SET model = NULL, reasoning_effort = 'high'");
+    applyMigrations(database);
     assertMigrationNames(database, version);
   }
 });
@@ -592,7 +652,7 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32])
+  for (const version of [27, 28, 31, 32, 47])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
@@ -603,13 +663,26 @@ test("recorded additive migrations restore missing columns and configured error 
       .get()?.stop_after_consecutive_errors,
     7,
   );
-  database.exec("UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2");
+  assert.equal(
+    database
+      .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+      .get()?.discovery_user_context_json,
+    null,
+  );
+  database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
+    discovery_user_context_json = '"Original discovery context"'`);
   applyMigrations(database);
   assert.equal(
     database
       .prepare("SELECT stop_after_consecutive_errors FROM deep_scan_runs")
       .get()?.stop_after_consecutive_errors,
     2,
+  );
+  assert.equal(
+    database
+      .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+      .get()?.discovery_user_context_json,
+    '"Original discovery context"',
   );
 });
 
@@ -814,11 +887,9 @@ test("retries an upgrade when another process holds the write lock beyond the bu
     await once(writer, "message");
     const database = await openWorkbenchDatabase(databasePath);
     try {
-      assert.equal(
-        database
-          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
-          .get()?.count,
-        migrations.length,
+      assertMigrationNames(
+        database,
+        ...migrations.map(({ version }) => version),
       );
       assert.equal(
         database.prepare("SELECT COUNT(*) AS count FROM security_targets").get()
