@@ -66,7 +66,9 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 
 The explicit Connector case returns a three-field JSON decision for transport,
 fallback, and account/repository scope. The code-scanning case returns request
-paths and query parameters as JSON. Other intake cases use freeform answers.
+paths and query parameters as JSON. A separate default-transport case checks
+that intake selects REST without an explicit Connector request. Other intake
+cases use freeform answers.
 
 ## Calibration Dataset
 

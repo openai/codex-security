@@ -223,6 +223,13 @@ const checks: Record<
     return failures;
   },
 
+  default_rest: (text) => {
+    const decision = structuredAnswer(text);
+    return decision?.transport === "rest" && Object.keys(decision).length === 1
+      ? []
+      : ["must select REST when the user has not requested the Connector"];
+  },
+
   explicit_issue: (text) => {
     return [
       ...(!/GitHub Issues?.*(explicit|specific)|specific.*GitHub Issues?/is.test(
