@@ -797,6 +797,34 @@ try {
     ],
     { cwd: consumer },
   );
+  const selectedPlugin = join(consumer, "compatibility-selected-plugin");
+  await cp(join(installedRoot, "_bundled_plugin"), selectedPlugin, {
+    recursive: true,
+  });
+  const selectedHelper = join(selectedPlugin, "mcp", "helpers.mjs");
+  const loader = await readFile(selectedHelper, "utf8");
+  // Selected plugins can provide the CLI helpers without the SDK admission export.
+  const olderLoader = loader.replace(
+    "export default runtimeModule.exports;",
+    "",
+  );
+  assert.notEqual(olderLoader, loader);
+  await writeFile(selectedHelper, olderLoader);
+  run(
+    process.execPath,
+    [
+      join(
+        packageRoot,
+        "scripts",
+        "fixtures",
+        "package-plugin-compatibility.mjs",
+      ),
+      installedRoot,
+      consumer,
+      selectedPlugin,
+    ],
+    { cwd: consumer },
+  );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   run(

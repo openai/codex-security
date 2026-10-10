@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   chmod,
+  copyFile,
   cp,
   mkdir,
   readFile,
@@ -212,6 +213,119 @@ describe("bundled plugin build", () => {
       ]);
       expect(helper.stdout).toBe("[]\n");
       expect(helper.stderr).toBe("");
+      const repository = await temporaryDirectory();
+      const policy = "Preserve this synthetic inherited security policy.";
+      await writeFixture(
+        repository,
+        "SECURITY.md",
+        `# Synthetic policy\n${policy}\n`,
+      );
+      const alias = join(await temporaryDirectory(), "plugin link");
+      await symlink(
+        root,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await mkdir(join(root, "scripts"), { recursive: true });
+      await copyFile(
+        join(plugin, "scripts", "launch_codex_security_mcp"),
+        join(root, "scripts", "launch_codex_security_mcp"),
+      );
+      const node = (
+        await execFileAsync("node", ["--print", "process.execPath"])
+      ).stdout.trim();
+      for (const pluginPath of [root, alias]) {
+        const linkedHelper = join(pluginPath, "mcp", "helpers.mjs");
+        const list = await execFileAsync(
+          process.platform === "win32" ? node : "/bin/sh",
+          [
+            ...(process.platform === "win32"
+              ? [linkedHelper]
+              : [
+                  join(pluginPath, "scripts", "launch_codex_security_mcp"),
+                  "--helper",
+                ]),
+            "resolve-security-md",
+            "--repo",
+            repository,
+            "--list",
+          ],
+          { env: { ...process.env, CODEX_MCP_NODE_PATH: node, NODE_PATH: "" } },
+        );
+        expect(list.stdout).toBe('["SECURITY.md"]\n');
+        expect(list.stderr).toBe("");
+        const guidance = await execFileAsync(node, [
+          linkedHelper,
+          "resolve-security-md",
+          "--repo",
+          repository,
+          "--scope",
+          repository,
+          "--out",
+          "-",
+        ]);
+        expect(guidance.stdout).toContain(policy);
+        expect(guidance.stderr).toBe("");
+      }
+
+      const imported = await execFileAsync(
+        "node",
+        [
+          "--input-type=module",
+          "--eval",
+          `
+          import assert from "node:assert/strict";
+          import { pathToFileURL } from "node:url";
+          const { default: helpers } = await import(pathToFileURL(process.argv[2]).href);
+          const input = {
+            scanId: "synthetic-scan",
+            manifest: { scan: {} },
+            findings: { findings: [] },
+            coverage: {
+              completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [],
+            },
+          };
+          assert.equal(helpers.parseCanonicalScanDraft(input).scanId, input.scanId);
+          assert.throws(() => helpers.parseCanonicalScanDraft({
+            ...input, coverage: { ...input.coverage, completeness: "invalid" },
+          }));
+          assert.equal(process.exitCode, undefined);
+        `,
+          "helper-import-test",
+          join(destination, "helpers.mjs"),
+        ],
+        { cwd: root, env: { ...process.env, NODE_PATH: "" } },
+      );
+      expect(imported.stdout).toBe("");
+      expect(imported.stderr).toBe("");
+      const workerImport = await execFileAsync(
+        "node",
+        [
+          "--input-type=module",
+          "--eval",
+          `
+          import assert from "node:assert/strict";
+          import { Worker } from "node:worker_threads";
+          import { pathToFileURL } from "node:url";
+          const worker = new Worker(
+            "const { parentPort, workerData } = require('node:worker_threads');" +
+            "import(workerData).then(() => parentPort.postMessage('imported'));",
+            { eval: true, workerData: pathToFileURL(process.argv[1]).href, execArgv: [] },
+          );
+          const messages = [];
+          worker.on("message", (message) => messages.push(message));
+          await new Promise((resolve, reject) => {
+            worker.on("error", reject);
+            worker.on("exit", (code) => code === 0 ? resolve() : reject(new Error(String(code))));
+          });
+          assert.deepEqual(messages, ["imported"]);
+          `,
+          join(destination, "helpers.mjs"),
+        ],
+        { cwd: root, env: { ...process.env, NODE_PATH: "" } },
+      );
+      expect(workerImport.stdout).toBe("");
+      expect(workerImport.stderr).toBe("");
       const preflight = await execFileAsync(
         "node",
         [

@@ -41,6 +41,26 @@ const findingFor = (candidateId: string) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+test("worker checkpoints retain typed surface IDs", async (t) => {
+  const f = await fixture(t, "worker");
+  await f.write(
+    f.draft({
+      surfaces: [
+        { id: "http-api", label: "HTTP API", disposition: "no_issue_found" },
+      ],
+    }),
+  );
+  const head = await readJson(f.root, "checkpoint-head.json");
+  const checkpointPath = path.join(f.root, "checkpoints", head.checkpoint);
+  const checkpoint = await readJson(checkpointPath);
+  checkpoint.coverage.surfaces[0].id = "HTTP API";
+  await writeJson(checkpointPath, checkpoint);
+  await assert.rejects(
+    f.write(f.draft({ deferred: [generic] })),
+    /Invalid string/,
+  );
+});
+
 for (const observation of ["checkpoint head", "worker result"]) {
   test(`worker: reopening survives replacement of the ${observation} during a read`, async (t) => {
     const f = await fixture(t, "worker");

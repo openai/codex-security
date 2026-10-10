@@ -1,4 +1,5 @@
 import { readJson, writeJsonLine } from "./support/json.ts";
+import { finding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
@@ -32,6 +33,7 @@ export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-dr
   },
 });
 
+await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench(true);
@@ -370,6 +372,89 @@ function checkpoint(scanId: string, candidateId: string, reason: string) {
       deferred: [{ candidateId, reason, paths: ["fixture.py"] }],
     },
   };
+}
+
+async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "canonical-parent-checkpoint-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  try {
+    const run = await new WorkbenchDeepScanStore(runWorkbench).begin({
+      targetPath,
+      scope: ".",
+      threadId: "canonical-checkpoint-owner",
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      {
+        ...checkpoint(run.scanId, "initial-review", "Review remains pending."),
+        findings: [finding("canonical-checkpoint", "fixture.py")],
+      },
+      runWorkbench,
+    );
+    const coverage = await readJson(run.scanDir, "coverage.json");
+    coverage.surfaces = [
+      { id: "HTTP API", label: "HTTP API", disposition: "reported" },
+    ];
+    const findings = await readJson(run.scanDir, "findings.json");
+    findings.findings[0].locations[0].path = "./fixture.py";
+    await writeJsonLine(path.join(run.scanDir, "coverage.json"), coverage);
+    await writeJsonLine(path.join(run.scanDir, "findings.json"), findings);
+
+    for (const update of ["first-update", "reloaded-update"]) {
+      const reloaded = await createScanArtifactContext(
+        run.scanId,
+        runWorkbench,
+        { requireRunning: true },
+      );
+      await recordCodexSecurityScanDraftViaWorkbench(
+        reloaded,
+        checkpoint(run.scanId, update, "Additional review remains pending."),
+        runWorkbench,
+      );
+      assert.equal(
+        (await readJson(run.scanDir, "coverage.json")).surfaces[0].id,
+        "HTTP API",
+      );
+      const head = await readJson(run.scanDir, "checkpoint-head.json");
+      const saved = await readJson(run.scanDir, "checkpoints", head.checkpoint);
+      assert.equal(saved.coverage.surfaces[0].id, "HTTP API");
+      assert.equal(saved.findings[0].locations[0].path, "./fixture.py");
+    }
+
+    const head = await readJson(run.scanDir, "checkpoint-head.json");
+    const saved = await readJson(run.scanDir, "checkpoints", head.checkpoint);
+    saved.findings[0].locations[0].path = "../outside.py";
+    await writeJsonLine(
+      path.join(run.scanDir, "checkpoints", head.checkpoint),
+      saved,
+    );
+    const names = ["scan-manifest.json", "findings.json", "coverage.json"];
+    const before = await Promise.all(
+      names.map((name) => readFile(path.join(run.scanDir, name))),
+    );
+    await assert.rejects(
+      recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        checkpoint(run.scanId, "unsafe-checkpoint", "Review remains pending."),
+        runWorkbench,
+      ),
+      /expected a safe scan-relative POSIX path/,
+    );
+    assert.deepEqual(
+      await Promise.all(
+        names.map((name) => readFile(path.join(run.scanDir, name))),
+      ),
+      before,
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 async function testConcurrentParentDraftsPreserveBothCheckpoints() {
