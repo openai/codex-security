@@ -1,7 +1,8 @@
 import { createHash, type Hash } from "node:crypto";
 import { open, readdir, realpath, type FileHandle } from "node:fs/promises";
-import { pipeline } from "node:stream";
+import { pipeline, Readable } from "node:stream";
 import zlib from "node:zlib";
+import { decodeZstd } from "./zstd.js";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
 import {
@@ -939,17 +940,48 @@ async function sessionPrefixMatches(
   }
 }
 
+async function* sessionFileChunks(
+  file: FileHandle,
+  position = 0,
+): AsyncGenerator<Buffer> {
+  for (;;) {
+    const buffer = Buffer.alloc(SESSION_READ_SIZE);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+    if (bytesRead === 0) return;
+    position += bytesRead;
+    yield buffer.subarray(0, bytesRead);
+  }
+}
+
 async function* compressedSessionChunks(
   file: FileHandle,
 ): AsyncGenerator<Buffer> {
-  const decoder = zlib.createZstdDecompress();
-  const source = file.createReadStream({ start: 0, autoClose: false });
-  const stream = pipeline(source, decoder, () => {});
-  try {
-    for await (const chunk of stream) yield chunk as Buffer;
-  } finally {
-    source.destroy();
-    stream.destroy();
+  if (typeof zlib.createZstdDecompress !== "function") {
+    for await (const chunk of decodeZstd(sessionFileChunks(file)))
+      yield Buffer.from(chunk);
+    return;
+  }
+  let position = 0;
+  for (;;) {
+    const decoder = zlib.createZstdDecompress();
+    const source = Readable.from(sessionFileChunks(file, position), {
+      objectMode: false,
+    });
+    const stream = pipeline(source, decoder, () => {});
+    try {
+      for await (const chunk of stream) yield chunk as Buffer;
+    } finally {
+      source.destroy();
+      stream.destroy();
+    }
+    // Older supported Node decoders stop after one frame, even when their
+    // input contains more. Continue from the bytes actually consumed.
+    position += decoder.bytesWritten;
+    if (position >= (await file.stat()).size) return;
+    if (decoder.bytesWritten === 0)
+      throw new Error(
+        "The Zstandard decoder did not consume the remaining rollout data.",
+      );
   }
 }
 
