@@ -720,3 +720,116 @@ for (const golden of roundtripFixtures) {
     );
   });
 }
+
+test("GitHub repository metadata accepts case variants without changing source URLs", async () => {
+  const supplied = {
+    ...sast,
+    repository: {
+      ...repository,
+      url: "HTTPS://GITHUB.COM/Example/PROJECT.git/",
+    },
+  };
+  const mixedInventory = {
+    ...inventory,
+    nodes: [
+      ...inventory.nodes,
+      {
+        ...inventory.nodes[0]!,
+        repository: {
+          ...repository,
+          url: "https://github.com/EXAMPLE/Project.git/",
+        },
+      },
+    ],
+  };
+  const parsed = await parse({
+    data: {
+      sastFindings: { nodes: [supplied] },
+      versionControlResources: mixedInventory,
+    },
+  });
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.evidence.source_data).toEqual(supplied);
+  expect(parsed.findings[0]!.evidence.details!.repository.url).toBe(
+    supplied.repository.url,
+  );
+});
+
+test.each([
+  [
+    "https://github.com/Example/Project.git/",
+    "https://github.com/example/project",
+    true,
+  ],
+  [
+    "https://EXAMPLE.ghe.com/Team/Project.git/",
+    "https://example.ghe.com/team/project",
+    true,
+  ],
+  [
+    "https://github.com/Example/Other.git/",
+    "https://github.com/example/project",
+    false,
+  ],
+  [
+    "https://other.ghe.com/team/project",
+    "https://example.ghe.com/team/project",
+    false,
+  ],
+  [
+    "https://code.example.test/Team/Project",
+    "https://code.example.test/team/project",
+    false,
+  ],
+  [
+    "http://github.com/example/project",
+    "https://github.com/example/project",
+    false,
+  ],
+  [
+    "https://github.com:443/example/project",
+    "https://github.com/example/project",
+    false,
+  ],
+  [
+    "https://example.ghe.com/Team/Project.GIT/",
+    "https://example.ghe.com/team/project",
+    false,
+  ],
+])(
+  "repository URL binding preserves identity: %s to %s",
+  async (sourceUrl, destinationUrl, matches) => {
+    const record = { ...sast, repository: { ...repository, url: sourceUrl } };
+    const f = await cloudFixture(envelope("sastFindings", [record], false));
+    f.destination.url = destinationUrl;
+    const options = { ...f.options, repository: f.destination.id };
+    if (matches) {
+      const publication = await prepareExternalPublication(
+        f.file,
+        options,
+        f.deps,
+      );
+      expect((await publication.publish()).verified).toBe(1);
+      expect(f.posts[0]!.items[0]!.evidence.source_data).toEqual(record);
+    } else {
+      await expect(
+        prepareExternalPublication(f.file, options, f.deps),
+      ).rejects.toThrow("does not match");
+      expect(f.posts).toEqual([]);
+    }
+  },
+);
+
+test("Cloud repository selection accepts a GitHub URL case variant", async () => {
+  const f = await cloudFixture(envelope("sastFindings", [sast]));
+  const prepared = await prepareExternalPublication(
+    f.file,
+    {
+      ...f.options,
+      repository: "HTTPS://GITHUB.COM/Example/PROJECT.git/",
+    },
+    f.deps,
+  );
+  expect(prepared.preview.destination.id).toBe(f.destination.id);
+  expect(f.posts).toEqual([]);
+});

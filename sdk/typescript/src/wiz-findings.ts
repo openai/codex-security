@@ -2,7 +2,10 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { CodexSecurityError } from "./errors.js";
-import { validateExternalEvidence } from "./external-import-contract.js";
+import {
+  repositoryUrlKey,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
 
 const decompressGzip = promisify(gunzip);
@@ -145,10 +148,6 @@ type FindingInput = {
   repositories: Map<string, RepositoryMetadata>;
 };
 
-function repositoryUrl(value: string): string {
-  return value.replace(/\/$/u, "").replace(/\.git$/u, "");
-}
-
 function sourceRepository(
   repository: Record<string, unknown> | undefined,
   repositories: FindingInput["repositories"],
@@ -159,7 +158,7 @@ function sourceRepository(
   if (
     suppliedUrl &&
     inventory &&
-    repositoryUrl(suppliedUrl) !== repositoryUrl(inventory.url)
+    repositoryUrlKey(suppliedUrl) !== repositoryUrlKey(inventory.url)
   )
     throw new Error(
       "The finding and repository inventory have conflicting repository URLs.",
@@ -343,7 +342,7 @@ function records(payload: unknown): FindingInput {
       const url = text(repository?.["url"]);
       if (!id || !url) continue;
       const previous = repositories.get(id);
-      if (previous && repositoryUrl(previous.url) !== repositoryUrl(url))
+      if (previous && repositoryUrlKey(previous.url) !== repositoryUrlKey(url))
         throw new Error(
           `Repository inventory contains conflicting URLs for ${JSON.stringify(id)}.`,
         );
