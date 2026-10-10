@@ -1048,6 +1048,7 @@ test("loads oversized comparison matches from stdin", async () => {
   const probe = [
     "import argparse, io, json, pathlib, sqlite3, sys, tempfile",
     "sys.path.insert(0, sys.argv[1])",
+    "from filesystem_identity import serialize_filesystem_identity",
     "import workbench_scan_history as history",
     "connection = sqlite3.connect(':memory:')",
     "connection.row_factory = sqlite3.Row",
@@ -1061,7 +1062,7 @@ test("loads oversized comparison matches from stdin", async () => {
     "metadata = repository.stat()",
     "connection.execute('INSERT INTO security_targets VALUES (?, ?)', ('target', str(repository)))",
     "connection.commit()",
-    "scans = {name: {'id': name, 'status': 'complete', 'target_id': 'target', 'target_path': str(repository), 'target_device': metadata.st_dev, 'target_inode': metadata.st_ino} for name in ('before', 'after')}",
+    "scans = {name: {'id': name, 'status': 'complete', 'target_id': 'target', 'target_path': str(repository), 'target_device': serialize_filesystem_identity(metadata.st_dev), 'target_inode': serialize_filesystem_identity(metadata.st_ino)} for name in ('before', 'after')}",
     "findings = {'before': {'old': {'id': 'old'}}, 'after': {'new': {'id': 'new'}}}",
     "history._scan_findings = lambda _connection, scan_id: findings[scan_id]",
     "history.compare_scans = lambda *_args, **_kwargs: {'saved': True}",
