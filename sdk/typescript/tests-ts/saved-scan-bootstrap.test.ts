@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -418,7 +419,7 @@ test.skipIf(process.platform === "win32").each([true, false])(
   },
 );
 
-test("a no-Git latest workflow resumes its pending group write by explicit scan ID", async () => {
+test("a no-Git explicit scan workflow resumes its pending group write", async () => {
   const f = await fixture(true);
   const hostGit = await inspectTrustedExecutable("git", f.environment, []);
   expect(hostGit.executable).not.toBeNull();
@@ -426,7 +427,9 @@ test("a no-Git latest workflow resumes its pending group write by explicit scan 
     join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
   );
   try {
-    db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+    db.query(
+      "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(
       "unrelated-target",
       dirname(await realpath(hostGit.executable!)),
       "Synthetic target",
@@ -447,14 +450,25 @@ test("a no-Git latest workflow resumes its pending group write by explicit scan 
     currentDirectory: f.repository,
   });
   expect(bootstrap.environment["CODEX_SECURITY_GIT"]).toBe("");
+  await expect(
+    resolveCompletedScan("latest", {
+      currentDirectory: () => f.repository,
+      runWorkbench: bootstrap,
+    }),
+  ).rejects.toThrow("codex-security dedupe --scan SCAN_ID");
+  const explicit = await savedScanWorkbench(f.second.scanId, {
+    environment: bootstrap.environment,
+    pluginRoot: PLUGIN_ROOT,
+    currentDirectory: f.repository,
+  });
   const options = { embedding: f.embedding, workflowId: "no-git-replay" };
   await expect(
-    deduplicateScanInternal("latest", options, {
+    deduplicateScanInternal(f.second.scanId, options, {
       environment: bootstrap.environment,
       currentDirectory: () => f.repository,
       reviewer: f.reviewer,
       runWorkbench: async (args, input) => {
-        const result = await bootstrap(args, input);
+        const result = await explicit(args, input);
         if (args[0] === "store-dedupe-groups")
           throw new Error("Lost group acknowledgement");
         return result;
@@ -615,7 +629,9 @@ test("latest explains the explicit scan-ID fallback when history protects the ho
     join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
   );
   try {
-    db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+    db.query(
+      "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(
       "unrelated-target",
       dirname(await realpath(hostGit.executable!)),
       "Unrelated synthetic target",
@@ -650,14 +666,12 @@ test("latest explains the explicit scan-ID fallback when history protects the ho
     ...options,
     currentDirectory: f.repository,
   });
-  expect(
-    (
-      await resolveCompletedScan("latest", {
-        currentDirectory: () => f.repository,
-        runWorkbench: exactPath,
-      })
-    ).scanId,
-  ).toBe(f.second.scanId);
+  await expect(
+    resolveCompletedScan("latest", {
+      currentDirectory: () => f.repository,
+      runWorkbench: exactPath,
+    }),
+  ).rejects.toThrow("codex-security dedupe --scan SCAN_ID");
 });
 
 test.skipIf(process.platform === "win32")(
@@ -875,7 +889,9 @@ for (const selector of ["latest", "workflow"] as const) {
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
     try {
-      db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+      db.query(
+        "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ).run(
         "unrelated-target",
         dirname(f.python),
         "Unrelated synthetic target",
@@ -1190,7 +1206,9 @@ for (const kind of ["non-Git", "symlinked"] as const) {
         join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
       );
       try {
-        db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+        db.query(
+          "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        ).run(
           "non-git-target",
           target,
           "Synthetic non-Git target",
@@ -1386,7 +1404,9 @@ test.skipIf(process.platform === "win32")(
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
     try {
-      db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+      db.query(
+        "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ).run(
         "inaccessible-target",
         target,
         "Synthetic target",
@@ -1423,5 +1443,43 @@ test.skipIf(process.platform === "win32")(
     } finally {
       await chmod(blocked, 0o700);
     }
+  },
+);
+
+test.each(["checkout", "git metadata"])(
+  "latest excludes the prior owner after replacing %s at the same path",
+  async (replacement) => {
+    const f = await fixture(true);
+    const options = {
+      environment: { ...f.environment, PYTHON: f.python },
+      pluginRoot: PLUGIN_ROOT,
+      currentDirectory: f.repository,
+    };
+    const before = await savedScanWorkbench("latest", options);
+    expect(
+      (
+        await resolveCompletedScan("latest", {
+          currentDirectory: () => f.repository,
+          runWorkbench: before,
+        })
+      ).scanId,
+    ).toBe(f.second.scanId);
+    if (replacement === "checkout") {
+      await rename(f.repository, join(f.root, "previous-checkout"));
+      await mkdir(f.repository);
+    } else {
+      await rename(
+        join(f.repository, ".git"),
+        join(f.root, "previous-git-metadata"),
+      );
+    }
+    execFileSync("git", ["init", "--quiet", f.repository]);
+    const workbench = await savedScanWorkbench("latest", options);
+    await expect(
+      resolveCompletedScan("latest", {
+        currentDirectory: () => f.repository,
+        runWorkbench: workbench,
+      }),
+    ).rejects.toThrow("No completed saved scan was found for this repository.");
   },
 );

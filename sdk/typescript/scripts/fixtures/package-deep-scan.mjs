@@ -368,6 +368,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
   const owner = "package-sdk-owner";
+  f.env.PACKAGE_DEEP_PARENT_THREAD = owner;
   let scanId;
   const client = new sdk.CodexSecurity(
     { pythonPath: f.env.PYTHON },
@@ -386,43 +387,15 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
-      // Replace only the parent model's tool choice. The installed SDK registers
-      // and finalizes the scan; the packaged MCP runs the real Deep lifecycle.
-      createCodex({ env, apiKey }) {
+      createCodex() {
         return {
           startThread() {
             return {
-              id: owner,
+              id: null,
               async runStreamed() {
-                return {
-                  events: (async function* () {
-                    yield { type: "thread.started", thread_id: owner };
-                    scanId = env.CODEX_SECURITY_SCAN_ID;
-                    // The pinned SDK maps its apiKey option to this child variable.
-                    const rpc = await server(f, {
-                      ...env,
-                      ...(apiKey ? { CODEX_API_KEY: apiKey } : {}),
-                    });
-                    try {
-                      const result = await rpc.call(
-                        "start_codex_security_deep_scan",
-                        { scanId },
-                        metadata(f, owner),
-                      );
-                      await assertDraft(result.manifestPath);
-                    } finally {
-                      await rpc.close();
-                    }
-                    yield {
-                      type: "turn.completed",
-                      usage: {
-                        input_tokens: 1,
-                        cached_input_tokens: 0,
-                        output_tokens: 1,
-                      },
-                    };
-                  })(),
-                };
+                throw new Error(
+                  "The direct Deep Scan must not start a parent model turn.",
+                );
               },
             };
           },
@@ -433,6 +406,9 @@ async function runInstalledSdk(pluginRoot, executable) {
   try {
     const result = await client.run(f.target, {
       mode: "deep",
+      onScanRegistered: (scan) => {
+        scanId = scan.scanId;
+      },
       auth: "api-key",
       workers: 1,
       subagents: 0,
@@ -452,7 +428,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  await assertExecutions(f, scanId, 4);
+  await assertExecutions(f, scanId, 5);
 }
 
 async function assertDraft(path) {

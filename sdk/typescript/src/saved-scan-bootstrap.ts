@@ -1,3 +1,4 @@
+import { isRecord } from "./record.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
@@ -101,9 +102,10 @@ export async function savedScanWorkbench(
     signal = options.signal,
   ) => {
     signal?.throwIfAborted();
-    // Return the selected ID directly: probing Python must not revisit unrelated history.
-    if (requestedId === "latest" && args[0] === "list-scans")
-      return { scans: targets.map((target) => ({ scanId: target.id })) };
+    const selectedLatest =
+      requestedId === "latest" && args[0] === "list-scans"
+        ? targets[0]
+        : undefined;
     const target =
       args[0] === "get-scan"
         ? latest
@@ -132,9 +134,33 @@ export async function savedScanWorkbench(
         currentDirectory: options.currentDirectory,
         failureMessage: "Could not read Codex Security scan history",
       },
-      target ? ["get-scan", "--scan-id", target.id] : args,
+      selectedLatest
+        ? [
+            "list-scans",
+            "--repository",
+            selectedLatest.target_path,
+            "--status",
+            "complete",
+          ]
+        : target
+          ? ["get-scan", "--scan-id", target.id]
+          : args,
       input,
     );
+    if (selectedLatest) {
+      const scans = result["scans"];
+      const selected = Array.isArray(scans)
+        ? scans.filter(
+            (scan) => isRecord(scan) && scan["scanId"] === selectedLatest.id,
+          )
+        : [];
+      if (selected.length === 0 && environment["CODEX_SECURITY_GIT"] === "") {
+        throw new CodexSecurityError(
+          "Could not verify the saved checkout automatically without a trusted Git executable. Use an explicit saved scan ID: codex-security dedupe --scan SCAN_ID",
+        );
+      }
+      return { scans: selected };
+    }
     if (typeof requestedId !== "string" && args[0] === "finding-workflow") {
       const workflow = result["workflow"];
       if (
