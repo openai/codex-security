@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { ProcessEnvironment } from "./runtime.js";
 
 /** @internal */
@@ -70,4 +70,16 @@ export function rawEnvironmentValue(
     }
   }
   return undefined;
+}
+
+/** @internal Expand a home prefix without changing filesystem traversal. */
+export function expandHomePath(
+  value: string,
+  environment: ProcessEnvironment,
+): string {
+  const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
+  // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
+  return path.startsWith("~/")
+    ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
+    : expandHome(path, environment);
 }

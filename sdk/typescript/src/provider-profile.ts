@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import { CodexSecurityError } from "./errors.js";
-import { configuredCodexHome } from "./codex-home.js";
+import {
+  configuredCodexHome,
+  environmentEntry,
+  expandHomePath,
+} from "./codex-home.js";
 import {
   resolveCodexProfile,
   modelProviderConfigOverride,
@@ -103,9 +107,14 @@ export async function restoreProviderProfile(
       "The saved scan contains an invalid provider profile.",
     );
   }
+  const requestedHome = environmentEntry(environment, "CODEX_HOME");
   const codexHome =
     profile["home"] === "ambient"
-      ? configuredCodexHome(environment)
+      ? await realpath(
+          requestedHome?.trim()
+            ? expandHomePath(requestedHome, environment)
+            : configuredCodexHome(environment),
+        )
       : codexSecurityCredentialHome(environment);
   // The managed home has stricter ownership rules. Native execution preserves
   // the invoking home's permissions and reads the same private profile files.
