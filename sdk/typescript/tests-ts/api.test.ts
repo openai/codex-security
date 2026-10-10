@@ -3762,6 +3762,13 @@ describe("CodexSecurity orchestration", () => {
   test.each(["EACCES", "EPERM", "EMFILE"])(
     "retries session logs and limits repeated %s diagnostics appropriately",
     async (code) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `retries session logs and limits repeated ${code} diagnostics appropriately`,
+        )
+      )
+        return;
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const sessions = join(codexHome, "sessions");
       await mkdir(sessions);
@@ -3769,8 +3776,23 @@ describe("CodexSecurity orchestration", () => {
         join(sessions, "a-synthetic.jsonl"),
         join(sessions, "b-synthetic.jsonl"),
       ];
-      await Promise.all(logs.map((path) => writeFile(path, "")));
-      const denied = new Set([logs[0]!]);
+      await Promise.all(
+        logs.map((path, index) =>
+          writeFile(
+            path,
+            JSON.stringify({
+              type: "session_meta",
+              payload: {
+                id: `synthetic-worker-${index}`,
+                parent_thread_id: "thread-1",
+              },
+            }) + "\n",
+          ),
+        ),
+      );
+      const identified = Promise.withResolvers<void>();
+      const observedWorkers = new Set<number>();
+      const denied = new Set<string>();
       const attempts = new Map<string, number>();
       let firstRepeated!: () => void;
       let secondRepeated!: () => void;
@@ -3787,7 +3809,7 @@ describe("CodexSecurity orchestration", () => {
           if (denied.has(path)) {
             const count = (attempts.get(path) ?? 0) + 1;
             attempts.set(path, count);
-            if (count === 3)
+            if (count === 3 && code !== "EMFILE")
               (path === logs[0] ? firstRepeated : secondRepeated)();
             throw Object.assign(
               new Error(`Synthetic ${code} for ${basename(path)}`),
@@ -3807,6 +3829,9 @@ describe("CodexSecurity orchestration", () => {
               await copyCompletedScan(root);
               async function* events(): AsyncGenerator<ThreadEvent> {
                 yield { type: "thread.started", thread_id: "thread-1" };
+                // Exercise retries for known scan-owned logs, after metadata has been read.
+                await identified.promise;
+                denied.add(logs[0]!);
                 await first;
                 denied.delete(logs[0]!);
                 denied.add(logs[1]!);
@@ -3825,7 +3850,22 @@ describe("CodexSecurity orchestration", () => {
       const keepAlive = setTimeout(() => {}, 10_000);
       const operation = client.run(repository, {
         onActivity: () => {},
-        onWarning: (warning) => warnings.push(warning),
+        onWorkerEvent: (event) => {
+          if (event.kind === "observed") observedWorkers.add(event.worker);
+          if (observedWorkers.size === logs.length) identified.resolve();
+        },
+        onWarning: (warning) => {
+          warnings.push(warning);
+          if (code === "EMFILE") {
+            for (const [index, log] of logs.entries()) {
+              if (
+                warnings.filter((message) => message.includes(basename(log)))
+                  .length === 3
+              )
+                (index === 0 ? firstRepeated : secondRepeated)();
+            }
+          }
+        },
       });
       try {
         expect(await operation).toMatchObject({
