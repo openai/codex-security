@@ -1015,6 +1015,12 @@ Results distinguish completion from partial or interrupted work:
 | `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is included in the result. |
 | `failed`      | 2         | Preparation failed before uploading; structured output includes the error.                         |
 
+For finding imports, `--full-output` requires `--format json` or `--format jsonl`.
+Failed and interrupted imports set the envelope's `ok` to `false`, with
+`error.code: "IMPORT_FAILED"`, while retaining available results, receipts, and
+counts under `data`. Other full-output format combinations are rejected before
+reading the input or contacting Cloud; omit `--full-output` to use those formats.
+
 Ctrl-C and SIGTERM retain exit codes 130 and 143. Interrupted JSON output preserves
 `receipts`, `counts`, `failures` with vendor source IDs, `excluded`, `verified`, and
 `unacknowledged`. A lost response can mean unacknowledged findings were accepted;

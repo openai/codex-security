@@ -1776,15 +1776,20 @@ export async function main(
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
   let scanStructuredError = false;
-  let incompleteScanOutput:
-    { format: "json" | "jsonl"; message: string } | undefined;
+  let publicationStructuredError = false;
+  let failedFullOutput:
+    { format: "json" | "jsonl"; code: string; message: string } | undefined;
   const recordIncompleteScanOutput = (outcome: ScanOutcome, format: string) => {
     if (
       outcome.coverageError !== undefined &&
       (format === "json" || format === "jsonl") &&
       argv.includes("--full-output")
     ) {
-      incompleteScanOutput = { format, message: outcome.coverageError };
+      failedFullOutput = {
+        format,
+        code: "SCAN_FAILED",
+        message: outcome.coverageError,
+      };
     }
   };
   let filteredScanFailure:
@@ -3151,7 +3156,7 @@ export async function main(
   publication.command("findings", {
     description:
       "Preview and import selected Wiz repository findings to Cloud.",
-    hint: "Supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+    hint: "Supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
@@ -3186,7 +3191,21 @@ export async function main(
         ),
     }),
     output: z.record(z.string(), z.unknown()).optional(),
-    async run({ args, options, format, formatExplicit }) {
+    async run({ args, options, format, formatExplicit, error: incurError }) {
+      if (
+        argv.includes("--full-output") &&
+        format !== "json" &&
+        format !== "jsonl"
+      ) {
+        publicationStructuredError = true;
+        exitCode = 2;
+        return incurError({
+          code: "INVALID_ARGUMENTS",
+          message:
+            "Finding imports support --full-output with --format json or --format jsonl. Choose one of those formats or omit --full-output.",
+          exitCode,
+        });
+      }
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       const structured = formatExplicit && format !== "toon";
@@ -3297,6 +3316,15 @@ export async function main(
           errorOutput.write(renderExternalPublicationSummary(result));
         return { ...result };
       } catch (error) {
+        if (
+          argv.includes("--full-output") &&
+          (format === "json" || format === "jsonl")
+        )
+          failedFullOutput = {
+            format,
+            code: "IMPORT_FAILED",
+            message: diagnosticValue(error),
+          };
         reportPublicationError(
           diagnosticValue(error),
           controller.signal.aborted ? controller.signal.reason : undefined,
@@ -6330,7 +6358,12 @@ export async function main(
   let frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
-    if (policyFullOutput || patchStructuredError || scanStructuredError) {
+    if (
+      policyFullOutput ||
+      patchStructuredError ||
+      scanStructuredError ||
+      publicationStructuredError
+    ) {
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
@@ -6355,7 +6388,7 @@ export async function main(
             streamedLogs,
             frameworkOutput ? JSON.parse(frameworkOutput).cta : undefined,
           );
-    if (incompleteScanOutput !== undefined) {
+    if (failedFullOutput !== undefined) {
       const envelope: JsonValue = JSON.parse(frameworkOutput);
       // Token-count output is a number, not a full-output envelope.
       if (isJsonObject(envelope) && envelope["ok"] === true) {
@@ -6364,12 +6397,12 @@ export async function main(
             ...envelope,
             ok: false,
             error: {
-              code: "SCAN_FAILED",
-              message: incompleteScanOutput.message,
+              code: failedFullOutput.code,
+              message: failedFullOutput.message,
             },
           },
           null,
-          incompleteScanOutput.format === "json" ? 2 : undefined,
+          failedFullOutput.format === "json" ? 2 : undefined,
         )}\n`;
       }
     }

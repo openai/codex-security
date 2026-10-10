@@ -129,11 +129,17 @@ async function readInBatches<T, U>(
   return output;
 }
 
-function canonicalJson(value: unknown): string {
+function canonicalJson(
+  value: unknown,
+  compareKeys?: (left: string, right: string) => number,
+): string {
   return JSON.stringify(value, (_key, child: unknown) => {
     if (child !== null && typeof child === "object" && !Array.isArray(child)) {
+      const record = child as Record<string, unknown>;
       return Object.fromEntries(
-        Object.entries(child).sort(([a], [b]) => a.localeCompare(b)),
+        Object.keys(record)
+          .sort(compareKeys)
+          .map((key) => [key, record[key]]),
       );
     }
     return child;
@@ -333,16 +339,22 @@ export async function prepareExternalPublication(
   );
   const key = hash(
     "sha256",
-    canonicalJson([
-      // Keep existing production checkpoints readable; other deployments must
-      // never share a saved request or receipt with the production default.
-      ...(apiBaseUrl === DEFAULT_CLOUD_BASE_URL ? [] : [apiBaseUrl]),
-      credentials.account_id,
-      destination.id,
-      destination.repo_connector_id,
-      source,
-      parsed.findings,
-    ]),
+    // Retain the original ordering only for checkpoint filenames so existing
+    // saved requests remain discoverable. Evidence comparisons use a total,
+    // locale-independent key order, including collating-equivalent Unicode keys.
+    canonicalJson(
+      [
+        // Keep existing production checkpoints readable; other deployments must
+        // never share a saved request or receipt with the production default.
+        ...(apiBaseUrl === DEFAULT_CLOUD_BASE_URL ? [] : [apiBaseUrl]),
+        credentials.account_id,
+        destination.id,
+        destination.repo_connector_id,
+        source,
+        parsed.findings,
+      ],
+      (left, right) => left.localeCompare(right),
+    ),
   );
   const pendingPath = join(state, `${key}.pending.json`);
   let saved: SavedSubmission | undefined;

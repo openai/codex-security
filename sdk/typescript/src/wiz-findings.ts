@@ -368,7 +368,7 @@ function records(payload: unknown): FindingInput {
       throw new Error(
         "Wiz response has another page. Complete the requested pages or save the explicitly selected records in their named collection before publishing.",
       );
-    selected.push(...collection["nodes"].map((value) => ({ value, kind })));
+    for (const value of collection["nodes"]) selected.push({ value, kind });
   }
   if (found) return { records: selected, repositories };
   throw new Error(
