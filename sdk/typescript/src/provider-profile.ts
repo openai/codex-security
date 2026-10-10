@@ -200,7 +200,7 @@ export async function legacyWorkerUsesScanProvider(
   });
 }
 
-async function withCodexPreflightLock<T>(
+export async function withCodexPreflightLock<T>(
   env: Record<string, string> | undefined,
   signal: AbortSignal | undefined,
   operation: () => Promise<T>,
