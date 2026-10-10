@@ -51,7 +51,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each([false, true])(
-  "inactive provider and MCP settings stay private in saved recipes (native: %s)",
+  "inactive provider and MCP settings stay private in saved recipes (native: %p)",
   async (native) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
