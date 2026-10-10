@@ -177,6 +177,8 @@ export interface PluginPythonOptions {
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
   protectedRoot?: string | readonly string[];
+  /** @internal Additional roots excluded only from ambient interpreter discovery. */
+  discoveryProtectedRoots?: readonly string[];
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -3053,7 +3055,11 @@ export async function resolvePluginPython(
   }
   // Named interpreters are ambient PATH discovery, even when PYTHON names one.
   // Explicit trusted paths and managed runtimes retain their existing precedence.
-  const discoveryRoots = [...protectedRoot, ...callerDirectories];
+  const discoveryRoots = [
+    ...protectedRoot,
+    ...callerDirectories,
+    ...(options.discoveryProtectedRoots ?? []),
+  ];
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,

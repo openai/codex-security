@@ -101,6 +101,16 @@ export async function savedScanWorkbench(
       )
     ).flat(),
   ];
+  const discoveryProtectedRoots = [
+    ...targets.map((row) => row.target_path),
+    ...(
+      await Promise.all(
+        targets.map((row) =>
+          gitProtectionRoots(row.target_path, options.signal),
+        ),
+      )
+    ).flat(),
+  ];
   let python: string | undefined;
   const workbench: SavedScanDependencies["runWorkbench"] = async (
     args,
@@ -120,10 +130,11 @@ export async function savedScanWorkbench(
       throw new CodexSecurityError(
         "Saved scan history changed during lookup. Retry the command.",
       );
-    // Pin the interpreter selected with every candidate and the caller checkout protected.
+    // Pin one interpreter; ambient discovery also excludes historical candidate paths.
     python ??= await resolvePluginPython({
       environment,
       protectedRoot: protectedRoots,
+      discoveryProtectedRoots,
       currentDirectory: options.currentDirectory,
       signal,
     });

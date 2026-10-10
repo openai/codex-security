@@ -1800,3 +1800,38 @@ test.skipIf(process.platform === "win32")(
     expect(existsSync(marker)).toBe(false);
   },
 );
+
+test.skipIf(process.platform === "win32").each([undefined, "python3"])(
+  "latest excludes unrelated historical checkouts from Python PATH discovery (PYTHON: %p)",
+  async (namedPython) => {
+    const f = await fixture(true);
+    const unrelated = join(f.root, "unrelated-path-checkout");
+    execFileSync("git", ["clone", "--quiet", f.repository, unrelated]);
+    await f.scan("unrelated-path-scan", unrelated);
+    const marker = join(f.root, "unrelated-python-probed");
+    await writeFile(
+      join(unrelated, "python3"),
+      `#!/bin/sh\nprintf probed > ${JSON.stringify(marker)}\nexec ${JSON.stringify(f.python)} "$@"\n`,
+      { mode: 0o700 },
+    );
+    const workbench = await savedScanWorkbench("latest", {
+      environment: {
+        ...f.environment,
+        PATH: `${unrelated}${delimiter}${f.environment.PATH ?? ""}`,
+        XDG_CACHE_HOME: join(f.root, "empty-runtime-cache"),
+        ...(namedPython === undefined ? {} : { PYTHON: namedPython }),
+      },
+      pluginRoot: PLUGIN_ROOT,
+      currentDirectory: f.repository,
+    });
+    expect(
+      (
+        await resolveCompletedScan("latest", {
+          currentDirectory: () => f.repository,
+          runWorkbench: workbench,
+        })
+      ).scanId,
+    ).toBe(f.second.scanId);
+    expect(existsSync(marker)).toBe(false);
+  },
+);
