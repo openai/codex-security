@@ -58,18 +58,14 @@ export function findingCatalogue(
       const latest = occurrences.at(-1)!;
       const card = compactFinding(latest);
       if (occurrences.length > 1) {
-        const description = (finding: ComparisonFinding) => {
-          const value: Record<string, unknown> = { ...compactFinding(finding) };
-          delete value["occurrenceId"];
-          delete value["findingId"];
-          return value;
-        };
-        const current = description(latest);
+        const current = compactFinding(latest);
         const seen = new Set<string>();
         const aliases = occurrences.slice(0, -1).flatMap((finding) => {
           const value = Object.fromEntries(
-            Object.entries(description(finding)).filter(
+            Object.entries(compactFinding(finding)).filter(
               ([field, value]) =>
+                field !== "occurrenceId" &&
+                field !== "findingId" &&
                 JSON.stringify(value) !== JSON.stringify(current[field]),
             ),
           );

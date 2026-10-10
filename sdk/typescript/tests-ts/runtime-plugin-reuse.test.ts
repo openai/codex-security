@@ -101,16 +101,13 @@ async function checkWorkerReuse(
       else if (metadata === "truncated") await writeFile(manifest, "{");
       const originalWrite = fsPromises.writeFile;
       let writes = 0;
-      let releaseWrites = () => {};
-      const bothWriting = new Promise<void>((resolve) => {
-        releaseWrites = resolve;
-      });
+      const bothWriting = Promise.withResolvers<void>();
       const write = concurrent
         ? spyOn(fsPromises, "writeFile").mockImplementation(async (...args) => {
             // Both repairs reach the filesystem before either write completes.
             if (dirname(String(args[0])) === dirname(manifest)) {
-              if (++writes === 2) releaseWrites();
-              await bothWriting;
+              if (++writes === 2) bothWriting.resolve();
+              await bothWriting.promise;
             }
             return originalWrite(...args);
           })

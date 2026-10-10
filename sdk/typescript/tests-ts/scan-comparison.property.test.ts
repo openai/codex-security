@@ -1,3 +1,4 @@
+import { jsonCodex } from "./support/codex.js";
 import { describe, expect, test } from "bun:test";
 import fc from "fast-check";
 import {
@@ -40,11 +41,7 @@ function compare(
 ) {
   return matchScanFindings(input, {
     ...options,
-    codex: {
-      startThread: () => ({
-        run: async () => ({ finalResponse: JSON.stringify(response) }),
-      }),
-    },
+    codex: jsonCodex(() => response),
   });
 }
 

@@ -76,6 +76,11 @@ def scanned_source_text(scan: sqlite3.Row, target: Path, path: str) -> str | Non
         return None
     if snapshot_digest is not None and snapshot_digest != clean_worktree_content_digest():
         return None
+    if (
+        scan["diff_target_kind"] == "working_tree"
+        and scan["diff_content_digest"] != clean_worktree_content_digest()
+    ):
+        return None
     object_name = f"{revision}:./{path}"
     content = git_bytes(target, "cat-file", "blob", object_name)
     return content.decode("utf-8", errors="replace") if content is not None else None

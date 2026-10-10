@@ -51,7 +51,7 @@ export type {
   ComponentPlanningOptions,
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost, ScanSessionEvent } from "./cost.js";
+export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
 export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
@@ -93,6 +93,7 @@ export {
   DeduplicationReviewError,
   IncompleteScanError,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
@@ -155,6 +156,12 @@ export type {
   DeduplicateScanResult,
 } from "./deduplication/scan.js";
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
+export type { FindingEmbeddingBinding } from "./deduplication/local.js";
+export type {
+  DeduplicationDiagnostic,
+  DeduplicationDiagnosticObserver,
+} from "./deduplication/diagnostics.js";
+export type { FindingEmbedder } from "./server/embeddings.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,

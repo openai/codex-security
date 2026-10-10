@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 import {
   chmod,
   copyFile,
@@ -48,6 +49,7 @@ async function destinationFiles(root, prefix = "") {
   return files.sort();
 }
 
+/** @returns {Promise<string[]>} */
 export async function buildBundledPlugin({
   contractPath = join(
     repositoryRoot,
@@ -112,12 +114,7 @@ export async function buildBundledPlugin({
       await chmod(output, mode);
     }
 
-    const generated = await destinationFiles(staged);
-    const expected = [...files].sort();
-    if (
-      generated.length !== expected.length ||
-      generated.some((path, index) => path !== expected[index])
-    ) {
+    if (!isDeepStrictEqual(await destinationFiles(staged), [...files].sort())) {
       throw new Error("Bundled plugin generated files outside its contract.");
     }
     try {

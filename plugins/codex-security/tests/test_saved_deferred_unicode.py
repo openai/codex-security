@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from test_saved_deferred_identity import recover, save_worker
 from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
-from workbench_test_support import fail_deep_scan, run_workbench, saved_draft, write_checkpoint
+from workbench_test_support import fail_deep_scan, saved_draft, scan_command, write_checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_saved_results as saved
@@ -74,8 +74,6 @@ def test_stopped_publication_recovers_after_unicode_review_is_closed(
     coverage = json.loads((scan_dir / "coverage.json").read_text(encoding="utf-8"))
     assert {row["id"] for row in coverage["deferred"]} == {"scan-stopped"}
     manifest = (scan_dir / "scan-manifest.json").read_bytes()
-    recovered = run_workbench(
-        state, "recover-scan-results", "--scan-id", scan_id, environment=environment
-    )
+    recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert recovered["scan"]["resultsRecoveryNeeded"] is False
     assert (scan_dir / "scan-manifest.json").read_bytes() == manifest

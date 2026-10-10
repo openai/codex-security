@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
-from typing import Any, BinaryIO
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PurePosixPath
+from typing import Any, BinaryIO, Callable
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
+from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
+
+_WINDOWS = os.name == "nt"
 
 
 def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision: str) -> str:
@@ -70,69 +76,100 @@ def git_bytes(
     return completed.stdout if completed.returncode == 0 else None
 
 
-def git_blob_bytes(
+def git_blob_samples(
     target: Path,
     object_names: list[str],
     *,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
-) -> list[bytes | None]:
-    """Read raw blobs with NUL-delimited requests and size-framed responses."""
+) -> list[tuple[bytes, bool] | None]:
+    """Sample ordered blobs and classify all their bytes without buffering the batch."""
     if not object_names:
         return []
 
     request = b"\0".join(os.fsencode(name) for name in object_names) + b"\0"
-    completed = git_command(
-        target,
-        "cat-file",
-        "--batch",
-        "-z",
-        text=False,
-        input_data=request,
-        git_dir=git_dir,
-        work_tree=work_tree,
-    )
-    if completed.returncode != 0:
-        return [None] * len(object_names)
+    read_fd, write_fd = os.pipe()
+    with (
+        ThreadPoolExecutor(max_workers=1) as reader,
+        os.fdopen(read_fd, "rb") as output,
+        os.fdopen(write_fd, "wb") as sink,
+    ):
 
-    try:
-        return _decode_git_batch_blobs(completed.stdout, object_names)
-    except ValueError:
-        return [None] * len(object_names)
+        def read_samples() -> list[tuple[bytes, bool] | None]:
+            # Closing the reader also unblocks Git if framing is invalid.
+            with output:
+                return _read_git_batch_samples(output, object_names)
+
+        samples = reader.submit(read_samples)
+        try:
+            completed = git_command(
+                target,
+                "cat-file",
+                "--batch",
+                "-z",
+                text=False,
+                input_data=request,
+                git_dir=git_dir,
+                work_tree=work_tree,
+                stdout_file=sink,
+            )
+        finally:
+            # Git may fail before producing all requested records.
+            sink.close()
+        if completed.returncode != 0:
+            return [None] * len(object_names)
+        try:
+            return samples.result()
+        except ValueError:
+            return [None] * len(object_names)
 
 
-def _decode_git_batch_blobs(output: bytes, object_names: list[str]) -> list[bytes | None]:
-    """The lowercase -z protocol works on older Git and preserves path bytes."""
-    blobs: list[bytes | None] = []
-    offset = 0
+def _read_git_batch_samples(
+    output: BinaryIO, object_names: list[str]
+) -> list[tuple[bytes, bool] | None]:
+    """Read the older-Git-compatible -z protocol without buffering blob bodies."""
+    samples: list[tuple[bytes, bool] | None] = []
     for name in object_names:
-        # Failed lookups echo the complete input, which can itself contain LF.
-        failed = next(
-            (
-                record
-                for status in (b"missing", b"ambiguous")
-                if output.startswith(record := os.fsencode(name) + b" " + status + b"\n", offset)
-            ),
-            None,
-        )
-        if failed is not None:
-            offset += len(failed)
-            blobs.append(None)
+        header = output.readline()
+        raw_name = os.fsencode(name)
+        # Missing lookups echo the whole request, including any embedded newlines.
+        if header and raw_name.startswith(header):
+            header += output.read(len(raw_name) - len(header)) + output.readline()
+        if header in (raw_name + b" missing\n", raw_name + b" ambiguous\n"):
+            samples.append(None)
             continue
-        end = output.find(b"\n", offset)
-        if end < 0:
-            raise ValueError("missing batch header terminator")
-        fields = output[offset:end].split(b" ")
-        if len(fields) != 3:
+        fields = header.split(b" ")
+        if len(fields) != 3 or not header.endswith(b"\n"):
             raise ValueError("invalid batch header")
         size = int(fields[2])
-        offset = end + 1
-        end = offset + size
-        if size < 0 or output[end : end + 1] != b"\n":
-            raise ValueError("invalid batch object size or terminator")
-        blobs.append(output[offset:end] if fields[1] == b"blob" else None)
-        offset = end + 1
-    return blobs
+        if size < 0:
+            raise ValueError("invalid blob size")
+        # Consume non-blob objects too, so subsequent records stay aligned.
+        sample = _read_git_blob_sample(output, size)
+        samples.append(sample if fields[1] == b"blob" else None)
+    return samples
+
+
+def _read_git_blob_sample(output: BinaryIO, size: int) -> tuple[bytes, bool]:
+    sample_size = min(size, DEFAULT_PREVIEW_READ_BYTES)
+    sample = output.read(sample_size)
+    if len(sample) != sample_size:
+        raise ValueError("truncated blob")
+    binary = is_binary_sample(sample)
+    bom = sample[:2] if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else b""
+    remaining = size - sample_size
+    while remaining:
+        chunk_size = min(remaining, DEFAULT_PREVIEW_READ_BYTES)
+        chunk = output.read(chunk_size)
+        if len(chunk) != chunk_size:
+            raise ValueError("truncated blob")
+        # Even-sized reads keep UTF-16 code units aligned; preserve the original byte order.
+        if not binary:
+            binary = is_binary_sample(bom + chunk) if bom else b"\0" in chunk
+        remaining -= chunk_size
+    if output.read(1) != b"\n":
+        raise ValueError("missing blob terminator")
+    return (b"", True) if binary else (sample, False)
 
 
 def _protected_repository_root(target: Path) -> Path:
@@ -211,6 +248,7 @@ def git_command(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
     stdout_file: BinaryIO | None = None,
+    pathspec_environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -218,6 +256,8 @@ def git_command(
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
+    if pathspec_environment is not None:
+        environment.update(pathspec_environment)
     executable = trusted_git_executable(target)
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
@@ -256,6 +296,80 @@ def git_command(
         # any other failed Git probe so the target falls back to a directory snapshot.
         empty_output = "" if text else b""
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
+
+
+def candidate_source_lines(
+    target: Path,
+    diff_target: dict[str, str],
+    paths: list[str],
+    locations: list[str],
+    case_insensitive: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Resolve candidate sources in the same selected view as the diff inventory."""
+    from generate_rank_input import git_changed_paths
+
+    base, head = diff_target["baseRevision"], diff_target["headRevision"]
+    local = diff_target["kind"] == "working_tree"
+    changed = {
+        path.relative_to(target).as_posix(): status
+        for path, status in git_changed_paths(
+            target, base, head, "local-patch" if local else "revisions"
+        )
+    }
+    selected_names = set(changed)
+    aliases: dict[str, str | None] = {}
+    if case_insensitive:
+        if not local:
+            tree = git_command(target, "ls-tree", "-r", "-t", "-z", "--name-only", head, text=False)
+            tree.check_returncode()
+            selected_names.update(os.fsdecode(name) for name in tree.stdout.split(b"\0") if name)
+        for name in selected_names:
+            key = name.lower()
+            aliases[key] = None if key in aliases and aliases[key] != name else name
+    location_set = set(locations)
+    result: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    for raw in dict.fromkeys([*paths, *locations]):
+        path = PurePosixPath(raw)
+        if not raw or path.is_absolute() or ".." in path.parts or "\0" in raw:
+            raise ValueError("path: expected a repository-relative path without traversal")
+        name = path.as_posix()
+        if case_insensitive and name not in selected_names:
+            selected = aliases.get(name.lower(), name)
+            if selected is None:
+                result[raw] = {"error": "missing"}
+                continue
+            name = selected
+        deleted = changed.get(name) == "D"
+        if local and not deleted:
+            continue
+        revision = base if deleted else head
+        if name not in changed:
+            entry = git_command(target, "ls-tree", "-z", revision, "--", name, text=False)
+            entry.check_returncode()
+            metadata = next(
+                (
+                    row.partition(b"\t")[0].split()
+                    for row in entry.stdout.split(b"\0")
+                    if row.partition(b"\t")[2] == os.fsencode(name)
+                ),
+                [],
+            )
+            if not metadata or not metadata[0].startswith(b"100"):
+                result[raw] = {"error": "not_file" if metadata else "missing"}
+                continue
+        source: dict[str, Any] = {"path": name}
+        if raw in location_set:
+            if name not in counts:
+                blob = git_command(target, "cat-file", "blob", f"{revision}:{name}", text=False)
+                blob.check_returncode()
+                data = blob.stdout
+                counts[name] = len(re.split(rb"\r\n|[\r\n]", data)) - int(
+                    not data or data.endswith((b"\r", b"\n"))
+                )
+            source["lineCount"] = counts[name]
+        result[raw] = source
+    return result
 
 
 def _update_digest_field_header(digest: Any, label: bytes, value_size: int) -> None:
@@ -417,11 +531,17 @@ def git_worktree_context(target: Path) -> tuple[Path, str]:
     if root is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
     repository = Path(root).resolve()
+    prefix = git_bytes(target, "rev-parse", "--show-prefix")
+    if prefix is None:
+        raise SystemExit("Could not inspect the selected Git working tree.")
+    pathspec = os.fsdecode(prefix.removesuffix(b"\n")).removesuffix("/") or "."
+    scoped = (repository / pathspec).resolve()
     try:
-        relative = target.resolve().relative_to(repository)
-    except ValueError as exc:
+        if not scoped.is_relative_to(repository) or not scoped.samefile(target):
+            raise ValueError("Git working tree does not contain the selected target")
+    except (OSError, ValueError) as exc:
         raise SystemExit("Scan target must stay inside its Git working tree.") from exc
-    return repository, relative.as_posix() or "."
+    return repository, pathspec
 
 
 def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
@@ -440,7 +560,8 @@ def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
             ) from exc
         if mode != b"160000":
             continue
-        entries.append((repository / os.fsdecode(raw_path), object_id.decode("ascii")))
+        relative_path = Path(os.fsdecode(raw_path)).relative_to(pathspec)
+        entries.append((target / relative_path, object_id.decode("ascii")))
     return tuple(entries)
 
 
@@ -455,7 +576,7 @@ def require_clean_submodule_worktrees(target: Path) -> None:
             continue
         root = git_output(submodule, "rev-parse", "--show-toplevel")
         try:
-            is_initialized = root is not None and Path(root).resolve() == submodule.resolve()
+            is_initialized = root is not None and Path(root).samefile(submodule)
         except OSError:
             is_initialized = False
         if not is_initialized:
@@ -491,6 +612,24 @@ def clean_worktree_content_digest() -> str:
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
+def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str, bool]) -> Path:
+    # The index can retain descendants of a directory replaced by a link.
+    # Keep the link's identity in snapshots without following its contents.
+    prefix = target
+    for component in path.relative_to(target).parts[:-1]:
+        prefix /= component
+        key = str(prefix)
+        if key not in linked_prefixes:
+            metadata = prefix.lstat()
+            linked_prefixes[key] = bool(
+                stat.S_ISLNK(metadata.st_mode)
+                or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            )
+        if linked_prefixes[key]:
+            return prefix
+    return path
+
+
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
@@ -499,7 +638,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     scope = repository / pathspec
     scope_depth = len(Path(pathspec).parts)
     matching_prefixes: dict[str, bool] = {}
-    junction_prefixes: dict[str, bool] = {}
+    linked_prefixes: dict[str, bool] = {}
     listing_args: list[str] = []
     inventory_pathspec = pathspec
     if scope_depth:
@@ -519,6 +658,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         "--cached",
         "--others",
         "--exclude-standard",
+        "-t",
         "-z",
         "--",
         inventory_pathspec,
@@ -526,9 +666,10 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
     paths: list[Path] = []
-    for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
-        relative = Path(os.fsdecode(raw_path))
-        path = repository / relative
+    junctions: dict[tuple[int, int], Path] = {}
+    nested_worktrees: set[tuple[int, int]] = set()
+    for entry in (entry for entry in listed.split(b"\0") if entry):
+        relative = Path(os.fsdecode(entry[2:]))
         if scope_depth:
             if len(relative.parts) <= scope_depth:
                 continue
@@ -545,23 +686,19 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             # POSIX volumes; WindowsPath equality also folds distinct names.
             if not matching_prefixes[key]:
                 continue
-            path = scope.joinpath(*relative.parts[scope_depth:])
+        path = target.joinpath(*relative.parts[scope_depth:])
         try:
-            # Git can list descendants of a junction; snapshots retain the link.
-            prefix = scope
-            for component in path.relative_to(scope).parts[:-1]:
-                prefix /= component
-                key = str(prefix)
-                if key not in junction_prefixes:
-                    junction_prefixes[key] = bool(
-                        getattr(prefix.lstat(), "st_reparse_tag", 0) & 0x20000000
-                    )
-                if junction_prefixes[key]:
-                    path = prefix
-                    break
+            path = _directory_link_boundary(target, path, linked_prefixes)
             metadata = path.lstat()
-        except FileNotFoundError:
-            # The index can retain a path that was staged and then deleted.
+        except (FileNotFoundError, NotADirectoryError):
+            # The index can retain deleted paths, including directory-to-file replacements.
+            continue
+        if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+            # Case aliases share the link's identity. Prefer the stable index
+            # spelling over untracked descendants added in its external target.
+            identity = metadata.st_dev, metadata.st_ino
+            if entry[:1] != b"?" or identity not in junctions:
+                junctions[identity] = path
             continue
         paths.append(path)
         if (
@@ -570,33 +707,118 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         ):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
-        if (
-            nested_repository_root is not None
-            and Path(nested_repository_root).resolve() == path.resolve()
-        ):
+        if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
             nested_paths = git_directory_snapshot_paths(path)
             if nested_paths is not None:
+                nested_worktrees.add((metadata.st_dev, metadata.st_ino))
                 paths.extend(nested_paths)
                 continue
         paths.extend(source_directory_snapshot_paths(path))
+
+    if _WINDOWS:
+        # Git omits empty untracked directories from its file listing. Inventory
+        # junction identities independently of whether their targets contain files.
+        git_directory = git_output(target, "rev-parse", "--absolute-git-dir")
+        if git_directory is None:
+            raise SystemExit("Could not inspect the selected Git working tree.")
+        directories = git_bytes(
+            target,
+            "--no-literal-pathspecs",
+            "ls-files",
+            "--others",
+            "--directory",
+            "--exclude-standard",
+            "-z",
+            "--",
+            # Seed only eligible descendants, never the selected directory itself.
+            ":(glob)**/*/",
+            git_dir=Path(git_directory),
+            work_tree=repository,
+        )
+        if directories is None:
+            raise SystemExit("Could not inspect directories in the selected Git working tree.")
+        pending = [target / os.fsdecode(path) for path in directories.split(b"\0") if path]
+        while pending:
+            children: list[Path] = []
+            for path in pending:
+                try:
+                    path = _directory_link_boundary(target, path, linked_prefixes)
+                    metadata = path.lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+                    junctions.setdefault((metadata.st_dev, metadata.st_ino), path)
+                elif stat.S_ISLNK(metadata.st_mode):
+                    paths.append(path)
+                elif stat.S_ISDIR(metadata.st_mode):
+                    if (metadata.st_dev, metadata.st_ino) in nested_worktrees:
+                        # Its own inventory already applied its repository exclusions.
+                        continue
+                    try:
+                        children.extend(path.iterdir())
+                    except PermissionError:
+                        # Match Git's treatment of unreadable descendants.
+                        continue
+            candidates: dict[bytes, Path] = {}
+            for path in children:
+                if os.path.normcase(path.name) == ".git":
+                    continue
+                try:
+                    metadata = path.lstat()
+                except (FileNotFoundError, NotADirectoryError, PermissionError):
+                    continue
+                if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+                    continue
+                relative = (Path(pathspec) / path.relative_to(target)).as_posix()
+                candidates[os.fsencode(relative)] = path
+            if not candidates:
+                break
+            # Filter a directory level at once, retaining the outer repository context.
+            ignored = git_command(
+                repository,
+                "--no-literal-pathspecs",
+                "check-ignore",
+                "-z",
+                "--stdin",
+                text=False,
+                input_data=b"\0".join(candidates) + b"\0",
+                git_dir=Path(git_directory),
+                work_tree=repository,
+                pathspec_environment={
+                    "GIT_NOGLOB_PATHSPECS": "0",
+                },
+            )
+            if ignored.returncode not in (0, 1):
+                raise SystemExit("Could not inspect directories in the selected Git working tree.")
+            excluded = set(ignored.stdout.split(b"\0"))
+            pending = [path for raw, path in candidates.items() if raw not in excluded]
+    paths.extend(junctions.values())
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 
-def source_directory_snapshot_paths(target: Path) -> list[Path]:
+def source_directory_snapshot_paths(
+    target: Path,
+    excluded: tuple[Path, ...] = (),
+    *,
+    onerror: Callable[[OSError], None] | None = None,
+) -> list[Path]:
     paths: list[Path] = []
-    pending = [target]
-    while pending:
-        for path in pending.pop().iterdir():
-            if path.name == ".git":
+    for directory, directories, files in os.walk(
+        target, topdown=True, followlinks=False, onerror=onerror
+    ):
+        parent = Path(directory)
+        for name in directories[:]:
+            path = parent / name
+            if name == ".git" or path in excluded:
+                directories.remove(name)
                 continue
             paths.append(path)
-            metadata = path.lstat()
             # Name-surrogate reparse points include Windows directory junctions.
-            if (
-                stat.S_ISDIR(metadata.st_mode)
-                and not getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-            ):
-                pending.append(path)
+            if getattr(path.lstat(), "st_reparse_tag", 0) & 0x20000000:
+                directories.remove(name)
+        paths.extend(
+            parent / name for name in files if name != ".git" and parent / name not in excluded
+        )
     return sorted(paths)
 
 
@@ -606,14 +828,14 @@ def directory_content_digest(
     excluded: tuple[Path, ...] = (),
     include_ignored: bool = False,
 ) -> str:
-    excluded_relative = []
-    for path in excluded:
-        try:
-            excluded_relative.append(path.relative_to(target))
-        except ValueError:
-            continue
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    excluded_relative = [
+        path.relative_to(target) for path in excluded if path.is_relative_to(target)
+    ]
     paths = (
-        source_directory_snapshot_paths(target)
+        source_directory_snapshot_paths(target, excluded, onerror=raise_walk_error)
         if include_ignored
         else git_directory_snapshot_paths(target)
     )
@@ -623,10 +845,7 @@ def directory_content_digest(
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:
         relative_path = path.relative_to(target)
-        if any(
-            relative_path == excluded_path or excluded_path in relative_path.parents
-            for excluded_path in excluded_relative
-        ):
+        if any(relative_path.is_relative_to(path) for path in excluded_relative):
             continue
         try:
             metadata = path.lstat()
@@ -682,12 +901,9 @@ def directory_snapshot_regular_file_count(target: Path) -> int:
 def copy_directory_excluding(
     source: Path, destination: Path, excluded: tuple[Path, ...]
 ) -> list[Path]:
-    excluded_relative = []
-    for path in excluded:
-        try:
-            excluded_relative.append(path.relative_to(source))
-        except ValueError:
-            continue
+    excluded_relative = [
+        path.relative_to(source) for path in excluded if path.is_relative_to(source)
+    ]
 
     junctions: list[Path] = []
 
@@ -728,7 +944,9 @@ def restore_directory_junctions(source: Path, destination: Path, junctions: list
         copy_directory_junction(source / path, placeholder)
 
 
-def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:
+def copy_git_worktree_files(
+    source: Path, destination: Path, excluded: tuple[Path, ...]
+) -> tuple[Path, list[Path]]:
     repository, pathspec = git_worktree_context(source)
     listed = git_bytes(
         repository,
@@ -745,21 +963,35 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
     excluded_relative = []
     for path in excluded:
         try:
-            excluded_relative.append(path.relative_to(repository))
+            relative_path = path.relative_to(repository)
         except ValueError:
-            continue
+            try:
+                relative_path = Path(pathspec) / path.relative_to(source)
+            except ValueError:
+                continue
+        excluded_relative.append(relative_path)
     destination.mkdir()
+    junctions: set[Path] = set()
+    nested_worktrees: list[Path] = []
+    linked_prefixes: dict[str, bool] = {}
+    copied: set[Path] = set()
     for raw_path in sorted(path for path in listed.split(b"\0") if path):
         relative = Path(os.fsdecode(raw_path))
-        if any(
-            relative == excluded_path or excluded_path in relative.parents
-            for excluded_path in excluded_relative
-        ):
+        if any(relative.is_relative_to(path) for path in excluded_relative):
             continue
         source_path = repository / relative
         try:
+            if _WINDOWS:
+                source_path = _directory_link_boundary(repository, source_path, linked_prefixes)
+                relative = source_path.relative_to(repository)
             metadata = source_path.lstat()
         except FileNotFoundError:
+            continue
+        if relative in copied:
+            continue
+        copied.add(relative)
+        if stat.S_ISDIR(metadata.st_mode) and getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+            junctions.add(relative)
             continue
         destination_path = destination / relative
         destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -771,13 +1003,30 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
             nested_git_dir = git_output(source_path, "rev-parse", "--absolute-git-dir")
             if nested_git_dir is None:
                 raise SystemExit(f"Could not inspect nested Git working tree: {relative}")
-            copy_git_worktree_files(source_path, destination_path, excluded)
+            _, nested_junctions = copy_git_worktree_files(source_path, destination_path, excluded)
+            junctions.update(relative / path for path in nested_junctions)
+            nested_worktrees.append(relative)
             (destination_path / ".git").write_text(f"gitdir: {nested_git_dir}\n", encoding="utf-8")
         else:
             raise SystemExit(f"Unsupported Git working-tree file type: {relative}")
+    if _WINDOWS:
+        for path in git_directory_snapshot_paths(source) or []:
+            relative = Path(pathspec) / path.relative_to(source)
+            if any(
+                relative.is_relative_to(root) for root in [*excluded_relative, *nested_worktrees]
+            ):
+                continue
+            metadata = path.lstat()
+            if (
+                stat.S_ISDIR(metadata.st_mode)
+                and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            ):
+                junctions.add(relative)
+    for path in junctions:
+        (destination / path).mkdir(parents=True, exist_ok=True)
     copied_target = destination if pathspec == "." else destination / pathspec
     copied_target.mkdir(parents=True, exist_ok=True)
-    return copied_target
+    return copied_target, sorted(junctions)
 
 
 def git_revision(target: Path) -> str:
@@ -794,7 +1043,7 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
         and is_worktree
         and revision is not None
         and repository_root is not None
-        and Path(repository_root).resolve() == target
+        and Path(repository_root).samefile(target)
     )
     metadata: dict[str, Any] = {
         "hasHead": revision is not None,

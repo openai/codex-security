@@ -4,12 +4,15 @@ Windows does not implement Python's descriptor-relative ``dir_fd`` APIs or
 ``O_NOFOLLOW``.  This module provides the three operations needed by the scan
 finalizer without falling back to check-then-use path validation.
 
-The implementation opens every directory with ``FILE_FLAG_OPEN_REPARSE_POINT``
-and rejects all reparse points, including junctions.  Directory handles remain
-open without ``FILE_SHARE_DELETE`` for the full operation, which prevents an
+Scan-local reads, writes, and deletes open every directory with
+``FILE_FLAG_OPEN_REPARSE_POINT`` and reject all reparse points, including junctions.
+Directory handles remain open without ``FILE_SHARE_DELETE`` for the full
+operation, which prevents an
 already-validated ancestor from being renamed or replaced during a read,
 write, or delete.  Writes rename the exact temporary-file handle into place so
 an attacker cannot substitute another file at the temporary name.
+
+The snapshot helper copies junction metadata without opening the link target.
 
 Importing this module and comparing streams work on every platform. Filesystem
 operations raise ``WindowsScanLocalFileError`` outside Windows.
@@ -704,6 +707,7 @@ def atomic_write(
                 try:
                     _mark_handle_for_deletion(temp_handle.value)
                 except OSError:
+                    # Cleanup must not replace the original write or rename failure.
                     pass
                 raise
 

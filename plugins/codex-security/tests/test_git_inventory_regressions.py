@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -31,19 +33,19 @@ def test_blob_batch_preserves_following_blobs_after_tree_and_commit(tmp_path: Pa
     target = tmp_path / "target"
     initialize_git_repository(target)
     source = target / ("fixture.py" if os.name == "nt" else "line\nbreak.py")
-    source.write_bytes(b"print('fixture')\n\0payload\n")
+    source.write_bytes(b"print('fixture')\npayload\n")
     git(target, "add", "--", source.name)
     git(target, "commit", "-qm", "Add unusual fixture")
-    reader = load_script("workbench_target").git_blob_bytes
+    reader = load_script("workbench_target").git_blob_samples
     assert reader(
         target,
         ["HEAD^{tree}", "HEAD", f"HEAD:{source.name}", "HEAD:missing\nfile", "HEAD:README.md"],
     ) == [
         None,
         None,
-        source.read_bytes(),
+        (source.read_bytes(), False),
         None,
-        b"fixture\n",
+        (b"fixture\n", False),
     ]
 
 
@@ -59,6 +61,30 @@ def test_plain_directory_inventory_ignores_nested_git_metadata(tmp_path: Path) -
     (nested / ".git" / "runtime-cache").write_text("bookkeeping\n")
     assert api.directory_content_digest(target) == before
     (nested / "README.md").write_text("changed source\n")
+    assert api.directory_content_digest(target) != before
+
+
+def test_git_directory_inventory_keeps_nested_bare_repository_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    nested = target / "nested.git"
+    git(target, "init", "--bare", "--quiet", str(nested))
+    (target / ".gitignore").write_text("nested.git/ignored-cache/\n")
+    ignored = nested / "ignored-cache"
+    ignored.mkdir()
+    (ignored / "output.txt").write_text("ignored fixture\n")
+    api = load_script("workbench_target")
+    monkeypatch.setattr(api, "_WINDOWS", True)
+
+    paths = api.git_directory_snapshot_paths(target)
+
+    assert nested / "HEAD" in paths
+    assert nested / "config" in paths
+    assert all(ignored not in path.parents for path in paths)
+    before = api.directory_content_digest(target)
+    (nested / "description").write_text("changed bare repository fixture\n")
     assert api.directory_content_digest(target) != before
 
 
@@ -118,7 +144,8 @@ def test_non_utf8_git_subject_and_refs_remain_inspectable(tmp_path: Path) -> Non
     try:
         payload = {"id": "fixture", "action": "source", "repository": str(target)}
         before = api.finding_workflow(connection, payload, "2026-01-01T00:00:00Z")["source"]
-        git(target, "update-ref", os.fsdecode(b"refs/heads/caf\xe9"), oid)
+        # Packed refs preserve raw bytes without requiring a non-UTF-8 filename.
+        (target / ".git" / "packed-refs").write_bytes(oid.encode() + b" refs/heads/caf\xe9\n")
         after = api.finding_workflow(connection, payload, "2026-01-01T00:00:00Z")["source"]
         assert after["refsDigest"] != before["refsDigest"]
     finally:
@@ -178,6 +205,27 @@ def test_committed_binary_detection_agrees_beyond_preview_window(tmp_path: Path)
     ]
 
 
+def test_disabled_git_source_snapshot_does_not_inspect_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = load_script("workbench_finding_workflows")
+    (tmp_path / "source.py").write_text("print('fixture')\n")
+
+    def unexpected_git(*args, **kwargs):
+        pytest.fail("disabled Git must not inspect revisions or refs")
+
+    monkeypatch.setattr(api, "git_revision", unexpected_git)
+    monkeypatch.setattr(api, "git_bytes", unexpected_git)
+    with closing(sqlite3.connect(":memory:")) as connection:
+        source = api.finding_workflow(
+            connection,
+            {"id": "fixture", "action": "source", "repository": str(tmp_path), "gitDisabled": True},
+            "2026-01-01T00:00:00Z",
+        )["source"]
+    assert source["revision"] == "unversioned"
+    assert source["refsDigest"] == hashlib.sha256(b"").hexdigest()
+
+
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])
 @pytest.mark.parametrize("replacement", ["symlink", "gitlink"])
 def test_diff_inventories_exclude_non_file_type_changes(
@@ -223,7 +271,6 @@ def test_diff_inventories_exclude_non_file_type_changes(
             preview_bytes=1024,
         )
     )
-    assert inventory_path.read_text().splitlines() == ["visible.py"]
-    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == [
-        "visible.py"
-    ]
+    expected = [".gitmodules", "visible.py"] if replacement == "gitlink" else ["visible.py"]
+    assert inventory_path.read_text().splitlines() == expected
+    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == expected
