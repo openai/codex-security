@@ -13,7 +13,9 @@ from test_workbench_standard_deep_results import (
     write_saved_parent,
 )
 from workbench_test_support import (
+    fail_deep_scan,
     preserve_scan_results,
+    run_workbench,
     saved_discovery_worker,
     saved_draft,
     write_checkpoint,
@@ -69,6 +71,166 @@ def recover(root: Path, module, workers, frozen=None):
     )
     assert result is not None
     return result
+
+
+@pytest.mark.parametrize("field", ["disposition", "completeness"])
+def test_malformed_coverage_does_not_interrupt_saved_evidence(
+    tmp_path: Path, saved_results, field: str
+):
+    draft = saved_draft("identity-scan", deferred=[{"id": "review", "reason": "Review remains."}])
+    if field == "disposition":
+        draft["coverage"]["surfaces"] = [
+            {"id": "review", "candidateId": "review", "disposition": ["rejected"]}
+        ]
+    else:
+        draft["coverage"]["completeness"] = ["complete"]
+    write_saved_parent(tmp_path, draft, 100)
+    worker = save_worker(tmp_path, saved_results, "reviewer", [], draft)
+    result = recover(tmp_path, saved_results, [worker])
+    assert any(row["id"] == "review" for row in result[2]["deferred"])
+
+
+def test_missing_parent_identity_is_identical_on_frozen_replay(tmp_path: Path, saved_results):
+    finding = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic review finding",
+        "summary": "Retain the saved result.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    draft = saved_draft("identity-scan", findings=[finding])
+    write_saved_parent(tmp_path, draft, 100)
+    first = recover(tmp_path, saved_results, [])
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (tmp_path / name).unlink()
+    replay = recover(tmp_path, saved_results, [], first[0]["scan"]["preservedSources"])
+    assert len(first[1]["findings"]) == len(replay[1]["findings"]) == 1
+    assert first[1]["findings"][0]["identity"] == replay[1]["findings"][0]["identity"]
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("saved_anchor", ["stable-anchor", 42])
+@pytest.mark.parametrize("explicit_end_line", [False, True])
+def test_missing_parent_identity_reuses_established_checkpoint(
+    tmp_path: Path, saved_results, stopped, saved_anchor, explicit_end_line
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+    from workbench_test_support import saved_binding
+
+    finding = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic review finding",
+        "summary": "Retain the saved result.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    checkpoint = write_checkpoint(
+        tmp_path / "checkpoints",
+        saved_draft(
+            "identity-scan",
+            complete=True,
+            findings=[{**finding, "identity": {"anchor": saved_anchor}}],
+        ),
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    if explicit_end_line:
+        finding["locations"][0]["endLine"] = 1
+    write_saved_parent(
+        tmp_path, saved_draft("identity-scan", complete=True, findings=[finding]), 200
+    )
+    binding = saved_binding()
+    binding["target"] = {
+        "kind": "git_revision",
+        "targetId": "synthetic",
+        "displayName": "test",
+        "revision": "head",
+    }
+    warnings = []
+    documents = saved_results.merge_saved_results(
+        tmp_path, "identity-scan", binding, [], warnings, stopped=stopped, reason="interrupted"
+    )
+    documents[0]["scan"].update(id="identity-scan", target=binding["target"])
+    documents[1]["scanId"] = "identity-scan"
+    _recover_unsealed_findings(
+        documents[0],
+        documents[1],
+        Path(__file__).resolve().parents[1] / "schemas",
+        tmp_path,
+        warnings,
+    )
+    expected = saved_anchor if isinstance(saved_anchor, str) else "synthetic-review-finding"
+    assert [row["identity"] for row in documents[1]["findings"]] == [{"anchor": expected}], warnings
+
+
+@pytest.mark.parametrize("artifacts", ["omitted", None, []])
+@pytest.mark.parametrize("outcome", ["failed", "canceled"])
+def test_empty_artifact_envelope_remains_a_recoverable_draft(tmp_path: Path, artifacts, outcome):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    write_saved_parent(
+        scan_dir,
+        saved_draft(scan_id, deferred=[{"id": "review", "reason": "Review remains."}]),
+        100,
+    )
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if artifacts != "omitted":
+        manifest["scan"]["artifacts"] = artifacts
+    manifest_path.write_text(json.dumps(manifest))
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan_id,
+        "--artifact-path",
+        "artifacts/review.txt",
+        input_text="Synthetic review receipt.",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    assert (scan_dir / "artifacts/review.txt").read_text() == "Synthetic review receipt."
+    if outcome == "failed":
+        fail_deep_scan(state, codex_home, scan_id)
+    else:
+        run_workbench(
+            state,
+            "cancel-scan",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+    sealed = json.loads(manifest_path.read_text())
+    assert sealed["scan"]["status"] == outcome
+    assert sealed["scan"]["sealedAt"]
+    original = manifest_path.read_bytes()
+    if outcome == "failed":
+        run_workbench(
+            state,
+            "recover-scan-results",
+            "--scan-id",
+            scan_id,
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+    else:
+        run_workbench(
+            state,
+            "preserve-scan-results",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+    assert manifest_path.read_bytes() == original
 
 
 @pytest.mark.parametrize("reason", ["Review remains.", "Unicode review: é \ud800"])
@@ -592,3 +754,465 @@ def test_legacy_summary_stays_pending_after_an_explicit_closure(
             {key: value for key, value in row.items() if key != "id"} == summary for row in pending
         )
     assert replay[2] == first[2]
+
+
+@pytest.mark.parametrize("same_title", [False, True])
+def test_worker_local_candidates_remain_distinct_on_frozen_recovery(
+    tmp_path, saved_results, same_title
+):
+    finding = {
+        "ruleId": "fixture.review",
+        "title": "First review",
+        "summary": "Retain the saved result.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+    }
+    workers = [
+        save_worker(
+            tmp_path,
+            saved_results,
+            worker,
+            [],
+            saved_draft("identity-scan", findings=[{**finding, "title": title}]),
+        )
+        for worker, title in [
+            ("reviewer-a", "First review"),
+            ("reviewer-b", "First review" if same_title else "Second review"),
+        ]
+    ]
+    documents = recover(tmp_path, saved_results, workers)
+    replay = recover(tmp_path, saved_results, workers, documents[0]["scan"]["preservedSources"])
+    for result in (documents, replay):
+        rows = result[1]["findings"]
+        assert len(rows) == 2
+        assert {row["provenance"]["workerId"] for row in rows} == {"reviewer-a", "reviewer-b"}
+        assert len({json.dumps(row["identity"], sort_keys=True) for row in rows}) == 2
+    assert documents[1] == replay[1]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("revised", [False, True])
+def test_recovery_finalization_coalesces_repeated_authored_reports(
+    tmp_path, saved_results, revised
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Existing report",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+        "identity": {"anchor": "shared"},
+        "extensions": {"reportId": "report-1"},
+    }
+    latest = (
+        {
+            **first,
+            "summary": "Synthetic evidence with additional detail.",
+            "severity": {"level": "high"},
+        }
+        if revised
+        else first
+    )
+    draft = saved_draft("identity-scan", findings=[first, latest])
+    worker = save_worker(tmp_path, saved_results, "reviewer", [draft], draft)
+    manifest, findings, _ = recover(tmp_path, saved_results, [worker])
+    manifest["scan"]["id"] = "identity-scan"
+    findings["scanId"] = "identity-scan"
+    _recover_unsealed_findings(
+        manifest, findings, Path(__file__).resolve().parents[1] / "schemas", tmp_path, []
+    )
+    assert len(findings["findings"]) == 1
+    assert findings["findings"][0]["identity"] == first["identity"]
+    assert findings["findings"][0]["summary"] == latest["summary"]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("identifier", ["reportId", "ledgerRowId"])
+@pytest.mark.parametrize("saved_result", [False, True])
+def test_recovery_finalization_preserves_distinct_reports_at_a_revised_location(
+    tmp_path, saved_results, identifier, saved_result
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Existing report",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 2}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+        "identity": {"anchor": "shared"},
+    }
+    independent = {
+        **first,
+        "title": "Independent report",
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "provenance": {"source": "local_plugin"},
+        "extensions": {identifier: "report-2"},
+    }
+    revised = {
+        **first,
+        "locations": independent["locations"],
+        "extensions": {identifier: "report-1"},
+    }
+    del revised["identity"]
+    drafts = [
+        saved_draft("identity-scan", findings=[first]),
+        saved_draft("identity-scan", findings=[independent, revised]),
+    ]
+    output = tmp_path / "reviewer"
+    for sequence, draft in enumerate(drafts, 1):
+        path = write_checkpoint(output / "checkpoints", draft)
+        os.utime(path, ns=(sequence * 1_000_000_000, sequence * 1_000_000_000))
+    if saved_result:
+        result = output / "result.json"
+        result.write_text(json.dumps(drafts[-1]))
+        os.utime(result, ns=(3_000_000_000, 3_000_000_000))
+    worker = saved_discovery_worker(output, "reviewer")
+    sources = {path: path.read_bytes() for path in output.rglob("*.json")}
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    for manifest, findings, _ in (documents, replay):
+        # The moved checkpoint revises the existing report without adding a third row.
+        assert len(findings["findings"]) == 2
+        manifest["scan"]["id"] = "identity-scan"
+        findings["scanId"] = "identity-scan"
+        warnings = []
+        _recover_unsealed_findings(
+            manifest,
+            findings,
+            Path(__file__).resolve().parents[1] / "schemas",
+            tmp_path,
+            warnings,
+        )
+        rows = findings["findings"]
+        assert {row["extensions"][identifier] for row in rows} == {"report-1", "report-2"}, warnings
+        assert len(rows) == 2
+        assert all(row["locations"] == independent["locations"] for row in rows)
+        assert len({json.dumps(row["identity"], sort_keys=True) for row in rows}) == 2
+        existing = next(row for row in rows if row["extensions"][identifier] == "report-1")
+        assert any(
+            previous["locations"] == first["locations"]
+            for previous in existing["provenance"]["previousFindings"]
+        )
+    assert documents[1] == replay[1]
+    assert all(path.read_bytes() == original for path, original in sources.items())
+
+
+@pytest.mark.parametrize("metadata", ["extensions", "provenance"])
+@pytest.mark.parametrize("identifier", ["reportId", "ledgerRowId"])
+def test_worker_report_metadata_enrichment_matches_published_identity(
+    tmp_path, saved_results, metadata, identifier
+):
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic report",
+        "summary": "Retain the saved result.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+        "extensions": {identifier: "report-1"},
+    }
+    second = {**first, metadata: {**first[metadata], "candidateId": "candidate-1"}}
+    drafts = [saved_draft("identity-scan", findings=[value]) for value in (first, second)]
+    worker = save_worker(tmp_path, saved_results, "reviewer", drafts, drafts[1])
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    for result in (documents, replay):
+        assert len(result[1]["findings"]) == 1
+        assert result[1]["findings"][0]["identity"] == {
+            "anchor": "candidate-1",
+            "instance": "report-1",
+        }
+    assert documents[1] == replay[1]
+
+
+@pytest.mark.parametrize("metadata", ["provenance", "extensions"])
+def test_parent_represents_worker_versions_before_candidate_enrichment(
+    tmp_path, saved_results, metadata
+):
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic review",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    latest = {**first, metadata: {**first.get(metadata, {}), "candidateId": "candidate-1"}}
+    reduced = {
+        **latest,
+        "summary": "Consolidated evidence.",
+        "provenance": {
+            **latest["provenance"],
+            "sourceFindingIds": ["reviewer:0"],
+            "sourceFindings": [{"id": "reviewer:0", "finding": latest}],
+        },
+    }
+    parent = {**reduced, "identity": {"anchor": "candidate-1"}}
+    write_saved_parent(
+        tmp_path, saved_draft("identity-scan", findings=[parent], complete=True), 2000
+    )
+    worker = save_worker(
+        tmp_path,
+        saved_results,
+        "reviewer",
+        [saved_draft("identity-scan", findings=[first])],
+        saved_draft("identity-scan", findings=[latest], complete=True),
+    )
+    output = tmp_path / "reducer"
+    output.mkdir()
+    draft = {"scanId": "identity-scan", "complete": True, "findings": [reduced]}
+    result = output / "result.json"
+    result.write_text(json.dumps(draft))
+    os.utime(result, ns=(1500, 1500))
+    checkpoint = write_checkpoint(output / "checkpoints", draft)
+    os.utime(checkpoint, ns=(1500, 1500))
+    reducer = {
+        "id": "reducer",
+        "kind": "dedup",
+        "status": "succeeded",
+        "completed_at": "2026-05-31T18:08:00Z",
+        "artifact_dir": str(output),
+        "result_manifest_path": str(result),
+        "attempt": 1,
+    }
+    documents = recover(tmp_path, saved_results, [worker, reducer])
+    replay = recover(
+        tmp_path, saved_results, [worker, reducer], documents[0]["scan"]["preservedSources"]
+    )
+    for recovered in (documents, replay):
+        assert len(recovered[1]["findings"]) == 1
+        assert recovered[1]["findings"][0]["summary"] == "Consolidated evidence."
+        assert recovered[1]["findings"][0]["identity"] == {"anchor": "candidate-1"}
+    assert documents[1] == replay[1]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("reversed_rows", [False, True])
+@pytest.mark.parametrize("revised_identity", ["explicit", "implicit", "anonymous"])
+def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
+    tmp_path, saved_results, reversed_rows, revised_identity
+):
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic first review",
+        "summary": "Original first evidence.",
+        "identity": {"anchor": "shared-review", "instance": "first"},
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+    }
+    sibling = {
+        **{key: value for key, value in first.items() if key != "identity"},
+        "title": "Independent review",
+        "summary": "Independent evidence remains active.",
+    }
+    if revised_identity == "anonymous":
+        first.pop("identity")
+    original, unchanged = (first, sibling) if revised_identity == "explicit" else (sibling, first)
+    revised = {**original, "title": "Revised review", "summary": "Revised evidence."}
+    rows = [first, sibling]
+    latest_rows = [revised, sibling] if revised_identity == "explicit" else [first, revised]
+    if reversed_rows:
+        rows.reverse()
+        latest_rows.reverse()
+    initial = saved_draft("identity-scan", findings=rows)
+    latest = saved_draft("identity-scan", findings=latest_rows, complete=True)
+    worker = save_worker(tmp_path, saved_results, "reviewer", [initial, latest], initial)
+    output = Path(worker["artifact_dir"])
+    # Publication stopped after selecting the reconciled checkpoint, before replacing result.json.
+    os.utime(output / "result.json", ns=(100, 100))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": f"{saved_results._digest(latest)}.json"}))
+    os.utime(head, ns=(300, 300))
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    for result in (documents, replay):
+        findings = result[1]["findings"]
+        assert len(findings) == (3 if revised_identity == "anonymous" else 2)
+        retained = next(row for row in findings if row["title"] == revised["title"])
+        assert retained["summary"] == revised["summary"]
+        if revised_identity == "explicit":
+            assert retained["identity"] == first["identity"]
+        assert any(row["summary"] == unchanged["summary"] for row in findings)
+        if revised_identity == "anonymous":
+            assert any(row["summary"] == original["summary"] for row in findings)
+        else:
+            assert any(
+                row["summary"] == original["summary"]
+                for row in retained["provenance"]["previousFindings"]
+            )
+    assert documents[1] == replay[1]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("identifier", ["reportId", "ledgerRowId"])
+@pytest.mark.parametrize("reversed_rows", [False, True])
+@pytest.mark.parametrize("with_independent", [False, True])
+def test_claimed_report_does_not_resolve_an_independent_recovery_match(
+    tmp_path, saved_results, identifier, reversed_rows, with_independent
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+
+    first = {
+        "ruleId": "fixture.review",
+        "title": "First independent report",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+        "extensions": {identifier: "report-1"},
+    }
+    independent = {
+        **{key: value for key, value in first.items() if key != "extensions"},
+        "title": "Second independent report",
+        "locations": [{"path": "src/example.py", "startLine": 2}],
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-2"},
+    }
+    latest = {
+        **first,
+        "title": "New report at second location",
+        "locations": independent["locations"],
+        "identity": {"anchor": "new-report"},
+    }
+    initial_rows = [first, independent] if with_independent else [first]
+    latest_rows = [first, latest]
+    if reversed_rows:
+        initial_rows.reverse()
+        latest_rows.reverse()
+    initial = saved_draft("identity-scan", findings=initial_rows)
+    terminal = saved_draft("identity-scan", findings=latest_rows, complete=True)
+    worker = save_worker(tmp_path, saved_results, "reviewer", [initial, terminal], initial)
+    output = Path(worker["artifact_dir"])
+    os.utime(output / "result.json", ns=(150, 150))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": f"{saved_results._digest(initial)}.json"}))
+    os.utime(head, ns=(150, 150))
+    sources = {path: path.read_bytes() for path in output.rglob("*.json")}
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    expected = {row["title"] for row in [*initial_rows, latest]}
+    for manifest, findings, _ in (documents, replay):
+        manifest["scan"]["id"] = "identity-scan"
+        findings["scanId"] = "identity-scan"
+        warnings = []
+        _recover_unsealed_findings(
+            manifest,
+            findings,
+            Path(__file__).resolve().parents[1] / "schemas",
+            tmp_path,
+            warnings,
+        )
+        assert {row["title"] for row in findings["findings"]} == expected
+        assert len(findings["findings"]) == len(expected)
+        assert warnings == []
+    assert documents[1] == replay[1]
+    assert all(path.read_bytes() == original for path, original in sources.items())
+
+
+@pytest.mark.parametrize("reverse_checkpoints", [False, True])
+def test_latest_eligible_worker_revision_survives_out_of_scope_result(
+    tmp_path, saved_results, monkeypatch, reverse_checkpoints
+):
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic review",
+        "summary": "Older assessment 0",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic fixture."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+        "identity": {"anchor": "stable"},
+    }
+    latest = {
+        **first,
+        "summary": "Confirmed newer high severity assessment",
+        "severity": {"level": "high"},
+    }
+    excluded = {
+        **latest,
+        "summary": "Excluded revision",
+        "locations": [{"path": "unselected/example.py", "startLine": 1}],
+    }
+    worker = save_worker(
+        tmp_path,
+        saved_results,
+        "reviewer",
+        [saved_draft("identity-scan", findings=[row]) for row in (first, latest)],
+        saved_draft("identity-scan", findings=[excluded]),
+    )
+    checkpoint_paths = saved_results._checkpoint_paths
+    monkeypatch.setattr(
+        saved_results,
+        "_checkpoint_paths",
+        lambda *args: sorted(checkpoint_paths(*args), reverse=reverse_checkpoints),
+    )
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {
+            "kind": "git_revision",
+            "targetId": "synthetic",
+            "displayName": "Synthetic",
+            "revision": "head",
+        },
+        "scope": {"includePaths": ["src"], "excludePaths": []},
+        "coverageMode": "scoped_path",
+    }
+    frozen = None
+    original = None
+    for _ in range(2):
+        warnings = []
+        documents = saved_results.merge_saved_results(
+            tmp_path,
+            "identity-scan",
+            binding,
+            [worker],
+            warnings,
+            stopped=True,
+            reason="Synthetic interruption",
+            frozen_source_digests=frozen,
+        )
+        assert documents is not None
+        findings = documents[1]["findings"]
+        assert len(findings) == 1
+        assert findings[0]["summary"] == latest["summary"]
+        assert findings[0]["severity"] == latest["severity"]
+        assert any(
+            row["summary"] == first["summary"]
+            for row in findings[0]["provenance"]["previousFindings"]
+        )
+        assert warnings == ["Skipped out-of-scope finding from reviewer/result.json."]
+        assert documents[2]["completeness"] == "partial"
+        if original is not None:
+            assert documents == original
+        original = documents
+        frozen = documents[0]["scan"]["preservedSources"]

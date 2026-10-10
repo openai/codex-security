@@ -1375,3 +1375,50 @@ test("resume requires an explicit scan ID", async () => {
   expect(code).toBe(2);
   expect(stderr.text()).toContain("scanId");
 });
+
+test.each([false, true])(
+  "unfinished empty artifact list does not pin producer on resume (empty=%p)",
+  async (empty) => {
+    const f = await interruptedScan("deep");
+    await finishDiscovery(f);
+    const manifestPath = join(f.scanDir, "scan-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.scan.sealedAt;
+    manifest.scan.producer.version = f.recipe.pluginVersion;
+    if (empty) manifest.scan.artifacts = [];
+    else delete manifest.scan.artifacts;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const resume = await f.command([
+      "get-cli-scan-resume",
+      "--scan-id",
+      f.scanId,
+    ]);
+    expect(resume["sealedProducerVersion"]).toBeUndefined();
+    const { stderr, runCli } = createCliTest(main);
+    const code = await runCli(
+      ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
+    );
+    expect(code, stderr.text()).toBe(2);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({ progress: { status: "complete" } });
+    const sealed = JSON.parse(await readFile(manifestPath, "utf8"));
+    const plugin = JSON.parse(
+      await readFile(join(PLUGIN_ROOT, ".codex-plugin/plugin.json"), "utf8"),
+    );
+    expect(sealed.scan.producer.version).toBe(plugin.version);
+    expect(sealed.scan.artifacts.length).toBeGreaterThan(0);
+  },
+);

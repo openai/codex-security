@@ -77,6 +77,78 @@ function expectation(
 }
 
 describe("canonical scan contract", () => {
+  test.each(["report.md", "report.html", "exports/results.sarif"])(
+    "re-finalizing an imported bundle preserves sealed %s",
+    async (projection) => {
+      const scanDir = await copyExample();
+      const destination = join(scanDir, projection);
+      const content = "Synthetic externally sealed projection.\n";
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, content);
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      manifest["scan"].artifacts.push({
+        path: projection,
+        sha256: sha256(content),
+        mediaType: "text/plain",
+      });
+      await writeJson(manifestPath, manifest);
+      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      const result = runPython(
+        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+        [
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+        ],
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+      expect(await readFile(destination, "utf8")).toBe(content);
+      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    },
+  );
+
+  test.each([
+    "duplicate finding",
+    "blank title",
+    "inverted range",
+    "backslash remote",
+  ])("both readers reject %s in a sealed contract", async (variant) => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    if (variant === "duplicate finding")
+      findings["findings"].push(structuredClone(findings["findings"][0]));
+    if (variant === "blank title") findings["findings"][0].title = "   ";
+    if (variant === "inverted range")
+      Object.assign(findings["findings"][0].locations[0], {
+        startLine: 10,
+        endLine: 2,
+      });
+    if (variant === "backslash remote")
+      manifest["scan"].target.remote = "https://example.com/repository\\path";
+    await writeJson(findingsPath, findings);
+    await writeJson(manifestPath, manifest);
+    await reseal(scanDir);
+    const result = runPython(
+      process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+      [
+        "-c",
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import _prepare_scan_finalization; _prepare_scan_finalization(Path(sys.argv[2]))",
+        join(PLUGIN_ROOT, "scripts"),
+        scanDir,
+      ],
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).not.toBe(
+      0,
+    );
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toBeInstanceOf(ContractValidationError);
+  });
+
   test("rejects byte changes to any sealed binary artifact", async () => {
     const scanDir = await copyExample();
     const artifactPath = join(scanDir, "artifacts", "synthetic.bin");
@@ -412,6 +484,10 @@ describe("canonical scan contract", () => {
     findings["findings"][0]["validation"] = legacyValidation;
     findings["findings"][0]["attackPath"] = legacyAttackPath;
     findings["findings"][0]["root_cause"] = null;
+    findings["findings"][0]["rootCause"] = {
+      summary: "Synthetic legacy details.",
+      evidenceRefs: [null, "evidence/source.md", 2],
+    };
     findings["findings"][0]["code_evidence"] = [
       { id: "legacy-source", code: "legacy_source()" },
     ];
@@ -431,6 +507,10 @@ describe("canonical scan contract", () => {
     ).toEqual(["THE MITIGATION WAS CHECKED."]);
     expect(loadedFinding?.attackPath?.steps).toBeUndefined();
     expect(loadedFinding?.root_cause).toBeNull();
+    expect(loadedFinding?.rootCause).toEqual({
+      summary: "Synthetic legacy details.",
+      evidenceRefs: ["evidence/source.md"],
+    });
     expect(await readJson(findingsPath)).toEqual(findings);
   });
 
@@ -447,6 +527,28 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow("findings.json");
     expect(await readJson(findingsPath)).toEqual(findings);
   });
+
+  test.each(["directory_snapshot", "git_worktree", "git_diff"])(
+    "both readers accept an empty unused revision for %s",
+    async (kind) => {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      manifest["scan"]["target"]["kind"] = kind;
+      manifest["scan"]["target"]["revision"] = "";
+      await writeJson(manifestPath, manifest);
+      const result = runPython(
+        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+        [
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+        ],
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    },
+  );
 
   test.each(["rootCause", "root_cause"])(
     "reads legacy %s evidence references in both readers without rewriting the seal",
@@ -498,6 +600,7 @@ describe("canonical scan contract", () => {
     ["taxonomy.category", " \t\n", false],
     ["provenance.source", " \t\n", false],
     ["severity.scoringSystem", " \t\n", false],
+    ["severity.scoringSystem", undefined, false],
     ["title", "\u0085\u001c", false],
     ["title", "\ufeff", true],
     ["title", "  Synthetic required text. \n", true],

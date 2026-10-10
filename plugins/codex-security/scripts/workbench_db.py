@@ -51,6 +51,7 @@ from finalize_scan_contract import (
     _write_prepared_scan_finalization,
     finalize_scan,
     finding_candidate_id,
+    manifest_is_sealed,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
@@ -1311,7 +1312,7 @@ def budget_exhausted_draft(
         for key in ("surfaces", "explicitExclusions", "deferred"):
             if not isinstance(coverage.get(key), list):
                 raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
-        if manifest["scan"].get("sealedAt") is not None or manifest["scan"].get("artifacts"):
+        if manifest_is_sealed(manifest["scan"]):
             raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
     else:
         contract = scan_contract(scan)
@@ -1476,10 +1477,7 @@ def complete_scan_locked(
     already_sealed = (
         current_manifest_path is not None
         and isinstance(current_manifest.get("scan"), dict)
-        and (
-            current_manifest["scan"].get("sealedAt") is not None
-            or current_manifest["scan"].get("artifacts") is not None
-        )
+        and manifest_is_sealed(current_manifest["scan"])
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
     if scan["recipe_json"] is not None:

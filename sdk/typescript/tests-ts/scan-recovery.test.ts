@@ -805,7 +805,7 @@ describe("malformed scan artifact recovery", () => {
     ).toBe(true);
   });
 
-  test("keeps valid findings and skips malformed or duplicate findings", async () => {
+  test("repairs missing identities and skips malformed or duplicate findings", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
@@ -857,7 +857,6 @@ describe("malformed scan artifact recovery", () => {
     for (const reason of [
       "summary",
       "safe repository-relative",
-      "identity",
       "codeEvidence[0].id",
       "duplicate logical finding",
       "expected an object",
@@ -866,7 +865,14 @@ describe("malformed scan artifact recovery", () => {
         completed.warnings.some((warning) => warning.includes(reason)),
       ).toBe(true);
     }
-    expect((await readJson<FindingsDocument>(path)).findings).toHaveLength(1);
+    expect(
+      completed.warnings.filter((warning) =>
+        warning.includes("duplicate logical finding"),
+      ),
+    ).toHaveLength(2);
+    const recovered = (await readJson<FindingsDocument>(path)).findings;
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.identity).toEqual(valid.identity);
     const coverage = await readJson<CoverageDocument>(
       join(fixture.scanDir, "coverage.json"),
     );
@@ -874,7 +880,7 @@ describe("malformed scan artifact recovery", () => {
     expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
       "needs_follow_up",
     );
-    expect(coverage.deferred).toHaveLength(5);
+    expect(coverage.deferred).toHaveLength(4);
   });
 
   test.each([

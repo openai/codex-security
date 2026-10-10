@@ -949,6 +949,59 @@ The extraction root is not enforced.
                 )
                 self.assertEqual(output.read_bytes(), sealed_export)
 
+    @pytest.mark.cross_platform
+    def test_finalization_preserves_sealed_projection_aliases_and_distinct_paths(self) -> None:
+        root = self.scan_dir
+        for relative, alias, media_type in (
+            ("report.md", "Report.md", "text/markdown"),
+            ("report.html", "REPORT.HTML", "text/html"),
+            ("exports/results.sarif", "Exports/Results.SARIF", "application/sarif+json"),
+        ):
+            for hardlink in (False, True):
+                with self.subTest(relative=relative, hardlink=hardlink):
+                    with tempfile.TemporaryDirectory(dir=root) as directory:
+                        self.scan_dir = Path(directory)
+                        self.write_sealed_scan()
+                        output = self.scan_dir / relative
+                        artifact = self.scan_dir / alias
+                        artifact.parent.mkdir(exist_ok=True)
+                        contents = b"Sealed authored projection.\n"
+                        output.write_bytes(contents)
+                        # Probe native case lookup before creating any hardlink alias.
+                        case_alias = artifact.exists()
+                        if not case_alias:
+                            if hardlink:
+                                os.link(output, artifact)
+                            else:
+                                artifact.write_bytes(contents)
+                        same_file = output.samefile(artifact)
+                        self.assertEqual(same_file, case_alias or hardlink)
+                        manifest = self.read_json("scan-manifest.json")
+                        manifest["scan"]["artifacts"].append(
+                            {
+                                "path": alias,
+                                "mediaType": media_type,
+                                "sha256": hashlib.sha256(contents).hexdigest(),
+                            }
+                        )
+                        self.write_json("scan-manifest.json", manifest)
+                        sealed_manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
+                        for _ in range(2):
+                            FINALIZER.finalize_scan(self.scan_dir)
+                            self.assertEqual(artifact.read_bytes(), contents)
+                            self.assertEqual(
+                                (self.scan_dir / "scan-manifest.json").read_bytes(),
+                                sealed_manifest,
+                            )
+                            if same_file:
+                                self.assertTrue(output.samefile(artifact))
+                                self.assertEqual(output.read_bytes(), contents)
+                            elif relative == "report.html":
+                                self.assertFalse(output.exists())
+                            else:
+                                self.assertNotEqual(output.read_bytes(), contents)
+        self.scan_dir = root
+
     def test_export_entrypoint_rejects_a_case_aliased_scan_directory(self) -> None:
         self.write_sealed_scan()
         alias = self.scan_dir.parent / self.scan_dir.name.swapcase()
@@ -1323,6 +1376,35 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir, source_root=self.scan_dir)
 
         self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
+
+    @pytest.mark.cross_platform
+    def test_optional_sarif_failure_does_not_abort_first_or_repeated_finalization(self) -> None:
+        root = self.scan_dir
+        for sealed in (False, True):
+            with self.subTest(sealed=sealed):
+                with tempfile.TemporaryDirectory(dir=root) as directory:
+                    self.scan_dir = Path(directory)
+                    if sealed:
+                        self.write_sealed_scan()
+                        (self.scan_dir / "exports" / "results.sarif").unlink()
+                        (self.scan_dir / "exports").rmdir()
+                    else:
+                        self.write_scan()
+                    contents = b"Saved optional export destination.\n"
+                    (self.scan_dir / "exports").write_bytes(contents)
+                    errors = io.StringIO()
+                    with mock.patch.object(FINALIZER.sys, "stderr", errors):
+                        FINALIZER.finalize_scan(self.scan_dir)
+                        manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
+                        FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertIn("automatic SARIF export failed", errors.getvalue())
+                    self.assertEqual((self.scan_dir / "exports").read_bytes(), contents)
+                    self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), manifest)
+                    self.assertEqual(
+                        self.read_json("scan-manifest.json")["scan"]["status"], "completed"
+                    )
+                    self.assertEqual(len(self.read_json("findings.json")["findings"]), 1)
+        self.scan_dir = root
 
     def test_sarif_output_fails_closed_without_secure_file_backend(self) -> None:
         with mock.patch.object(FINALIZER.os, "supports_dir_fd", set()):

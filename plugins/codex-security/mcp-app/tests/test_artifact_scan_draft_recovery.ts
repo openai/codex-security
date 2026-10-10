@@ -16,6 +16,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
 import {
   draftApi,
@@ -29,7 +30,14 @@ const { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } =
 const execFileAsync = promisify(execFile);
 const generic = { reason: "Review remains.", paths: ["src/example.py"] };
 const close = (id: string, reason = "Review completed.") => ({ id, reason });
-const findingFor = (candidateId: string) => ({
+type FixtureFinding = Record<string, unknown> & {
+  title: string;
+  severity: { level: string };
+  provenance: Record<string, unknown>;
+  extensions?: Record<string, unknown>;
+  locations: Array<{ path: string; startLine: number; endLine?: number }>;
+};
+const findingFor = (candidateId: string): FixtureFinding => ({
   ruleId: "fixture.review",
   title: "Synthetic review finding",
   summary: "The candidate outcome must survive publication.",
@@ -40,6 +48,278 @@ const findingFor = (candidateId: string) => ({
   remediation: "Complete the review.",
   provenance: { source: "local_plugin", candidateId },
 });
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const variant of [
+    "one",
+    "three",
+    "legacy",
+    "owner",
+    "siblings",
+    "preserved",
+    "new-sibling",
+    "new-worker-sibling",
+    "range-refinement",
+    "report-added",
+    "ledger-added",
+    "report-id",
+    "ledger-id",
+    "worker-report-id",
+    "worker-ledger-id",
+    "cross-field-id",
+    "severity-revision",
+    "title-revision",
+    "new-sibling-checkpoints",
+    "new-worker-sibling-checkpoints",
+  ]) {
+    for (const status of ["failed", "canceled"]) {
+      test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
+        const f = await fixture(t, layout);
+        const count =
+          variant === "three"
+            ? 3
+            : variant.includes("sibling") || variant === "preserved"
+              ? 2
+              : variant.endsWith("-id")
+                ? 2
+                : 1;
+        const findings = Array.from({ length: count }, (_, index) => {
+          const finding = findingFor(
+            variant.includes("sibling") || variant.endsWith("-id")
+              ? "shared-review"
+              : `review-${index + 1}`,
+          );
+          if (
+            variant === "owner" ||
+            variant.startsWith("new-worker-") ||
+            variant.startsWith("worker-")
+          )
+            finding.provenance.workerId = "worker-1";
+          if (variant.includes("sibling"))
+            finding.title = `Synthetic sibling ${index + 1}`;
+          if (variant.endsWith("-id"))
+            finding.extensions = {
+              [variant.includes("report") ||
+              (variant === "cross-field-id" && index === 0)
+                ? "reportId"
+                : "ledgerRowId"]: `synthetic-report-${index + 1}`,
+            };
+          if (variant === "preserved")
+            finding.locations[0].startLine = index + 1;
+          return finding;
+        });
+        if (variant === "legacy")
+          Object.assign(findings[0], {
+            identity: { anchor: "synthetic-review-finding" },
+          });
+        if (variant === "severity-revision") {
+          const initial = structuredClone(findings[0]);
+          initial.severity.level = "high";
+          initial.summary = "Initial assessment before reviewing the control.";
+          await saveScanDraftCheckpoint(
+            f.context,
+            { ...f.draft(), findings: [initial] },
+            false,
+          );
+        }
+        await f.write({
+          ...f.draft(),
+          findings: variant.endsWith("-id") ? findings.slice(0, 1) : findings,
+        });
+        if (variant.endsWith("-id"))
+          await saveScanDraftCheckpoint(
+            f.context,
+            { ...f.draft(), findings: findings.slice(1) },
+            false,
+          );
+        if (variant.endsWith("-added")) {
+          findings[0].extensions = {
+            [variant === "report-added" ? "reportId" : "ledgerRowId"]:
+              "synthetic-report-1",
+          };
+          await f.write({ ...f.draft(), findings });
+        }
+        if (variant === "title-revision") {
+          findings[0].title = "Revised synthetic review finding";
+          await f.write({ ...f.draft(), findings });
+        }
+        if (variant === "range-refinement") {
+          findings[0].locations[0].endLine = 1;
+          await f.write({ ...f.draft(), findings });
+        }
+        if (variant.startsWith("new-")) {
+          const file = path.join(f.root, "findings.json");
+          const saved = JSON.parse(await readFile(file, "utf8"));
+          saved.findings = saved.findings.slice(0, 1);
+          await writeFile(file, JSON.stringify(saved));
+        }
+        if (variant.endsWith("-checkpoints")) {
+          findings[1].severity.level = "high";
+          await saveScanDraftCheckpoint(
+            f.context,
+            { ...f.draft(), findings: findings.slice(1) },
+            false,
+          );
+        }
+        if (variant === "preserved") {
+          const file = path.join(f.root, "findings.json");
+          const saved = JSON.parse(await readFile(file, "utf8"));
+          saved.findings[1].provenance.preservedIdentity = structuredClone(
+            saved.findings[1].identity,
+          );
+          saved.findings[1].identity.instance = "saved-distinct-location";
+          await writeFile(file, JSON.stringify(saved));
+        }
+        const { stdout } = await execFileAsync(
+          process.env.PYTHON?.trim() || "python3",
+          [
+            "-c",
+            `import sys,json
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from workbench_saved_results import merge_saved_results
+from finalize_scan_contract import _prepare_scan_finalization, _write_prepared_scan_finalization
+root,scan_id,status=Path(sys.argv[2]),sys.argv[3],sys.argv[4]
+manifest=json.loads((root/'scan-manifest.json').read_text())
+coverage=json.loads((root/'coverage.json').read_text())
+binding={'status':status,'allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
+warnings=[]
+documents=merge_saved_results(root,scan_id,binding,[],warnings,stopped=True,reason='Synthetic interruption')
+documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},status=status,startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
+for document in documents[1:]: document['scanId']=scan_id
+prepared=_prepare_scan_finalization(root,completion_warnings=warnings,draft_documents=documents)
+published=_write_prepared_scan_finalization(prepared)
+print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
+            fileURLToPath(new URL("../../scripts", import.meta.url)),
+            f.root,
+            f.context.scanId!,
+            status,
+          ],
+        );
+        assert.deepEqual(JSON.parse(stdout), {
+          count,
+          sealed: true,
+          warnings: [],
+          assessments: findings
+            .map((finding) => [finding.title, finding.severity.level])
+            .sort(),
+        });
+      });
+    }
+  }
+}
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const title of [".env review", "/admin review", "_debug review"]) {
+    test(`${layout}: generated identity permits repeated writes for ${title}`, async (t) => {
+      const f = await fixture(t, layout);
+      const submitted = {
+        ...f.draft(),
+        findings: [
+          {
+            ...findingFor("review"),
+            title,
+            provenance: { source: "local_plugin" },
+          },
+        ],
+      };
+      await f.write(submitted);
+      await f.write(submitted);
+      await f.write(f.draft({}, true));
+      const saved = JSON.parse(
+        await readFile(
+          path.join(
+            f.root,
+            layout === "worker" ? "result.json" : "findings.json",
+          ),
+          "utf8",
+        ),
+      );
+      assert.equal(saved.findings.length, 1);
+    });
+  }
+  test(`${layout}: distinct candidates at one location survive draft merging`, async (t) => {
+    const f = await fixture(t, layout);
+    for (const candidate of ["first", "second", "third"])
+      await f.write({ ...f.draft(), findings: [findingFor(candidate)] });
+    await f.write(f.draft({}, true));
+    const saved = JSON.parse(
+      await readFile(
+        path.join(
+          f.root,
+          layout === "worker" ? "result.json" : "findings.json",
+        ),
+        "utf8",
+      ),
+    );
+    assert.equal(saved.findings.length, 3);
+    if (layout !== "worker") {
+      assert.equal(
+        new Set(saved.findings.map(draftApi.scanFindingIdentity)).size,
+        3,
+      );
+      const manifestPath = path.join(f.root, "scan-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      Object.assign(manifest.scan, {
+        id: f.context.scanId!,
+        producer: { name: "codex-security-plugin", version: "0.1.0" },
+        status: "completed",
+        startedAt: "2026-05-31T18:00:00Z",
+        completedAt: "2026-05-31T18:09:00Z",
+      });
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      for (const file of ["findings.json", "coverage.json"]) {
+        const filePath = path.join(f.root, file);
+        const document = JSON.parse(await readFile(filePath, "utf8"));
+        document.scanId = f.context.scanId;
+        await writeFile(filePath, JSON.stringify(document));
+      }
+      await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+        fileURLToPath(
+          new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
+        ),
+        "--scan-dir",
+        f.root,
+      ]);
+      const completed = JSON.parse(
+        await readFile(path.join(f.root, "findings.json"), "utf8"),
+      );
+      assert.equal(completed.findings.length, 3);
+    }
+    assert.deepEqual(
+      new Set(
+        saved.findings.map(
+          (finding: FixtureFinding) => finding.provenance.candidateId,
+        ),
+      ),
+      new Set(["first", "second", "third"]),
+    );
+  });
+  test(`${layout}: malformed deferred identity cannot poison subsequent writes`, async (t) => {
+    const f = await fixture(t, layout);
+    await f.write(
+      f.draft({
+        deferred: [
+          {
+            id: "review",
+            candidateId: "review",
+            ...generic,
+            finding: {
+              ...findingFor("review"),
+              identity: { anchor: ".invalid" },
+            },
+          },
+        ],
+      }),
+    );
+    const submitted = {
+      ...f.draft({}, true),
+      findings: [findingFor("review")],
+    };
+    await f.write(submitted);
+    await f.write(submitted);
+  });
+}
 
 for (const observation of ["checkpoint head", "worker result"]) {
   test(`worker: reopening survives replacement of the ${observation} during a read`, async (t) => {
@@ -1563,7 +1843,63 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     });
   }
 
-  test(`${layout}: ignored late progress keeps an accepted terminal marker`, async (t) => {
+  test(`${layout}: unfinished surfaces retain later notes and receipts`, async (t) => {
+    const f = await fixture(t, layout);
+    const initial = {
+      id: "api",
+      label: "API review",
+      disposition: "needs_follow_up",
+      notes: "Initial evidence",
+      receiptRefs: ["artifacts/initial.md"],
+    };
+    await f.write(
+      f.draft({ completeness: "partial", surfaces: [initial] }, true),
+    );
+    const updated = {
+      ...initial,
+      notes: "Updated evidence",
+      receiptRefs: ["artifacts/updated.md"],
+    };
+    await f.write(f.draft({ surfaces: [updated] }));
+    assert.deepEqual(
+      (await f.read()).surfaces.find(
+        (row: { id: string }) => row.id === initial.id,
+      ),
+      updated,
+    );
+    await f.write(f.draft({}, true));
+    assert.deepEqual(
+      (await f.read()).surfaces.find(
+        (row: { id: string }) => row.id === initial.id,
+      ),
+      updated,
+    );
+  });
+
+  test(`${layout}: new late work does not undo an already reviewed surface`, async (t) => {
+    const f = await fixture(t, layout);
+    const reviewed = {
+      id: "existing",
+      label: "Existing review",
+      disposition: "no_issue_found",
+    };
+    await f.write(f.draft({ surfaces: [reviewed] }, true));
+    await f.write(
+      f.draft({
+        surfaces: [{ ...reviewed, disposition: "needs_follow_up" }],
+        deferred: [{ id: "new-review", ...generic }],
+      }),
+    );
+    const coverage = await f.read();
+    assert.equal(
+      coverage.surfaces.find((row: { id: string }) => row.id === reviewed.id)
+        .disposition,
+      "no_issue_found",
+    );
+    assert.deepEqual(coverage.deferred, [{ id: "new-review", ...generic }]);
+  });
+
+  test(`${layout}: late progress survives an identical terminal retry`, async (t) => {
     const f = await fixture(t, layout);
     await f.write(f.draft({}, true));
     await f.write(f.draft({ deferred: [{ id: "late", ...generic }] }));
@@ -1571,11 +1907,14 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       f.root,
       layout === "worker" ? "result.json" : "scan-manifest.json",
     );
-    assert.notEqual(
+    assert.equal(
       layout === "worker" ? published.complete : published.scan.complete,
       false,
     );
-    assert.deepEqual((await f.read()).deferred, []);
+    const pending = (await f.read()).deferred;
+    assert.deepEqual(pending, [{ id: "late", ...generic }]);
+    await f.write(f.draft({}, true));
+    assert.deepEqual((await f.read()).deferred, pending);
   });
 
   for (const reverse of [false, true]) {
@@ -1710,4 +2049,251 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       });
     }
   }
+}
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const linkedById of [false, true]) {
+    for (const otherPending of [false, true]) {
+      test(`${layout}: newly deferred work reopens reviewed surface id=${linkedById} otherPending=${otherPending}`, async (t) => {
+        const f = await fixture(t, layout);
+        const surface = {
+          id: "api",
+          label: "API",
+          disposition: "no_issue_found",
+        };
+        const other = {
+          id: "independent",
+          kind: "generic",
+          reason: "Independent work remains.",
+        };
+        await f.write(
+          f.draft(
+            { surfaces: [surface], deferred: otherPending ? [other] : [] },
+            true,
+          ),
+        );
+        const next = {
+          id: linkedById ? "api" : "new-review",
+          kind: "generic",
+          reason: "Review the new caller.",
+          ...(linkedById ? {} : { surfaceIds: ["api"] }),
+        };
+        const progress = f.draft({
+          surfaces: [{ ...surface, disposition: "needs_follow_up" }],
+          deferred: [next],
+        });
+        for (const input of [progress, f.draft()]) {
+          const result = await f.write(input);
+          assert.equal(
+            result.coverage.surfaces.find(
+              ({ id }: { id: string }) => id === surface.id,
+            ).disposition,
+            "needs_follow_up",
+          );
+          assert.ok(
+            result.coverage.deferred.some(
+              ({ id }: { id: string }) => id === next.id,
+            ),
+          );
+          assert.equal(
+            result.coverage.deferred.some(
+              ({ id }: { id: string }) => id === other.id,
+            ),
+            otherPending,
+          );
+          assert.equal(result.coverage.completeness, "partial");
+          const document = await readJson(
+            f.root,
+            layout === "worker" ? "result.json" : "scan-manifest.json",
+          );
+          assert.equal(
+            layout === "worker" ? document.complete : document.scan.complete,
+            false,
+          );
+        }
+      });
+    }
+  }
+}
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const malformed of ["sourceFindingIds", "sourceFindings", "none"]) {
+    test(`${layout}: deferred provenance promotion ${malformed}`, async (t) => {
+      const f = await fixture(t, layout);
+      const source = {
+        id: "source-1",
+        finding: { summary: "Original source." },
+      };
+      const old = findingFor("review");
+      Object.assign(old.provenance, {
+        sourceFindingIds:
+          malformed === "sourceFindingIds" ? [null] : ["source-1"],
+        sourceFindings:
+          malformed === "sourceFindings"
+            ? [{ id: "source-1", finding: null }]
+            : [source],
+        originalCandidates: [null, { original: "candidate" }],
+      });
+      await f.write(
+        f.draft({
+          deferred: [
+            {
+              id: "review",
+              candidateId: "review",
+              reason: "Review remains.",
+              finding: old,
+            },
+          ],
+        }),
+      );
+      const reported = {
+        ...old,
+        provenance: { source: "local_plugin", candidateId: "review" },
+      };
+      const input = { ...f.draft({}, true), findings: [reported] };
+      await f.write(input);
+      await f.write(input);
+      const saved = await readJson(
+        f.root,
+        layout === "worker" ? "result.json" : "findings.json",
+      );
+      assert.equal(saved.findings.length, 1);
+      const provenance = saved.findings[0].provenance;
+      for (const field of ["sourceFindingIds", "sourceFindings"] as const) {
+        if (malformed === field) {
+          assert.equal(provenance[field], undefined);
+          assert.ok(
+            (provenance.previousFindings as FixtureFinding[]).some((row) =>
+              isDeepStrictEqual(row.provenance[field], old.provenance[field]),
+            ),
+          );
+        } else assert.deepEqual(provenance[field], old.provenance[field]);
+      }
+      assert.deepEqual(provenance.originalCandidates, [
+        null,
+        { original: "candidate" },
+      ]);
+      const parent = layout === "worker" ? await fixture(t, "deep") : f;
+      if (layout === "worker")
+        await parent.write({
+          ...parent.draft({}, true),
+          findings: saved.findings,
+        });
+      const manifestPath = path.join(parent.root, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      Object.assign(manifest.scan, {
+        id: parent.context.scanId,
+        producer: { name: "codex-security-plugin", version: "0.1.0" },
+        status: "completed",
+        startedAt: "2026-05-31T18:00:00Z",
+        completedAt: "2026-05-31T18:09:00Z",
+      });
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      for (const file of ["findings.json", "coverage.json"]) {
+        const document = await readJson(parent.root, file);
+        document.scanId = parent.context.scanId;
+        await writeFile(path.join(parent.root, file), JSON.stringify(document));
+      }
+      await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+        fileURLToPath(
+          new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
+        ),
+        "--scan-dir",
+        parent.root,
+      ]);
+      assert.equal(
+        JSON.parse(
+          await readFile(path.join(parent.root, "findings.json"), "utf8"),
+        ).findings.length,
+        1,
+      );
+    });
+  }
+}
+
+for (const additional of ["none", "surface", "task", "completed-surface"]) {
+  test(`worker: resolved linked candidate replay preserves completion (${additional})`, async (t) => {
+    const f = await fixture(t, "worker");
+    const surface = {
+      id: "api",
+      label: "API",
+      disposition: "needs_follow_up",
+      receiptRefs: [],
+    };
+    const progress = f.draft({
+      surfaces: [surface],
+      deferred: [
+        {
+          id: "review",
+          candidateId: "candidate-review",
+          surfaceIds: [surface.id],
+          reason: "Review candidate.",
+        },
+      ],
+    });
+    await f.write(progress);
+    await f.write({
+      ...f.draft({}, true),
+      findings: [findingFor("candidate-review")],
+    });
+    const { importSource } = await import("./import-module.ts");
+    const { validateDiscoveryArtifacts } = await importSource(
+      "../src/deep-scan/artifact-validation.ts",
+      { absWorkingDir: import.meta.dirname },
+    );
+    const validate = () =>
+      validateDiscoveryArtifacts(
+        { workersRoot: f.root },
+        path.join(f.root, "result.json"),
+        f.context.scanId,
+      );
+    await validate();
+    if (additional === "surface")
+      (progress.coverage.surfaces as Record<string, unknown>[]).push({
+        id: "independent",
+        label: "Independent review",
+        disposition: "needs_follow_up",
+      });
+    if (additional === "task")
+      (progress.coverage.deferred as Record<string, unknown>[]).push({
+        id: "independent",
+        surfaceIds: [surface.id],
+        reason: "Independent review remains.",
+      });
+    if (additional === "completed-surface") {
+      Object.assign(
+        (progress.coverage.surfaces as Record<string, unknown>[])[0],
+        {
+          disposition: "no_issue_found",
+          notes: "Additional completed surface evidence.",
+        },
+      );
+      (progress.coverage.deferred as Record<string, unknown>[]).push({
+        id: "other-task",
+        reason: "Independent review remains.",
+      });
+    }
+    await f.write(progress);
+    const saved = await readJson(f.root, "result.json");
+    assert.equal(saved.complete, additional === "none");
+    assert.equal(saved.findings.length, 1);
+    if (additional === "completed-surface")
+      assert.deepEqual(saved.coverage.surfaces, progress.coverage.surfaces);
+    if (additional === "none") {
+      await validate();
+      assert.ok(
+        !saved.coverage.surfaces.some(
+          (row: Record<string, unknown>) => row.id === surface.id,
+        ),
+      );
+    } else {
+      await assert.rejects(validate(), /only a checkpoint/);
+      assert.ok(
+        saved.coverage.surfaces.some(
+          (row: Record<string, unknown>) =>
+            row.id === (additional === "surface" ? "independent" : surface.id),
+        ),
+      );
+    }
+  });
 }

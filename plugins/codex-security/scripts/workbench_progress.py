@@ -46,7 +46,7 @@ def preflight_issues_json(value: str | None) -> str | None:
             )
         severity = issue.get("severity")
         status = issue.get("status")
-        if severity not in {"block", "warn"} or status not in {"fail", "unknown"}:
+        if severity not in ("block", "warn") or status not in ("fail", "unknown"):
             raise SystemExit(f"Preflight issue {label} has an invalid severity or status.")
         for field, maximum in (("capability", 128), ("reason", 1200)):
             issue[field] = _preflight_issue_text(issue.get(field), maximum, f"{label} {field}")
