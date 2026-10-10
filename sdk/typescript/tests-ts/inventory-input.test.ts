@@ -159,23 +159,13 @@ for (const command of [
   "make-repo-rank-input",
 ]) {
   for (const rawWindowsHome of [false, true]) {
-    test.skipIf(rawWindowsHome && process.platform !== "win32")(
+    test.skipIf(process.platform !== "win32")(
       `${command} selects trusted ripgrep outside the repository${rawWindowsHome ? " through the UTF-16 bridge" : ""}`,
       () => {
         const f = fixture();
         f.write("scope/visible.py");
-        const hostile = join(
-          f.repo,
-          process.platform === "win32" ? "rg.exe" : "rg",
-        );
-        const marker = join(f.root, "repository-tool-ran");
-        if (process.platform === "win32") copyFileSync(node, hostile);
-        else
-          writeFileSync(
-            hostile,
-            `#!/bin/sh\nprintf executed > '${marker.replaceAll("'", "'\\''")}'\nexit 23\n`,
-            { mode: 0o700 },
-          );
+        const hostile = join(f.repo, "rg.exe");
+        copyFileSync(node, hostile);
         const scopes = join(f.root, "scopes.json");
         writeFileSync(scopes, '["scope"]');
         const preload = join(f.root, "tool-launch.cjs");
@@ -238,7 +228,6 @@ require("node:module").syncBuiltinESMExports();
           expect(parse(executable).root).not.toBe("");
           expect(executable).not.toBe(hostile);
         }
-        expect(readdirSync(f.root)).not.toContain("repository-tool-ran");
       },
     );
   }

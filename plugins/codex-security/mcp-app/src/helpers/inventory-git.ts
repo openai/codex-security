@@ -59,11 +59,11 @@ function rawToolValue(value: string): boolean {
   return (windows ? /[\ud800-\udfff]/u : /[\udc80-\udcff]/u).test(value);
 }
 
-function* trustedTools(
+function trustedTool(
   name: "git" | "rg",
   target: string,
   rawWindowsLookup = false,
-): Generator<string> {
+): string | undefined {
   let protectedRoot = canonical(target);
   for (const ancestor of ancestors(protectedRoot))
     if (exists(append(ancestor, ".git"))) protectedRoot = ancestor;
@@ -141,8 +141,9 @@ function* trustedTools(
         );
       continue;
     }
-    yield invocation;
+    return invocation;
   }
+  return undefined;
 }
 
 function windowsToolPaths(searchPath: string): string[] {
@@ -171,7 +172,6 @@ function spawnTool(
     stdio: ["ignore" | "pipe", "pipe", "pipe"];
   },
   inheritedEnvironment: Record<string, string>,
-  onMissingExecutable?: () => void,
 ) {
   const environment = Object.fromEntries(
     Object.entries(inheritedEnvironment).filter(([, value]) =>
@@ -214,22 +214,9 @@ function spawnTool(
     ...(typeof options.cwd === "string"
       ? [assign(options.cwd), 'cd -P -- "$value" || exit']
       : []),
-    // An EXIT trap survives a failed exec but disappears after a successful one.
-    // Only the ripgrep PATH search uses this pipe; a launched wrapper may itself
-    // exit 127, and its status and stderr must remain the command's result.
-    ...(onMissingExecutable
-      ? ["trap 'if [ \"$?\" -eq 127 ]; then printf . >&3; fi' 0"]
-      : []),
     'exec "$@"',
   ].join("\n");
-  const child = spawn("/bin/sh", ["-c", script], {
-    ...options,
-    cwd: undefined,
-    ...(onMissingExecutable ? { stdio: [...options.stdio, "pipe"] } : {}),
-  });
-  if (onMissingExecutable)
-    child.stdio[3]!.on("data", () => onMissingExecutable());
-  return child;
+  return spawn("/bin/sh", ["-c", script], { ...options, cwd: undefined });
 }
 
 function inheritedToolPaths(additional: string[] = []): Record<string, string> {
@@ -262,7 +249,7 @@ function inheritedToolPaths(additional: string[] = []): Record<string, string> {
 }
 
 function gitProcess(repo: string, args: string[]) {
-  const [command] = trustedTools("git", repo);
+  const command = trustedTool("git", repo);
   if (!command) return undefined;
   const env: NodeJS.ProcessEnv = { ...process.env };
   const inherited = inheritedToolPaths();
@@ -292,8 +279,7 @@ export async function runRipgrep(
   args: string[],
   repo: string,
 ): Promise<ToolResult> {
-  let lookupError: unknown;
-  let lookupResult: ToolResult | undefined;
+  if (!windows) return runTool("rg", args, repo);
   const inherited = inheritedToolPaths([
     "RIPGREP_CONFIG_PATH",
     "CODEX_SECURITY_GIT",
@@ -301,39 +287,10 @@ export async function runRipgrep(
   const rawWindowsLookup = [repo, ...args, ...Object.values(inherited)].some(
     rawToolValue,
   );
-  for (const command of trustedTools("rg", repo, rawWindowsLookup)) {
-    try {
-      let missingExecutable = false;
-      const child = spawnTool(
-        command,
-        args,
-        { cwd: repo, stdio: ["ignore", "pipe", "pipe"] },
-        inherited,
-        () => {
-          missingExecutable = true;
-        },
-      );
-      const result = await collect(child);
-      if (!missingExecutable) return result;
-      lookupResult = result;
-      lookupError = undefined;
-    } catch (error) {
-      if (
-        windows ||
-        !["ENOENT", "ENOTDIR"].includes(
-          (error as NodeJS.ErrnoException).code ?? "",
-        )
-      )
-        throw error;
-      lookupError = error;
-      lookupResult = undefined;
-    }
-  }
-  if (lookupResult) return lookupResult;
-  throw (
-    lookupError ??
-    Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" })
-  );
+  const command = trustedTool("rg", repo, rawWindowsLookup);
+  if (!command)
+    throw Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" });
+  return runTool(command, args, repo);
 }
 
 export async function runTool(
