@@ -421,7 +421,7 @@ jobs:
           python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
-        run: python -c "import xml.etree.ElementTree as ET; assert not ET.parse('reports/python.xml').findall('.//testcase/skipped'), 'Native platform tests must run without skips'"
+        run: python -c "import pathlib, xml.etree.ElementTree as ET; assert not any(ET.parse(report).findall('.//testcase/skipped') for report in pathlib.Path('reports').glob('python*.xml')), 'Native platform tests must run without skips'"
       - name: Upload Python test reports
         if: always()
         continue-on-error: true
@@ -429,7 +429,7 @@ jobs:
         with:
           name: python-test-reports-${{ matrix.os }}-${{ matrix.python }}
           overwrite: true
-          path: reports/python.xml
+          path: reports/python*.xml
           if-no-files-found: warn
           retention-days: 14
       - name: Set up Node.js for triage evals

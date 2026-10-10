@@ -847,3 +847,32 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
     run_repo_cli(command, repo, output, *arguments)
 
     assert {row["path"]: row["preview"] for row in read_jsonl(output)} == expected
+
+
+def test_revision_preview_uses_the_same_read_window_as_local_files(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initialize_repo(repo)
+    source = repo / "example.py"
+    source.write_text("def first():\n    pass\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    source.write_text(
+        "def first():\n    pass\n#" + "x" * 80_000 + "\ndef outside_window():\n    pass\n"
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "long source")
+    output = tmp_path / "preview.jsonl"
+    run_repo_cli(
+        "make-diff-rank-input",
+        repo,
+        output,
+        "--base",
+        base,
+        "--head",
+        "HEAD",
+    )
+    rows = read_jsonl(output)
+    assert "first" in rows[0]["preview"]
+    assert "outside_window" not in rows[0]["preview"]

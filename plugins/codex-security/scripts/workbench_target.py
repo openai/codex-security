@@ -701,7 +701,10 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 junctions[identity] = path
             continue
         paths.append(path)
-        if not stat.S_ISDIR(metadata.st_mode):
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+        ):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
@@ -820,7 +823,10 @@ def source_directory_snapshot_paths(
 
 
 def directory_content_digest(
-    target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
+    target: Path,
+    *,
+    excluded: tuple[Path, ...] = (),
+    include_ignored: bool = False,
 ) -> str:
     def raise_walk_error(error: OSError) -> None:
         raise error
