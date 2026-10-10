@@ -186,16 +186,18 @@ function sourceBranch(
     return name.slice(prefix.length) || null;
 
   // URL-only metadata still identifies Wiz's repository-qualified branch name.
-  // Compare only the qualifier, preserving the branch suffix's case and slashes.
-  const repositoryKey = repositoryUrlKey(repository.url);
+  // Supported GitHub destinations use case-insensitive repository qualifiers.
+  // Preserve the branch suffix's case and slashes and the original evidence.
+  const repositoryKey = repositoryUrlKey(repository.url).toLowerCase();
   const url = /^(https?:\/\/[^/?#]+)\/([^?#]+)$/iu.exec(repositoryKey);
   if (!url) return repository.name ? name : null;
   const prefixParts = url[2]!.split("/").length;
   const parts = name.split("/");
   if (
     parts.length > prefixParts &&
-    repositoryUrlKey(url[1] + "/" + parts.slice(0, prefixParts).join("/")) ===
-      repositoryKey
+    repositoryUrlKey(
+      url[1] + "/" + parts.slice(0, prefixParts).join("/"),
+    ).toLowerCase() === repositoryKey
   )
     return parts.slice(prefixParts).join("/") || null;
   return name;
