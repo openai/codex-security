@@ -22,6 +22,9 @@ import { startRpc } from "./package-rpc.mjs";
 import { packageSmokeTimeouts } from "../package-smoke-timeouts.mjs";
 
 const installedRoot = await realpath(process.argv[2]);
+const { resolvePluginPython } = await import(
+  pathToFileURL(join(installedRoot, "dist", "runtime.js")).href
+);
 const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
@@ -45,6 +48,11 @@ try {
   ]) {
     await copyFile(new URL(name, import.meta.url), join(root, name));
   }
+  const installedRequire = createRequire(join(installedRoot, "package.json"));
+  await copyFile(
+    installedRequire.resolve("smol-toml"),
+    join(root, "package-toml.cjs"),
+  );
   const executable = join(
     root,
     process.platform === "win32"
@@ -54,19 +62,26 @@ try {
   if (process.platform === "win32")
     await copyFile(process.execPath, executable);
   await chmod(executable, 0o700);
+  if (process.platform === "win32") {
+    // The direct SDK engine launches its preflight from this process too.
+    process.env.PACKAGE_DEEP_EXECUTABLE = executable;
+    await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
+  }
 
   const scenarios = await Promise.allSettled([
     runInstalledSdk(installedPlugin, executable),
     runDetachedPlugin(detachedPlugin, executable),
+    runInstalledDirectSdk(installedPlugin, executable),
   ]);
   for (const scenario of scenarios) {
     if (scenario.status === "rejected") throw scenario.reason;
   }
+
   console.log(
     "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
   );
 } catch (error) {
-  for (const name of ["installed", "detached"]) {
+  for (const name of ["installed", "detached", "installed-direct"]) {
     try {
       error.message += `\n${await readFile(join(root, name, "executions.jsonl"), "utf8")}`;
     } catch (readError) {
@@ -108,6 +123,7 @@ async function fixture(name, pluginRoot, executable) {
       "TMP",
       "TEMP",
       "TMPDIR",
+      "PYTHON",
     ]
       .filter((key) => process.env[key] !== undefined)
       .map((key) => [key, process.env[key]]),
@@ -120,7 +136,6 @@ async function fixture(name, pluginRoot, executable) {
     CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
     CODEX_SECURITY_STATE_DIR: join(directory, "state"),
     CODEX_SECURITY_SCAN_ROOT: join(directory, "scans"),
-    PYTHON: process.env.PYTHON || "python3",
     OPENAI_API_KEY: "synthetic-package-deep-key",
     ...(process.platform === "win32"
       ? {
@@ -129,9 +144,11 @@ async function fixture(name, pluginRoot, executable) {
         }
       : {}),
     PACKAGE_DEEP_TRACE: join(directory, "executions.jsonl"),
-    PACKAGE_DEEP_TOML_MODULE: pathToFileURL(
-      createRequire(join(installedRoot, "package.json")).resolve("smol-toml"),
-    ).href,
+  });
+  env.PYTHON = await resolvePluginPython({
+    environment: env,
+    protectedRoot: target,
+    homeDirectory: home,
   });
   return { directory, target, home, env, pluginRoot };
 }
@@ -386,6 +403,7 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
+      supportsDirectDeepScan: async () => false,
       // Replace only the parent model's tool choice. The installed SDK registers
       // and finalizes the scan; the packaged MCP runs the real Deep lifecycle.
       createCodex({ env, apiKey }) {
@@ -580,6 +598,12 @@ async function readExecutions(f) {
 
 async function assertExecutions(f, scanId, preflights = 3) {
   const executions = await readExecutions(f);
+  for (const execution of executions) {
+    assert.equal(
+      await realpath(execution.python),
+      await realpath(f.env.PYTHON),
+    );
+  }
   const workers = executions.filter((entry) => entry.phase === "worker");
   const reducers = executions.filter((entry) => entry.phase === "reducer");
   const incomplete = f.env.PACKAGE_DEEP_EMPTY_ONCE ? 1 : 0;
@@ -601,4 +625,80 @@ async function assertExecutions(f, scanId, preflights = 3) {
     );
     assert.ok(execution.args.includes('approval_policy="never"'));
   }
+}
+
+async function runInstalledDirectSdk(pluginRoot, executable) {
+  const f = await fixture("installed-direct", pluginRoot, executable);
+  f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
+    f.directory,
+    "missing-result-completion",
+  );
+  const sdk = await import(
+    pathToFileURL(join(installedRoot, "dist", "index.js")).href
+  );
+  const manifest = JSON.parse(
+    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
+  );
+  const owner = "package-sdk-owner";
+  let scanId;
+  const client = new sdk.CodexSecurity(
+    { pythonPath: f.env.PYTHON },
+    {
+      environment: f.env,
+      prepareRuntime: async () => ({
+        codexHome: f.home,
+        environment: f.env,
+        credentialsAvailable: true,
+        plugin: {
+          pluginRoot,
+          marketplaceRoot: pluginRoot,
+          installedRoot: pluginRoot,
+          marketplaceName: "codex-security-sdk",
+          name: manifest.name,
+          version: manifest.version,
+        },
+      }),
+      // The installed SDK runs the direct engine without a parent model turn.
+      createCodex() {
+        return {
+          startThread() {
+            return {
+              id: owner,
+              async runStreamed() {
+                assert.fail(
+                  "The direct engine must not start a parent model turn.",
+                );
+              },
+            };
+          },
+        };
+      },
+    },
+  );
+  try {
+    const result = await client.run(f.target, {
+      mode: "deep",
+      auth: "api-key",
+      workers: 1,
+      subagents: 0,
+      maxDiscoveryRuns: 2,
+      stopAfterNoNew: 1,
+      outputDir: join(f.directory, "output"),
+      onScanRegistered(scan) {
+        scanId = scan.scanId;
+      },
+    });
+    assert.equal(result.threadId, owner);
+    assert.equal(result.manifest.scan.status, "completed");
+    assert.ok(result.manifest.scan.sealedAt);
+    assert.equal(result.manifest.scan.id, scanId);
+    assert.deepEqual(result.findings.findings, []);
+    assert.ok(
+      (await readFile(join(f.directory, "output", "report.md"), "utf8"))
+        .length > 0,
+    );
+  } finally {
+    await client.close();
+  }
+  await assertExecutions(f, scanId, 5);
 }

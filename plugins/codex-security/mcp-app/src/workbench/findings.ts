@@ -127,7 +127,7 @@ export function listStoredFindings(
     const rows = database
       .prepare(
         `SELECT details_json FROM findings WHERE details_json IS NOT NULL
-        ORDER BY created_at, id LIMIT ? OFFSET ?`,
+        ORDER BY julianday(upper(created_at)), id LIMIT ? OFFSET ?`,
       )
       .all(limit, offset);
     const nextOffset = offset + rows.length;

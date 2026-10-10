@@ -5,6 +5,7 @@ import { appendFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { startRpc } from "./package-rpc.mjs";
+import { parse } from "./package-toml.cjs";
 
 try {
   await run();
@@ -18,7 +19,7 @@ try {
 async function trace(event) {
   await appendFile(
     process.env.PACKAGE_DEEP_TRACE,
-    `${JSON.stringify(event)}\n`,
+    `${JSON.stringify({ ...event, python: process.env.PYTHON })}\n`,
   );
 }
 
@@ -26,6 +27,8 @@ async function run() {
   const args = process.argv.slice(2);
   if (args.includes("app-server")) {
     await trace({ phase: "preflight", args });
+    const threadId = "package-sdk-owner";
+    const sessionPath = join(process.env.CODEX_HOME, `${threadId}.jsonl`);
     for await (const line of createInterface({ input: process.stdin })) {
       const message = JSON.parse(line);
       if (message.id === undefined) continue;
@@ -33,6 +36,41 @@ async function run() {
       switch (message.method) {
         case "initialize":
           result = { userAgent: "package-fixture" };
+          break;
+        case "thread/start":
+          assert.equal(message.params.threadSource, "security_scan");
+          assert.equal(message.params.ephemeral, false);
+          result = {
+            thread: { id: threadId, path: sessionPath },
+            model: "gpt-5.5",
+            reasoningEffort: "high",
+          };
+          break;
+        case "thread/inject_items":
+          assert.equal(message.params.threadId, threadId);
+          assert.equal(message.params.items[0].role, "user");
+          await writeFile(
+            sessionPath,
+            `${JSON.stringify({
+              type: "turn_context",
+              payload: {
+                permission_profile: {
+                  type: "managed",
+                  file_system: {
+                    type: "restricted",
+                    entries: [
+                      {
+                        path: { type: "special", value: { kind: "root" } },
+                        access: "read",
+                      },
+                    ],
+                  },
+                  network: "restricted",
+                },
+              },
+            })}\n`,
+          );
+          result = {};
           break;
         case "config/read":
           result = {
@@ -74,18 +112,18 @@ async function run() {
   }
   let prompt = "";
   for await (const chunk of process.stdin) prompt += chunk;
-  const { parse } = await import(process.env.PACKAGE_DEEP_TOML_MODULE);
-  const settings = [];
+  const overrides = [];
   for (let index = 0; index < args.length; index++) {
     if (args[index] === "-c" || args[index] === "--config")
-      settings.push(args[++index]);
+      overrides.push(args[++index]);
   }
-  const config = parse(settings.join("\n"));
-  const artifactServer = config.mcp_servers.cs_artifacts;
-  const env = artifactServer.env;
+  const config = parse(overrides.join("\n"));
+  const artifacts = config.mcp_servers.cs_artifacts;
+  const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;
   assert.ok(root, "The real worker must supply its bound artifact root.");
   assert.equal(config.mcp_servers["codex-security"].enabled, false);
+  assert.notEqual(artifacts.enabled, false);
   const layout = env.CODEX_SECURITY_ARTIFACT_LAYOUT;
   const threadId = `package-${layout}-${basename(root)}-${basename(join(root, ".."))}`;
   console.log(JSON.stringify({ type: "thread.started", thread_id: threadId }));
@@ -98,7 +136,7 @@ async function run() {
     await trace({ phase: "held", scanId: env.CODEX_SECURITY_SCAN_ID });
     await new Promise(() => setInterval(() => {}, 1_000));
   }
-  const server = await startRpc(artifactServer.command, artifactServer.args, {
+  const server = await startRpc(artifacts.command, artifacts.args, {
     cwd: root,
     env: { ...process.env, ...env },
   });

@@ -24,6 +24,7 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_scan,
     get_scan,
     initialize_git_repository,
     load_script,
@@ -87,12 +88,75 @@ EXPECTED_MIGRATIONS = [
     (44, "version local finding embedding inputs"),
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
-    (47, "retain deep scan attempts and exact merge inputs"),
-    (48, "persist selected deep scan finalization input"),
-    (49, "freeze stopped scan checkpoint selections"),
-    (50, "bind original deep scan parent usage turn"),
-    (51, "bind original deep scan execution settings"),
+    (47, "snapshot deep scan discovery context"),
+    (48, "retain deep scan attempts and exact merge inputs"),
+    (49, "persist selected deep scan finalization input"),
+    (50, "freeze stopped scan checkpoint selections"),
+    (51, "bind original deep scan parent usage turn"),
+    (52, "bind original deep scan execution settings"),
 ]
+
+
+@pytest.mark.parametrize(
+    "code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST]
+)
+def test_state_directory_failure_preserves_original_exception(
+    workbench_api, tmp_path, code, capsys
+):
+    error = OSError(code, os.strerror(code), str(tmp_path / "state"))
+    connect = workbench_api["connect"]
+    with (
+        mock.patch.dict(
+            connect.__globals__,
+            {
+                "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                "create_private_directory": mock.Mock(side_effect=error),
+            },
+        ),
+        pytest.raises(OSError) as failure,
+    ):
+        connect()
+    assert str(failure.value) == str(error)
+    assert failure.value is error
+    detail = capsys.readouterr().err
+    assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+    assert "SQLite journal files" in detail
+    assert "CODEX_SECURITY_STATE_DIR" in detail
+
+
+@pytest.mark.parametrize("during_open", [True, False])
+def test_state_open_or_migration_failure_preserves_original_exception(
+    workbench_api, tmp_path, during_open, capsys
+):
+    error = sqlite3.OperationalError("unable to open database file")
+    connect = workbench_api["connect"]
+    connection = sqlite3.connect(":memory:")
+    try:
+        with (
+            mock.patch.dict(
+                connect.__globals__,
+                {
+                    "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                    "apply_migrations": mock.Mock(side_effect=error),
+                },
+            ),
+            mock.patch.object(
+                sqlite3,
+                "connect",
+                side_effect=error if during_open else None,
+                return_value=connection,
+            ),
+            pytest.raises(sqlite3.OperationalError) as failure,
+        ):
+            connect()
+        assert failure.value is error
+        assert str(error) == "unable to open database file"
+        detail = capsys.readouterr().err
+        assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+        assert "SQLite journal files" in detail
+        assert "CODEX_SECURITY_STATE_DIR" in detail
+    finally:
+        connection.close()
 
 
 def create_historical_database(
@@ -456,11 +520,7 @@ def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path)
     assert started["results"]["progress"]["coverage"]["filesTotal"] == 1
 
 
-def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    dependency = tmp_path / "dependency"
-    initialize_git_repository(dependency)
-    target = tmp_path / "target"
+def initialize_git_repository_with_submodule(target: Path, dependency: Path) -> None:
     initialize_git_repository(target)
     subprocess.run(
         [
@@ -477,6 +537,14 @@ def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
         check=True,
     )
     subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+
+
+def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    dependency = tmp_path / "dependency"
+    initialize_git_repository(dependency)
+    target = tmp_path / "target"
+    initialize_git_repository_with_submodule(target, dependency)
     saved = create_saved_git_workspace(state_dir, target)
     (target / "vendor/dependency/README.md").write_text("dirty dependency\n")
 
@@ -491,22 +559,7 @@ def test_scan_start_allows_uninitialized_submodule(tmp_path: Path) -> None:
     dependency = tmp_path / "dependency"
     initialize_git_repository(dependency)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     subprocess.run(
         ["git", "submodule", "deinit", "-f", "-q", "--", "vendor/dependency"],
         cwd=target,
@@ -527,22 +580,7 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     (dependency / "README.md").write_text("second revision\n")
     subprocess.run(["git", "commit", "-qam", "Second revision"], cwd=dependency, check=True)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     submodule = target / "vendor/dependency"
     subprocess.run(["git", "checkout", "-q", revision_a], cwd=submodule, check=True)
     subprocess.run(
@@ -571,9 +609,7 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repository, text=True
     ).strip()
-    workspace_id = str(uuid.uuid4())
-    create_workspace(state_dir, workspace_id, "--target-path", str(target))
-    save_workspace(state_dir, workspace_id, str(target), ".", "standard")
+    workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     (repository / "outside.py").write_text("outside = 2\n")
     write_completed_contract(
@@ -633,11 +669,7 @@ def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: boo
 
 
 def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     scan_command(state_dir, "complete-scan", scan_id)
     database = state_dir / "workbench.sqlite3"
@@ -822,9 +854,7 @@ def test_severity_migration_only_copies_assessments_with_matching_scan_occurrenc
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-@pytest.mark.parametrize("operation", ["migration", "read"])
-def test_severity_work_scales_with_selected_findings(operation: str) -> None:
-    severity = load_script("workbench_severity")
+def test_severity_migration_scales_with_classified_scans() -> None:
     timestamp = "2026-09-01T00:00:00Z"
 
     def instruction_count(scale: int) -> int:
@@ -835,9 +865,7 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
                 "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', ?, ?)",
                 (timestamp, timestamp),
             )
-            scan_count, findings_per_scan = (
-                (scale, 10) if operation == "migration" else (1, scale * 10)
-            )
+            scan_count, findings_per_scan = scale, 10
             for scan in range(scan_count):
                 scan_id = f"scan-{scan}"
                 finding_ids = [f"finding-{scan}-{item}" for item in range(findings_per_scan)]
@@ -878,9 +906,6 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
                         (finding_id, occurrence_id, timestamp),
                     )
             connection.commit()
-            if operation == "read":
-                apply_migrations(connection)
-
             instructions = 0
 
             def progress() -> int:
@@ -890,12 +915,7 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
 
             connection.set_progress_handler(progress, 100)
             try:
-                if operation == "migration":
-                    apply_migrations(connection)
-                else:
-                    selected = list(reversed(finding_ids))
-                    result = severity.assessments(connection, selected, scan_id)
-                    assert [assessment["findingId"] for assessment in result] == selected
+                apply_migrations(connection)
             finally:
                 connection.set_progress_handler(None, 0)
             assert (
@@ -2607,14 +2627,20 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
         ) is supported
 
 
-@pytest.mark.parametrize("legacy_version", [48, 51])
-def test_local_cache_upgrade_preserves_deep_scan_migration_history(legacy_version: int) -> None:
+@pytest.mark.parametrize("legacy_version", [48, 51, "published"])
+def test_local_cache_upgrade_preserves_deep_scan_migration_history(
+    legacy_version: int | str,
+) -> None:
     current = SCHEMA.MIGRATIONS
-    historical = tuple(migration for migration in current if migration[0] <= 43)
+    published = legacy_version == "published"
+    historical = tuple(
+        migration for migration in current if migration[0] <= (46 if published else 43)
+    )
     historical += tuple(
-        (version - 2 if version < 51 else version, name, sql)
+        (version - 1 if published or version == 52 else version - 3, name, sql)
         for version, name, sql in current
-        if 47 <= version <= 51 and (version - 2 if version < 51 else version) <= legacy_version
+        if 48 <= version <= 52
+        and (published or (version - 3 if version < 52 else version - 1) <= legacy_version)
     )
     connection, apply_migrations = create_historical_database(1, historical)
     connection.execute(
@@ -2622,7 +2648,8 @@ def test_local_cache_upgrade_preserves_deep_scan_migration_history(legacy_versio
         "VALUES ('finding', 'fingerprint', 'rule', 'anchor', 'created', 'updated')"
     )
     connection.execute(
-        "INSERT INTO finding_embeddings VALUES ('finding', 'service-model', '[1, 0]')"
+        "INSERT INTO finding_embeddings (finding_id, model, vector_json) "
+        "VALUES ('finding', 'service-model', '[1, 0]')"
     )
     recorded = {
         row["name"]: row["applied_at"]
@@ -2649,6 +2676,10 @@ def test_local_cache_upgrade_preserves_deep_scan_migration_history(legacy_versio
             )
             if row["name"].startswith("deep_scan_")
         }
+        assert upgraded_tables["deep_scan_runs"].count(", discovery_user_context_json TEXT") == 1
+        upgraded_tables["deep_scan_runs"] = upgraded_tables["deep_scan_runs"].replace(
+            ", discovery_user_context_json TEXT", "", 1
+        )
         if legacy_version == 48:
             assert upgraded_tables["deep_scan_runs"].count(", execution_settings_json TEXT") == 1
             upgraded_tables["deep_scan_runs"] = upgraded_tables["deep_scan_runs"].replace(

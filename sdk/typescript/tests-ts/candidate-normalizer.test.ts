@@ -102,6 +102,60 @@ function ledger(f: Fixture): Row[] {
 afterEach(roots.cleanup);
 
 describe("built candidate normalizer", () => {
+  test("keeps helper imports inside Node workers side-effect free", () => {
+    const f = fixture();
+    const result = spawnSync(
+      node,
+      [
+        "--input-type=module",
+        "-e",
+        `import { Worker } from "node:worker_threads";
+         import { pathToFileURL } from "node:url";
+         const source = \`import { parentPort } from "node:worker_threads";
+           const { default: helper } = await import(\${JSON.stringify(pathToFileURL(process.argv[1]).href)});
+           parentPort.postMessage([typeof helper.parseCanonicalScanDraft, typeof helper.resumeSelectedDeepScan]);\`;
+         const worker = new Worker(new URL("data:text/javascript," + encodeURIComponent(source)), { execArgv: [] });
+         worker.on("message", (value) => console.log(JSON.stringify(value)));
+         worker.on("error", (error) => { throw error; });`,
+        helper,
+      ],
+      { cwd: f.root, encoding: "utf8" },
+    );
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(["function", "function"]);
+  });
+
+  test("dispatches normalization when the helper is a Node worker entry", () => {
+    const f = fixture();
+    const rows = [candidate()];
+    const cli = run(f, [rows]);
+    expect(cli.status).toBe(0);
+    const result = spawnSync(
+      node,
+      [
+        "--input-type=module",
+        "-e",
+        `import { Worker } from "node:worker_threads";
+         const worker = new Worker(process.argv[1], {
+           execArgv: [], workerData: JSON.parse(process.argv[2]),
+         });
+         worker.on("message", (value) => console.log(JSON.stringify(value)));
+         worker.on("error", (error) => { throw error; });`,
+        helper,
+        JSON.stringify({
+          repoRoot: f.repo,
+          scopePath: f.scope,
+          candidates: rows,
+        }),
+      ],
+      { cwd: f.root, encoding: "utf8" },
+    );
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(ledger(f));
+  });
+
   test.skipIf(process.platform !== "linux")(
     "accepts many input paths through the packaged launcher",
     () => {

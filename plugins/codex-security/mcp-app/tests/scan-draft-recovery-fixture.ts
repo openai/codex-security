@@ -11,6 +11,12 @@ import { importSource } from "./import-module.ts";
 export const draftApi = await importSource("../src/artifact-scan-draft.ts", {
   absWorkingDir: import.meta.dirname,
 });
+
+export const { recordCodexSecurityScanDraft } = await importSource(
+  "./scan-draft-writer-fixture.ts",
+  { absWorkingDir: import.meta.dirname },
+);
+
 export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 export const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
 
@@ -70,7 +76,7 @@ export function draftFixture(root: string, layout: Layout) {
     write: (input: ScanDraftInput) =>
       layout === "worker"
         ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
-        : draftApi.recordCodexSecurityScanDraft(context, input),
+        : recordCodexSecurityScanDraft(context, input),
     read: async () =>
       layout === "worker"
         ? (await readJson(root, "result.json")).coverage
@@ -91,12 +97,17 @@ export async function interruptDraftWrite(
   action: () => Promise<unknown>,
 ) {
   const rename = fs.rename;
+  let interrupted = false;
   fs.rename = async (source, target) => {
-    if (target === destination) throw new Error("interrupted draft write");
+    if (target === destination) {
+      interrupted = true;
+      throw new Error("interrupted draft write");
+    }
     return rename(source, target);
   };
   try {
     await assert.rejects(action(), /interrupted draft write/);
+    assert.equal(interrupted, true);
   } finally {
     fs.rename = rename;
   }

@@ -4,7 +4,7 @@ This Promptfoo suite verifies that `$codex-security:triage-finding` accepts the 
 JSON result shape. It also covers bare skill invocation with no supplied finding,
 which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub intake cases cover repository-source selection, REST endpoints, and explicit Connector requests without querying live GitHub during the eval.
 
-The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. Codex runs from the checkout's plugin directory and reads its triage skill directly, with ambient plugins and memory disabled. The default suite can also read the synthetic fixtures; calibration cases can read their own hydrated checkout. Dataset labels, assertions, and calibration Git history stay outside those readable roots. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
+The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The common runner stages the checkout's triage skill and policy helper in a throwaway directory, with ambient plugins and memory disabled. The default suite can also read the synthetic fixtures; calibration cases can read their own hydrated checkout. Dataset labels, assertions, and calibration Git history stay outside those readable roots. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
 Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the repository root to install dependencies under this eval directory.
 
@@ -18,15 +18,16 @@ pnpm --dir evals/triage-finding run setup
 
 After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals`. It prepares the SDK and type-checks the eval sources. Node and Promptfoo execute the TypeScript sources directly; package commands enable type stripping for Node 22.13.
 
-Before running model evals, build the checkout's policy helper (requires the [native build prerequisites](../../plugins/codex-security/native/README.md)):
+Before running the eval commands, prepare the native policy helper (requires the [native build prerequisites](../../plugins/codex-security/native/README.md)):
 
 ```bash
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 node plugins/codex-security/mcp-app/scripts/build_native.mjs
-node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
 
-Config validation and deterministic tests do not need this helper build.
+The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. The runtime extension runs after Promptfoo loads the native Codex provider, preserving its authentication precedence. A pinned Promptfoo patch runs saved `:beforeAll` startup hooks during viewer replay. Replay does not restore grading metadata, so grading hooks remain disabled.
+
+Saved runs whose provider ID is `file://.../triage-provider.mts` need to be rerun with the current configuration before retry, resume, or replay. Their saved results remain intact. Native Codex provider IDs are unchanged.
 
 Validate the config:
 
@@ -56,7 +57,7 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 
 - `contains-json` validates the fenced `triage-finding/v0` JSON block against `schemas/triage-result-v0.schema.json`.
 - `assertions/triage-io.mts` checks input order, `input_id`, `source_type`,
-  verdicts, array fields, and `$fix-finding` handoff behavior.
+  verdicts, array fields, and `$fix-finding` handoff behavior. Its shared triage parser accepts complete JSON or multiline JSON code fences, including indented and CRLF fences. Inline fences and JSON embedded in prose are not accepted.
 - `tests/invocation-behavior.yaml` opts out of those default JSON assertions for the no-finding case with `options.disableDefaultAsserts: true`.
 - `assertions/missing-input.mts` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.

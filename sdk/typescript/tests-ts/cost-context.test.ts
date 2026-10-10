@@ -236,7 +236,7 @@ test("component totals preserve uncertainty and label legacy records without rep
 });
 
 test.each([false, true])(
-  "attributed model totals retain context bounds and partial coverage (%s)",
+  "attributed model totals retain context bounds and partial coverage (%p)",
   (unknownUpper) => {
     const first = {
       model: "gpt-5.6-sol",

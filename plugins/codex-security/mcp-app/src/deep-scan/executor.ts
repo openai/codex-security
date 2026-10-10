@@ -13,16 +13,18 @@ import {
   dirname,
   isAbsolute,
   join,
+  parse,
   resolve,
+  sep,
   win32,
 } from "node:path";
-import { readCodexSessionTurn } from "../codex-session.js";
 import {
   Codex,
   type CodexOptions,
   type CyberAccessProgram,
   type ThreadEvent,
 } from "@openai/codex-sdk";
+import { readCodexSessionTurn } from "../../../scripts/codex_session.mjs";
 import { parse as parseToml } from "smol-toml";
 import {
   createCodexProfileClient,
@@ -251,42 +253,27 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           events,
           stopOnCompletion: true,
           onEvent: async (event) => {
-            if (
-              event.type === "thread.started" &&
-              typeof event.thread_id === "string"
-            ) {
-              await request.onThreadStarted?.(event.thread_id);
-            } else if (
-              event.type === "item.completed" &&
-              isRecord(event.item)
-            ) {
-              const fallbackError =
-                event.item.type === "error" &&
-                typeof event.item.message === "string"
-                  ? deepScanPermissionProfileFallbackError(event.item.message)
-                  : undefined;
-              if (fallbackError) {
-                controller.abort(fallbackError);
-                throw fallbackError;
-              }
-              appendSafeItemDiagnostic(diagnostics, event.item);
-            } else if (event.type === "turn.completed") {
-              request.signal.removeEventListener("abort", forwardAbort);
-            } else if (event.type === "turn.failed") {
-              throw new Error((event.error as { message: string }).message);
-            } else if (
-              event.type === "error" &&
-              typeof event.message === "string"
-            ) {
+            const item = event.type === "item.completed" ? event.item : event;
+            if (item.type === "error") {
               const fallbackError = deepScanPermissionProfileFallbackError(
-                event.message,
+                item.message,
               );
               if (fallbackError) {
                 controller.abort(fallbackError);
                 throw fallbackError;
               }
+            }
+            if (event.type === "thread.started") {
+              await request.onThreadStarted?.(event.thread_id);
+            } else if (event.type === "item.completed") {
+              appendItemDiagnostic(diagnostics, event.item);
+            } else if (event.type === "turn.completed") {
+              request.signal.removeEventListener("abort", forwardAbort);
+            } else if (event.type === "turn.failed") {
+              throw new Error(event.error.message);
+            } else if (event.type === "error") {
               // Codex exec emits retry-in-progress notifications as error events.
-              appendCodeModeFrameDiagnostic(diagnostics, event.message);
+              appendStreamDiagnostic(diagnostics, event.message);
             }
           },
         });
@@ -416,59 +403,69 @@ function workerSubagentConfig(
   };
 }
 
-type TomlValue = string | number | boolean | TomlValue[] | TomlObject;
-type TomlObject = { [key: string]: TomlValue };
-
-function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
+function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+  const filesystem = new Map<string, string | Record<string, string>>([
+    [":root", "read"],
+    ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
+  ]);
+  for (const literal of sandbox.literalFilesystemDenies ?? []) {
+    if (sandbox.filesystemDenies.includes(literal)) {
+      const root = parse(literal).root;
+      const scope = filesystem.get(root);
+      filesystem.set(root, {
+        ...(typeof scope === "object"
+          ? scope
+          : scope === undefined
+            ? {}
+            : { ".": scope }),
+        [literal.slice(root.length)]: "deny",
+      });
+    }
+    filesystem.set(literal, { ".": "deny" });
+  }
   return {
     extends: ":read-only",
     // Object.fromEntries preserves literal keys such as "__proto__" without
     // letting a denied path mutate the serializer object prototype.
-    filesystem: Object.fromEntries([
-      [":root", "read"],
-      ...Array.from(sandbox.filesystemDenies, (key) => [key, "deny"]),
-      ...Array.from(sandbox.literalFilesystemDenies ?? [], (key) => [
-        key,
-        { ".": "deny" },
-      ]),
+    filesystem: {
+      ...Object.fromEntries(filesystem),
       ...(sandbox.globScanMaxDepth === undefined
-        ? []
-        : [["glob_scan_max_depth", sandbox.globScanMaxDepth]]),
-    ]),
+        ? {}
+        : { glob_scan_max_depth: sandbox.globScanMaxDepth }),
+    },
     network: { enabled: false },
   };
 }
 
-/**
- * Convert SDK item failures into bounded classifications without retaining the
- * command, output, or paths carried by the event. Those fields can contain
- * repository contents and credentials, while the coordinator only needs the
- * reason a later deterministic artifact check failed.
- */
-function appendSafeItemDiagnostic(
+/** Retain SDK failure messages for a later deterministic artifact check. */
+function appendItemDiagnostic(
   diagnostics: CodexWorkerDiagnostic[],
   item: unknown,
 ): void {
   if (!isRecord(item) || typeof item.type !== "string") return;
-  if (item.type === "error") {
-    appendCodeModeFrameDiagnostic(diagnostics, item.message);
+  if (item.type === "error" && typeof item.message === "string") {
+    appendStreamDiagnostic(diagnostics, item.message);
     return;
   }
   if (item.status !== "failed") return;
   if (
     item.type === "mcp_tool_call" &&
     isRecord(item.error) &&
-    appendCodeModeFrameDiagnostic(diagnostics, item.error.message)
-  )
-    return;
+    typeof item.error.message === "string" &&
+    isCodeModeFrameError(item.error.message)
+  ) {
+    appendUniqueDiagnostic(diagnostics, {
+      code: "artifact_tool_failed",
+      message: item.error.message,
+    });
+  }
   if (item.type === "command_execution") {
     const output =
       typeof item.aggregated_output === "string" ? item.aggregated_output : "";
     if (isSandboxNamespaceExhaustion(output)) {
       appendUniqueDiagnostic(diagnostics, {
         code: "sandbox_namespace_exhausted",
-        message:
-          "Codex worker sandbox namespace creation failed (bwrap ENOSPC).",
+        message: output,
       });
     }
     return;
@@ -486,50 +483,51 @@ function appendSafeItemDiagnostic(
       item.server === "codex_security_artifacts") &&
     typeof item.tool === "string"
   ) {
-    if (isRecord(item.result) && Array.isArray(item.result.content)) {
-      for (const content of item.result.content) {
-        if (
-          isRecord(content) &&
-          content.type === "text" &&
-          appendCodeModeFrameDiagnostic(diagnostics, content.text)
-        )
-          return;
-      }
-    }
+    const messages = [
+      ...(isRecord(item.error) ? [item.error.message] : []),
+      ...(isRecord(item.result) && Array.isArray(item.result.content)
+        ? item.result.content.flatMap((content) =>
+            isRecord(content) && content.type === "text" ? [content.text] : [],
+          )
+        : []),
+    ].filter(
+      (message): message is string =>
+        typeof message === "string" && message.length > 0,
+    );
     const reason = isRecord(item.result)
       ? "returned an error"
       : isRecord(item.error)
         ? "transport failed"
         : "failed";
-    appendUniqueDiagnostic(diagnostics, {
-      code: "artifact_tool_failed",
-      message: `Codex worker artifact tool ${item.tool} ${reason}.`,
-    });
+    for (const message of messages.length > 0
+      ? messages
+      : [`Codex worker artifact tool ${item.tool} ${reason}.`]) {
+      appendUniqueDiagnostic(diagnostics, {
+        code: "artifact_tool_failed",
+        message,
+      });
+    }
   }
 }
 
-function appendCodeModeFrameDiagnostic(
-  diagnostics: CodexWorkerDiagnostic[],
-  message: unknown,
-): boolean {
-  // Codex exposes this transport error as text, without a structured code.
-  // Preserve only its complete numeric template, never surrounding tool output.
-  if (typeof message !== "string") return false;
-  const match =
+function isCodeModeFrameError(message: string): boolean {
+  return (
     /^code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length [0-9]+ exceeds [0-9]+ bytes$/u.exec(
       message,
-    );
-  if (match?.[0] !== message) return false;
-  const diagnostic: CodexWorkerDiagnostic = {
-    code: "artifact_tool_failed",
-    message,
-  };
-  const index = diagnostics.findIndex(
-    (existing) => existing.code === diagnostic.code,
+    )?.[0] === message
   );
-  if (index === -1) diagnostics.push(diagnostic);
-  else diagnostics[index] = diagnostic;
-  return true;
+}
+
+function appendStreamDiagnostic(
+  diagnostics: CodexWorkerDiagnostic[],
+  message: string,
+): void {
+  appendUniqueDiagnostic(diagnostics, {
+    code: isCodeModeFrameError(message)
+      ? "artifact_tool_failed"
+      : "worker_error",
+    message,
+  });
 }
 
 function isSandboxNamespaceExhaustion(output: string): boolean {
@@ -542,7 +540,13 @@ function appendUniqueDiagnostic(
   diagnostics: CodexWorkerDiagnostic[],
   diagnostic: CodexWorkerDiagnostic,
 ): void {
-  if (!diagnostics.some((existing) => existing.code === diagnostic.code)) {
+  if (
+    !diagnostics.some(
+      (existing) =>
+        existing.code === diagnostic.code &&
+        existing.message === diagnostic.message,
+    )
+  ) {
     diagnostics.push(diagnostic);
   }
 }
@@ -550,6 +554,9 @@ function appendUniqueDiagnostic(
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+
+type TomlValue = string | number | boolean | TomlValue[] | TomlObject;
+type TomlObject = { [key: string]: TomlValue };
 
 // These are the existing non-secret selections written by the SDK preflight
 // adapter. Reading only summary left provider selection in a shared home.
@@ -641,11 +648,18 @@ async function workerRuntimeSettings(
       ? profiles[config.profile]
       : undefined;
   const selected = { ...config, ...(isRecord(profile) ? profile : {}) };
+  for (const key of ["analytics", "responses_api_metadata"]) {
+    if (isRecord(config[key]) && isRecord(profile) && isRecord(profile[key])) {
+      selected[key] = { ...config[key], ...profile[key] };
+    }
+  }
   const inherited = Object.fromEntries(
-    ["model_reasoning_summary", "service_tier"].map((key) => [
-      key,
-      selected[key],
-    ]),
+    [
+      "model_reasoning_summary",
+      "service_tier",
+      "analytics",
+      "responses_api_metadata",
+    ].map((key) => [key, selected[key]]),
   );
   const settings: CodexSdkWorkerRuntimeSettings = { config: inherited };
   const workerConfigPath = environmentVariable(
@@ -874,7 +888,7 @@ function resolveFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(resolve(originalCwd, directory), executableName);
+    const candidate = `${absoluteCodexPath(directory, process.platform, originalCwd)}${sep}${executableName}`;
     if (isExecutableFile(candidate)) return candidate;
   }
   return undefined;
@@ -981,7 +995,9 @@ function absoluteCodexPath(
   if (isAbsolute(value) || (platform === "win32" && win32.isAbsolute(value))) {
     return value;
   }
-  return resolve(originalCwd, value);
+  return platform === "win32"
+    ? resolve(originalCwd, value)
+    : `${originalCwd}${sep}${value}`;
 }
 
 function isNativeWindowsRootRelativePath(value: string): boolean {

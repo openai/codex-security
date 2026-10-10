@@ -96,20 +96,42 @@ export async function sendFeedback(
       },
     );
     const uploaded = Promise.withResolvers<string>();
+    let stderr = "";
+    let stdinError: Error | undefined;
     const closed = new Promise<void>((resolve) => {
       child.once("close", () => {
         uploaded.reject(
-          new CodexSecurityError("Codex exited before feedback was uploaded."),
+          new CodexSecurityError(
+            stderr || "Codex exited before feedback was uploaded.",
+          ),
         );
         resolve();
       });
     });
     child.once("error", uploaded.reject);
-    child.stdin.on("error", uploaded.reject);
-    child.stderr.resume();
+    child.stdin.on("error", (error: Error) => {
+      stdinError ??= error;
+      uploaded.reject(error);
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
     const send = (message: object) =>
       child.stdin.write(`${JSON.stringify(message)}\n`);
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const releaseCanceledPipes = () => {
+      if (!options.signal?.aborted) return;
+      uploaded.reject(options.signal.reason);
+      if (child.exitCode === null && child.signalCode === null) return;
+      lines.close();
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+    options.signal?.addEventListener("abort", releaseCanceledPipes, {
+      once: true,
+    });
+    child.once("exit", releaseCanceledPipes);
     lines.on("line", (line) => {
       try {
         const message = JSON.parse(line) as {
@@ -161,26 +183,35 @@ export async function sendFeedback(
       }
     });
     try {
-      send({
-        id: 1,
-        method: "initialize",
-        params: { clientInfo: { name: "codex-security", version: VERSION } },
-      });
-      return {
-        feedbackId: await uploaded.promise,
-        scanId: scan?.scanId ?? null,
-        includedLogs: includeLogs,
-      };
-    } finally {
-      lines.close();
-      child.stdin.end();
-      child.kill();
-      const timer = setTimeout(() => child.kill("SIGKILL"), 1_000);
       try {
-        await closed;
+        send({
+          id: 1,
+          method: "initialize",
+          params: { clientInfo: { name: "codex-security", version: VERSION } },
+        });
+        return {
+          feedbackId: await uploaded.promise,
+          scanId: scan?.scanId ?? null,
+          includedLogs: includeLogs,
+        };
       } finally {
-        clearTimeout(timer);
+        lines.close();
+        child.stdin.end();
+        child.kill();
+        const timer = setTimeout(() => child.kill("SIGKILL"), 1_000);
+        try {
+          await closed;
+        } finally {
+          clearTimeout(timer);
+          options.signal?.removeEventListener("abort", releaseCanceledPipes);
+          child.removeListener("exit", releaseCanceledPipes);
+        }
       }
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      if (error === stdinError && stderr)
+        throw new CodexSecurityError(stderr, { cause: error });
+      throw error;
     }
   } finally {
     if (directory !== undefined)

@@ -554,12 +554,13 @@ def _discover_rollout_sessions(
     try:
         database.row_factory = sqlite3.Row
         database.execute("PRAGMA query_only = ON")
-        _require_state_columns(database, "threads", {"id", "rollout_path"})
-        _require_state_columns(
-            database,
-            "thread_spawn_edges",
-            {"parent_thread_id", "child_thread_id"},
-        )
+        for table, required in (
+            ("threads", {"id", "rollout_path"}),
+            ("thread_spawn_edges", {"parent_thread_id", "child_thread_id"}),
+        ):
+            columns = {str(row["name"]) for row in database.execute(f"PRAGMA table_info({table})")}
+            if not required.issubset(columns):
+                raise ValueError("Codex state graph does not expose the required thread columns.")
         sessions: dict[str, RolloutSession] = {}
         missing_thread_ids: set[str] = set()
         for root in roots:

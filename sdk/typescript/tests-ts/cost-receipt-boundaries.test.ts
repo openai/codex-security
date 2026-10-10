@@ -139,7 +139,7 @@ test.each([
 );
 
 test.each([false, true])(
-  "keeps inherited receipt baselines without counting parent tokens (gap: %s)",
+  "keeps inherited receipt baselines without counting parent tokens (gap: %p)",
   async (gap) => {
     const home = await temporaryDirectory();
     await mkdir(join(home, "sessions"));
@@ -237,7 +237,7 @@ test.each([false, true])(
 );
 
 test.each([false, true])(
-  "uses the complete equal-token rollout copy (prefix first: %s)",
+  "uses the complete equal-token rollout copy (prefix first: %p)",
   async (prefixFirst) => {
     const home = await temporaryDirectory();
     await mkdir(join(home, "sessions"));

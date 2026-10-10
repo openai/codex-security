@@ -15,6 +15,7 @@ import { build } from "esbuild";
 const bundle = await build({
   stdin: {
     contents: `export * from "./src/artifact-scan-draft.ts";
+      export { recordCodexSecurityScanDraft } from "./tests/scan-draft-writer-fixture.ts";
       export * from "./src/deep-scan/artifact-validation.ts";
       export * from "./src/deep-scan/artifacts.ts";
       export * from "./src/accepted-audit.ts";`,
