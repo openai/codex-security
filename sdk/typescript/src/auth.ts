@@ -61,6 +61,7 @@ export function configuredCodexHome(environment: ProcessEnvironment): string {
 /** Private stores excluded from read-only model tools. @internal */
 export function codexSecurityPrivatePaths(
   environment: ProcessEnvironment,
+  workingDirectory: string = process.cwd(),
 ): string[] {
   const stateDatabase = join(
     codexSecurityStateDirectory(environment),
@@ -93,7 +94,7 @@ export function codexSecurityPrivatePaths(
     stateDatabase,
     `${stateDatabase}-wal`,
     `${stateDatabase}-shm`,
-  ].map((path) => resolve(expandHome(path, environment)));
+  ].map((path) => resolve(workingDirectory, expandHome(path, environment)));
 }
 
 /** @internal */

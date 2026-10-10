@@ -8,7 +8,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -901,19 +901,26 @@ process.exit(0);
 );
 
 (process.platform === "win32" ? test.skip : test).each([
-  ["HOME", false],
-  ["USERPROFILE", false],
-  ["HOME", true],
-  ["USERPROFILE", true],
+  ["HOME", false, false],
+  ["USERPROFILE", false, false],
+  ["HOME", true, false],
+  ["USERPROFILE", true, false],
+  ["HOME", false, true],
+  ["USERPROFILE", false, true],
 ] as const)(
-  "dependency triage runs a delegated native tool with private %s stores, configured GitHub home: %p",
-  async (homeVariable, configuredGitHubHome) => {
+  "dependency triage runs a delegated native tool with private %s stores, configured GitHub home: %p, relative home: %p",
+  async (homeVariable, configuredGitHubHome, relativeHome) => {
     const f = await fixture({
       wrappedCodex: true,
       ambientOutput: true,
       homeVariable,
       configuredGitHubHome,
     });
+    if (relativeHome) {
+      Object.assign(f.environment, {
+        [homeVariable]: relative(f.outputDir, f.selectedUserHome),
+      });
+    }
     const npmFiles = [
       join(f.selectedUserHome, ".npmrc"),
       join(dirname(f.repository), "registry [user] #.npmrc"),
@@ -1145,6 +1152,22 @@ test.each([
       ] as JsonObject;
       expect(filesystem[expected[index]!]).toEqual({ ".": "deny" });
       expect(filesystem[expected[1 - index]!]).toBeUndefined();
+      if (shape === "relative-home") {
+        for (const suffix of [".ssh", ".config/gh"]) {
+          expect(
+            filesystem[resolve(f.outputDir, "../relative-home", suffix)],
+          ).toEqual({ ".": "deny" });
+          expect(
+            filesystem[
+              resolve(
+                fixtures[1 - index]!.outputDir,
+                "../relative-home",
+                suffix,
+              )
+            ],
+          ).toBeUndefined();
+        }
+      }
       expect(options.env!["npm_config_userconfig"]).toBe(configured);
       expect(f.captured.thread!.workingDirectory).toBe(f.outputDir);
       expect(filesystem[f.repository]).toBeUndefined();

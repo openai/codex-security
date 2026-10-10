@@ -5181,6 +5181,7 @@ function dependencyPermissions(
   });
   const privatePaths = [
     ...codexSecurityPrivatePaths(environment),
+    ...codexSecurityPrivatePaths(environment, workingDirectory),
     ...[
       homedir(),
       resolve(workingDirectory, expandHome("~", environment)),
