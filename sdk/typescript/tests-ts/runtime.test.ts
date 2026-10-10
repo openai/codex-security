@@ -5086,30 +5086,38 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(join(root, "state", "scans", "linked-repository"));
   });
 
-  test("rejects symbolic children beneath persistent scan state", async () => {
-    const root = await temporaryDirectory();
-    const external = join(root, "external");
-    await mkdir(external);
+  test.each([
+    ["scans", "scan"],
+    ["dependencies", "dependency"],
+  ] as const)(
+    "rejects symbolic children beneath persistent %s state",
+    async (category, label) => {
+      const root = await temporaryDirectory();
+      const external = join(root, "external");
+      await mkdir(external);
 
-    for (const [name, path] of [
-      ["scans", "scans"],
-      ["repository", join("scans", "repository")],
-    ] as const) {
-      const state = join(root, `state-${name}`);
-      const linked = join(state, path);
-      await mkdir(dirname(linked), { recursive: true });
-      await symlink(
-        external,
-        linked,
-        process.platform === "win32" ? "junction" : "dir",
-      );
+      for (const [name, path] of [
+        [category, category],
+        ["repository", join(category, "repository")],
+      ] as const) {
+        const state = join(root, `state-${name}`);
+        const linked = join(state, path);
+        await mkdir(dirname(linked), { recursive: true });
+        await symlink(
+          external,
+          linked,
+          process.platform === "win32" ? "junction" : "dir",
+        );
 
-      await expect(
-        preparePersistentOutputRoot(state, "scans", "repository"),
-      ).rejects.toThrow("Persistent scan output must use real directories");
-      expect(await readdir(external)).toEqual([]);
-    }
-  });
+        await expect(
+          preparePersistentOutputRoot(state, category, "repository"),
+        ).rejects.toThrow(
+          `Persistent ${label} output must use real directories`,
+        );
+        expect(await readdir(external)).toEqual([]);
+      }
+    },
+  );
 
   test("expands a tilde CODEX_HOME when discovering preflight configuration", async () => {
     const root = await temporaryDirectory();

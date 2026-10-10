@@ -1,0 +1,42 @@
+{
+  "id": "openai:codex-sdk:gpt-5.5",
+  "label": "Codex SDK SCA synthetic smoke",
+  "config": {
+    "working_dir": "{{triage_runtime_root}}",
+    "additional_directories": [
+      "{{env.SCA_EVAL_RUNTIME_ROOT}}",
+      "{{env.SCA_EVAL_CODEX_RUNTIME_ROOT}}",
+      "{{triage_node_root}}"
+    ],
+    "skip_git_repo_check": true,
+    "approval_policy": "never",
+    "model_reasoning_effort": "xhigh",
+    "cli_env": {
+      "CODEX_HOME": "{{env.SCA_EVAL_CODEX_HOME}}",
+      "HTTP_PROXY": "{{env.HTTP_PROXY}}",
+      "HTTPS_PROXY": "{{env.HTTPS_PROXY}}",
+      "ALL_PROXY": "{{env.ALL_PROXY}}",
+      "NO_PROXY": "{{env.NO_PROXY}}"
+    },
+    "cli_config": {
+      "web_search": "disabled",
+      "default_permissions": "sca_eval_runtime_only",
+      "permissions": {
+        "sca_eval_runtime_only": {
+          "filesystem": {
+            ":minimal": "read",
+            ":workspace_roots": "read"
+          },
+          "network": {
+            "enabled": false
+          }
+        }
+      },
+      "features": {
+        "memories": false,
+        "plugins": false,
+        "apps": false
+      }
+    }
+  }
+}

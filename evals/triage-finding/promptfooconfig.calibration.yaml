@@ -43,7 +43,7 @@ defaultTest:
     invocation_preamble: "Use $codex-security:triage-finding to triage the supplied existing security finding."
   assert:
     - type: contains-json
-      value: file://./schemas/triage-result-v0.schema.json
+      value: file://../../plugins/codex-security/schemas/triage-result.schema.json
     - type: javascript
       value: file://./assertions/triage-io.mts
     - type: javascript

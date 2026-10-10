@@ -52,7 +52,7 @@ defaultTest:
       verdict queue; and use null rank_queue/rank for not_actionable findings.
   assert:
     - type: contains-json
-      value: file://./schemas/triage-result-v0.schema.json
+      value: file://../../plugins/codex-security/schemas/triage-result.schema.json
     - type: javascript
       value: file://./assertions/triage-io.mts
 

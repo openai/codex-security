@@ -1339,7 +1339,7 @@ async function testUnsupportedProviderSnapshotFailsBeforeLaunch() {
 }
 
 async function testWorkerRuntimeSettings() {
-  const cases: [string, string | undefined][] = [
+  const cases: [string, string | undefined, boolean?][] = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
     ['model_reasoning_summary = "auto"\n', "auto"],
@@ -1352,6 +1352,8 @@ async function testWorkerRuntimeSettings() {
       "none",
     ],
   ];
+  if (process.platform !== "win32")
+    cases.push(['model_reasoning_summary = "auto"\n', "auto", true]);
   const saved = [
     "PYTHON",
     "CODEX_SECURITY_PYTHON_COMMAND",
@@ -1359,6 +1361,8 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
     "CODEX_CLI_PATH",
     "CODEX_MCP_NODE_PATH",
     "CODEX_HOME",
@@ -1384,7 +1388,7 @@ async function testWorkerRuntimeSettings() {
     delete process.env.SYNTHETIC_GATEWAY_KEY;
     delete process.env.SYNTHETIC_HEADER_VALUE;
     delete process.env.CODEX_SQLITE_HOME;
-    for (const [configuration, expected] of cases) {
+    for (const [configuration, expected, scriptLauncher = false] of cases) {
       const fixture = await fakeCodexFixture(
         deniedWorkerPermissionProfile,
         true,
@@ -1409,6 +1413,11 @@ async function testWorkerRuntimeSettings() {
         GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
       };
       Object.assign(process.env, gitEnvironment);
+      const githubEnvironment = {
+        GH_CONFIG_DIR: path.join(fixture.root, "configured github"),
+        XDG_CONFIG_HOME: path.join(fixture.root, "existing config"),
+      };
+      Object.assign(process.env, githubEnvironment);
       const configPath = path.join(fixture.root, "active [scan] config.toml");
       const codexHome = path.join(
         fixture.root,
@@ -1723,7 +1732,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         ),
       );
       await writeFile(promptPath, "synthetic worker configuration fixture");
-      process.env.CODEX_CLI_PATH = process.execPath;
+      const selectedExecutable = scriptLauncher
+        ? fixture.executablePath
+        : process.execPath;
+      process.env.CODEX_CLI_PATH = selectedExecutable;
       process.env.CODEX_HOME = codexHome;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
       process.env.CODEX_SECURITY_PLUGIN_ROOT = path.join(
@@ -1756,6 +1768,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           ),
         };
         launches.push({ command, args, environment, markerPath });
+        if (scriptLauncher && command === selectedExecutable)
+          return originalSpawn(
+            process.execPath,
+            [fixture.executablePath, ...args],
+            { ...options, env: environment },
+          );
         return originalSpawn(
           command,
           command === process.execPath ||
@@ -1851,11 +1869,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.command,
               process.platform === "win32"
                 ? path.toNamespacedPath(process.execPath)
-                : process.execPath,
+                : selectedExecutable,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_CLI_PATH,
-              process.execPath,
+              selectedExecutable,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_HOME,
@@ -2030,6 +2048,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               false,
             );
             assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
+            assert.deepEqual(invocation.githubEnvironment, githubEnvironment);
+            for (const [name, value] of Object.entries(githubEnvironment)) {
+              assert.equal(workerLaunch.environment![name], value);
+              assert.equal(process.env[name], value);
+            }
             for (const [name, value] of Object.entries(gitEnvironment)) {
               assert.equal(process.env[name], value);
             }
@@ -2088,6 +2111,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           )) {
             const preflight = await readJson(launch.markerPath);
             assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
+            assert.deepEqual(preflight.githubEnvironment, githubEnvironment);
             const selectedProvider = workerConfigurations.find(
               (entry) => preflight.configPath === entry.path,
             );
@@ -3311,7 +3335,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, githubEnvironment: Object.fromEntries(['GH_CONFIG_DIR', 'XDG_CONFIG_HOME'].map(name => [name, process.env[name]])), gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -3362,7 +3386,7 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, githubEnvironment: Object.fromEntries(['GH_CONFIG_DIR', 'XDG_CONFIG_HOME'].map(name => [name, process.env[name]])), gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }

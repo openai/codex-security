@@ -1,5 +1,16 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
+import { runOsvScan, type OsvScanResult } from "./sca-osv.js";
+import {
+  dependencyScanResult,
+  dependencyRepositoryDirty,
+  saveDependencyScan,
+} from "./sca.js";
+import {
+  dependencyTriageContract,
+  dependencyTriagePrompt,
+} from "./sca-triage.js";
+import type { ScaAssessment, ScaResult } from "./sca-types.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   chmod,
@@ -12,7 +23,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { pathToFileURL } from "node:url";
 import {
@@ -37,6 +48,8 @@ import {
   createProfileCodex,
   createProviderProfile,
   legacyWorkerUsesScanProvider,
+  isPermissionProfileFallbackError,
+  preflightReadOnlyProfileCodex,
   providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
@@ -46,6 +59,8 @@ import {
   NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
+  codexSecurityPrivatePaths,
+  environmentEntry,
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
@@ -172,6 +187,7 @@ import {
 import { writeMockScanDraft } from "./mock-scan.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
+  disabledMcpServers,
   matchCompletedScan,
   matchScanFindingsInternal,
 } from "./scan-comparison.js";
@@ -352,6 +368,14 @@ export interface ScanOptions extends ScanSettings {
   signal?: AbortSignal;
 }
 
+export interface DependencyScanOptions extends Pick<
+  ScanOptions,
+  "auth" | "outputDir" | "signal" | "maxCostUsd"
+> {
+  repositoryPath: string;
+}
+export type DependencyScanResult = ScaResult;
+
 export interface ValidationOptions extends Pick<
   ScanOptions,
   "auth" | "outputDir" | "signal"
@@ -479,7 +503,10 @@ interface CodexSecurityRuntimeOptions {
 
 interface ClientDependencies {
   createCodex(
-    options: CodexOptions & { nativeProfile?: string },
+    options: CodexOptions & {
+      nativeProfile?: string;
+      requestedPermissionProfile?: string;
+    },
   ): CodexClientLike | Promise<CodexClientLike>;
   environment: ProcessEnvironment;
   prepareRuntime?: (
@@ -495,20 +522,23 @@ interface ClientDependencies {
   probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
+  runOsvScan?: typeof runOsvScan;
+  sourceSnapshot?: FindingWorkflow["sourceSnapshot"];
   runDeepScan?: typeof runDeepScan;
   supportsDirectDeepScan?: typeof supportsDirectDeepScan;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  createCodex: ({ nativeProfile, ...options }) =>
+  createCodex: ({ nativeProfile, requestedPermissionProfile, ...options }) =>
     nativeProfile === undefined
       ? new Codex(options)
-      : createProfileCodex(options, nativeProfile),
+      : createProfileCodex(options, nativeProfile, requestedPermissionProfile),
   environment: process.env,
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
 const POLICY_PERMISSION_PROFILE = "codex_security_policy";
+const SCA_PERMISSION_PROFILE = "codex_security_dependencies";
 const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
@@ -665,6 +695,348 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       await workflow.fail("scan", error);
+      throw error;
+    }
+  }
+
+  /** Inventory locked dependencies, match OSV advisories, and assess them statically. */
+  public async scanDependencies(
+    options: DependencyScanOptions,
+  ): Promise<DependencyScanResult> {
+    return await this.#trackOperation(() => this.#scanDependencies(options));
+  }
+
+  async #scanDependencies(
+    options: DependencyScanOptions,
+  ): Promise<DependencyScanResult> {
+    const budgetController = new AbortController();
+    const signal = AbortSignal.any([
+      this.#abortController.signal,
+      budgetController.signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
+    let outputDir = "";
+    let result: ScaResult | undefined;
+    try {
+      throwIfAborted(signal);
+      const inputs = await this.#prepareLocalInputs(
+        options.repositoryPath,
+        options,
+        signal,
+      );
+      const temporaryRoot = await realpath(tmpdir());
+      requireOutputOutsideRepository(
+        inputs.protectedRoot,
+        temporaryRoot,
+        "temporary",
+      );
+      const outputRoot =
+        inputs.outputDir === null
+          ? await preparePersistentOutputRoot(
+              inputs.stateDirectory,
+              "dependencies",
+              basename(inputs.repository),
+            )
+          : temporaryRoot;
+      outputDir = await prepareOutputDir(
+        inputs.outputDir ?? undefined,
+        basename(inputs.repository),
+        outputRoot,
+        (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+      );
+      let sourceWorkflow: FindingWorkflow | undefined;
+      const snapshotSource = async (): Promise<JsonObject> => {
+        if (this.#dependencies.sourceSnapshot !== undefined)
+          return await this.#dependencies.sourceSnapshot(inputs.repository);
+        if (sourceWorkflow === undefined) {
+          const python = await (
+            this.#dependencies.resolvePluginPython ?? resolvePluginPython
+          )({
+            configuredPath: this.config.pythonPath,
+            environment: this.#dependencies.environment,
+            protectedRoot: inputs.protectedRoot,
+            signal,
+          });
+          sourceWorkflow = new FindingWorkflow(
+            "dependency-triage",
+            this.#dependencies.environment,
+            (options, args, input) =>
+              (this.#dependencies.runWorkbench ?? runWorkbench)(
+                { ...options, signal },
+                args,
+                input,
+              ),
+            python,
+          );
+        }
+        return await sourceWorkflow.sourceSnapshot(inputs.repository);
+      };
+      const sourceDigest = async () => {
+        const { repository, revision, content } = await snapshotSource();
+        return workflowDigest({ repository, revision, content });
+      };
+      // Bind triage to the source before inventory, including dirty and ignored files.
+      // A snapshot failure must not discard deterministic scanner evidence.
+      const source = await sourceDigest().then(
+        (digest) => ({ digest }),
+        (error: unknown) => ({ error }),
+      );
+      const repository = {
+        path: inputs.repository,
+        revision: await (
+          this.#dependencies.repositoryRevision ?? repositoryRevision
+        )(inputs.repository, signal),
+        dirty: await dependencyRepositoryDirty(
+          inputs.repository,
+          this.#dependencies.environment,
+          signal,
+        ),
+      };
+      try {
+        const scan = await (this.#dependencies.runOsvScan ?? runOsvScan)({
+          repositoryPath: inputs.repository,
+          outputDir,
+          environment: this.#dependencies.environment,
+          signal,
+        });
+        result = dependencyScanResult(scan, repository, outputDir);
+      } catch (error) {
+        if (error instanceof Error && "osvResult" in error) {
+          result = dependencyScanResult(
+            error.osvResult as OsvScanResult,
+            repository,
+            outputDir,
+          );
+          await saveDependencyScan(result);
+        }
+        throw error;
+      }
+      await saveDependencyScan(result);
+      throwIfAborted(signal, outputDir);
+      if (result.matches.length === 0) return result;
+      // Authentication is deliberately deferred until deterministic evidence is durable.
+      try {
+        if ("error" in source) throw source.error;
+        const session = await this.#prepareSession(
+          inputs,
+          options,
+          signal,
+          temporaryRoot,
+        );
+        const { runtime } = session;
+        const { model } = scanModelConfiguration(session.effectiveConfig);
+        result.model.model = model;
+        validateScanCostLimit(options.maxCostUsd, model);
+        const contract = await dependencyTriageContract(
+          runtime.plugin.pluginRoot,
+        );
+        result.model.skillDigest = contract.skillDigest;
+        const command = this.#codexCommand();
+        const mcpServers = await disabledMcpServers(
+          await providerPreflightCommand(command, session.effectiveConfig),
+          session.sessionConfig,
+          definedEnvironment({
+            ...withoutCodexHome(runtime.environment),
+            CODEX_HOME: runtime.codexHome,
+          }),
+          { workingDirectory: outputDir, signal },
+        );
+        const { codex } = await this.#createSessionCodex(
+          session,
+          "dependencies",
+          {
+            CODEX_SECURITY_REPOSITORY: inputs.repository,
+            CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
+            CODEX_SECURITY_SURFACE: this.#surface,
+          },
+          options.auth,
+          undefined,
+          {
+            ...policyCodexConfig(session.sessionConfig),
+            default_permissions: SCA_PERMISSION_PROFILE,
+          },
+          [`mcp_servers=${inlineToml(mcpServers)}`],
+          {
+            id: SCA_PERMISSION_PROFILE,
+            profile: dependencyPermissions(
+              this.#dependencies.environment,
+              runtime.codexHome,
+              outputDir,
+            ),
+            cwd: outputDir,
+            signal,
+          },
+        );
+        const threadOptions: ThreadOptions = {
+          threadSource: CODEX_SECURITY_THREAD_SOURCES.dependencyTriage,
+          workingDirectory: outputDir,
+          additionalDirectories: [inputs.repository, runtime.plugin.pluginRoot],
+          skipGitRepoCheck: true,
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+          webSearchMode: "disabled",
+        };
+        const reportCost = (cost: Readonly<ScanCost>): void => {
+          result!.model.costUsd = cost.estimatedUsd;
+          if (
+            options.maxCostUsd !== undefined &&
+            cost.estimatedUsd > options.maxCostUsd
+          )
+            budgetController.abort(
+              new ScanCostLimitExceededError(
+                options.maxCostUsd,
+                cost,
+                outputDir,
+              ),
+            );
+        };
+        const reportTrackingError = (error: unknown): void => {
+          if (options.maxCostUsd !== undefined) budgetController.abort(error);
+          else
+            result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
+        };
+        const verifyCost = (cost: Readonly<ScanCost> | null): void => {
+          if (cost !== null) reportCost(cost);
+          else {
+            result!.model.costUsd = null;
+            if (options.maxCostUsd !== undefined)
+              budgetController.abort(
+                new CodexSecurityError(
+                  "Could not verify the dependency assessment cost limit.",
+                ),
+              );
+          }
+        };
+        const tracker = new ScanCostTracker({
+          codexHome: runtime.codexHome,
+          model,
+          repository: inputs.repository,
+          scanDirectory: outputDir,
+          maxCostUsd: options.maxCostUsd,
+          onCost: reportCost,
+          onError: reportTrackingError,
+        });
+        try {
+          for (const [index, match] of result.matches.entries()) {
+            throwIfAborted(signal, outputDir);
+            const thread = codex.startThread(threadOptions);
+            let assessment: ScaAssessment;
+            try {
+              const { events } = await thread.runStreamed(
+                dependencyTriagePrompt(result, contract.skillPath, match),
+                { signal, outputSchema: contract.schema },
+              );
+              const turn = await readCodexTurn({
+                thread,
+                events,
+                onEvent: (event) => {
+                  if (
+                    event.type === "thread.started" &&
+                    typeof event["thread_id"] === "string"
+                  ) {
+                    result!.model.threadId = event["thread_id"];
+                    result!.assessments[index]!.threadId = event["thread_id"];
+                    tracker.recordUsage(null, event["thread_id"]);
+                    tracker.start(event["thread_id"]);
+                  }
+                  throwIfAborted(signal, outputDir);
+                },
+              });
+              tracker.recordUsage(turn.usage, turn.threadId);
+              result.model.threadId = turn.threadId;
+              if (turn.threadId !== null)
+                result.assessments[index]!.threadId = turn.threadId;
+              throwIfAborted(signal, outputDir);
+              if (turn.status !== "completed")
+                throw new CodexSecurityError(
+                  "Dependency triage did not complete.",
+                );
+              assessment = contract.parse(turn.finalResponse, {
+                ...result,
+                matches: [match],
+              })[0]!;
+            } catch (error) {
+              throwIfAborted(signal, outputDir);
+              const message = errorMessage(error);
+              const failure = classifyConnectionFailure(message);
+              if (
+                failure === "unauthorized" ||
+                failure === "forbidden" ||
+                (await isPermissionProfileFallbackError(error))
+              )
+                throw error;
+              result.diagnostics.push(
+                `Static assessment ${match.id}: ${message}`,
+              );
+              assessment = {
+                matchId: match.id,
+                status: "failed",
+                verdict: null,
+                triage: null,
+                error: message,
+              };
+            }
+            if ((await sourceDigest()) !== source.digest)
+              throw new CodexSecurityError(
+                "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
+              );
+            throwIfAborted(signal, outputDir);
+            const threadId = result.assessments[index]!.threadId;
+            if (threadId !== undefined) assessment.threadId = threadId;
+            result.assessments[index] = assessment;
+            await saveDependencyScan(result);
+            const snapshot = await tracker.refresh().catch((error: unknown) => {
+              reportTrackingError(error);
+              if (options.maxCostUsd !== undefined) throw error;
+              return { cost: null };
+            });
+            verifyCost(snapshot.cost);
+            throwIfAborted(signal, outputDir);
+          }
+          if (
+            result.coverage.status === "complete" &&
+            result.assessments.every((item) => item.status === "completed")
+          )
+            result.status = "completed";
+        } finally {
+          const snapshot = await tracker.stop().catch((error: unknown) => {
+            reportTrackingError(error);
+            if (options.maxCostUsd !== undefined) throw error;
+            return { cost: null };
+          });
+          verifyCost(snapshot.cost);
+        }
+        throwIfAborted(signal, outputDir);
+      } catch (error) {
+        const message = errorMessage(error);
+        result.diagnostics.push(`Static assessment: ${message}`);
+        throwIfAborted(signal, outputDir);
+        result.status = "partial";
+        for (const assessment of result.assessments) {
+          if (assessment.status !== "not_started") continue;
+          assessment.status = "failed";
+          assessment.error = message;
+        }
+        await saveDependencyScan(result);
+        throwIfAborted(signal, outputDir);
+        return result;
+      }
+      await saveDependencyScan(result);
+      return result;
+    } catch (error) {
+      if (result !== undefined && signal.aborted) {
+        result.status = "partial";
+        for (const assessment of result.assessments) {
+          if (assessment.status !== "not_started") continue;
+          assessment.status = "cancelled";
+          assessment.error = errorMessage(signal.reason);
+        }
+        result.diagnostics.push(
+          "Dependency scan interrupted; completed scanner facts are retained.",
+        );
+        await saveDependencyScan(result);
+      }
+      throwIfAborted(signal, outputDir);
       throw error;
     }
   }
@@ -2832,6 +3204,12 @@ export class CodexSecurity {
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
+    readOnlyProfile?: {
+      id: string;
+      profile: JsonObject;
+      cwd: string;
+      signal: AbortSignal;
+    },
   ): Promise<{
     codex: CodexClientLike;
     environment: ProcessEnvironment;
@@ -2921,9 +3299,6 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(runtime.providerProfile === undefined
-        ? {}
-        : { nativeProfile: runtime.providerProfile.name }),
       ...(configOverrides.length > 0
         ? {
             configOverrides,
@@ -2942,8 +3317,33 @@ export class CodexSecurity {
         },
       },
     };
-    const codex = await this.#dependencies.createCodex(codexOptions);
-    return { codex, environment, codexOptions };
+    if (readOnlyProfile !== undefined) {
+      const verified = await preflightReadOnlyProfileCodex(
+        codexOptions,
+        readOnlyProfile.profile,
+        session.effectiveConfig,
+        readOnlyProfile.cwd,
+        readOnlyProfile.signal,
+        readOnlyProfile.id,
+      );
+      codexOptions.configOverrides = verified.configOverrides;
+      // The native profile client also rejects a policy fallback after preflight.
+      runtime.providerProfile ??= await createProviderProfile(
+        runtimeHome,
+        session.effectiveConfig,
+      );
+    }
+    const executionOptions = {
+      ...codexOptions,
+      ...(runtime.providerProfile === undefined
+        ? {}
+        : { nativeProfile: runtime.providerProfile.name }),
+      ...(readOnlyProfile === undefined
+        ? {}
+        : { requestedPermissionProfile: readOnlyProfile.id }),
+    };
+    const codex = await this.#dependencies.createCodex(executionOptions);
+    return { codex, environment, codexOptions: executionOptions };
   }
 
   async #prepareSession(
@@ -4729,6 +5129,107 @@ export function scanRuntimeCodexConfig(
         network: { enabled: false },
       },
     },
+  };
+}
+
+function dependencyPermissions(
+  environment: ProcessEnvironment,
+  runtimeHome: string,
+  workingDirectory: string,
+): JsonObject {
+  const ambientHome = configuredCodexHome(environment);
+  const defaultHome = configuredCodexHome({});
+  const npmHome = resolve(
+    workingDirectory,
+    environmentEntry(environment, "HOME") ||
+      (process.platform === "win32"
+        ? environmentEntry(environment, "USERPROFILE")
+        : undefined) ||
+      homedir(),
+  );
+  const npmConfigs = Object.entries(environment).flatMap(([name, value]) => {
+    if (name.toLowerCase() !== "npm_config_userconfig" || !value) return [];
+    // npm expands environment references before resolving its user config path.
+    const expanded = value
+      .trim()
+      .replace(
+        /(?<!\\)(\\*)\$\{([^${}?]+)(\?)?\}/gu,
+        (
+          original: string,
+          escaped: string,
+          name: string,
+          optional: string | undefined,
+        ) => {
+          if (escaped.length % 2)
+            return original.slice((escaped.length + 1) / 2);
+          return (
+            escaped.slice(escaped.length / 2) +
+            (environmentEntry(environment, name) ??
+              (optional ? "" : `\${${name}}`))
+          );
+        },
+      );
+    const homeRelative =
+      expanded.startsWith("~/") ||
+      (process.platform === "win32" && expanded.startsWith("~\\"));
+    return [
+      resolve(
+        workingDirectory,
+        homeRelative ? resolve(npmHome, expanded.slice(2)) : expanded,
+      ),
+    ];
+  });
+  const privatePaths = [
+    ...codexSecurityPrivatePaths(environment),
+    ...codexSecurityPrivatePaths(environment, workingDirectory),
+    ...[
+      homedir(),
+      resolve(workingDirectory, expandHome("~", environment)),
+    ].flatMap((home) => [
+      join(home, ".git-credentials"),
+      join(home, ".config", "git", "credentials"),
+      join(home, ".pypirc"),
+      join(home, ".m2", "settings.xml"),
+      join(home, ".m2", "settings-security.xml"),
+      join(home, ".aws"),
+    ]),
+    ...[process.env, environment].flatMap((source) => {
+      const xdg = environmentEntry(source, "XDG_CONFIG_HOME");
+      return [
+        ...(xdg ? [join(xdg, "git", "credentials")] : []),
+        ...["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"].flatMap(
+          (name) => {
+            const file = environmentEntry(source, name);
+            return file ? [file] : [];
+          },
+        ),
+      ].map((file) => resolve(workingDirectory, expandHome(file, source)));
+    }),
+    join(homedir(), ".npmrc"),
+    resolve(workingDirectory, expandHome("~", environment), ".npmrc"),
+    join(npmHome, ".npmrc"),
+    ...npmConfigs,
+    runtimeHome,
+    codexSecurityCredentialHome({}),
+    join(defaultHome, "auth.json"),
+    join(defaultHome, ".credentials.json"),
+    join(defaultHome, "config.toml"),
+    // The ambient home also contains the default dependency evidence directory.
+    join(ambientHome, "auth.json"),
+    join(ambientHome, ".credentials.json"),
+    join(ambientHome, "config.toml"),
+    ...[defaultHome, ambientHome].flatMap((home) =>
+      ["sessions", "archived_sessions", "history.jsonl"].map((name) =>
+        join(home, name),
+      ),
+    ),
+  ];
+  return {
+    extends: ":read-only",
+    filesystem: Object.fromEntries(
+      privatePaths.map((path) => [path, { ".": "deny" }]),
+    ),
+    network: { enabled: false },
   };
 }
 

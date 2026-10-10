@@ -884,7 +884,7 @@ async function walkGitMarkers(
   }
 }
 
-function isolatedGitEnvironment(
+export function isolatedGitEnvironment(
   preserveGitConfiguration: boolean,
   source: Readonly<Record<string, string | undefined>> = process.env,
 ): NodeJS.ProcessEnv {

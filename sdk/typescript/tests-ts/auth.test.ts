@@ -519,3 +519,43 @@ setInterval(() => {}, 1000);
     expect(observeSucceeded).not.toHaveBeenCalled();
   });
 });
+
+test("private credential paths retain default GitHub stores with overrides", async () => {
+  const root = await temporaryDirectory();
+  const host = join(root, "host-appdata");
+  const caller = join(root, "caller-appdata");
+  const callerHome = join(root, "caller-home");
+  const explicit = join(root, "explicit-gh");
+  const xdg = join(root, "xdg");
+  const auth = new URL("../src/auth.ts", import.meta.url).href;
+  const script = `
+const {codexSecurityPrivatePaths} = await import(${JSON.stringify(auth)});
+Object.defineProperty(process, "platform", {value: "win32"});
+process.env.AppData = ${JSON.stringify(host)};
+const base = {CODEX_HOME: ${JSON.stringify(join(root, "codex"))}, AppData: ${JSON.stringify(caller)}, USERPROFILE: ${JSON.stringify(callerHome)}};
+const outputs = [
+  {...base, GH_CONFIG_DIR: ${JSON.stringify(explicit)}},
+  {...base, XDG_CONFIG_HOME: ${JSON.stringify(xdg)}},
+  {...base, GH_CONFIG_DIR: ${JSON.stringify(explicit)}, XDG_CONFIG_HOME: ${JSON.stringify(xdg)}}
+].map(environment => {
+  const paths = codexSecurityPrivatePaths(environment);
+  return [
+    paths.includes(${JSON.stringify(join(host, "GitHub CLI"))}),
+    paths.includes(${JSON.stringify(join(caller, "GitHub CLI"))}),
+    paths.includes(environment.GH_CONFIG_DIR ?? ${JSON.stringify(join(xdg, "gh"))}),
+    environment.XDG_CONFIG_HOME ? paths.includes(${JSON.stringify(join(xdg, "gh"))}) : true,
+    paths.includes(${JSON.stringify(join(callerHome, ".config", "gh"))})
+  ];
+});
+console.log(JSON.stringify(outputs));
+`;
+  const child = Bun.spawnSync([process.execPath, "-e", script], {
+    env: process.env,
+  });
+  expect(child.exitCode, child.stderr.toString()).toBe(0);
+  expect(JSON.parse(child.stdout.toString())).toEqual([
+    [true, true, true, true, true],
+    [true, true, true, true, true],
+    [true, true, true, true, true],
+  ]);
+});

@@ -2576,10 +2576,9 @@ describe("CodexSecurity orchestration", () => {
               scanPrompt: "Review café boundaries.\nPreserve the second line.",
             })
       ).catch((error: unknown) => error);
-      let socket: Socket | undefined;
       let closing: Promise<void> | undefined;
       try {
-        [socket] = (await Promise.race([
+        const [socket] = (await Promise.race([
           connected,
           operation.then((error) => {
             throw error;
@@ -2591,21 +2590,25 @@ describe("CodexSecurity orchestration", () => {
         expect(
           await readFile(join(root, "registration-input.json"), "utf8"),
         ).toBe(submitted!);
-        // Terminating the paused child can reset its socket on Windows.
-        // Still wait for close, and retain unexpected errors and the deadline.
+        // Terminating the paused child can reset its socket on Windows. Still
+        // wait for close, and preserve the deadline and other socket errors.
+        deadline.throwIfAborted();
         const closed = new Promise<void>((resolve, reject) => {
-          const onError = (error: NodeJS.ErrnoException) => {
-            if (error.code !== "ECONNRESET") reject(error);
-          };
-          const onAbort = () => reject(deadline.reason);
-          socket!.once("error", onError);
-          socket!.once("close", () => {
-            socket!.removeListener("error", onError);
+          const finish = (error?: unknown) => {
+            socket.off("close", onClose);
+            socket.off("error", onError);
             deadline.removeEventListener("abort", onAbort);
-            resolve();
-          });
-          if (deadline.aborted) onAbort();
-          else deadline.addEventListener("abort", onAbort, { once: true });
+            if (error === undefined) resolve();
+            else reject(error);
+          };
+          const onClose = () => finish();
+          const onError = (error: NodeJS.ErrnoException) => {
+            if (error.code !== "ECONNRESET") finish(error);
+          };
+          const onAbort = () => finish(deadline.reason);
+          socket.once("close", onClose);
+          socket.on("error", onError);
+          deadline.addEventListener("abort", onAbort, { once: true });
         });
         if (cancel === "close") closing = client.close();
         else controller.abort();

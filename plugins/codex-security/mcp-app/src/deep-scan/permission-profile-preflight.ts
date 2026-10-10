@@ -14,6 +14,8 @@ export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
   "codex_security_deep_scan_worker";
 
 export interface DeepScanPermissionProfilePreflightOptions {
+  /** SDK helpers can verify their own reserved read-only profile. */
+  readonly permissionProfileId?: string;
   /** The exact Codex executable that will run the worker turn. */
   readonly codexPath: string;
   /** The worker cwd used for app-server startup and cwd-scoped config RPCs. */
@@ -151,6 +153,8 @@ export async function prepareCliDeepScanSession(
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
 ): Promise<{ useOpenAiApiKey: boolean }> {
+  const permissionProfileId =
+    options.permissionProfileId ?? DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID;
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
@@ -158,7 +162,7 @@ export async function preflightDeepScanWorkerPermissionProfile(
     });
     const catalog = await client.readPermissionProfileCatalog(options.cwd);
     const matchingEntries = catalog.filter(
-      (entry) => entry.id === DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+      (entry) => entry.id === permissionProfileId,
     );
     if (matchingEntries.length !== 1)
       throw malformedPreflightError(options.context);
@@ -488,16 +492,21 @@ function verifyPreflightResult(
   catalogEntry: JsonRecord,
   requirementsResponse: JsonRecord | undefined,
 ): void {
+  const permissionProfileId =
+    options.permissionProfileId ?? DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID;
   if (catalogEntry.allowed !== true) {
-    throw existingAllowlistExcludesProfile(requirementsResponse)
-      ? disallowedProfileAllowlistError(options.context)
-      : managedPolicyRejectedError(options.context);
+    throw existingAllowlistExcludesProfile(
+      requirementsResponse,
+      permissionProfileId,
+    )
+      ? disallowedProfileAllowlistError(permissionProfileId, options.context)
+      : managedPolicyRejectedError(permissionProfileId, options.context);
   }
 
   const config = record(configResponse.config);
   const permissions = record(config?.permissions);
   const actualProfile = permissions
-    ? record(permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID])
+    ? record(permissions[permissionProfileId])
     : undefined;
   if (
     !config ||
@@ -507,19 +516,20 @@ function verifyPreflightResult(
   )
     throw malformedPreflightError(options.context);
 
-  if (config.default_permissions !== DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID) {
-    throw profileNotSelectedError(options.context);
+  if (config.default_permissions !== permissionProfileId) {
+    throw profileNotSelectedError(permissionProfileId, options.context);
   }
 
   const expectedProfile = comparableProfile(options.expectedProfile);
   const actualWithoutDescription = comparableProfile(actualProfile);
   if (!isDeepStrictEqual(actualWithoutDescription, expectedProfile)) {
-    throw profileCollisionError(options.context);
+    throw profileCollisionError(permissionProfileId, options.context);
   }
 }
 
 function existingAllowlistExcludesProfile(
   response: JsonRecord | undefined,
+  permissionProfileId: string,
 ): boolean {
   if (!response || !Object.hasOwn(response, "requirements")) return false;
   if (response.requirements === null) return false;
@@ -534,7 +544,7 @@ function existingAllowlistExcludesProfile(
   if (!allowlist) return false;
   if (Object.values(allowlist).some((value) => typeof value !== "boolean"))
     return false;
-  return allowlist[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID] !== true;
+  return allowlist[permissionProfileId] !== true;
 }
 
 /**
@@ -570,32 +580,38 @@ function stripNullObjectFields(value: unknown): unknown {
 // Verified permission incompatibilities explicitly stop the scan. A failed
 // transport attempt alone does not establish that the scan cannot proceed.
 function disallowedProfileAllowlistError(
+  permissionProfileId: string,
   context?: "helper",
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `${subject(context)} cannot safely start a read-only worker because organization policy does not allow the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID} = true\n\n${subject(context)} did not run.`,
+    `${subject(context)} cannot safely start a read-only worker because organization policy does not allow the required \`${permissionProfileId}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${permissionProfileId}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${permissionProfileId} = true\n\n${subject(context)} did not run.`,
   );
 }
 
 function managedPolicyRejectedError(
+  permissionProfileId: string,
   context?: "helper",
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `${subject(context)} cannot safely start a read-only worker because managed Codex policy rejected the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. ${subject(context)} did not run.`,
+    `${subject(context)} cannot safely start a read-only worker because managed Codex policy rejected the required \`${permissionProfileId}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. ${subject(context)} did not run.`,
   );
 }
 
 function profileNotSelectedError(
+  permissionProfileId: string,
   context?: "helper",
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `${subject(context)} cannot safely start a read-only worker because Codex did not select the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to allow that profile for ${subject(context)}. ${subject(context)} did not run.`,
+    `${subject(context)} cannot safely start a read-only worker because Codex did not select the required \`${permissionProfileId}\` permission profile. Ask your Codex administrator to allow that profile for ${subject(context)}. ${subject(context)} did not run.`,
   );
 }
 
-function profileCollisionError(context?: "helper"): DeepScanNonRetryableError {
+function profileCollisionError(
+  permissionProfileId: string,
+  context?: "helper",
+): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `${subject(context)} cannot safely start a read-only worker because existing Codex configuration changes the reserved \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\` stub limited to \`extends = ":read-only"\`; ${subject(context)} supplies its deny rules at runtime. ${subject(context)} did not run.`,
+    `${subject(context)} cannot safely start a read-only worker because existing Codex configuration changes the reserved \`${permissionProfileId}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${permissionProfileId}]\` stub limited to \`extends = ":read-only"\`; ${subject(context)} supplies its deny rules at runtime. ${subject(context)} did not run.`,
   );
 }
 
