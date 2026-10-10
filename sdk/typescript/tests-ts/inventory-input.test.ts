@@ -226,7 +226,10 @@ require("node:module").syncBuiltinESMExports();
         // The bridge case also checks Windows' implicit current-directory lookup.
         if (!rawWindowsHome)
           env[pathKey] = `${f.repo}${delimiter}${env[pathKey] ?? ""}`;
-        if (rawWindowsHome) env["HOME"] = join(f.root, "home-\ud800");
+        if (rawWindowsHome) {
+          env["HOME"] = `${f.root}${sep}home-\ud800`;
+          expect(env["HOME"].isWellFormed()).toBe(false);
+        }
         env["CODEX_SECURITY_GIT"] = "";
         env["NODE_OPTIONS"] =
           `${env["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`;
@@ -300,8 +303,10 @@ for (const command of [
         }
         env[pathKey] =
           location === "symlink parent" ? "../link/../tools" : "../tools";
-        if (location === "Windows bridge")
-          env["HOME"] = join(f.root, "home-\ud800");
+        if (location === "Windows bridge") {
+          env["HOME"] = `${f.root}${sep}home-\ud800`;
+          expect(env["HOME"].isWellFormed()).toBe(false);
+        }
         env["CODEX_SECURITY_GIT"] = "";
         const scopes = join(f.root, "scopes.json");
         writeFileSync(scopes, '["scope"]');
@@ -419,7 +424,10 @@ for (const command of [
             );
           const quote = lookup === "single-quoted semicolon" ? "'" : '"';
           env[pathKey] = quoted ? `${quote}${tools}${quote}` : tools;
-          if (bridge) env["HOME"] = join(f.root, "home-\ud800");
+          if (bridge) {
+            env["HOME"] = `${f.root}${sep}home-\ud800`;
+            expect(env["HOME"].isWellFormed()).toBe(false);
+          }
           env["CODEX_SECURITY_GIT"] = "";
           const result = runPathInventory(f, command, env);
           expect(result.status, result.stderr).toBe(0);
