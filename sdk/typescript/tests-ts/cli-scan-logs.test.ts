@@ -185,7 +185,7 @@ async function attributedFixture(attributedOwner = false) {
   };
   const logs = await readSavedScanLogs(scan, [home, originalHome]);
   const deps = dependencies({
-    environment: { CODEX_SECURITY_STATE_DIR: state },
+    environment: { CODEX_SECURITY_STATE_DIR: state, CODEX_HOME: home },
     onWorkbench: () => ({ scan }),
   });
   deps.createSecurity = () => {

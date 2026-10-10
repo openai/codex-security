@@ -502,23 +502,26 @@ describe("live scan cost tracking", () => {
     const tracker = costTracker(home, {
       maxCostUsd: 1,
     });
-    const refresh = tracker.refresh.bind(tracker);
-    tracker.refresh = async () => {
+    const forcedReads: boolean[] = [];
+    tracker.setAttributionReader(async (force) => {
+      forcedReads.push(force === true);
       await new Promise<void>((resolve) => releases.push(resolve));
-      return refresh();
-    };
+      return null;
+    });
     tracker.start("scan-thread");
 
     await new Promise<void>((resolve) => setTimeout(resolve, 350));
-    expect(releases).toHaveLength(1);
+    expect(forcedReads).toEqual([false]);
 
     const stopped = tracker.stop();
-    expect(releases).toHaveLength(2);
+    expect(releases).toHaveLength(1);
     releases[0]!();
+    await waitFor(() => releases.length === 2);
+    expect(forcedReads).toEqual([false, true]);
     releases[1]!();
 
     expect((await stopped).cost?.inputTokens).toBe(100);
-    expect(releases).toHaveLength(2);
+    expect(forcedReads).toEqual([false, true]);
   });
 
   test("retries one coalesced poll after a failed refresh", async () => {

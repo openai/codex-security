@@ -182,6 +182,7 @@ describe("bundled plugin build", () => {
       "package.json",
       "tsconfig.json",
       "main.ts",
+      "deep-scan-main.ts",
       "artifact-writer-main.ts",
       "helpers-main.ts",
       "server.ts",
@@ -203,6 +204,8 @@ describe("bundled plugin build", () => {
       "scripts/reserved_artifact_paths.json",
       "scripts/codex_profile.mjs",
       "scripts/codex_profile.d.mts",
+      "scripts/codex_session.mjs",
+      "scripts/codex_session.d.mts",
     ]) {
       await cp(new URL(name, source), join(plugin, name), { recursive: true });
     }

@@ -330,7 +330,10 @@ def test_reader_honors_original_context_when_present(tmp_path: Path, original: s
         columns = {row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")}
         if "discovery_user_context" not in columns:
             connection.execute("ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context TEXT")
-        connection.execute("UPDATE deep_scan_runs SET discovery_user_context = ?", (original,))
+        connection.execute(
+            "UPDATE deep_scan_runs SET discovery_user_context = ?, discovery_user_context_json = NULL",
+            (original,),
+        )
         connection.execute("UPDATE scans SET user_context = 'Later discussion'")
     observed = run_workbench(
         state,
