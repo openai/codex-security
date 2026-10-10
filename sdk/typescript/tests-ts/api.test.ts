@@ -3768,7 +3768,7 @@ describe("CodexSecurity orchestration", () => {
         join(sessions, "a-synthetic.jsonl"),
         join(sessions, "b-synthetic.jsonl"),
       ];
-      await Promise.all(logs.map((path) => writeFile(path, "")));
+      await Promise.all(logs.map((path) => writeFile(path, "{}\n")));
       const denied = new Set([logs[0]!]);
       const attempts = new Map<string, number>();
       let firstRepeated!: () => void;
@@ -3809,6 +3809,7 @@ describe("CodexSecurity orchestration", () => {
                 await first;
                 denied.delete(logs[0]!);
                 denied.add(logs[1]!);
+                await appendFile(logs[1]!, "{}\n");
                 await second;
                 denied.delete(logs[1]!);
                 for await (const event of completedEvents()) {
