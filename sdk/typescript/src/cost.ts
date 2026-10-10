@@ -73,6 +73,8 @@ interface SessionUsage {
   responseUsageObserved: boolean;
   responseTokens: number;
   expectedResponseTokens: number;
+  responseEpochUsageObserved: boolean;
+  incompleteResponseEpoch: boolean;
   counterRegressed: boolean;
   calls: Map<string, ScanActivity>;
   activities: { index: number; activity: ScanActivity }[];
@@ -133,6 +135,8 @@ function createSessionUsage(): SessionUsage {
     responseUsageObserved: false,
     responseTokens: 0,
     expectedResponseTokens: 0,
+    responseEpochUsageObserved: false,
+    incompleteResponseEpoch: false,
     counterRegressed: false,
     calls: new Map(),
     activities: [],
@@ -522,7 +526,9 @@ export class ScanCostTracker {
       }
       if (
         (session.counterRegressed && !session.responseUsageObserved) ||
-        session.expectedResponseTokens > session.responseTokens
+        session.incompleteResponseEpoch ||
+        (session.responseEpochUsageObserved &&
+          session.expectedResponseTokens > session.responseTokens)
       )
         incomplete = true;
       if (session.pendingLine.length > 0 && !this.#receipts.get(threadId))
@@ -848,6 +854,17 @@ function readSessionEvent(
     }
     return;
   }
+  if (event["type"] === "compacted") {
+    // Later counter epochs cannot account for missing earlier scan receipts.
+    if (
+      session.responseEpochUsageObserved &&
+      session.expectedResponseTokens > session.responseTokens
+    )
+      session.incompleteResponseEpoch = true;
+    session.responseTokens = 0;
+    session.expectedResponseTokens = 0;
+    session.responseEpochUsageObserved = false;
+  }
   if (
     (event["type"] === "turn_context" || payload["type"] === "task_started") &&
     typeof payload["turn_id"] === "string"
@@ -893,6 +910,7 @@ function readSessionEvent(
       )
     )
       return;
+    session.responseEpochUsageObserved = true;
     if (!session.responseUsageObserved) {
       // Exact receipts include compaction and survive counter resets. Keep the
       // legacy counter as an independent lower bound, never add it to receipts.

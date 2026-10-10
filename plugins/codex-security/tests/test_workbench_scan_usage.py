@@ -1329,6 +1329,105 @@ def test_delayed_response_receipt_resolves_missing_cumulative_usage(
     assert warnings == set()
 
 
+@pytest.mark.parametrize("missing_receipt", [False, True])
+def test_completion_retains_child_receipt_gap_across_compaction(
+    tmp_path: Path, missing_receipt: bool
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+
+    def receipt(thread_id: str, response: str, tokens: int, cumulative: int):
+        return _event(
+            counted,
+            "token_usage_record",
+            {
+                "response_id": response,
+                "thread_id": thread_id,
+                "model": "gpt-5.6-sol",
+                "usage": {"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+                "thread_token_usage": {
+                    "input_tokens": cumulative,
+                    "output_tokens": 0,
+                    "total_tokens": cumulative,
+                },
+            },
+        )
+
+    parent = _rollout(tmp_path, "scan-parent", [receipt("scan-parent", "parent", 10, 10)])
+    first = receipt("scan-worker", "first", 50 if missing_receipt else 100, 100)
+    second = receipt("scan-worker", "second", 100, 100)
+    worker = _rollout(
+        tmp_path,
+        "scan-worker",
+        [
+            first,
+            _event(counted, "compacted", {"message": "Synthetic summary"}),
+            first,
+            second,
+            second,
+        ],
+        parent_thread_id="scan-parent",
+    )
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": parent, "scan-worker": worker},
+        [("scan-parent", "scan-worker")],
+    )
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    expected = _counts(160 if missing_receipt else 210, 0, 0)
+    assert usage["totalTokens"] == expected["totalTokens"]
+    assert usage["modelUsage"] == [{"model": "gpt-5.6-sol", **expected}]
+    assert usage["coverage"] == ("partial" if missing_receipt else "complete")
+    assert usage.get("warnings", []) == (["token_receipts_incomplete"] if missing_receipt else [])
+
+
+@pytest.mark.parametrize("prior_turn", [False, True])
+@pytest.mark.parametrize("outside_after", [False, True])
+def test_compaction_before_owned_receipts_does_not_taint_scan_coverage(
+    tmp_path: Path, workbench_api, prior_turn: bool, outside_after: bool
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def receipt(response: str, tokens: int, timestamp: datetime, turn: str):
+        return _event(
+            timestamp,
+            "token_usage_record",
+            {
+                "response_id": response,
+                "thread_id": "parent",
+                "turn_id": turn,
+                "model": "gpt-5.6-sol",
+                "usage": {"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+                "thread_token_usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 0,
+                    "total_tokens": 100,
+                },
+            },
+        )
+
+    previous = start if prior_turn else start - timedelta(seconds=1)
+    if outside_after:
+        previous = start + timedelta(seconds=1 if prior_turn else 10)
+    outside = receipt("prior", 50, previous, "other-turn" if prior_turn else "scan-turn")
+    current = receipt("current", 100, start, "scan-turn")
+    compacted = _event(previous, "compacted", {"message": "Synthetic previous summary"})
+    rollout = _rollout(
+        tmp_path,
+        "parent",
+        [current, compacted, outside] if outside_after else [outside, compacted, current],
+    )
+    counts, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, rollout),
+        started_at=start,
+        completed_at=start + timedelta(seconds=5),
+        owner_turn_id="scan-turn",
+    )
+    assert counts == _counts(100, 0, 0)
+    assert warnings == set()
+
+
 def test_exact_receipts_replace_overlapping_legacy_counter(tmp_path: Path, workbench_api) -> None:
     reader = sys.modules["workbench_scan_usage"]
     start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")

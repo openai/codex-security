@@ -738,6 +738,7 @@ def _read_rollout_usage(
     response_usage_observed = False
     response_tokens = 0
     expected_response_tokens = 0
+    response_epoch_owned = False
     local_models: dict[str | None, dict[str, int]] = {}
 
     with session.path.open("rb") as source:
@@ -806,6 +807,15 @@ def _read_rollout_usage(
                     if inherited_usage is not None:
                         previous = inherited_usage
                 continue
+            if event.get("type") == "compacted":
+                # Later receipt counters describe a new compaction epoch and cannot
+                # account for missing receipts from the earlier one.
+                if response_epoch_owned and expected_response_tokens > response_tokens:
+                    warnings.add("token_receipts_incomplete")
+                response_tokens = 0
+                expected_response_tokens = 0
+                response_epoch_owned = False
+                continue
             if event.get("type") == "token_usage_record":
                 response_id = payload.get("response_id")
                 usage = _token_snapshot({"info": {"total_token_usage": payload.get("usage")}})
@@ -838,6 +848,7 @@ def _read_rollout_usage(
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
                     continue
+                response_epoch_owned = True
                 if not response_usage_observed:
                     response_usage_observed = True
                     total = _empty_token_usage()
@@ -899,7 +910,7 @@ def _read_rollout_usage(
         _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
     if response_usage_observed:
         warnings.discard("token_counter_regressed")
-    if expected_response_tokens > response_tokens:
+    if response_epoch_owned and expected_response_tokens > response_tokens:
         warnings.add("token_receipts_incomplete")
     if model_usage is not None:
         for model, usage in local_models.items():

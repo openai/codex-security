@@ -599,3 +599,196 @@ test("late exact receipts replace an overlapping legacy counter without adding i
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+] as const)(
+  "preserves receipt gaps across compaction (attributed: %p, repaired before reset: %p)",
+  async (attributed, repaired) => {
+    const home = await mkdtemp(join(tmpdir(), "usage-compaction-gap-"));
+    const trackers: ScanCostTracker[] = [];
+    const usage = (tokens: number) => ({
+      input_tokens: tokens,
+      output_tokens: 0,
+    });
+    const receipt = (
+      thread: string,
+      id: string,
+      tokens: number,
+      cumulative: number,
+    ) => ({
+      type: "token_usage_record",
+      timestamp: "2026-09-01T00:00:02Z",
+      payload: {
+        thread_id: thread,
+        turn_id: `${thread}-turn`,
+        response_id: id,
+        model: "gpt-5.6-sol",
+        usage: usage(tokens),
+        thread_token_usage: usage(cumulative),
+      },
+    });
+    const compacted = {
+      type: "compacted",
+      payload: { message: "Synthetic summary" },
+    };
+    const lines = (events: unknown[]) =>
+      events.map((event) => JSON.stringify(event)).join("\n") + "\n";
+    const startTracker = () => {
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 0.0007,
+      });
+      if (attributed)
+        tracker.setAttributionReader(async () => ({
+          formatVersion: 1,
+          executionThreadIds: ["child"],
+          owner: {
+            threadId: "parent",
+            turnId: "parent-turn",
+            startedAt: "2026-09-01T00:00:00Z",
+          },
+          startedAt: "2026-09-01T00:00:00Z",
+          completedAt: null,
+        }));
+      trackers.push(tracker);
+      tracker.start("parent");
+      tracker.recordUsage(usage(10));
+      return tracker;
+    };
+    try {
+      await mkdir(join(home, "sessions"));
+      await writeFile(
+        join(home, "sessions", "parent.jsonl"),
+        lines([
+          { type: "session_meta", payload: { id: "parent" } },
+          receipt("parent", "parent-receipt", 10, 10),
+        ]),
+      );
+      const childPath = join(home, "sessions", "child.jsonl");
+      const first = receipt("child", "before-compaction", 50, 100);
+      await writeFile(
+        childPath,
+        lines([
+          {
+            type: "session_meta",
+            payload: { id: "child", parent_thread_id: "parent" },
+          },
+          first,
+        ]),
+      );
+      const tracker = startTracker();
+      expect((await tracker.refresh()).cost).toMatchObject({
+        inputTokens: 60,
+        coverage: "partial",
+      });
+      if (repaired) {
+        await appendFile(
+          childPath,
+          lines([receipt("child", "delayed-before-compaction", 50, 50)]),
+        );
+        expect((await tracker.refresh()).cost?.coverage).toBeUndefined();
+      }
+      const second = receipt("child", "after-compaction", 100, 100);
+      await appendFile(childPath, lines([compacted, first, second]));
+      const snapshot = await tracker.refresh();
+      expect(snapshot.cost?.inputTokens).toBe(repaired ? 210 : 160);
+      expect(snapshot.cost?.coverage).toBe(repaired ? undefined : "partial");
+      if (repaired) expect(snapshot.usage).not.toHaveProperty("coverage");
+      else expect(snapshot.usage).toMatchObject({ coverage: "partial" });
+      if (!repaired) {
+        expect(snapshot.cost!.estimatedUsd).toBeLessThan(0.0007);
+        expect(
+          estimateScanCost("gpt-5.6-sol", usage(210))!.estimatedUsd,
+        ).toBeGreaterThan(0.0007);
+      }
+      await appendFile(
+        childPath,
+        lines([compacted, second, receipt("child", "later", 20, 20)]),
+      );
+      const final = await tracker.stop();
+      expect(final.cost?.inputTokens).toBe(repaired ? 230 : 180);
+      expect(final.cost?.coverage).toBe(repaired ? undefined : "partial");
+      const reloaded = await startTracker().stop();
+      expect(reloaded.usage).toEqual(final.usage);
+      expect(reloaded.cost).toEqual(final.cost);
+    } finally {
+      await Promise.all(trackers.map((tracker) => tracker.stop()));
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([
+  ["before", "time"],
+  ["before", "turn"],
+  ["after", "time"],
+  ["after", "turn"],
+] as const)(
+  "unowned receipt epochs do not taint scan coverage (%s, %s)",
+  async (position, exclusion) => {
+    const home = await mkdtemp(join(tmpdir(), "usage-compaction-scope-"));
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    const at = (second: string) => `2026-09-01T00:00:${second}Z`;
+    const receipt = (
+      id: string,
+      tokens: number,
+      turn: string,
+      timestamp: string,
+    ) => ({
+      type: "token_usage_record",
+      timestamp,
+      payload: {
+        thread_id: "worker",
+        turn_id: turn,
+        response_id: id,
+        model: "gpt-5.6-sol",
+        usage: { input_tokens: tokens, output_tokens: 0 },
+        thread_token_usage: { input_tokens: 100, output_tokens: 0 },
+      },
+    });
+    const owned = receipt("owned", 100, "scan-turn", at("02"));
+    const ignored = receipt(
+      "ignored",
+      50,
+      exclusion === "turn" ? "other-turn" : "scan-turn",
+      exclusion === "time" ? at(position === "before" ? "00" : "11") : at("02"),
+    );
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      executionThreadIds: [],
+      owner: { threadId: "worker", turnId: "scan-turn", startedAt: at("01") },
+      startedAt: at("01"),
+      completedAt: at("10"),
+    }));
+    try {
+      await mkdir(join(home, "sessions"));
+      await writeFile(
+        join(home, "sessions", "worker.jsonl"),
+        [
+          { type: "session_meta", payload: { id: "worker" } },
+          position === "before" ? ignored : owned,
+          { type: "compacted", payload: { message: "Synthetic summary" } },
+          position === "before" ? owned : ignored,
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      tracker.start("worker");
+      const snapshot = await tracker.stop();
+      expect(snapshot.cost?.inputTokens).toBe(100);
+      expect(snapshot.cost?.coverage).toBeUndefined();
+      expect(snapshot.usage).not.toHaveProperty("coverage");
+    } finally {
+      await tracker.stop();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
