@@ -353,8 +353,26 @@ test.each([
   },
 );
 
-test("CLI resumes the owning Codex thread and preserves running state on a transport failure", async () => {
+test("CLI resumes through native execution with current permissions and preserves interrupted state", async () => {
   const f = await interruptedScan();
+  const originalHome = join(f.root, "original-codex-home");
+  await appendFile(
+    f.sessionPath,
+    JSON.stringify({
+      type: "turn_context",
+      payload: {
+        permission_profile: {
+          type: "managed",
+          file_system: {
+            type: "restricted",
+            entries: [
+              { path: { type: "path", path: originalHome }, access: "deny" },
+            ],
+          },
+        },
+      },
+    }) + "\n",
+  );
   const before = await f.command([
     "get-deep-scan",
     "--scan-id",
@@ -371,14 +389,41 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
     createSecurity: (config) =>
       new TestClient(config, {
         environment: f.environment,
-        prepareRuntime: async () => preparedRuntime(f.codexHome),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(f.codexHome),
+          deepScanConfigDirectory: join(f.codexHome, "worker-config"),
+          deepScanConfigPath: join(
+            f.codexHome,
+            "worker-config",
+            "deep-scan-config.toml",
+          ),
+        }),
         resolvePluginPython: async () => f.python,
         runWorkbench,
+        runDeepScan: async function* () {
+          throw new Error("Resumed scans must refresh native permissions.");
+        },
         createCodex: (options) => ({
           startThread: () => fail("Resume must not create a new thread."),
           resumeThread(threadId, threadOptions) {
             resumedThread = threadId;
             expect(threadOptions.workingDirectory).toBe(f.scanDir);
+            expect(threadOptions.approvalPolicy).toBe("never");
+            expect(options.config).toMatchObject({
+              model: f.recipe.config["model"],
+              default_permissions: "codex_security_scan",
+            });
+            const permissions = parseToml(
+              options.configOverrides!.join("\n"),
+            ) as {
+              permissions: {
+                codex_security_scan: { filesystem: Record<string, unknown> };
+              };
+            };
+            const filesystem =
+              permissions.permissions.codex_security_scan.filesystem;
+            expect(filesystem[f.codexHome]).toEqual({ ".": "deny" });
+            expect(filesystem[originalHome]).toBeUndefined();
             expect(options.env).toMatchObject({
               CODEX_SECURITY_SCAN_ID: f.scanId,
               CODEX_SECURITY_SCAN_DIR: f.scanDir,
