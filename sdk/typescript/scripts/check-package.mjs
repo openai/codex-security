@@ -201,6 +201,7 @@ const allowedFiles = new Set([
     "scan-comparison",
     "scan-dashboard",
     "scan-history-renderer",
+    "scan-inputs",
     "scan-logs",
     "security-policy",
     "security-policy-cli",

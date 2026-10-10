@@ -29,7 +29,6 @@ const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
 const installedPlugin = join(installedRoot, "_bundled_plugin");
-let restoreSpawn;
 try {
   const detachedPlugin = join(root, "standalone plugin %", "codex-security");
   await cp(installedPlugin, detachedPlugin, { recursive: true });
@@ -60,28 +59,17 @@ try {
       ? "package-codex.exe"
       : "package-deep-codex.mjs",
   );
-  if (process.platform === "win32") {
+  if (process.platform === "win32")
     await copyFile(process.execPath, executable);
-    const { installFixtureSpawn } = await import(
-      pathToFileURL(join(root, "package-deep-spawn.mjs")).href
-    );
-    restoreSpawn = installFixtureSpawn(executable);
-  }
   await chmod(executable, 0o700);
+  if (process.platform === "win32") {
+    // The direct SDK engine launches its preflight from this process too.
+    process.env.PACKAGE_DEEP_EXECUTABLE = executable;
+    await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
+  }
 
-  const checks = await Promise.allSettled([
-    runInstalledSdk(installedPlugin, executable).then(() =>
-      console.log("Validated installed SDK direct Deep Scan and worker retry."),
-    ),
-    runDetachedPlugin(detachedPlugin, executable).then(() =>
-      console.log("Validated detached plugin restart and finalization."),
-    ),
-  ]);
-  const failures = checks.flatMap((check) =>
-    check.status === "rejected" ? [check.reason] : [],
-  );
-  if (failures.length > 0)
-    throw new AggregateError(failures, "Deep Scan package checks failed.");
+  await runInstalledSdk(installedPlugin, executable);
+  await runDetachedPlugin(detachedPlugin, executable);
   console.log(
     "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
   );
@@ -95,7 +83,6 @@ try {
   }
   throw error;
 } finally {
-  restoreSpawn?.();
   await rm(root, {
     recursive: true,
     force: true,
@@ -388,10 +375,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   const owner = "package-sdk-owner";
   let scanId;
   const client = new sdk.CodexSecurity(
-    {
-      pythonPath: f.env.PYTHON,
-      codexOverrides: { model: "gpt-5.5", model_reasoning_effort: "high" },
-    },
+    { pythonPath: f.env.PYTHON },
     {
       environment: f.env,
       prepareRuntime: async () => ({
@@ -407,15 +391,15 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
-      createCodex({ env }) {
-        scanId = env.CODEX_SECURITY_SCAN_ID;
+      // The installed SDK runs the direct engine without a parent model turn.
+      createCodex() {
         return {
           startThread() {
             return {
-              id: null,
+              id: owner,
               async runStreamed() {
                 assert.fail(
-                  "API-key Deep Scans must not start a parent model turn.",
+                  "The direct engine must not start a parent model turn.",
                 );
               },
             };
@@ -433,6 +417,9 @@ async function runInstalledSdk(pluginRoot, executable) {
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
       outputDir: join(f.directory, "output"),
+      onScanRegistered(scan) {
+        scanId = scan.scanId;
+      },
     });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
@@ -446,12 +433,6 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  const sessions = (await readExecutions(f)).filter(
-    (entry) => entry.phase === "parent-session",
-  );
-  assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].threadId, owner);
-  assert.equal(sessions[0].scanId, scanId);
   await assertExecutions(f, scanId, 5);
 }
 
