@@ -135,13 +135,6 @@ describe("bundled plugin build", () => {
         "plugin-files.json",
         await readFile(join(plugin, "plugin-files.json"), "utf8"),
       );
-      for (const name of ["codex_profile.mjs", "codex_profile.d.mts"]) {
-        await writeFixture(
-          source,
-          `scripts/${name}`,
-          await readFile(join(plugin, "scripts", name), "utf8"),
-        );
-      }
       const platformSource = join(source, "native", "platform.mts");
       await writeFile(
         platformSource,

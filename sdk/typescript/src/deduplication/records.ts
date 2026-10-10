@@ -47,27 +47,22 @@ export function recordsReviewAttribution(
 }
 
 const id = z.string().min(1);
-const record = z
-  .object({
-    id,
-    finding: z.unknown().transform((value) => requireFinding(value)),
-  })
-  .strict();
+const record = z.strictObject({
+  id,
+  finding: z.unknown().transform((value) => requireFinding(value)),
+});
 
-const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
-  .object({
+const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> =
+  z.strictObject({
     version: z.literal(1),
     observations: z.array(record),
     candidateRelationships: z.array(
-      z
-        .object({
-          observationId: id,
-          candidateObservationIds: z.array(id),
-        })
-        .strict(),
+      z.strictObject({
+        observationId: id,
+        candidateObservationIds: z.array(id),
+      }),
     ),
-  })
-  .strict();
+  });
 
 export interface DeduplicateRecordsInput {
   version: 1;

@@ -4,6 +4,7 @@ import { expect, test } from "bun:test";
 import {
   FindingWorkflow,
   workflowDestination,
+  workflowDigest,
 } from "../src/finding-workflow.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import {
@@ -22,6 +23,54 @@ const distinct: DuplicateDecision = {
   decision: "DISTINCT",
   rationale: "Independent corrections are required.",
 };
+
+test("resumed reviews invalidate pre-decision-contract checkpoints", async () => {
+  await using f = await workflowFixture();
+  const store = checkpointWorkbench("legacy-contract", {
+    repository: f.repository,
+  });
+  let legacy = true;
+  const workflow = new FindingWorkflow(
+    "legacy-contract",
+    f.environment,
+    async (options, args, input) => {
+      const payload = JSON.parse(input!);
+      if (legacy && payload.action === "save-review") {
+        payload.binding.version = 4;
+        payload.key = workflowDigest(payload.binding);
+        legacy = false;
+      }
+      return store.run(options, args, JSON.stringify(payload));
+    },
+  );
+  let reviews = 0;
+  const makeRunner = () =>
+    new CheckpointedReviewRunner(
+      workflow,
+      {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          reviews++;
+          return review.validate(distinct);
+        },
+      },
+      store.source,
+      { allRepositories: true },
+    );
+  const review: CodexReview<DuplicateDecision> = {
+    stage: "pair-review",
+    model: "synthetic-model",
+    effort: "medium",
+    prompt: "Synthetic comparison",
+    schema: {},
+    validate: () => distinct,
+  };
+  await makeRunner().run(review);
+  await makeRunner().run(review);
+  await makeRunner().run(review);
+  expect(reviews).toBe(2);
+  expect(store.saved[0]?.["binding"]).toMatchObject({ version: 4 });
+  expect(store.saved[1]?.["binding"]).not.toMatchObject({ version: 4 });
+});
 
 test.each([
   "finding",
