@@ -64,6 +64,11 @@ try {
     await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
   }
   await chmod(executable, 0o700);
+  if (process.platform === "win32") {
+    // The direct SDK engine launches its preflight from this process too.
+    process.env.PACKAGE_DEEP_EXECUTABLE = executable;
+    await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
+  }
 
   await runInstalledSdk(installedPlugin, executable);
   await runDetachedPlugin(detachedPlugin, executable);
@@ -371,7 +376,6 @@ async function runInstalledSdk(pluginRoot, executable) {
     await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
   const owner = "package-sdk-owner";
-  f.env.PACKAGE_DEEP_PARENT_THREAD = owner;
   const postScanPrompt = "Explain the completed synthetic scan.";
   const prompts = [];
   let threadCount = 0;
@@ -448,9 +452,6 @@ async function runInstalledSdk(pluginRoot, executable) {
   try {
     const result = await client.run(f.target, {
       mode: "deep",
-      onScanRegistered: (scan) => {
-        scanId = scan.scanId;
-      },
       auth: "api-key",
       workers: 1,
       subagents: 0,
@@ -458,6 +459,9 @@ async function runInstalledSdk(pluginRoot, executable) {
       stopAfterNoNew: 1,
       postScanPrompt,
       outputDir: join(f.directory, "output"),
+      onScanRegistered(scan) {
+        scanId = scan.scanId;
+      },
     });
     assert.equal(threadCount, 1);
     assert.equal(resumedThreads, 1);
