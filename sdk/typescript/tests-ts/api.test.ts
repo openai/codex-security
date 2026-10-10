@@ -615,6 +615,61 @@ describe("CodexSecurity finding validation", () => {
     };
   }
 
+  test.each(
+    ["output", "state", "runtime"].flatMap((destination) =>
+      [false, true].map((snapshot) => ({ destination, snapshot })),
+    ),
+  )(
+    "keeps validation storage outside knowledge-base inputs: %p",
+    async ({ destination, snapshot }) => {
+      const { root, repository } = await repositoryDirectories();
+      const knowledge = join(root, "documents");
+      const document = join(knowledge, "policy.md");
+      const storage = join(knowledge, "validation-storage");
+      const codexHome =
+        destination === "runtime" ? storage : join(root, "runtime");
+      await mkdir(knowledge);
+      await mkdir(codexHome, { mode: 0o700 });
+      await writeFile(document, "Synthetic primary project guidance.");
+      const knowledgeBaseSnapshot = snapshot
+        ? await readKnowledgeBaseSnapshot([knowledge])
+        : undefined;
+      const prepareRuntime = mock(async () => preparedRuntime(codexHome));
+      const createCodex = mock(throwing("validation must not start"));
+      await using client = new TestClient(
+        {},
+        {
+          environment: {
+            CODEX_SECURITY_STATE_DIR:
+              destination === "state" ? storage : join(root, "state"),
+            OPENAI_API_KEY: "synthetic-validation-key",
+          },
+          prepareRuntime,
+          resolvePluginPython: async () => "/managed/python",
+          createCodex,
+        },
+      );
+      await expect(
+        client.validate({
+          repositoryPath: repository,
+          finding: "Synthetic candidate.",
+          outputDir: destination === "output" ? storage : join(root, "output"),
+          knowledgeBasePaths: [knowledge],
+          knowledgeBaseSnapshot,
+        }),
+      ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
+      expect(prepareRuntime).toHaveBeenCalledTimes(
+        destination === "runtime" ? 1 : 0,
+      );
+      expect(createCodex).not.toHaveBeenCalled();
+      if (destination === "runtime") expect(await readdir(storage)).toEqual([]);
+      else expect(existsSync(storage)).toBe(false);
+      expect(await readFile(document, "utf8")).toBe(
+        "Synthetic primary project guidance.",
+      );
+    },
+  );
+
   test.each(["text", "object"])(
     "validates %s without a scan or implicit file reads",
     async (kind) => {

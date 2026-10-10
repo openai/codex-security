@@ -136,6 +136,7 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import {
+  knowledgeBaseProtectedRoots,
   prepareKnowledgeBase,
   readKnowledgeBaseSnapshot,
   type PreparedKnowledgeBase,
@@ -716,26 +717,38 @@ export class CodexSecurity {
         );
       }
       const finding = jsonForPrompt(options.finding);
+      const snapshot = options.knowledgeBasePaths?.length
+        ? (options.knowledgeBaseSnapshot ??
+          (await readKnowledgeBaseSnapshot(options.knowledgeBasePaths, signal)))
+        : undefined;
+      let protectedRoots: string[] | undefined;
+      if (snapshot !== undefined) {
+        const repository = await normalizeRepository(
+          resolveRepositoryPath(options.repositoryPath),
+          signal,
+        );
+        protectedRoots = [
+          (await enclosingGitWorktreeRoot(repository, signal)) ?? repository,
+          ...(await knowledgeBaseProtectedRoots(snapshot, signal)),
+        ];
+      }
       // Cached validation may already own this output. Regeneration below still
       // requires an empty directory through prepareOutputDir.
       const inputs = await this.#prepareLocalInputs(
         options.repositoryPath,
         options,
         signal,
-        undefined,
+        protectedRoots,
         options.workflowId !== undefined,
       );
       const temporaryRoot = await realpath(tmpdir());
-      requireOutputOutsideRepository(
-        inputs.protectedRoot,
+      requireOutputOutsideRepositories(
+        inputs.protectedRoots,
         temporaryRoot,
         "temporary",
       );
-      if (options.knowledgeBasePaths?.length) {
-        knowledgeBase = await prepareKnowledgeBase(
-          options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
-          signal,
-        );
+      if (snapshot !== undefined) {
+        knowledgeBase = await prepareKnowledgeBase(snapshot, signal);
       }
       const session = await this.#prepareSession(
         inputs,
@@ -1002,7 +1015,7 @@ export class CodexSecurity {
         inputs.outputDir ?? undefined,
         basename(inputs.repository),
         outputRoot,
-        (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+        (path) => requireOutputOutsideRepositories(inputs.protectedRoots, path),
       );
       throwIfAborted(signal, outputDir);
       // Like CLI validation, load the skill directly without scan tools.
