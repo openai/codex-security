@@ -47,6 +47,7 @@ async function fixture() {
     {
       environment,
       runWorkbench,
+      resolvePluginPython: async () => python!,
       prepareRuntime: rejecting("Mock scan initialized Codex"),
       matchFindings: rejecting("Mock scan called model matching"),
     },
