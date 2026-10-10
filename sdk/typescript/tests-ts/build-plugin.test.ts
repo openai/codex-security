@@ -182,6 +182,7 @@ describe("bundled plugin build", () => {
       "package.json",
       "tsconfig.json",
       "main.ts",
+      "deep-scan-main.ts",
       "artifact-writer-main.ts",
       "helpers-main.ts",
       "server.ts",

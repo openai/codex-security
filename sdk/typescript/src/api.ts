@@ -2243,6 +2243,18 @@ export class CodexSecurity {
             return;
           }
           if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
+          if (directDeepScan) {
+            // The direct engine's control session makes no model calls.
+            tracker.recordUsage(
+              {
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 0,
+              },
+              threadId,
+            );
+          }
           tracker.start(threadId);
           try {
             await workbench(workbenchOptions, [
@@ -2660,8 +2672,7 @@ export class CodexSecurity {
             budgetScanId,
             "--cost-json",
             JSON.stringify(budgetCost),
-            "--message",
-            failure.message.slice(0, 2400),
+            `--message=${failure.message.slice(0, 2400)}`,
           ]).catch((error) =>
             recoverCompletedScan(completionOptions, budgetScanId, error, [
               "complete-scan",

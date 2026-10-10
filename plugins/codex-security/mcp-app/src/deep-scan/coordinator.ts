@@ -606,11 +606,10 @@ export class DeepScanCoordinator {
     }
     if (this.externallyFailed || this.terminal) return this.externallyFailed;
     const replacementConfirmed =
-      Boolean(confirmedOwnershipChange(error, this.state.scanId)) ||
-      (current.status === "running" &&
-        current.coordinatorGeneration !== undefined &&
-        this.state.coordinatorGeneration !== undefined &&
-        current.coordinatorGeneration > this.state.coordinatorGeneration);
+      current.status === "running" &&
+      current.coordinatorGeneration !== undefined &&
+      this.state.coordinatorGeneration !== undefined &&
+      current.coordinatorGeneration > this.state.coordinatorGeneration;
     if (current.status === "running" && !replacementConfirmed) {
       // A selection response can be lost after its transaction commits.
       if (current.finalizationInput)
