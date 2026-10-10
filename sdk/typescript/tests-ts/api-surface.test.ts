@@ -2,7 +2,9 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import { CodexSecurity } from "../src/index.js";
+import { deepMerge, type JsonObject } from "../src/config.js";
 import { mockWorkbench } from "./support/api-client.js";
 import {
   completedEvents,
@@ -69,11 +71,14 @@ async function scanResponseSurface(runtimeOptions?: {
 
   await client.run(repository);
   await client.close();
+  const captured = codexOptions as CodexOptions | null;
+  const config = (captured?.configOverrides ?? []).reduce(
+    (config, override) => deepMerge(config, parseToml(override) as JsonObject),
+    structuredClone(captured?.config ?? {}) as JsonObject,
+  );
   return {
     surface: (
-      (codexOptions as CodexOptions | null)?.config?.[
-        "responses_api_metadata"
-      ] as Record<string, string> | undefined
+      config["responses_api_metadata"] as Record<string, string> | undefined
     )?.["codex_security_surface"],
     threadSource: (threadOptions as ThreadOptions | null)?.threadSource,
   };

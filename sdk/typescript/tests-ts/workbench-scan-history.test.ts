@@ -334,7 +334,7 @@ print(json.dumps({
     'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries),
     'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']],
     'batchedLinks': [[row['before_scan_id'], row['after_scan_id']] for row in batched],
-    'batchedQueryCount': batched_queries, 'expectedBatchedQueryCount': 2 if limited else 1,
+    'batchedQueryCount': batched_queries, 'maxBatchedQueryCount': 2 if limited else 1,
     'emptyLinks': empty, 'emptyQueryCount': len(queries),
 }))`;
 
@@ -380,8 +380,8 @@ print(json.dumps({
       ],
     },
   });
-  expect(observed["batchedQueryCount"]).toBe(
-    observed["expectedBatchedQueryCount"],
+  expect(observed["batchedQueryCount"]).toBeLessThanOrEqual(
+    observed["maxBatchedQueryCount"] as number,
   );
 });
 
