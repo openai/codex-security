@@ -704,7 +704,9 @@ def _diff_candidate_reason(candidate: dict[str, Any]) -> str:
     )
 
 
-def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
+def _diff_candidate_decision(
+    candidate: dict[str, Any], *, legacy_reason: bool = False
+) -> dict[str, Any] | None:
     """Project a terminal Diff ledger decision; either deferred phase remains unresolved."""
     validation = candidate.get("validation") or {}
     attack_path = candidate.get("attack_path") or {}
@@ -725,7 +727,8 @@ def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None
             for value in (
                 *(
                     [attack_path.get("counterevidence"), attack_path.get("severity_rationale")]
-                    if attack_path.get("decision") == "ignore"
+                    if (legacy_reason or disposition == "rejected")
+                    and attack_path.get("decision") == "ignore"
                     else []
                 ),
                 validation.get("counterevidence_or_proof_gap"),

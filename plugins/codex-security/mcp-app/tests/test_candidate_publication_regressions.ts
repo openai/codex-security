@@ -652,6 +652,13 @@ for (const mode of ["standard", "diff"] as const) {
           f.draft({ surfaces: [{ ...previous, candidateId: "review-auth" }] }),
         );
         if (source === "checkpoint") {
+          const earlierFiles = [
+            path.join(f.root, "coverage.json"),
+            ...(await readdir(path.join(f.root, "checkpoints"))).map((name) =>
+              path.join(f.root, "checkpoints", name),
+            ),
+          ];
+          await Promise.all(earlierFiles.map((file) => utimes(file, 1, 1)));
           await draftApi.saveScanDraftCheckpoint(
             f.context,
             f.draft({ surfaces: [previous] }),

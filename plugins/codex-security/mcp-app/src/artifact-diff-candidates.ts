@@ -311,7 +311,8 @@ function isGeneratedDecision(surface: JsonObject): boolean {
     surface.candidateId === candidate.candidate_id &&
     surface.disposition === candidateDisposition(candidate) &&
     surface.label === candidate.summary &&
-    surface.notes === terminalReason(candidate)
+    (surface.notes === terminalReason(candidate) ||
+      surface.notes === terminalReason(candidate, true))
   );
 }
 
@@ -873,12 +874,13 @@ function candidateDisposition(
   return undefined;
 }
 
-function terminalReason(candidate: JsonObject): string {
+function terminalReason(candidate: JsonObject, legacy = false): string {
   const validation = object(candidate.validation);
   const attackPath = object(candidate.attack_path);
   return (
     [
-      ...(attackPath?.decision === "ignore"
+      ...((legacy || candidateDisposition(candidate) === "rejected") &&
+      attackPath?.decision === "ignore"
         ? [attackPath.counterevidence, attackPath.severity_rationale]
         : []),
       validation?.counterevidence_or_proof_gap,

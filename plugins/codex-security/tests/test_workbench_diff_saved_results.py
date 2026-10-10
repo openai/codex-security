@@ -126,6 +126,7 @@ def saved_candidate_finding(tmp_path: Path, scan_id: str, candidate_id: str) -> 
     [
         ("suppressed", None, "rejected"),
         ("not_applicable", None, "not_applicable"),
+        ("not_applicable", "ignore", "not_applicable"),
         ("reportable", "ignore", "rejected"),
         ("suppressed", "deferred", None),
         ("not_applicable", "deferred", None),
@@ -159,8 +160,53 @@ def test_diff_candidate_decision_precedence(
         assert decision["disposition"] == disposition
         assert decision["candidate"] == candidate
         assert decision["notes"] == (
-            "Path counterevidence." if attack_path == "ignore" else "Validation evidence."
+            "Path counterevidence."
+            if disposition == "rejected" and attack_path == "ignore"
+            else "Validation evidence."
         )
+
+
+@pytest.mark.parametrize("authored", [False, True])
+def test_stopped_diff_reopens_legacy_terminal_rationale(
+    tmp_path: Path, workbench_api, authored: bool
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, _checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {
+        "disposition": "not_applicable",
+        "counterevidence_or_proof_gap": "Validation evidence.",
+    }
+    candidate["attack_path"] = {
+        "decision": "ignore",
+        "counterevidence": "Earlier attack-path evidence.",
+    }
+    surface = workbench_api["saved_results"]._diff_candidate_decision(candidate)
+    surface.update(
+        id="legacy-terminal",
+        receiptRefs=[],
+        notes="Independent authored evidence."
+        if authored
+        else candidate["attack_path"]["counterevidence"],
+    )
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(surfaces=[surface], deferred=[])
+    coverage_path.write_text(json.dumps(coverage))
+    candidate["validation"] = {"disposition": "deferred"}
+    ledger.write_text(json.dumps(candidate) + "\n")
+
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    recovered = json.loads(coverage_path.read_text())
+    pending = [
+        row for row in recovered["deferred"] if row.get("candidateId") == candidate["candidate_id"]
+    ]
+    assert len(pending) == (0 if authored else 1)
+    saved_surface = next(
+        row for row in recovered["surfaces"] if row.get("candidateId") == candidate["candidate_id"]
+    )
+    assert saved_surface["disposition"] == ("not_applicable" if authored else "needs_follow_up")
+    if authored:
+        assert saved_surface["notes"] == surface["notes"]
 
 
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])

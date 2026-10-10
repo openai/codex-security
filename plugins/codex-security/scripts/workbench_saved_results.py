@@ -755,8 +755,11 @@ def _generated_diff_candidate_decision(item: dict[str, Any]) -> bool:
         decision = _diff_candidate_decision(candidate)
     except (KeyError, ValueError):
         return False
-    return decision is not None and all(
-        item.get(field) == decision[field] for field in ("label", "disposition", "notes")
+    return (
+        decision is not None
+        and all(item.get(field) == decision[field] for field in ("label", "disposition"))
+        and item.get("notes")
+        in (decision["notes"], _diff_candidate_decision(candidate, legacy_reason=True)["notes"])
     )
 
 

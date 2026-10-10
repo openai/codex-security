@@ -1000,11 +1000,23 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           f.write(input),
         );
       await f.write(f.draft({ deferred: [pending] }));
+      // The closing checkpoint is newer than the published pending state.
+      // Make that ordering explicit on filesystems with coarse timestamps.
+      const checkpointRoot = path.join(f.root, "checkpoints");
+      const previous = [
+        ...(await readdir(checkpointRoot)).map((name) =>
+          path.join(checkpointRoot, name),
+        ),
+        ...(layout === "worker"
+          ? ["result.json", "checkpoint-head.json"]
+          : ["coverage.json", "scan-manifest.json"]
+        ).map((name) => path.join(f.root, name)),
+      ];
+      await Promise.all(previous.map((file) => utimes(file, 1, 1)));
       await fail(closing);
       await f.write(f.draft({}, true));
       assert.deepEqual((await f.read()).deferred, []);
       assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
-      const checkpointRoot = path.join(f.root, "checkpoints");
       const originalClosures: [string, number][] = [];
       for (const name of await readdir(checkpointRoot)) {
         const file = path.join(checkpointRoot, name);

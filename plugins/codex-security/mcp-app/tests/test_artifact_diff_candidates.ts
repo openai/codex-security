@@ -1382,6 +1382,7 @@ for (const complete of [false, true]) {
 for (const [validation, attackPath, disposition] of [
   ["suppressed", undefined, "rejected"],
   ["not_applicable", undefined, "not_applicable"],
+  ["not_applicable", "ignore", "not_applicable"],
   ["reportable", "ignore", "rejected"],
 ]) {
   test(`terminal ${validation}/${attackPath ?? "unreviewed"} ledger decisions demote saved findings`, async (t) => {
@@ -1396,7 +1397,11 @@ for (const [validation, attackPath, disposition] of [
     const terminal = candidate(pending.candidate_id, validation, attackPath);
     const reason = "Synthetic source evidence resolved this candidate.";
     terminal.validation.counterevidence_or_proof_gap = reason;
-    if (terminal.attack_path) terminal.attack_path.counterevidence = reason;
+    if (terminal.attack_path)
+      terminal.attack_path.counterevidence =
+        validation === "not_applicable"
+          ? "Earlier attack-path rejection."
+          : reason;
     await writeLedger(context, [terminal]);
     for (const complete of [false, true, true]) {
       await recordCodexSecurityScanDraft(context, {
@@ -1421,6 +1426,37 @@ for (const [validation, attackPath, disposition] of [
         ).findings,
         [],
       );
+    }
+  });
+}
+
+for (const authored of [false, true]) {
+  test(`reopens legacy terminal rationale without overriding authored evidence: ${authored}`, async (t) => {
+    const previous = candidate("legacy-terminal", "not_applicable", "ignore");
+    previous.validation.counterevidence_or_proof_gap = "Validation evidence.";
+    previous.attack_path.counterevidence = "Earlier attack-path evidence.";
+    const context = await fixture(t, [previous]);
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    const coverage = await readCoverage(context);
+    coverage.surfaces[0].notes = authored
+      ? "Independent authored evidence."
+      : previous.attack_path.counterevidence;
+    await writeFile(
+      path.join(context.root, "coverage.json"),
+      JSON.stringify(coverage),
+    );
+    await writeLedger(context, [candidate(previous.candidate_id, "deferred")]);
+    for (const complete of [false, true]) {
+      await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+      const saved = await readCoverage(context);
+      assert.equal(saved.completeness, authored ? "complete" : "partial");
+      assert.equal(saved.deferred.length, authored ? 0 : 1);
+      assert.equal(
+        saved.surfaces[0].disposition,
+        authored ? "not_applicable" : "needs_follow_up",
+      );
+      if (authored)
+        assert.equal(saved.surfaces[0].notes, coverage.surfaces[0].notes);
     }
   });
 }
