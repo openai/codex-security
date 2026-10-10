@@ -41,6 +41,41 @@ const findingFor = (candidateId: string) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+for (const source of ["title", "candidateId", "reportId", "ledgerRowId"]) {
+  for (const [value, expected] of [
+    ["_Unsafe archive_", "unsafe-archive_"],
+    [".hidden file", "hidden-file"],
+    ["/absolute path", "absolute-path"],
+    ["./_-", "finding-1"],
+    ["安全检查", "finding-1"],
+    ["Résumé review", "resume-review"],
+    ["9valid._/anchor", "9valid._/anchor"],
+  ]) {
+    test(`standard: generated ${source} identity survives a draft update for ${value}`, async (t) => {
+      const f = await fixture(t, "standard");
+      const finding = {
+        ...findingFor("candidate-example"),
+        ...(source === "title"
+          ? { title: value }
+          : { extensions: { [source]: value } }),
+      };
+      const draft = { ...f.draft(), findings: [finding] };
+      await f.write(draft);
+      const saved = (await readJson(f.root, "findings.json")).findings[0];
+      await f.write(draft);
+      const updated = (await readJson(f.root, "findings.json")).findings;
+      assert.equal(updated.length, 1);
+      assert.deepEqual(updated[0].identity, saved.identity);
+      assert.equal(
+        saved.identity[
+          source === "title" || source === "candidateId" ? "anchor" : "instance"
+        ],
+        expected,
+      );
+    });
+  }
+}
+
 for (const observation of ["checkpoint head", "worker result"]) {
   test(`worker: reopening survives replacement of the ${observation} during a read`, async (t) => {
     const f = await fixture(t, "worker");
