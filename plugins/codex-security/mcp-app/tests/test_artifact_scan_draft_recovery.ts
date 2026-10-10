@@ -937,7 +937,12 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       }
       for (const name of layout === "worker"
         ? ["result.json", "checkpoint-head.json"]
-        : ["coverage.json", "scan-manifest.json", "findings.json"])
+        : [
+            "coverage.json",
+            "scan-manifest.json",
+            "findings.json",
+            "checkpoint-head.json",
+          ])
         await utimes(path.join(f.root, name), 2, 2);
       const before = new Set(await readdir(checkpoints));
       const followUp = {
@@ -989,6 +994,18 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     : ["coverage.json", "scan-manifest.json"]) {
     test(`${layout}: recover explicit work after ${destination} publication fails`, async (t) => {
       const f = await fixture(t, layout);
+      const originalRename = fsPromises.rename;
+      let publicationTime = 0;
+      // Keep successive publications distinct on coarse filesystem clocks.
+      t.mock.method(
+        fsPromises,
+        "rename",
+        async (...args: Parameters<typeof originalRename>) => {
+          await originalRename(...args);
+          publicationTime += 1;
+          await utimes(args[1], publicationTime, publicationTime);
+        },
+      );
       const pending = { id: "review", ...generic };
       const closing = f.draft({ resolvedDeferred: [close(pending.id)] }, true);
       const fail = (input: ScanDraftInput) =>
@@ -1001,12 +1018,18 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       assert.deepEqual((await f.read()).deferred, []);
       assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
       const checkpointRoot = path.join(f.root, "checkpoints");
-      const originalClosures: [string, number][] = [];
+      const originalClosures: [string, number, Buffer, boolean][] = [];
       for (const name of await readdir(checkpointRoot)) {
         const file = path.join(checkpointRoot, name);
         const saved = await readJson(file);
         if (saved.coverage.resolvedDeferred?.length)
-          originalClosures.push([file, (await stat(file)).mtimeMs]);
+          originalClosures.push([
+            file,
+            (await stat(file)).mtimeMs,
+            await readFile(file),
+            // Raw scopes forbid bound paths; normalized snapshots have them.
+            layout === "worker" || Array.isArray(saved.scope?.includePaths),
+          ]);
       }
       const reopened = {
         ...pending,
@@ -1019,11 +1042,12 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       assert.deepEqual(saved.deferred, [reopened]);
       assert.deepEqual(saved.resolvedDeferred ?? [], []);
       await fail(closing);
-      for (const [file, modified] of originalClosures)
-        assert.equal((await stat(file)).mtimeMs, modified);
+      for (const [file, modified, bytes, fixedTime] of originalClosures) {
+        assert.deepEqual(await readFile(file), bytes);
+        if (fixedTime) assert.equal((await stat(file)).mtimeMs, modified);
+      }
       await f.write(f.draft({}, true));
-      const accepted =
-        destination === "result.json" || destination === "scan-manifest.json";
+      const accepted = layout !== "worker" || destination === "result.json";
       assert.deepEqual((await f.read()).deferred, accepted ? [] : [reopened]);
       await f.write(closing);
       await f.write(f.draft({}, true));
@@ -1647,7 +1671,12 @@ for (const metadata of [
     const checkpoints = path.join(f.root, "checkpoints");
     for (const name of await readdir(checkpoints))
       await utimes(path.join(checkpoints, name), 100, 100);
-    for (const name of ["findings.json", "coverage.json", "scan-manifest.json"])
+    for (const name of [
+      "findings.json",
+      "coverage.json",
+      "scan-manifest.json",
+      "checkpoint-head.json",
+    ])
       await utimes(path.join(f.root, name), 100, 100);
     if (metadata === "latest") {
       await saveScanDraftCheckpoint(f.context, {
@@ -1661,22 +1690,11 @@ for (const metadata of [
           await utimes(path.join(checkpoints, name), 150, 150);
       }
     }
-    const controller = new AbortController();
-    controller.abort(new Error("interrupted terminal publication"));
-    await assert.rejects(
-      draftApi.recordCodexSecurityScanDraft(
-        f.context,
-        {
-          ...f.draft({}, true),
-          ...(terminalModel === undefined
-            ? {}
-            : { threatModel: terminalModel }),
-        },
-        undefined,
-        controller.signal,
-      ),
-      /interrupted terminal publication/,
-    );
+    // Legacy writers could stop after saving raw terminal input, before publication.
+    await saveScanDraftCheckpoint(f.context, {
+      ...f.draft({}, true),
+      ...(terminalModel === undefined ? {} : { threatModel: terminalModel }),
+    });
     const originalCheckpoints = new Map<string, string>();
     for (const name of await readdir(checkpoints)) {
       const filename = path.join(checkpoints, name);
@@ -1818,14 +1836,36 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       findings: [findingFor("accepted")],
     };
     await f.write(terminal);
-    const checkpoints = await readdir(path.join(f.root, "checkpoints"));
+    const checkpointRoot = path.join(f.root, "checkpoints");
+    const checkpoints = new Map(
+      await Promise.all(
+        (await readdir(checkpointRoot)).map(
+          async (name) =>
+            [
+              name,
+              await readFile(path.join(checkpointRoot, name), "utf8"),
+            ] as const,
+        ),
+      ),
+    );
     await f.write({
       ...f.draft({ deferred: [{ id: "late", ...generic }] }),
       findings: [findingFor("late-finding")],
     });
+    for (const [name, contents] of checkpoints)
+      assert.equal(
+        await readFile(path.join(checkpointRoot, name), "utf8"),
+        contents,
+      );
+    const selected = await readJson(f.root, "checkpoint-head.json");
+    const selectedDraft = await readJson(checkpointRoot, selected.checkpoint);
+    assert.notEqual(selectedDraft.complete, false);
+    assert.deepEqual(selectedDraft.coverage.deferred, []);
     assert.deepEqual(
-      await readdir(path.join(f.root, "checkpoints")),
-      checkpoints,
+      selectedDraft.findings.map(
+        (row: ReturnType<typeof findingFor>) => row.provenance.candidateId,
+      ),
+      ["accepted"],
     );
     if (layout !== "worker") {
       await recordCodexSecurityScanDraftViaWorkbench(
@@ -2632,7 +2672,12 @@ for (const [layout, history] of [
       await utimes(filename, time, time);
       if (old) oldContents.set(name, await readFile(filename, "utf8"));
     }
-    for (const name of ["findings.json", "coverage.json", "scan-manifest.json"])
+    for (const name of [
+      "findings.json",
+      "coverage.json",
+      "scan-manifest.json",
+      "checkpoint-head.json",
+    ])
       await utimes(path.join(f.root, name), 200, 200);
     const result = await f.write({
       ...f.draft(),

@@ -1,8 +1,13 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createCodexSecurityArtifactWriterServer } from "./artifact-writer-main.js";
 import { createCodexSecurityServer } from "./server.js";
+import { runCliDeepScan } from "./deep-scan-main.js";
 
 async function main(): Promise<void> {
+  if (process.argv.includes("--deep-scan-engine")) {
+    await runCliDeepScan();
+    return;
+  }
   const artifactWriter = process.argv.includes("--artifact-writer");
   const server = artifactWriter
     ? await createCodexSecurityArtifactWriterServer()
@@ -29,9 +34,11 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   console.error(
-    process.argv.includes("--artifact-writer")
-      ? "Codex Security artifact writer failed to start:"
-      : "Codex Security MCP server failed to start:",
+    process.argv.includes("--deep-scan-engine")
+      ? "Codex Security Deep Scan failed:"
+      : process.argv.includes("--artifact-writer")
+        ? "Codex Security artifact writer failed to start:"
+        : "Codex Security MCP server failed to start:",
     error,
   );
   process.exitCode = 1;

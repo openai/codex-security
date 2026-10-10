@@ -10,6 +10,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { importModule } from "./import-module.ts";
+import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import {
+  DeepScanCoordinator,
+  FakeExecutor,
+} from "./deep_scan_coordinator_fixture.ts";
 
 const execFileAsync = promisify(execFile);
 const mcpAppRoot = path.resolve(import.meta.dirname, "..");
@@ -30,6 +35,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
   },
 });
 
+await testFreeformFailureMessagesAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench(true);
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
@@ -398,6 +404,150 @@ async function testOwnerlessCanonicalCandidateReplay(
   }
 }
 
+await testCoordinatorCommitResponseRecovery();
+await testCoordinatorCommitResponseRecovery("commit-deep-scan-dedup");
+await testCoordinatorCommitResponseRecovery("finish-deep-scan");
+
+async function testCoordinatorCommitResponseRecovery(
+  exhaustOperation?: "commit-deep-scan-dedup" | "finish-deep-scan",
+) {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-commit-response-",
+  );
+  const exhaustCommitRetries = exhaustOperation === "commit-deep-scan-dedup";
+  const runWorkbench = createWorkbenchRunner(environment);
+  const attempts = new Map<string, string[][]>();
+  let failureWrites = 0;
+  let committedManifest: string | undefined;
+  const store = new WorkbenchDeepScanStore(async (args: string[]) => {
+    const result = await runWorkbench(args);
+    if (args[0] === "fail-deep-scan") failureWrites += 1;
+    if (args[0] === "finish-deep-scan") {
+      committedManifest ??= await readFile(
+        args[args.indexOf("--manifest-path") + 1],
+        "utf8",
+      );
+    }
+    if (
+      args[0] !== "commit-deep-scan-dedup" &&
+      args[0] !== "finish-deep-scan" &&
+      !(
+        args[0] === "upsert-deep-scan-worker" &&
+        args[args.indexOf("--kind") + 1] === "discovery" &&
+        args[args.indexOf("--status") + 1] === "succeeded"
+      )
+    )
+      return result;
+    const calls = attempts.get(args[0]) ?? [];
+    calls.push([...args]);
+    attempts.set(args[0], calls);
+    if (
+      args[0] === "commit-deep-scan-dedup" &&
+      (calls.length === 1 || exhaustCommitRetries)
+    ) {
+      throw Object.assign(
+        new Error("workbench response timed out after commit"),
+        {
+          code: "ETIMEDOUT",
+        },
+      );
+    }
+    // Reproduce truncated stdout after the actual SQLite mutation committed.
+    if (calls.length === 1 || args[0] === exhaustOperation)
+      return JSON.parse('{"deepScan":');
+    return result;
+  });
+  try {
+    await mkdir(path.join(environment.CODEX_HOME, "codex-security"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(environment.CODEX_HOME, "codex-security", "config.toml"),
+      "[deep_scan]\nworkers = 1\nstop_after_no_new = 1\nmax_discovery_runs = 1\n",
+    );
+    const threadId = "commit-response-owner";
+    const run = await store.begin({
+      targetPath,
+      threadId,
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    const coordinator = new DeepScanCoordinator({
+      run: claim.run,
+      store,
+      pluginRoot,
+      threadId,
+      executor: new FakeExecutor(),
+      heartbeatIntervalMs: 60_000,
+      onComplete: async (draft: ScanDraftInput, signal: AbortSignal) => {
+        const context = await createScanArtifactContext(
+          run.scanId,
+          runWorkbench,
+          {
+            requireRunning: true,
+            pluginRoot,
+          },
+        );
+        await recordCodexSecurityScanDraftViaWorkbench(
+          context,
+          draft,
+          runWorkbench,
+          signal,
+        );
+      },
+    });
+    coordinator.start();
+    const terminal = await coordinator.wait(undefined, 30_000);
+    assert.equal(
+      terminal?.status,
+      exhaustCommitRetries ? "failed" : "succeeded",
+      terminal?.error,
+    );
+    assert.equal(failureWrites, exhaustCommitRetries ? 1 : 0);
+    assert.equal(
+      attempts.get("commit-deep-scan-dedup")?.length,
+      exhaustCommitRetries ? 3 : 2,
+    );
+    assert.equal(attempts.get("upsert-deep-scan-worker")?.length, 2);
+    assert.equal(
+      attempts.get("finish-deep-scan")?.length,
+      exhaustCommitRetries
+        ? undefined
+        : exhaustOperation === "finish-deep-scan"
+          ? 3
+          : 2,
+    );
+    for (const calls of attempts.values()) {
+      for (const call of calls) assert.deepEqual(call, calls[0]);
+    }
+    const persisted = await store.get(run.scanId, threadId);
+    assert.equal(persisted.status, terminal.status);
+    assert.equal(
+      persisted.noNewStreak,
+      1,
+      "replayed commits must not double-count discovery",
+    );
+    assert.equal(
+      persisted.persistedWorkers.filter(
+        (worker: { status: string }) => worker.status === "succeeded",
+      ).length,
+      2,
+    );
+    if (!exhaustCommitRetries) {
+      assert.equal(
+        await readFile(terminal.manifestPath, "utf8"),
+        committedManifest,
+        "lost finish replies must not overwrite the published manifest",
+      );
+    }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
 async function createWorkbenchFixture(prefix: string) {
   const fixtureRoot = await temporaryDirectory(prefix);
   const targetPath = path.join(fixtureRoot, "target");
@@ -468,6 +618,39 @@ raise SystemExit(workbench_db.main())`,
     await runWorkbench(stopArgs);
   }
   return (await runWorkbench(["get-scan", "--scan-id", scanId])).scan;
+}
+
+async function testFreeformFailureMessagesAgainstRealWorkbench() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-error-transport-",
+  );
+  const store = new WorkbenchDeepScanStore(createWorkbenchRunner(environment));
+  try {
+    const run = await store.begin({
+      targetPath,
+      threadId: "error-owner",
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId: "error-owner",
+    });
+    const worker = await createWorkerFixture(run, "discovery", "discovery");
+    await store.updateWorker({ ...worker, status: "running" });
+    const message = "--provider-error=café\nretry the request";
+    const failed = await store.updateWorker({
+      ...worker,
+      status: "failed",
+      error: message,
+    });
+    assert.equal(failed.error, message);
+    assert.equal((await store.fail(run.scanId, message)).error, message);
+    const reloaded = await store.get(run.scanId, "error-owner");
+    assert.equal(reloaded.error, message);
+    assert.equal(reloaded.persistedWorkers[0].error, message);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 async function testRecoveredPublicationRejectsLateFailure() {
@@ -559,7 +742,7 @@ async function testNoopStoppedRefreshRetainsPublicationFailure() {
       "noop-publication-owner",
     ]);
     const message =
-      "Saved result publication failed: fixture no-op publication failure";
+      "--publication-error=café\nSaved result publication failed.";
     await store.recordStoppedPublicationFailure(
       run.scanId,
       message,
