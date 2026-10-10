@@ -188,10 +188,11 @@ def _scan_root_thread_ids(
             row["sdk_thread_id"]
             for row in connection.execute(
                 """
-                SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
-                WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
-                ORDER BY sdk_thread_id
+                SELECT DISTINCT threads.sdk_thread_id
+                FROM deep_scan_worker_threads AS threads
+                JOIN deep_scan_workers AS workers ON workers.id = threads.worker_id
+                WHERE workers.scan_id = ?
+                ORDER BY threads.sdk_thread_id
                 """,
                 (scan["id"],),
             )
@@ -381,6 +382,7 @@ def _read_rollout_usage(
     total = _empty_token_usage()
     warnings: set[str] = set()
     previous = _empty_token_usage()
+    previous_cache_writes_reported = True
     boundary_reached = False
 
     with session.path.open("rb") as source:
@@ -438,7 +440,9 @@ def _read_rollout_usage(
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
-                        previous = inherited_usage
+                        previous = _retain_cache_baseline(
+                            previous, inherited_usage, _cache_writes_reported(payload)
+                        )
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
@@ -447,22 +451,85 @@ def _read_rollout_usage(
             if timestamp is None or snapshot is None:
                 warnings.add("token_record_invalid")
                 continue
+            reset = snapshot["totalTokens"] < previous["totalTokens"]
+            cache_writes_reported = _cache_writes_reported(payload)
+            baseline = _retain_cache_baseline(previous, snapshot, cache_writes_reported)
+            if baseline is previous:
+                cache_writes_reported = previous_cache_writes_reported and cache_writes_reported
+            refines_classification = (
+                baseline["inputTokens"] >= previous["inputTokens"]
+                and baseline["outputTokens"] >= previous["outputTokens"]
+                and baseline["cachedInputTokens"] >= previous["cachedInputTokens"]
+                and baseline["cacheWriteInputTokens"] >= previous["cacheWriteInputTokens"]
+                and (
+                    (not previous_cache_writes_reported and cache_writes_reported)
+                    or baseline["cachedInputTokens"] > previous["cachedInputTokens"]
+                    or baseline["cacheWriteInputTokens"] > previous["cacheWriteInputTokens"]
+                )
+            )
+            previous_cache_writes_reported = cache_writes_reported
             delta = {
-                key: value - previous[key] if value >= previous[key] else value
+                key: value if reset or value < previous[key] else value - previous[key]
                 for key, value in snapshot.items()
             }
-            previous = snapshot
+            previous = baseline
             if timestamp < started_at:
                 continue
             if completed_at is not None and timestamp > completed_at:
                 continue
-            if delta["totalTokens"] <= 0:
+            delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
+            if delta["totalTokens"] <= 0 and not refines_classification:
                 continue
+            cache_write_capacity = (
+                total["inputTokens"]
+                + delta["inputTokens"]
+                - total["cachedInputTokens"]
+                - total["cacheWriteInputTokens"]
+                if refines_classification
+                else delta["inputTokens"]
+            )
+            delta["cacheWriteInputTokens"] = min(
+                delta["cacheWriteInputTokens"], cache_write_capacity
+            )
+            delta["cachedInputTokens"] = min(
+                delta["cachedInputTokens"],
+                max(0, cache_write_capacity - delta["cacheWriteInputTokens"]),
+            )
+            delta["reasoningOutputTokens"] = min(
+                delta["reasoningOutputTokens"], delta["outputTokens"]
+            )
             _add_token_usage(total, delta)
 
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
     return total, warnings
+
+
+def _cache_writes_reported(payload: Mapping[str, Any]) -> bool:
+    raw_usage = payload.get("info", {}).get("total_token_usage", {})
+    return "cache_write_input_tokens" in raw_usage or "cache_write_tokens" in raw_usage
+
+
+def _retain_cache_baseline(
+    previous: dict[str, int], snapshot: dict[str, int], reported: bool
+) -> dict[str, int]:
+    baseline = snapshot
+    if (
+        not reported
+        and snapshot["inputTokens"] >= previous["inputTokens"]
+        and snapshot["outputTokens"] >= previous["outputTokens"]
+    ):
+        baseline = {**snapshot, "cacheWriteInputTokens": previous["cacheWriteInputTokens"]}
+    if (
+        baseline["inputTokens"] == previous["inputTokens"]
+        and baseline["outputTokens"] == previous["outputTokens"]
+        and (
+            baseline["cachedInputTokens"] < previous["cachedInputTokens"]
+            or baseline["cacheWriteInputTokens"] < previous["cacheWriteInputTokens"]
+        )
+    ):
+        return previous
+    return baseline
 
 
 def _session_parent_thread_id(payload: Mapping[str, Any]) -> str | None:

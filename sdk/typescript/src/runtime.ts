@@ -1569,6 +1569,137 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+interface NativeSessionConfig {
+  command: CodexCommand;
+  config?: JsonObject;
+  workingDirectory: string;
+  sqliteHome?: Promise<string | undefined>;
+}
+
+/** @internal */
+export async function resolveScanSessionPaths(
+  options: WorkbenchCommandOptions,
+  scanId: string | null,
+  rootThreadId: string,
+  nativeConfig?: NativeSessionConfig,
+  additionalRootThreadIds: readonly string[] = [],
+): Promise<ReadonlyMap<string, string>> {
+  const source = [
+    "import json, os, sqlite3, sys",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_usage as usage",
+    "roots = [sys.argv[3]]",
+    "if sys.argv[2]:",
+    "    path = (Path(os.environ['CODEX_SECURITY_STATE_DIR']) / 'workbench.sqlite3').expanduser().resolve()",
+    "    connection = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)",
+    "    try:",
+    "        connection.row_factory = sqlite3.Row",
+    "        connection.execute('PRAGMA query_only = ON')",
+    "        scan = connection.execute('SELECT * FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
+    "        if scan is None: raise RuntimeError('Scan ownership is unavailable.')",
+    "        roots = usage._scan_root_thread_ids(connection, scan, sys.argv[3])",
+    "    finally:",
+    "        connection.close()",
+    "roots.extend(json.loads(sys.argv[4]))",
+    "database = usage._codex_state_database()",
+    "if database is None: raise RuntimeError('Codex session ownership is unavailable.')",
+    "warnings = set()",
+    "sessions, missing = usage._discover_rollout_sessions(database, roots, warnings)",
+    "if missing or warnings or not any(session.thread_id == sys.argv[3] for session in sessions):",
+    "    raise RuntimeError('Scan session ownership is incomplete.')",
+    "print(json.dumps([[str(session.path), session.thread_id] for session in sessions], allow_nan=False))",
+  ].join("\n");
+  try {
+    if (
+      nativeConfig !== undefined &&
+      !(process.platform === "win32"
+        ? environmentValue(options.environment, "CODEX_STATE_DB")
+        : options.environment["CODEX_STATE_DB"]?.trim())
+    ) {
+      const sqliteHome = await (nativeConfig.sqliteHome ??=
+        readNativeSqliteHome(nativeConfig, options));
+      if (sqliteHome !== undefined) {
+        options = {
+          ...options,
+          environment: {
+            ...options.environment,
+            CODEX_SQLITE_HOME: sqliteHome,
+          },
+        };
+      }
+    }
+    const { stdout } = await execFile(
+      options.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        source,
+        join(options.pluginRoot, "scripts"),
+        scanId ?? "",
+        rootThreadId,
+        JSON.stringify(additionalRootThreadIds),
+      ],
+      {
+        env: pluginHelperEnvironment(options.environment),
+        encoding: "utf8",
+        maxBuffer: Infinity,
+        windowsHide: true,
+        signal: options.signal,
+      },
+    );
+    const paths: unknown = JSON.parse(stdout);
+    if (
+      !Array.isArray(paths) ||
+      !paths.every(
+        (entry) =>
+          Array.isArray(entry) &&
+          entry.length === 2 &&
+          typeof entry[0] === "string" &&
+          isAbsolute(entry[0]) &&
+          typeof entry[1] === "string",
+      )
+    ) {
+      throw new Error("The scan session ownership response is invalid.");
+    }
+    const owned = new Map<string, string>(paths);
+    if (owned.size !== paths.length) {
+      throw new Error(
+        "The scan session ownership response has conflicting paths.",
+      );
+    }
+    return owned;
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new CodexSecurityError(
+      "The scan session ownership could not be verified.",
+      { cause: error },
+    );
+  }
+}
+
+async function readNativeSqliteHome(
+  config: NativeSessionConfig,
+  options: WorkbenchCommandOptions,
+): Promise<string | undefined> {
+  const { providerPreflightCommand, readNativeSessionSqliteHome } =
+    await import("./provider-profile.js");
+  const configured = await readNativeSessionSqliteHome(
+    await providerPreflightCommand(config.command, config.config ?? {}),
+    options.environment,
+    config.workingDirectory,
+    options.signal,
+    config.config,
+  );
+  if (configured !== undefined) return configured;
+  // config/read omits the native environment fallback, which trims this value.
+  const inherited =
+    process.platform === "win32"
+      ? environmentValue(options.environment, "CODEX_SQLITE_HOME")
+      : options.environment["CODEX_SQLITE_HOME"]?.trim();
+  return inherited || undefined;
+}
 const WORKBENCH_ARGUMENTS_PROGRAM = String.raw`
 import json, sys
 sys.argv[2:] = json.loads(sys.stdin.buffer.readline())

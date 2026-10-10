@@ -89,6 +89,7 @@ EXPECTED_MIGRATIONS = [
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
     (47, "snapshot deep scan discovery context"),
+    (48, "retain deep scan worker session ownership"),
 ]
 
 
@@ -980,6 +981,110 @@ def test_scan_model_migration_preserves_existing_scans() -> None:
     assert scan["model"] is None
     assert scan["reasoning_effort"] is None
     assert scan["completion_warnings_json"] == "[]"
+
+
+@pytest.mark.parametrize(
+    ("before_version", "ownership_version"),
+    [(44, None), (48, None), (43, 44), (44, 44), (47, 47)],
+)
+def test_worker_thread_history_backfills_and_survives_retries(
+    before_version: int, ownership_version: int | None
+) -> None:
+    published_ownership = ownership_version is not None
+    connection, apply_migrations = create_historical_database(before_version)
+    connection.execute("PRAGMA foreign_keys = ON")
+    timestamp = "2026-07-01T00:00:00Z"
+    if published_ownership:
+        _, name, sql = next(migration for migration in SCHEMA.MIGRATIONS if migration[0] == 48)
+        for statement in SCHEMA.sql_statements(sql):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)", (ownership_version, name, timestamp)
+        )
+    connection.execute(
+        "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', ?, ?)",
+        (timestamp, timestamp),
+    )
+    connection.execute(
+        """INSERT INTO scans (
+            id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+            status, phase, started_at, created_at, updated_at
+        ) VALUES ('scan', 'workspace', '/target', 'revision', '.', 'deep', '/scan',
+            'running', 'discovery', ?, ?, ?)""",
+        (timestamp, timestamp, timestamp),
+    )
+    connection.execute(
+        """INSERT INTO deep_scan_runs (
+            scan_id, schema_version, workflow_version, status, phase, workers, subagents,
+            stop_after_no_new, max_discovery_runs, created_at, updated_at
+        ) VALUES ('scan', 1, 'deep-scan-mcp/v1', 'running', 'discovery', 2, 0, 2, 10, ?, ?)""",
+        (timestamp, timestamp),
+    )
+    insert_worker = """INSERT INTO deep_scan_workers (
+        id, scan_id, kind, status, prompt_path, artifact_dir, sdk_thread_id, created_at, updated_at
+    ) VALUES (?, 'scan', 'discovery', 'running', '/prompt', '/artifacts', ?, ?, ?)"""
+    connection.execute(insert_worker, ("worker", "first-thread", timestamp, timestamp))
+    if published_ownership:
+        for thread_id in ("previous-thread", "first-thread"):
+            connection.execute(
+                "UPDATE deep_scan_workers SET sdk_thread_id = ? WHERE id = 'worker'", (thread_id,)
+            )
+    connection.commit()
+    apply_migrations(connection)
+    apply_migrations(connection)
+    previous = [("worker", "previous-thread")] if published_ownership else []
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT * FROM deep_scan_worker_threads ORDER BY worker_id, sdk_thread_id"
+        )
+    ] == [("worker", "first-thread"), *previous]
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version >= 44 ORDER BY version"
+        )
+    ] == EXPECTED_MIGRATIONS[43:]
+    if published_ownership:
+        assert (
+            connection.execute(
+                "SELECT applied_at FROM schema_migrations WHERE version = 48"
+            ).fetchone()[0]
+            == timestamp
+        )
+    history = connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+    connection.commit()
+    apply_migrations(connection)
+    assert (
+        connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall() == history
+    )
+    for thread_id in ("second-thread", "second-thread", "first-thread"):
+        connection.execute(
+            "UPDATE deep_scan_workers SET sdk_thread_id = ? WHERE id = 'worker'", (thread_id,)
+        )
+    connection.execute(insert_worker, ("other-worker", "other-thread", timestamp, timestamp))
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT * FROM deep_scan_worker_threads ORDER BY worker_id, sdk_thread_id"
+        )
+    ] == sorted(
+        [
+            ("other-worker", "other-thread"),
+            ("worker", "first-thread"),
+            ("worker", "second-thread"),
+            *previous,
+        ]
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "INSERT INTO deep_scan_worker_threads VALUES ('missing-worker', 'thread')"
+        )
+    connection.execute("DELETE FROM deep_scan_workers WHERE id = 'worker'")
+    assert [tuple(row) for row in connection.execute("SELECT * FROM deep_scan_worker_threads")] == [
+        ("other-worker", "other-thread")
+    ]
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_deep_discovery_error_migration_backfills_each_existing_threshold() -> None:

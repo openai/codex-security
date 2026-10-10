@@ -141,6 +141,8 @@ test.each([
   [defaultTimeoutMs, [], "blocked directory", true],
   ["5000", ["--timeout", "5000"], "available", false],
   ["5000", ["--timeout=5000"], "available", false],
+  [defaultTimeoutMs, ["--seed=12345"], "available", false],
+  [defaultTimeoutMs, ["--seed", "789", "--seed=12345"], "available", false],
   ["5000", ["--timeout", "9000", "--timeout=5000"], "available", false],
   ["5000", ["--timeout=9000", "--timeout", "5000"], "available", false],
   [defaultTimeoutMs, ["--", "--timeout", "5000"], "available", false],
@@ -202,6 +204,13 @@ test("synthetic report probe --timeout=5000", () => {
       });
       const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(fail ? 1 : 0);
+      expect(stdout).toContain("probe.test.ts");
+      const seed = /Bun test seed: (\d+)/u.exec(stdout)?.[1];
+      expect(seed).toBeDefined();
+      expect(stderr).toContain(`--seed=${seed}`);
+      if (options.some((option) => option === "--seed=12345")) {
+        expect(seed).toBe("12345");
+      }
       expect(stdout).toContain("Test shard 1/1: probe.test.ts");
       expect(stderr).toContain("synthetic report probe");
       if (report === "available") {

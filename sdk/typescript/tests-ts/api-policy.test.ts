@@ -1,3 +1,8 @@
+import {
+  nativeSqlitePreflight,
+  sqliteProviderConfig,
+} from "./support/native-sqlite-preflight.js";
+import { nodeCommand } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import {
   link,
@@ -56,6 +61,8 @@ async function setup(
     secureOutput?: (path: string) => Promise<void>;
     surface?: "cli" | "sdk";
     config?: Record<string, unknown>;
+    resolveOwnedSessions?: typeof runtime.resolveScanSessionPaths;
+    resolveCodexCommand?: typeof runtime.resolveCodexCommand;
   } = {},
 ) {
   const f = await fixture();
@@ -89,10 +96,11 @@ async function setup(
     "threat_model",
     "policy",
   ];
+  const environment = { CODEX_SECURITY_STATE_DIR: join(f.root, "state") };
   const security = new InternalSecurity(
     options.config ?? {},
     {
-      environment: { CODEX_SECURITY_STATE_DIR: join(f.root, "state") },
+      environment,
       prepareRuntime: async () => {
         options.onPrepare?.();
         return runtime;
@@ -110,11 +118,15 @@ async function setup(
       },
       runWorkbench: rejecting("Policy generation must not register a scan."),
       createCodex,
+      resolveCodexCommand: options.resolveCodexCommand,
+      resolveScanSessionPaths:
+        options.resolveOwnedSessions ?? (async () => new Map<string, string>()),
     },
     { surface: options.surface ?? "sdk" },
   );
   return {
     ...f,
+    environment,
     security,
     runtime,
     threads,
@@ -1544,6 +1556,131 @@ describe("CodexSecurity policy API", () => {
     expect(await readdir(f.repository)).toEqual([]);
     await f.security.close();
   });
+
+  test.each(
+    [
+      "default",
+      "profile",
+      "tilde",
+      "inherited-relative",
+      "native-provider",
+    ].flatMap((location) =>
+      [false, true].map((limited) => ({ location, limited })),
+    ),
+  )(
+    "policy accounting ignores unrelated empty sessions at the $location SQLite home with budget=$limited",
+    async ({ location, limited }) => {
+      const f = await setup({
+        ...(location === "native-provider"
+          ? { resolveCodexCommand: () => ({ ...nodeCommand(), args: ["--"] }) }
+          : {}),
+        config:
+          location === "native-provider"
+            ? { codexOverrides: sqliteProviderConfig }
+            : location === "profile"
+              ? {
+                  codexOverrides: {
+                    profile: "review",
+                    profiles: { review: { sqlite_home: "../selected-state" } },
+                  },
+                }
+              : location === "tilde"
+                ? { codexOverrides: { sqlite_home: "~/selected-state" } }
+                : {},
+        resolveOwnedSessions: async (...args) => {
+          expect(args[3]?.command.command.length).toBeGreaterThan(0);
+          expect(args[3]?.workingDirectory).toBe(f.outputDir);
+          expect(args[0].environment?.["HOME"]).toBe(
+            f.configuration()?.env?.["HOME"],
+          );
+          expect(args[0].environment?.["CODEX_SQLITE_HOME"]).toBe(
+            f.configuration()?.env?.["CODEX_SQLITE_HOME"],
+          );
+          return await runtime.resolveScanSessionPaths(...args);
+        },
+        stream: async function* (stage) {
+          const id = `policy-${stage}`;
+          const directory = join(f.runtime.codexHome, "sessions");
+          await mkdir(directory, { recursive: true });
+          const rollout = join(directory, `${id}.jsonl`);
+          await writeFile(
+            rollout,
+            [
+              { type: "session_meta", payload: { id } },
+              {
+                type: "event_msg",
+                payload: {
+                  type: "token_count",
+                  info: {
+                    total_token_usage: { input_tokens: 100, output_tokens: 10 },
+                  },
+                },
+              },
+              { type: "event_msg", payload: { type: "task_complete" } },
+            ]
+              .map((value) => JSON.stringify(value))
+              .join("\n") + "\n",
+          );
+          execFileSync(PYTHON, [
+            "-I",
+            "-B",
+            "-c",
+            "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)'); c.execute('CREATE TABLE IF NOT EXISTS thread_spawn_edges (parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)'); c.execute('INSERT INTO threads VALUES (?,?)',(sys.argv[2],sys.argv[3])); c.commit(); c.close()",
+            join(sqliteHome, "state_7.sqlite"),
+            id,
+            rollout,
+          ]);
+          yield* events(stage);
+        },
+      });
+      const sqliteHome =
+        location === "profile" ||
+        location === "inherited-relative" ||
+        location === "native-provider"
+          ? join(f.root, "selected-state")
+          : location === "tilde"
+            ? join(f.root, "selected-state")
+            : f.runtime.codexHome;
+      await mkdir(sqliteHome, { recursive: true });
+      const native =
+        location === "native-provider"
+          ? await nativeSqlitePreflight(f.root, sqliteHome)
+          : null;
+      if (native !== null) {
+        Object.assign(f.environment, native.environment);
+        Object.assign(f.runtime.environment, native.environment);
+      }
+      f.runtime.environment["HOME"] = f.root;
+      f.runtime.environment["USERPROFILE"] = f.root;
+      if (location === "inherited-relative")
+        f.runtime.environment["CODEX_SQLITE_HOME"] = "../selected-state";
+      await mkdir(join(f.runtime.codexHome, "sessions"), { recursive: true });
+      await writeFile(
+        join(f.runtime.codexHome, "sessions", "unrelated-empty.jsonl"),
+        "",
+      );
+      try {
+        const result = await f.security.generatePolicy(f.repository, {
+          outputDir: f.outputDir,
+          ...(limited ? { maxCostUsd: 1 } : {}),
+        });
+        expect(result.content).toBe(POLICY);
+        expect(result.cost?.inputTokens).toBe(300);
+        if (native !== null) {
+          if (limited)
+            expect(await readFile(native.transcript, "utf8")).toContain(
+              '"method":"config/read"',
+            );
+          else
+            await expect(
+              readFile(native.transcript, "utf8"),
+            ).rejects.toMatchObject({ code: "ENOENT" });
+        }
+      } finally {
+        await f.security.close();
+      }
+    },
+  );
 
   test("optional observer failures do not stop policy generation", async () => {
     const f = await setup();

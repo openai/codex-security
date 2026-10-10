@@ -50,7 +50,7 @@ export async function testDeepScanContextSnapshots({
     fixture.executablePath,
     (await readFile(fixture.executablePath, "utf8")).replace(
       "process.env.FAKE_CODEX_MARKER",
-      "process.argv[process.argv.indexOf('--cd') + 1] + '/invocation.json'",
+      "thread.params.cwd + '/invocation.json'",
     ),
   );
   const previousPath = process.env.CODEX_CLI_PATH;
@@ -87,7 +87,7 @@ export async function testDeepScanContextSnapshots({
           });
           const invocations: {
             kind: DeepScanWorkerKind;
-            invocation: { argv: string[]; stdin: string };
+            invocation: { thread: { method: string }; stdin: string };
           }[] = [];
           const sdk = new CodexSdkWorkerExecutor({ parentSandbox });
           const executor = {
@@ -182,8 +182,8 @@ export async function testDeepScanContextSnapshots({
           for (let offset = 0; offset < invocations.length; offset += 2) {
             const fresh = invocations[offset]!;
             const resumed = invocations[offset + 1]!;
-            assert.equal(fresh.invocation.argv.includes("resume"), false);
-            assert.equal(resumed.invocation.argv.includes("resume"), true);
+            assert.equal(fresh.invocation.thread.method, "thread/start");
+            assert.equal(resumed.invocation.thread.method, "thread/resume");
             const context = JSON.parse(
               fresh.invocation.stdin.match(/```json\n([\s\S]*?)\n```/)![1],
             );

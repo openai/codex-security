@@ -3,6 +3,8 @@ import { workbenchCommand } from "./support/workbench-command.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
@@ -45,9 +47,11 @@ async function interruptedScan(
     | "auth"
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
+    | "maxCostUsd"
   > & { config?: JsonObject } = {},
   resolvedDeep = false,
   modelProvider?: string,
+  config: { sqlite_home?: string } = {},
   knowledgeState: "saved" | "legacy" = "saved",
 ) {
   const root = await temporaryDirectory();
@@ -152,6 +156,7 @@ async function interruptedScan(
     config: {
       model: "gpt-5.6-sol",
       approval_policy: "never",
+      ...config,
       ...(modelProvider === undefined ? {} : { model_provider: modelProvider }),
     },
     pluginVersion: "0.1.0",
@@ -528,6 +533,109 @@ test("resumed Bedrock scans retain provider context for the account advisory", a
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
 });
+
+test.each(["direct", "profile"])(
+  "resume restores selected settings from an API-created %s recipe",
+  async (shape) => {
+    const root = await temporaryDirectory();
+    const script = fileURLToPath(
+      new URL("./fixtures/resume-selected-settings.ts", import.meta.url),
+    );
+    const run = (stage: string) =>
+      spawnSync(process.execPath, [script, root, stage, shape], {
+        env: process.env,
+        encoding: "utf8",
+        windowsHide: true,
+      });
+    const first = run("first");
+    expect(first.status, first.stderr || first.error?.message).toBe(86);
+    const started = JSON.parse(
+      await readFile(join(root, "first.json"), "utf8"),
+    );
+    const selected = {
+      sqlite_home: join(root, "scan", " selected-state", "nested"),
+      model_context_window: 96_000,
+      model_auto_compact_token_limit: 72_000,
+    };
+    expect(started.codex[0].config).toEqual(selected);
+    expect(started.workerSnapshot).toEqual(selected);
+    expect(started.savedRecipe.config).toMatchObject(selected);
+    const resumed = run("resume");
+    expect(resumed.status, resumed.stderr || resumed.error?.message).toBe(0);
+    const attached = JSON.parse(
+      await readFile(join(root, "resume.json"), "utf8"),
+    );
+    expect(attached.restoredConfig).toEqual(selected);
+    expect(attached.codex[0].config).toEqual(selected);
+    expect(attached.workerSnapshot).toEqual(selected);
+    expect(attached.resumedThread).toBe(started.resumeContext.threadId);
+    expect(attached.ownership.length).toBeGreaterThan(0);
+    for (const lookup of attached.ownership) {
+      expect(lookup.error).toBeUndefined();
+      expect(lookup.paths).toEqual(started.firstOwnershipControl);
+      expect(lookup.selectedSqliteHome).toBe(selected.sqlite_home);
+    }
+    expect(attached.stderr).not.toContain("ownership could not be verified");
+    const requests = await readJsonLines(join(root, "child-transcript.jsonl"));
+    expect(requests.length).toBeGreaterThan(0);
+    for (const request of requests)
+      expect(request.home).toBe(selected.sqlite_home);
+  },
+);
+
+test.each(["budgeted", "unbudgeted"])(
+  "resume carries the saved %s setting into the private worker snapshot",
+  async (mode) => {
+    const f = await interruptedScan(
+      "deep",
+      false,
+      mode === "budgeted" ? { maxCostUsd: 1 } : {},
+      false,
+      undefined,
+      { sqlite_home: " saved-state/selected" },
+    );
+    const { stderr, runCli } = createCliTest(main);
+    const code = await runCli(
+      ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(
+        f,
+        (options) => ({
+          startThread: () => fail("Resume must use the existing thread."),
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            return {
+              id: threadId,
+              async runStreamed() {
+                const configPath =
+                  options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+                expect(configPath).toBe(join(f.codexHome, "deep-scan.toml"));
+                const snapshot = parseToml(await readFile(configPath!, "utf8"))[
+                  "worker_runtime"
+                ] as Record<string, unknown>;
+                expect(snapshot["sqlite_home"]).toBe(
+                  join(f.scanDir, " saved-state", "selected"),
+                );
+                expect(options.config?.["sqlite_home"]).toBe(
+                  join(f.scanDir, " saved-state", "selected"),
+                );
+                expect(f.recipe.config["sqlite_home"]).toBe(
+                  " saved-state/selected",
+                );
+                expect(snapshot["drain_session_records"]).toBe(
+                  mode === "budgeted" ? true : undefined,
+                );
+                throw new Error("resumed budget snapshot captured");
+              },
+            };
+          },
+        }),
+        { deepScanConfigPath: join(f.codexHome, "deep-scan.toml") },
+      ),
+    );
+    expect(code).not.toBe(0);
+    expect(stderr.text()).toContain("resumed budget snapshot captured");
+  },
+);
 
 function resumeDependencies(
   f: Awaited<ReturnType<typeof interruptedScan>>,
@@ -1180,6 +1288,7 @@ test.each(["legacy", "missing", "modified"] as const)(
       { knowledgeBasePaths: [document] },
       false,
       undefined,
+      {},
       snapshotState === "legacy" ? "legacy" : "saved",
     );
     const snapshot = join(f.scanDir, ".scan-knowledge.json");

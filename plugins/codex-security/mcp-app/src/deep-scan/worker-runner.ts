@@ -477,6 +477,7 @@ export class DeepScanWorkerRunner {
               : undefined;
           const persistedFailure = await this.options.store.updateWorker({
             ...baseMutation,
+            threadId: activeThreadId,
             status: replaceableFailureKind ? "canceled" : "failed",
             error: boundedDeepScanErrorMessage(
               replaceableFailureKind
@@ -501,6 +502,7 @@ export class DeepScanWorkerRunner {
         }
         await this.options.store.updateWorker({
           ...baseMutation,
+          threadId: activeThreadId,
           error: boundedDeepScanErrorMessage(normalized),
         });
         if (

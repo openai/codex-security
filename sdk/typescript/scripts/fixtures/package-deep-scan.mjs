@@ -481,10 +481,7 @@ async function assertExecutions(f, scanId, preflights = 3) {
     assert.equal(execution.scanId, scanId);
     assert.equal(execution.home, f.home);
     assert.equal(execution.hasApiKey, true);
-    assert.equal(
-      execution.args[execution.args.indexOf("--model") + 1],
-      "gpt-5.5",
-    );
+    assert.equal(execution.model, "gpt-5.5");
     assert.ok(execution.args.includes('approval_policy="never"'));
   }
 }

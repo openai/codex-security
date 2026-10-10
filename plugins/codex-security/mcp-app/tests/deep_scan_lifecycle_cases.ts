@@ -41,6 +41,7 @@ export async function testDeepScanLifecycle({
     terminalDiscoveryWaitsForCleanup,
     orphanWorkerDirectoriesAreNotReused,
     ancestorNamesDoNotChooseWorkerSequence,
+    failedThreadRegistrationRetainsAcceptedThread,
   ]) {
     try {
       await test();
@@ -50,6 +51,51 @@ export async function testDeepScanLifecycle({
   }
   if (errors.length)
     throw new AggregateError(errors, "Deep Scan lifecycle regressions");
+
+  async function failedThreadRegistrationRetainsAcceptedThread() {
+    for (const retry of [false, true]) {
+      const fixture = await fixtureRun(config);
+      const store = new FakeStore(fixture.run);
+      const executor = new FakeExecutor();
+      const updateWorker = store.updateWorker.bind(store);
+      let acceptedThread: string | undefined;
+      store.updateWorker = async (update) => {
+        if (
+          update.kind === "discovery" &&
+          update.threadId &&
+          acceptedThread === undefined
+        ) {
+          acceptedThread = update.threadId;
+          throw new Error("synthetic initial thread registration failure");
+        }
+        return updateWorker(update);
+      };
+      const coordinator = createCoordinator(fixture, store, executor, {
+        clock: immediateClock,
+        retryDelaysMs: retry ? [0] : [],
+      });
+      coordinator.start();
+      await coordinator.settled();
+      assert.ok(acceptedThread);
+      const failure = store.workerUpdates.find(
+        (update) =>
+          update.kind === "discovery" &&
+          update.error?.includes(
+            "synthetic initial thread registration failure",
+          ),
+      );
+      assert.ok(
+        failure,
+        "the failed ownership write reached retry or terminal persistence",
+      );
+      assert.equal(failure.threadId, acceptedThread);
+      if (retry) {
+        assert.equal(executor.discoveryResumeThreadIds[0], acceptedThread);
+      } else {
+        assert.equal(store.workers.get(failure.id)?.threadId, acceptedThread);
+      }
+    }
+  }
 
   async function canceledPublicationWaitsForHeartbeat() {
     const fixture = await fixtureRun(config);

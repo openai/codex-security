@@ -26,6 +26,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
+    load_script,
     mark_handoff_delivered,
     mark_remediation_delivered,
     request_remediation,
@@ -70,6 +71,7 @@ EXPECTED_TABLES = {
     "deep_scan_dedup_inputs",
     "deep_scan_runs",
     "deep_scan_workers",
+    "deep_scan_worker_threads",
     "finding_decisions",
     "finding_dedupe_group_members",
     "finding_dedupe_groups",
@@ -913,7 +915,9 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            len(load_script("workbench_schema").MIGRATIONS),
+        )
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 

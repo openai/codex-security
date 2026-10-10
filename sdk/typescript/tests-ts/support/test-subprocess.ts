@@ -7,6 +7,7 @@ export function runTestInSubprocess(file: string, name: string): boolean {
   const timeout = process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000";
   const pattern = `${name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`;
 
+  console.error(`Running isolated test: ${name}`);
   const result = spawnSync(
     process.execPath,
     ["test", "--timeout", timeout, "--test-name-pattern", pattern, file],

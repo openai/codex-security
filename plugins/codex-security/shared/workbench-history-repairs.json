@@ -1,5 +1,13 @@
 [
   [
+    "-- Preserve published worker ownership before restoring canonical migration numbers.",
+    "SELECT :history AS history, 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 48' ||",
+    "    ' WHERE version IN (44, 47) AND name = ''retain deep scan worker session ownership''' AS value",
+    "WHERE EXISTS (SELECT 1 FROM schema_migrations WHERE version IN (44, 47)",
+    "    AND name = 'retain deep scan worker session ownership');"
+  ],
+  [
     "-- mirror and early-moves: relocate numbers before checking profiles.",
     "WITH",
     "-- Keep the common :history binding even though these moves do not inspect it.",

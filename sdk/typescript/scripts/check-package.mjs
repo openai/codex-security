@@ -240,6 +240,7 @@ const allowedFiles = new Set([
     "version",
     "windows-path",
     "worker-progress",
+    "zstd",
   ].flatMap((module) =>
     ["js", "js.map", "d.ts", "d.ts.map"].map(
       (extension) => `package/dist/${module}.${extension}`,

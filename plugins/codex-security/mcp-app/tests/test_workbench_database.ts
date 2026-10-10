@@ -168,6 +168,93 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
+for (const [label, version, ownershipVersion] of [
+  ["schema 43", 43, null],
+  ["schema 46", 46, null],
+  ["current main schema 47", 47, null],
+  ["published 47", 46, 47],
+  ["published 44 before severity migration", 42, 44],
+  ["published 44 after severity migration", 43, 44],
+] as const) {
+  test(`worker ownership survives upgrade from ${label}`, (t) => {
+    const database = memory(t);
+    const publishedOwnership = ownershipVersion !== null;
+    const ownership = migrations.find((item) => item.version === 48)!;
+    applyMigrations(database, [
+      ...migrations.filter((item) => item.version <= version),
+      ...(publishedOwnership
+        ? [{ ...ownership, version: ownershipVersion! }]
+        : []),
+    ]);
+    insertScan(database);
+    database.exec(`
+      INSERT INTO deep_scan_runs (
+        scan_id, schema_version, workflow_version, status, phase, workers, subagents,
+        stop_after_no_new, max_discovery_runs, created_at, updated_at
+      ) VALUES ('scan', 1, 'deep-scan-mcp/v1', 'running', 'discovery', 2, 0, 2, 10,
+        'created', 'updated');
+      INSERT INTO deep_scan_workers (
+        id, scan_id, kind, status, prompt_path, artifact_dir, sdk_thread_id,
+        created_at, updated_at
+      ) VALUES ('worker', 'scan', 'discovery', 'running', '/prompt', '/artifacts',
+        'first-thread', 'created', 'updated');
+    `);
+    if (publishedOwnership) {
+      database.exec(`
+        UPDATE schema_migrations SET applied_at = 'original-ownership-time' WHERE version = ${ownershipVersion};
+        UPDATE deep_scan_workers SET sdk_thread_id = 'previous-thread' WHERE id = 'worker';
+        UPDATE deep_scan_workers SET sdk_thread_id = 'first-thread' WHERE id = 'worker';
+      `);
+    }
+    applyMigrations(database);
+    assertMigrationNames(database, 44, 45, 46, 47, 48);
+    if (publishedOwnership)
+      assert.equal(
+        database
+          .prepare(
+            "SELECT applied_at FROM schema_migrations WHERE version = 48",
+          )
+          .get()?.applied_at,
+        "original-ownership-time",
+      );
+    const history = database
+      .prepare("SELECT * FROM schema_migrations ORDER BY version")
+      .all();
+    applyMigrations(database);
+    assert.deepEqual(
+      database
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all(),
+      history,
+    );
+    database.exec(
+      "UPDATE deep_scan_workers SET sdk_thread_id = 'next-thread' WHERE id = 'worker'",
+    );
+    assert.deepEqual(
+      database
+        .prepare(
+          "SELECT sdk_thread_id FROM deep_scan_worker_threads ORDER BY sdk_thread_id",
+        )
+        .all()
+        .map((row) => row.sdk_thread_id),
+      [
+        "first-thread",
+        "next-thread",
+        ...(publishedOwnership ? ["previous-thread"] : []),
+      ],
+    );
+    const current = memory(t);
+    applyMigrations(current);
+    assert.deepEqual(schema(database), schema(current));
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    database.exec("DELETE FROM deep_scan_workers WHERE id = 'worker'");
+    assert.deepEqual(
+      database.prepare("SELECT * FROM deep_scan_worker_threads").all(),
+      [],
+    );
+  });
+}
+
 test("configured state paths use native parent traversal semantics", async () => {
   const directory = await temporary.create("workbench-symlink-");
   const actual = join(directory, "actual");

@@ -1,3 +1,4 @@
+import { createFakeCodexFixture } from "./deep_scan_native_fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
@@ -49,6 +50,7 @@ const { bundledCodexSdkEnvironment } = await importModule({
 
 const {
   CodexSdkWorkerExecutor,
+  runAppServerWorker,
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
@@ -62,7 +64,7 @@ const {
   stdin: {
     // Test the environment snapshot without adding a production export.
     contents: `${await readFile(executorSource, "utf8")}
-export { snapshotWorkerEnvironment, appendItemDiagnostic };
+export { snapshotWorkerEnvironment, appendItemDiagnostic, runAppServerWorker };
 export * from "./errors.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
@@ -112,12 +114,11 @@ const deniedWorkerPermissionProfile = {
 try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
-  await testWorkerCancellation();
-  await testNullUsageCompletion();
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
-  await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
+  await testCompletedWorkerDrainPreservesCancellation();
+  await testUnbudgetedCompletedWorkerReturns();
   if (process.platform !== "win32") {
     await testDeepScanContextSnapshots({
       CodexSdkWorkerExecutor,
@@ -126,6 +127,7 @@ try {
     });
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
+    await testNativeWarningReachesDiagnosticCallback();
     await testRuntimePermissionProfileFallbackStopsAndDiscards();
     await testWorkerLaunchesWithoutGlobalCodex();
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
@@ -142,7 +144,11 @@ try {
     }
     await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
     await testStreamTerminationWithoutTerminalEventFails();
+    await testCompletedWorkerFlushesBeforeSettling();
+    await testCancelCompletedWorkerDrain();
     await testAbortPropagation();
+    await testCancellationBeforeAcceptedTurnHasNoOwnership();
+    await testOwnershipRegistrationSettlesBeforeWorker();
     await testUnstructuredConfigurationFailureRemainsRetryable();
     await testUnstructuredThreadStartFailureRemainsRetryable();
     await testPolicyFailuresRemainWorkerErrors();
@@ -425,10 +431,7 @@ async function testWindowsLongExecutableLaunches() {
       const result = await runWorker(promptPath, workingDirectory);
       assert.equal(result.threadId, "fixture-thread-id");
       const invocation = await readJson(fixture.markerPath);
-      assert.deepEqual(invocation.argv.slice(0, 2), [
-        "exec",
-        "--experimental-json",
-      ]);
+      assertWorkerProtocol(invocation);
       assertReadOnlyWorkerPolicy(invocation.argv);
       assert.equal(invocation.codexHome, await realpath(codexHome));
       const preflight = await readJson(fixture.preflightMarkerPath);
@@ -807,10 +810,7 @@ async function testWorkerLaunchesWithoutGlobalCodex() {
 
     assert.equal(result.threadId, "fixture-thread-id");
     const invocation = await readJson(fixture.markerPath);
-    assert.deepEqual(invocation.argv.slice(0, 2), [
-      "exec",
-      "--experimental-json",
-    ]);
+    assertWorkerProtocol(invocation);
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousCodexPath);
     restoreEnv("PATH", previousSearchPath);
@@ -937,9 +937,16 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
           const preflight = await readJson(fixture.preflightMarkerPath);
           const invocation = await readJson(fixture.markerPath);
           assert.equal(preflight.cwd, await realpath(workingDirectory));
-          assert.equal(invocation.cwd, originalCwd);
+          assert.equal(invocation.cwd, await realpath(workingDirectory));
           assert.equal(preflight.codexHome, expectedHome);
           assert.equal(invocation.codexHome, expectedHome);
+          assert.equal(process.env.CODEX_HOME, relativeHome);
+          assert.deepEqual(preflight.requests, [
+            { method: "config/read", cwd: workingDirectory },
+            { method: "permissionProfile/list", cwd: workingDirectory },
+          ]);
+          assertWorkerProtocol(invocation);
+          assert.equal(invocation.thread.params.cwd, workingDirectory);
           if (hasBundledTools) {
             assert.equal(
               invocation.runtimeEnvironment.PATH.split(path.delimiter)[0],
@@ -951,17 +958,6 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
               invocation.runtimeEnvironment.PATH,
             );
           }
-          assert.equal(process.env.CODEX_HOME, relativeHome);
-          assert.deepEqual(preflight.requests, [
-            { method: "config/read", cwd: workingDirectory },
-            { method: "permissionProfile/list", cwd: workingDirectory },
-          ]);
-          assert.deepEqual(invocation.argv.slice(0, 2), [
-            "exec",
-            "--experimental-json",
-          ]);
-          assertFlagPair(invocation.argv, "--cd", workingDirectory);
-          assertReadOnlyWorkerPolicy(invocation.argv);
         }
     }
   } finally {
@@ -996,11 +992,8 @@ async function testSdkInvocationAndThreadCapture() {
       invocation.originator,
       process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE || "codex_sdk_ts",
     );
-    assert.deepEqual(invocation.argv.slice(0, 2), [
-      "exec",
-      "--experimental-json",
-    ]);
-    assertFlagPair(invocation.argv, "--model", "gpt-5.6-luna");
+    assertWorkerProtocol(invocation);
+    assert.equal(invocation.thread.params.model, "gpt-5.6-luna");
     assertConfigOverrides(invocation.argv, {
       model_reasoning_effort: "xhigh",
       "mcp_servers.codex-security.command": "node",
@@ -1022,8 +1015,9 @@ async function testSdkInvocationAndThreadCapture() {
       nativeConfigOverrides(invocation.argv),
     );
     assertWorkerSubagentPolicy(invocation.argv, 3);
-    assertFlagPair(invocation.argv, "--cd", workingDirectory);
-    assert.equal(invocation.argv.includes("--skip-git-repo-check"), true);
+    assert.equal(invocation.thread.params.cwd, workingDirectory);
+    assert.equal(invocation.thread.params.cwd, workingDirectory);
+    assert.equal(invocation.thread.params.threadSource, "security_scan");
   }, deniedWorkerPermissionProfile);
 }
 
@@ -1064,6 +1058,7 @@ async function testOpenAiCredentialsReachWorker() {
     };
     nativeProvider?: string;
     configuration?: string;
+    forcedLoginMethod?: string;
   }[] = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
     {
@@ -1083,6 +1078,21 @@ async function testOpenAiCredentialsReachWorker() {
       expected: "synthetic-selected-key",
     },
     { codex: "synthetic-selected-key", expected: "synthetic-selected-key" },
+    {
+      codex: "  synthetic-selected-key  ",
+      expected: "synthetic-selected-key",
+      accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
+    },
+    {
+      codex: "synthetic-ignored-key",
+      openai: "synthetic-ignored-openai",
+      forcedLoginMethod: "chatgpt",
+      accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
+    },
+    {
+      codex: "synthetic-unused-key",
+      accountResult: { account: null, requiresOpenaiAuth: false },
+    },
     {
       openai: "synthetic-openai-key",
       accountResult: { account: { type: "apiKey" }, requiresOpenaiAuth: true },
@@ -1115,6 +1125,7 @@ async function testOpenAiCredentialsReachWorker() {
       emptyWorkerPermissionProfile,
       true,
       entry.accountResult ?? noAccount,
+      entry.forcedLoginMethod,
     );
     const runtimeEnvironment = {
       PATH: [
@@ -1182,20 +1193,23 @@ env_key = "CODEX_API_KEY"
             libraryPath: string | undefined;
           }
         | undefined;
+      let appServerLaunches = 0;
       childProcess.spawn = ((
         command: string,
         args: readonly string[],
         options: SpawnOptions,
       ) => {
+        const preflightLaunch =
+          args.includes("app-server") && appServerLaunches++ % 2 === 0;
         const nodeExecutable =
           command === process.execPath ||
           command === path.toNamespacedPath(process.execPath);
-        // Keep real account/config selection, while the existing fake exec
-        // observes credentials without starting a model turn.
+        // Keep real account/config selection in the first subprocess only.
+        // The worker app-server is synthetic and never starts a real model turn.
         if (
           nodeExecutable &&
           entry.nativeProvider !== undefined &&
-          args.includes("app-server")
+          preflightLaunch
         ) {
           nativePreflight = {
             codexHome: options.env?.CODEX_HOME,
@@ -1251,10 +1265,17 @@ env_key = "CODEX_API_KEY"
           for (const [name, value] of Object.entries(runtimeEnvironment)) {
             assert.equal(process.env[name], value);
           }
-          assert.equal(
-            invocation.openaiAuthentication.CODEX_API_KEY,
-            entry.expected,
-          );
+          assert.equal(invocation.login?.params.apiKey, entry.expected);
+          if (entry.expected !== undefined) {
+            assertConfigOverrides(invocation.argv, {
+              cli_auth_credentials_store: "ephemeral",
+            });
+          } else {
+            assert.equal(invocation.login, undefined);
+            assertConfigOverrides(invocation.argv, {
+              cli_auth_credentials_store: undefined,
+            });
+          }
           assert.equal(
             invocation.openaiAuthentication.OPENAI_API_KEY,
             entry.openai,
@@ -1339,6 +1360,8 @@ async function testUnsupportedProviderSnapshotFailsBeforeLaunch() {
 }
 
 async function testWorkerRuntimeSettings() {
+  const stateDatabaseName =
+    process.platform === "win32" ? "Codex_State_Db" : "CODEX_STATE_DB";
   const cases: [string, string | undefined][] = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
@@ -1368,9 +1391,10 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
+    "CODEX_SQLITE_HOME",
+    stateDatabaseName,
     "SYNTHETIC_GATEWAY_KEY",
     "SYNTHETIC_HEADER_VALUE",
-    "CODEX_SQLITE_HOME",
     "XDG_CACHE_HOME",
     "LD_LIBRARY_PATH",
     "DYLD_LIBRARY_PATH",
@@ -1437,6 +1461,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         // Omitted settings preserve the model and effort in the Codex home.
         {},
       ];
+      const sqliteHomes = settings.map((_, index) =>
+        index === 0
+          ? ""
+          : index === 1
+            ? ` ${path.join(fixture.root, `scan-state-${index}`)} `
+            : path.join(fixture.root, `scan-state-${index}`),
+      );
       const providerKeys = settings.map((_, index) =>
         index === 0 ? undefined : ` synthetic-gateway-key-${index} `,
       );
@@ -1595,10 +1626,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 : {
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
-                    CODEX_SQLITE_HOME: path.join(
-                      fixture.root,
-                      `native-state-${index}`,
-                    ),
+                    ...(index < 3
+                      ? {}
+                      : {
+                          CODEX_SQLITE_HOME: path.join(
+                            fixture.root,
+                            `native-state-${index}`,
+                          ),
+                        }),
                   },
             authentication:
               index === 0
@@ -1612,6 +1647,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             endpoint,
             serviceTier,
             instructionsFile,
+            sqliteHome:
+              index === 0
+                ? undefined
+                : path.join(fixture.root, `configured-state-${index}`),
             verbosity,
             modelContextWindow: index === 0 ? undefined : 32_000 * (index + 1),
             autoCompactTokenLimit:
@@ -1632,6 +1671,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             workerTelemetry: overrideTelemetry ? telemetry : {},
             configuration: {
               ...parsedConfiguration,
+              sqlite_home: "relative-parent-state",
               ...inheritedTelemetry,
               ...(index === 0
                 ? {}
@@ -1646,6 +1686,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                       ...profiles,
                       selected: {
                         ...profiles.selected,
+                        sqlite_home: "relative-profile-state",
                         ...(index === 2 ? { service_tier: serviceTier } : {}),
                         ...(index === 4 ? telemetry : {}),
                         ...(mergeProfileTelemetry
@@ -1691,6 +1732,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     ? {}
                     : {
                         model_instructions_file: entry.instructionsFile,
+                        sqlite_home: entry.sqliteHome,
                         model_verbosity: entry.verbosity,
                         model_context_window: entry.modelContextWindow,
                         model_auto_compact_token_limit:
@@ -1786,10 +1828,22 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+          const workerCwd = path.join(
+            fixture.root,
+            kind,
+            resumeThreadId ?? "fresh",
+          );
+          await mkdir(workerCwd, { recursive: true });
           launches.length = 0;
           await Promise.all(
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
+              process.env.CODEX_SQLITE_HOME = sqliteHomes[index];
+              delete process.env[stateDatabaseName];
+              process.env[stateDatabaseName] = path.join(
+                sqliteHomes[index],
+                "explicit.sqlite",
+              );
               process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
@@ -1814,7 +1868,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 workerConfigurations[index].workerConfigPath,
               );
               return executor.run(
-                workerRequest(promptPath, fixture.root, {
+                workerRequest(promptPath, workerCwd, {
                   kind,
                   resumeThreadId,
                   artifactContext: {
@@ -1833,20 +1887,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               );
             }),
           );
-          const workerLaunches = launches.filter(
-            ({ args }) => args[0] === "exec",
-          );
+          const workerLaunches = await recordedWorkerLaunches(launches);
           assert.equal(workerLaunches.length, settings.length);
           for (const [
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
-            const workerLaunch = workerLaunches.find(({ args }) =>
-              model === undefined
-                ? !args.includes("--model")
-                : args[args.indexOf("--model") + 1] === model,
+            const workerLaunch = workerLaunches.find(
+              ({ invocation }) => invocation.thread.params.model === model,
             );
             assert.ok(workerLaunch, `missing worker launch for ${model}`);
+            const sqliteHome =
+              workerConfigurations[index].environment?.CODEX_SQLITE_HOME ??
+              sqliteHomes[index];
             assert.equal(
               workerLaunch.command,
               process.platform === "win32"
@@ -1860,6 +1913,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               workerLaunch.environment!.CODEX_HOME,
               await realpath(codexHome),
+            );
+            assert.equal(
+              workerLaunch.environment!.CODEX_SQLITE_HOME,
+              sqliteHome,
+            );
+            const invocation = await readJson(workerLaunch.markerPath);
+            assert.equal(
+              workerLaunch.environment![stateDatabaseName],
+              path.join(sqliteHomes[index], "explicit.sqlite"),
+            );
+            assert.equal(
+              invocation.stateDatabase,
+              path.join(sqliteHomes[index], "explicit.sqlite"),
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
@@ -1889,7 +1955,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
               workerConfigurations[index].knowledgePath,
             );
-            const invocation = await readJson(workerLaunch.markerPath);
             for (const name of [
               "LD_LIBRARY_PATH",
               "DYLD_LIBRARY_PATH",
@@ -1913,16 +1978,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
+            assert.equal(invocation.sqliteHome, sqliteHome);
+            assert.equal(invocation.thread.params.cwd, workerCwd);
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(invocation.mcpNodePath, nodePaths[index]);
             assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
             assert.equal(invocation.providerHeader, providerHeaders[index]);
 
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
-            assert.equal(
-              workerLaunch.environment!.CODEX_SQLITE_HOME,
-              workerConfigurations[index].environment?.CODEX_SQLITE_HOME,
-            );
             assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
             assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
             assertConfigOverrides(invocation.argv, {
@@ -1932,6 +1995,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               service_tier: workerConfigurations[index].serviceTier,
               model_instructions_file:
                 workerConfigurations[index].instructionsFile,
+              sqlite_home: workerConfigurations[index].sqliteHome,
               model_verbosity: workerConfigurations[index].verbosity,
               model_context_window:
                 workerConfigurations[index].modelContextWindow,
@@ -1969,12 +2033,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
             );
             if (model === undefined) {
-              assert.equal(invocation.argv.includes("--model"), false);
+              assert.equal(invocation.thread.params.model, undefined);
             } else {
-              assertFlagPair(invocation.argv, "--model", model);
+              assert.equal(invocation.thread.params.model, model);
             }
             assert.equal(
-              invocation.argv.includes("resume"),
+              invocation.thread.method === "thread/resume",
               resumeThreadId !== undefined,
             );
             assert.equal(
@@ -2002,17 +2066,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider.provider !== undefined &&
               selectedProvider.providerConfig
             ) {
-              assertFlagPair(
-                invocation.argv,
-                "--profile",
-                selectedProvider.nativeProfile!,
-              );
+              assert.equal(invocation.argv.includes("--profile"), false);
               assert.deepEqual(
-                JSON.parse(
-                  JSON.stringify(
-                    parseToml(invocation.profileContents).model_providers,
-                  ),
-                ),
+                invocation.thread.params.config.model_providers,
                 {
                   [selectedProvider.provider]: selectedProvider.providerConfig,
                 },
@@ -2021,7 +2077,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               invocation.argv.some(
                 (arg: string) =>
-                  arg.startsWith("model_providers=") ||
                   arg.includes("synthetic-gateway-key-") ||
                   arg.includes("synthetic-header-") ||
                   arg.includes("synthetic-bearer-") ||
@@ -2083,8 +2138,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertReadOnlyWorkerPolicy(invocation.argv);
             assertWorkerSubagentPolicy(invocation.argv, 0);
           }
-          for (const launch of launches.filter(({ args }) =>
-            args.includes("app-server"),
+          for (const launch of launches.filter(
+            (entry) =>
+              !workerLaunches.some(
+                (worker) => worker.markerPath === entry.markerPath,
+              ),
           )) {
             const preflight = await readJson(launch.markerPath);
             assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
@@ -2106,6 +2164,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(preflight.argv, {
               openai_base_url: selectedProvider.endpoint,
               model_instructions_file: selectedProvider.instructionsFile,
+              sqlite_home: selectedProvider.sqliteHome,
               model_verbosity: selectedProvider.verbosity,
               model_context_window: selectedProvider.modelContextWindow,
               model_auto_compact_token_limit:
@@ -2177,7 +2236,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               nativeConfigOverrides(launch.args).filter(
                 (override) => !override.startsWith("model_providers="),
               ),
-              nativeConfigOverrides(execution.args),
+              nativeConfigOverrides(execution.args).filter(
+                (override) => !override.startsWith("model_providers="),
+              ),
             );
           }
           await Promise.all(
@@ -2208,7 +2269,7 @@ async function testWorkerCyberAccessSettings() {
   const cases: {
     name: string;
     configuration: string;
-    program?: string;
+    nativeProgram?: string;
     serviceTier?: string;
     features?: Record<string, boolean>;
     configPath?: string;
@@ -2220,18 +2281,24 @@ async function testWorkerCyberAccessSettings() {
       configuration:
         'service_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
       serviceTier: "fast",
-      program: "daybreak_blue",
+      nativeProgram: "daybreakBlue",
       features: {
         api_key_cyber_access_programs: true,
         api_key_model_discovery: true,
       },
     },
     {
+      name: "red",
+      configuration:
+        '[codex_security]\ncyber_access_program = "daybreak_red"\n',
+      nativeProgram: "daybreakRed",
+    },
+    {
       name: "explicit-false",
       configuration:
         'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
       serviceTier: "flex",
-      program: "daybreak_blue",
+      nativeProgram: "daybreakBlue",
       features: {
         api_key_cyber_access_programs: false,
         api_key_model_discovery: false,
@@ -2242,7 +2309,7 @@ async function testWorkerCyberAccessSettings() {
       configuration:
         'service_tier = "flex"\nprofile = "cloud.production"\n[profiles."cloud.production"]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
       serviceTier: "fast",
-      program: "standard",
+      nativeProgram: "standard",
       features: {
         api_key_cyber_access_programs: true,
         api_key_model_discovery: false,
@@ -2317,13 +2384,16 @@ async function testWorkerCyberAccessSettings() {
             );
           }),
         );
-        const workerLaunches = launches.filter(
-          ({ args }) => args[0] === "exec",
-        );
+        const workerLaunches = await recordedWorkerLaunches(launches);
         assert.equal(workerLaunches.length, cases.length);
-        for (const { name, program, serviceTier, features = {} } of cases) {
+        for (const {
+          name,
+          nativeProgram,
+          serviceTier,
+          features = {},
+        } of cases) {
           const launch = workerLaunches.find(
-            ({ args }) => args[args.indexOf("--model") + 1] === name,
+            ({ invocation }) => invocation.thread.params.model === name,
           );
           const invocation = await readJson(launch!.markerPath);
           assert.deepEqual(
@@ -2334,14 +2404,10 @@ async function testWorkerCyberAccessSettings() {
               ? []
               : [`service_tier=${JSON.stringify(serviceTier)}`],
           );
-          if (program === undefined) {
-            assert.equal(
-              invocation.argv.includes("--cyber-access-program"),
-              false,
-            );
-          } else {
-            assertFlagPair(invocation.argv, "--cyber-access-program", program);
-          }
+          assert.equal(
+            invocation.turn.params.cyberAccessProgram,
+            nativeProgram,
+          );
           assertConfigOverrides(invocation.argv, {
             "features.api_key_cyber_access_programs":
               features.api_key_cyber_access_programs,
@@ -2349,11 +2415,15 @@ async function testWorkerCyberAccessSettings() {
               features.api_key_model_discovery,
           });
           assert.equal(
+            invocation.login.params.apiKey,
+            "synthetic-worker-api-key",
+          );
+          assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             "synthetic-worker-api-key",
           );
           assert.equal(
-            invocation.argv.includes("resume"),
+            invocation.thread.method === "thread/resume",
             resumeThreadId !== undefined,
           );
           assertReadOnlyWorkerPolicy(invocation.argv);
@@ -2416,7 +2486,7 @@ async function testBedrockCredentialsReachWorker() {
         const invocation = await readJson(fixture.markerPath);
         assert.deepEqual(invocation.bedrockAuthentication, awsEnvironment);
         assert.equal(
-          invocation.argv.includes("resume"),
+          invocation.thread.method === "thread/resume",
           resumeThreadId !== undefined,
         );
         assertConfigOverrides(invocation.argv, {
@@ -2441,7 +2511,7 @@ async function testZeroSubagentsPreservesHostRestrictions() {
       }).run(workerRequest(promptPath, workingDirectory));
       assert.equal(result.threadId, "fixture-thread-id");
       const invocation = await readJson(fixture.markerPath);
-      assertFlagPair(invocation.argv, "--model", model);
+      assert.equal(invocation.thread.params.model, model);
       assertWorkerSubagentPolicy(invocation.argv, 0);
       assertReadOnlyWorkerPolicy(invocation.argv);
     });
@@ -2489,10 +2559,10 @@ async function testSdkResumesExistingThread() {
     );
     assert.equal(result.threadId, "fixture-existing-thread");
     const invocation = await readJson(fixture.markerPath);
-    const resumeIndex = invocation.argv.indexOf("resume");
-    assert.notEqual(resumeIndex, -1);
-    assert.equal(invocation.argv[resumeIndex + 1], "fixture-existing-thread");
-    assertFlagPair(invocation.argv, "--model", "gpt-5.6-sol");
+    assert.equal(invocation.thread.method, "thread/resume");
+    assert.equal(invocation.thread.params.threadId, "fixture-existing-thread");
+    assert.equal(invocation.thread.params.threadSource, undefined);
+    assert.equal(invocation.thread.params.model, "gpt-5.6-sol");
     assertConfigOverrides(invocation.argv, { model_reasoning_effort: "ultra" });
     assertReadOnlyWorkerPolicy(invocation.argv);
     assertWorkerSubagentPolicy(invocation.argv, 3);
@@ -2515,7 +2585,7 @@ async function testRetryNotificationDoesNotInterruptTurn() {
       },
     ]);
     const invocation = await readJson(fixture.markerPath);
-    assert.equal(invocation.argv.includes("--model"), false);
+    assert.equal(invocation.thread.params.model, undefined);
     assertConfigOverrides(invocation.argv, {
       model_reasoning_effort: undefined,
     });
@@ -2708,8 +2778,8 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
             assert.equal(worker.attempt, 1);
             assert.ok(worker.error.includes(persistedDiagnostic));
             assert.equal(
-              (await readJson(fixture.markerPath)).argv.includes("resume"),
-              false,
+              (await readJson(fixture.markerPath)).thread.method,
+              "thread/start",
             );
           },
         },
@@ -2743,10 +2813,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
       assert.equal(worker.attempt, 2);
       assert.ok(worker.error.includes(persistedDiagnostic));
       const invocation = await readJson(fixture.markerPath);
-      assert.equal(
-        invocation.argv[invocation.argv.indexOf("resume") + 1],
-        "fixture-thread-id",
-      );
+      assert.equal(invocation.thread.params.threadId, "fixture-thread-id");
     } finally {
       for (const [name, value] of saved) restoreEnv(name, value);
     }
@@ -2937,23 +3004,216 @@ async function testAbortPropagation() {
         error?.name === "AbortError" ||
         /abort|SIGTERM/i.test(error?.message ?? ""),
     );
+    const invocation = await readJson(fixture.markerPath);
+    assert.equal(invocation.turn.method, "turn/start");
+    const interruption = invocation.rpc.find(
+      (message: { method: string }) => message.method === "turn/interrupt",
+    );
+    assert.deepEqual(interruption.params, {
+      threadId: "fixture-thread-id",
+      turnId: "fixture-turn-id",
+    });
+    assert.ok(
+      invocation.sequence.indexOf("interrupt") <
+        invocation.sequence.indexOf("terminal:interrupted"),
+    );
+    assert.ok(
+      invocation.sequence.indexOf("terminal:interrupted") <
+        invocation.sequence.indexOf("eof"),
+    );
+    assert.ok(
+      invocation.sequence.indexOf("eof") <
+        invocation.sequence.indexOf("flushed"),
+    );
   });
 }
 
-async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
-  await completedWorkerSettlesWithoutWaitingForProcessExit();
+async function waitForWorkerFixture(predicate: () => Promise<boolean>) {
+  const deadline = Date.now() + 3_000;
+  while (!(await predicate())) {
+    assert.ok(
+      Date.now() < deadline,
+      "worker fixture did not reach its boundary",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function testCancellationBeforeAcceptedTurnHasNoOwnership() {
   for (const kind of ["discovery", "dedup"] as const) {
     for (const resumed of [false, true]) {
-      await completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed);
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        await writeFile(promptPath, "unsubmitted fixture prompt\n");
+        const previous = process.env.FAKE_CODEX_HOLD_THREAD_START;
+        process.env.FAKE_CODEX_HOLD_THREAD_START = "true";
+        const controller = new AbortController();
+        const registered = mock.fn();
+        const execution = runWorker(promptPath, workingDirectory, {
+          kind,
+          signal: controller.signal,
+          ...(resumed ? { resumeThreadId: "fixture-existing-thread" } : {}),
+          onThreadStarted: registered,
+        });
+        void execution.catch(() => {});
+        try {
+          await waitForWorkerFixture(
+            async () =>
+              (await readFile(fixture.completionMarkerPath, "utf8").catch(
+                () => "",
+              )) === "thread-pending\n",
+          );
+          controller.abort("canceled before turn acceptance");
+          await assert.rejects(
+            execution,
+            (error: Error) =>
+              error.name === "AbortError" &&
+              error.cause === "canceled before turn acceptance",
+          );
+          const invocation = await readJson(fixture.markerPath);
+          assert.equal(registered.mock.callCount(), 0);
+          assert.equal(invocation.turn, undefined);
+          assert.equal(
+            invocation.rpc.some(
+              (message: { method: string }) => message.method === "turn/start",
+            ),
+            false,
+          );
+          assert.deepEqual(invocation.sequence, [
+            "thread-pending",
+            "eof",
+            "flushed",
+          ]);
+          assert.equal(
+            invocation.thread.method,
+            resumed ? "thread/resume" : "thread/start",
+          );
+        } finally {
+          controller.abort("fixture cleanup");
+          await execution.catch(() => {});
+          restoreEnv("FAKE_CODEX_HOLD_THREAD_START", previous);
+        }
+      });
     }
   }
 }
 
-async function completedWorkerSettlesWithoutWaitingForProcessExit(
+async function testOwnershipRegistrationSettlesBeforeWorker() {
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumed of [false, true]) {
+      for (const outcome of ["success", "abort", "failure"] as const) {
+        await withWorkerFixture(
+          async (fixture, promptPath, workingDirectory) => {
+            await writeFile(
+              promptPath,
+              outcome === "abort"
+                ? "BLOCK_AFTER_START\n"
+                : "COMPLETE_THEN_FLUSH\n",
+            );
+            const controller = new AbortController();
+            const registration = Promise.withResolvers<void>();
+            let callbacks = 0;
+            let callbackStarted = false;
+            let callbackFinished = false;
+            let settled = false;
+            const registrationFailure = new Error(
+              "synthetic ownership registration failed",
+            );
+            const execution = runWorker(promptPath, workingDirectory, {
+              kind,
+              signal: controller.signal,
+              ...(resumed ? { resumeThreadId: "fixture-existing-thread" } : {}),
+              onThreadStarted: async (threadId) => {
+                callbacks++;
+                assert.equal(
+                  threadId,
+                  resumed ? "fixture-existing-thread" : "fixture-thread-id",
+                );
+                callbackStarted = true;
+                await registration.promise;
+                callbackFinished = true;
+                if (outcome === "failure") throw registrationFailure;
+              },
+            });
+            const observed = execution.finally(() => {
+              settled = true;
+            });
+            void observed.catch(() => {});
+            try {
+              await waitForWorkerFixture(async () => callbackStarted);
+              if (outcome === "abort")
+                controller.abort("canceled while saving accepted ownership");
+              await waitForWorkerFixture(
+                async () =>
+                  (await readFile(fixture.completionMarkerPath, "utf8").catch(
+                    () => "",
+                  )) === "flushed\n",
+              );
+              const invocation = await readJson(fixture.markerPath);
+              await waitForWorkerFixture(async () => {
+                try {
+                  process.kill(invocation.pid, 0);
+                  return false;
+                } catch (error) {
+                  return (error as NodeJS.ErrnoException).code === "ESRCH";
+                }
+              });
+              await new Promise((resolve) => setImmediate(resolve));
+              assert.equal(callbackFinished, false);
+              assert.equal(
+                settled,
+                false,
+                "worker settled before its accepted turn ownership was saved",
+              );
+              registration.resolve();
+              if (outcome === "failure") {
+                await assert.rejects(
+                  observed,
+                  (error: Error) => error === registrationFailure,
+                );
+              } else if (outcome === "abort") {
+                await assert.rejects(
+                  observed,
+                  (error: Error) =>
+                    error.name === "AbortError" &&
+                    error.cause === "canceled while saving accepted ownership",
+                );
+              } else {
+                assert.equal(
+                  (await observed).threadId,
+                  resumed ? "fixture-existing-thread" : "fixture-thread-id",
+                );
+              }
+              assert.equal(callbackFinished, true);
+              assert.equal(callbacks, 1);
+            } finally {
+              registration.resolve();
+              controller.abort("fixture cleanup");
+              await observed.catch(() => {});
+            }
+          },
+        );
+      }
+    }
+  }
+}
+
+async function testCompletedWorkerDrainPreservesCancellation() {
+  await completedWorkerDrainPreservesCancellation();
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumed of [false, true]) {
+      await completedWorkerDrainPreservesCancellation(kind, resumed);
+      await completedWorkerDrainPreservesCancellation(kind, resumed, true);
+    }
+  }
+}
+
+async function completedWorkerDrainPreservesCancellation(
   kind?: DeepScanWorkerKind,
   resumed = false,
+  pendingStart = false,
 ) {
   const fixture = await fakeCodexFixture();
+  const restoreDrain = await budgetedWorkerFixture(fixture);
   const saved = [
     "CODEX_CLI_PATH",
     "CODEX_HOME",
@@ -2984,7 +3244,7 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     await writeFile(configPath, "");
     await writeFile(
       workerConfigPath,
-      '[worker_runtime]\nnative_profile = "completion_fixture"\n',
+      '[worker_runtime]\ndrain_session_records = true\nnative_profile = "completion_fixture"\n',
     );
     await writeFile(
       path.join(home, "completion_fixture.config.toml"),
@@ -3003,6 +3263,7 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
   let execution;
   let timeout;
   let childPid!: number;
+  let registrations = 0;
 
   process.on("uncaughtException", captureUnexpectedError);
   try {
@@ -3012,8 +3273,10 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     await writeFile(
       promptPath,
       kind === undefined
-        ? "COMPLETE_THEN_HANG\n"
-        : "COMPLETE_THEN_HANG_IGNORE_TERMINATION\n",
+        ? "COMPLETE_THEN_FLUSH\n"
+        : pendingStart
+          ? "DELAY_TURN_START\n"
+          : "BLOCK_AFTER_START\n",
     );
     execution = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
@@ -3024,38 +3287,93 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
       subagents: 0,
       signal: controller.signal,
       ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
-      onThreadStarted: async () => {
+      onThreadStarted: async (threadId: string) => {
+        registrations++;
+        assert.equal(
+          threadId,
+          resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
+        );
         childPid = (await readJson(fixture.markerPath)).pid;
       },
     });
 
-    const result = await Promise.race([
-      execution,
+    await Promise.race([
+      (async () => {
+        while (
+          (await readFile(fixture.completionMarkerPath, "utf8").catch(
+            () => "",
+          )) !==
+          (kind === undefined
+            ? "completed\n"
+            : pendingStart
+              ? "starting\n"
+              : "active\n")
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      })(),
       new Promise((_, reject) => {
         timeout = setTimeout(() => {
           controller.abort("completed worker fixture timed out");
-          reject(
-            new Error("completed worker did not settle after turn.completed"),
-          );
+          reject(new Error("worker did not publish its completed turn"));
         }, 1_000);
       }),
     ]);
     clearTimeout(timeout);
-    assert.equal(
-      result.threadId,
-      resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
-    );
     const invocation = await readJson(fixture.markerPath);
-    assert.equal(invocation.argv.includes("--profile"), kind !== undefined);
-    assert.equal(invocation.argv.includes("resume"), resumed);
+    childPid ??= invocation.pid;
+    assert.equal(invocation.argv.includes("--profile"), false);
+    assert.equal(invocation.thread.method === "thread/resume", resumed);
+    assertConfigOverrides(invocation.argv, {
+      drain_session_records: undefined,
+    });
 
-    controller.abort("coordinator immediately canceled its remaining workers");
-    await new Promise((resolve) => setTimeout(resolve, 250));
-
-    assert.deepEqual(unexpectedErrors, []);
-    if (kind === undefined) {
-      assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+    controller.abort("coordinator canceled its worker");
+    await assert.rejects(execution, /abort|coordinator canceled/i);
+    assert.equal(registrations, pendingStart ? 0 : 1);
+    const settled = await readJson(fixture.markerPath);
+    assert.equal(
+      await readFile(fixture.completionMarkerPath, "utf8"),
+      "flushed\n",
+    );
+    assert.ok(
+      settled.sequence.indexOf("eof") < settled.sequence.indexOf("flushed"),
+    );
+    if (kind !== undefined) {
+      assert.ok(settled.sequence.indexOf("interrupt") >= 0);
+      if (pendingStart) {
+        assert.equal(settled.sequence.includes("active"), false);
+        assert.equal(settled.sequence.includes("terminal:interrupted"), false);
+        assert.ok(
+          settled.sequence.indexOf("interrupt") <
+            settled.sequence.indexOf("eof"),
+        );
+      } else {
+        assert.ok(
+          settled.sequence.indexOf("interrupt") <
+            settled.sequence.indexOf("terminal:interrupted"),
+        );
+        assert.ok(
+          settled.sequence.indexOf("terminal:interrupted") <
+            settled.sequence.indexOf("eof"),
+        );
+      }
+      const interrupted = settled.rpc.find(
+        (message: { method: string }) => message.method === "turn/interrupt",
+      );
+      assert.deepEqual(interrupted.params, {
+        threadId: resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
+        turnId: pendingStart ? "" : "fixture-turn-id",
+      });
+    } else {
+      assert.ok(
+        settled.sequence.indexOf("terminal:completed") <
+          settled.sequence.indexOf("eof"),
+      );
     }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.deepEqual(unexpectedErrors, []);
+    assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
   } finally {
     clearTimeout(timeout);
     controller.abort("completed worker fixture cleanup");
@@ -3069,6 +3387,7 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
     for (const [name, value] of saved) restoreEnv(name, value);
+    restoreDrain();
   }
 }
 
@@ -3077,7 +3396,8 @@ async function testUnstructuredConfigurationFailureRemainsRetryable() {
     runFixtureWorker("CONFIG_ERROR", "setup"),
     (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
       error?.name === "Error" &&
-      error.message.startsWith("Codex Exec exited with code 2:"),
+      error.message.startsWith("Codex app-server exited with code 2:") &&
+      error.message.includes("failed to load configuration: invalid value"),
   );
 }
 
@@ -3086,7 +3406,8 @@ async function testUnstructuredThreadStartFailureRemainsRetryable() {
     runFixtureWorker("THREAD_START_CONFIG_ERROR", "setup"),
     (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
       error?.name === "Error" &&
-      error.message.startsWith("Codex Exec exited with code 1:"),
+      error.message.startsWith("Codex app-server exited with code 1:") &&
+      error.message.includes("thread/start failed: agents.max_threads"),
   );
 }
 
@@ -3228,25 +3549,99 @@ async function testDisallowedWorkerProfileFailsBeforeWorkerLaunch() {
   );
 }
 
-async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
-  for (const marker of [
-    "PERMISSION_PROFILE_FALLBACK_ITEM",
-    "PERMISSION_PROFILE_FALLBACK_EVENT",
-  ]) {
-    await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
-      await writeFile(promptPath, `${marker}\n`);
+async function testNativeWarningReachesDiagnosticCallback() {
+  const message =
+    "Synthetic native warning: keep punctuation and details unchanged.";
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumeThreadId of [undefined, "fixture-warning-resume"]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        const diagnostics: unknown[] = [];
+        const input = `NATIVE_WARNING\n${JSON.stringify(message)}\n`;
+        const result = await runAppServerWorker({
+          codexPath: fixture.executablePath,
+          environment: await snapshotWorkerEnvironment(),
+          configOverrides: [],
+          request: workerRequest(promptPath, workingDirectory, {
+            kind,
+            resumeThreadId,
+          }),
+          input,
+          onDiagnostic: (item: unknown) => diagnostics.push(item),
+        });
+        assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+        assert.deepEqual(
+          diagnostics.filter(
+            (item) => (item as { type?: unknown })?.type === "error",
+          ),
+          [{ type: "error", message }],
+        );
+        const invocation = await readJson(fixture.markerPath);
+        assert.equal(
+          invocation.thread.method,
+          resumeThreadId ? "thread/resume" : "thread/start",
+        );
+        assert.equal(invocation.thread.params.threadId, resumeThreadId);
+        assert.equal(
+          invocation.thread.params.permissions,
+          "codex_security_deep_scan_worker",
+        );
+        assert.equal(invocation.turn.params.input[0].text, input);
+        assert.ok(
+          invocation.sequence.indexOf("terminal:completed") <
+            invocation.sequence.indexOf("eof"),
+        );
+        assert.equal(
+          await readFile(fixture.completionMarkerPath, "utf8"),
+          "flushed\n",
+        );
+        assert.throws(() => process.kill(invocation.pid, 0), { code: "ESRCH" });
+      });
+    }
+  }
+}
 
-      await assert.rejects(
-        runWorker(promptPath, workingDirectory),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "DeepScanNonRetryableError" &&
-          error.message.includes("worker was stopped") &&
-          error.message.includes("results were discarded") &&
-          !error.message.includes("did not run"),
-      );
-      const invocation = await readJson(fixture.markerPath);
-      assert.equal(invocation.stdin, `${marker}\n`);
-    });
+async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumeThreadId of [undefined, "fixture-fallback-resume"]) {
+      const markers = [
+        "PERMISSION_PROFILE_FALLBACK_ITEM",
+        "PERMISSION_PROFILE_FALLBACK_EVENT",
+        ...(resumeThreadId ? ["PERMISSION_PROFILE_FALLBACK_WARNING"] : []),
+      ];
+      for (const marker of markers) {
+        await withWorkerFixture(
+          async (fixture, promptPath, workingDirectory) => {
+            await writeFile(promptPath, `${marker}\n`);
+            await assert.rejects(
+              runWorker(promptPath, workingDirectory, { kind, resumeThreadId }),
+              (
+                error: NodeJS.ErrnoException & {
+                  cause?: NodeJS.ErrnoException;
+                },
+              ) =>
+                error?.name === "DeepScanNonRetryableError" &&
+                error.message.includes("worker was stopped") &&
+                error.message.includes("results were discarded") &&
+                !error.message.includes("did not run"),
+            );
+            const invocation = await readJson(fixture.markerPath);
+            assert.equal(invocation.stdin, `${marker}\n`);
+            assert.equal(
+              invocation.thread.method,
+              resumeThreadId ? "thread/resume" : "thread/start",
+            );
+            assert.equal(invocation.thread.params.threadId, resumeThreadId);
+            assert.equal(
+              await readFile(fixture.completionMarkerPath, "utf8"),
+              "flushed\n",
+            );
+            assert.throws(() => process.kill(invocation.pid, 0), {
+              code: "ESRCH",
+            });
+          },
+        );
+      }
+    }
   }
 }
 
@@ -3293,135 +3688,56 @@ async function fakeCodexFixture(
     account: { type: string } | null;
     requiresOpenaiAuth: boolean;
   } = { account: { type: "apiKey" }, requiresOpenaiAuth: true },
+  forcedLoginMethod?: string,
 ) {
-  const root = await temporaryDirectories.create(
-    "codex-security-sdk-executor-",
+  return createFakeCodexFixture(
+    (prefix) => temporaryDirectories.create(prefix),
+    preflightProfile,
+    preflightAllowed,
+    accountResult,
+    forcedLoginMethod,
   );
-  const markerPath = path.join(root, "invocation.json");
-  const preflightMarkerPath = path.join(root, "preflight.json");
-  const scriptPath = path.join(root, "fake-codex.mjs");
-  await writeFile(
-    scriptPath,
-    `#!/usr/bin/env node
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { join } from "node:path";
-const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
-const preflightAllowed = ${JSON.stringify(preflightAllowed)};
-const accountResult = ${JSON.stringify(accountResult)};
-const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
-if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
-  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
-  let buffer = '';
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => {
-    buffer += chunk;
-    while (true) {
-      const newline = buffer.indexOf('\\n');
-      if (newline < 0) return;
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (!line) continue;
-      const message = JSON.parse(line);
-      if (message.method === 'initialized') continue;
-      if (message.method === 'config/read' || message.method === 'permissionProfile/list') {
-        preflight.requests.push({ method: message.method, cwd: message.params?.cwd });
-        writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
-      }
-      let result;
-      if (message.method === 'initialize') {
-        result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
-      } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
-      } else if (message.method === 'permissionProfile/list') {
-        result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: preflightAllowed }], nextCursor: null };
-      } else if (message.method === 'account/read') {
-        result = accountResult;
-      } else if (message.method === 'configRequirements/read') {
-        result = { requirements: { allowedPermissionProfiles: { existing_profile: true } } };
-      } else {
-        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }) + '\\n');
-        continue;
-      }
-      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');
-    }
-  });
-  process.stdin.on('end', () => process.exit(0));
-} else {
-const stdin = (await process.stdin.toArray()).join('');
-const profileIndex = process.argv.indexOf('--profile');
-const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
-const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
-const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
-const toolProbe = stdin.includes('CAPTURE_SYNTHETIC_RG') ? spawnSync('rg', ['--version'], { encoding: 'utf8' }) : undefined;
-if (toolProbe && toolProbe.status !== 0) throw toolProbe.error ?? new Error(toolProbe.stderr);
-const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
-if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
-const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
-const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
-const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
-if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
+}
 
-if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
-if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }
-if (stdin.includes('MCP_STARTUP_TIMEOUT') || stdin.includes('CATALOG_AUTH_ONLY') || stdin.includes('SYNC_AUTH_ONLY')) {
-  const syncWarning = stdin.includes('SYNC_AUTH_WARNING') || stdin.includes('SYNC_AUTH_ONLY');
-  const bothWarnings = stdin.includes('BOTH_AUTH_WARNINGS');
-  if (!syncWarning || bothWarnings) console.error('chatgpt authentication required for remote plugin catalog; api key auth is not supported');
-  if (syncWarning || bothWarnings) console.error('chatgpt authentication required to sync remote plugins; api key auth is not supported');
-  if (!stdin.includes('CATALOG_AUTH_ONLY') && !stdin.includes('SYNC_AUTH_ONLY')) {
-    const serverName = stdin.includes('OTHER_MCP_STARTUP_TIMEOUT') ? 'other_server' : stdin.includes('LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT') ? 'codex_security_artifacts' : 'cs_artifacts';
-    const timeout = stdin.includes('REQUEST_TIMED_OUT') ? 'request timed out' : 'timed out handshaking with MCP server after 30s';
-    console.error('required MCP servers failed to initialize: ' + serverName + ': ' + timeout);
-  }
-  if (stdin.includes('WITH_MISSING_API_KEY')) console.error('missing API key');
-  if (stdin.includes('WITH_POLICY_REFUSAL')) console.error('Request blocked by cyberPolicy.');
-  process.exit(1);
-}
-const resumeIndex = process.argv.indexOf('resume');
-const threadId = resumeIndex === -1 ? 'fixture-thread-id' : process.argv[resumeIndex + 1];
-console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));
-if (stdin.includes('IPC_DIAGNOSTIC_EVENT')) console.log(stdin.split('\\n')[1]);
-if (process.env.FAKE_CODEX_ARTIFACT_EVENT) console.log(process.env.FAKE_CODEX_ARTIFACT_EVENT);
-if (stdin.includes('MALFORMED_COMMAND_EVENT')) {
-  const output = JSON.parse(stdin.split('\\n')[1]);
-  const event = { type: 'item.completed', item: { id: 'fixture-command', type: 'command_execution', command: 'cat example.ts', aggregated_output: output, exit_code: 0, status: 'completed' } };
-  console.log(JSON.stringify(event).slice(0, -1));
-  process.exit(0);
-}
-const permissionProfileFallbackWarning = 'Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`codex_security_deep_scan_worker\` to required value \`:read-only\`.';
-if (stdin.includes('PERMISSION_PROFILE_FALLBACK_ITEM')) console.log(JSON.stringify({ type: 'item.completed', item: { id: 'warning-1', type: 'error', message: permissionProfileFallbackWarning } }));
-if (stdin.includes('PERMISSION_PROFILE_FALLBACK_EVENT')) console.log(JSON.stringify({ type: 'error', message: permissionProfileFallbackWarning }));
-if (stdin.includes('BLOCK_AFTER_START')) await new Promise(() => {});
-if (stdin.includes('FAIL_THEN_HANG')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'fixture worker failed' } })); setInterval(() => {}, 1_000); await new Promise(() => {}); }
-if (stdin.includes('RATE_LIMIT_CYBER_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: '429 Too Many Requests: Request blocked by cyberPolicy.' } })); process.exit(0); }
-if (stdin.includes('CYBER_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'Request blocked by cyberPolicy.' } })); process.exit(0); }
-if (stdin.includes('SAFETY_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'Request blocked by a safety policy violation.' } })); process.exit(0); }
-if (stdin.includes('UPSTREAM_CYBERSECURITY_RISK_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This request has been flagged for possible cybersecurity risk.' } })); process.exit(0); }
-if (stdin.includes('UPSTREAM_HIGH_RISK_CYBER_ACTIVITY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This request has been flagged for potentially high-risk cyber activity.' } })); process.exit(0); }
-if (stdin.includes('CYBERSECURITY_RISK_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This content was flagged for possible cybersecurity risk.' } })); process.exit(0); }
-if (stdin.includes('HIGH_RISK_CYBER_ACTIVITY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This content was flagged for potentially high-risk cyber activity.' } })); process.exit(0); }
-if (stdin.includes('RETRYABLE_STREAM_ERROR')) console.log(JSON.stringify({ type: 'error', message: 'Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)' }));
-if (stdin.includes('INCOMPLETE_STREAM')) { console.log(JSON.stringify({ type: 'error', message: 'fixture stream interrupted' })); process.exit(0); }
-if (stdin.includes('BWRAP_NAMESPACE_FAILURE')) console.log(JSON.stringify({ type: 'item.completed', item: { id: 'command-1', type: 'command_execution', command: 'super-secret-command', aggregated_output: 'private source text\\nbwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_user_namespaces exceeded (ENOSPC)', exit_code: 1, status: 'failed' } }));
-if (stdin.includes('ARTIFACT_TOOL_')) {
-  const server = stdin.includes('FOREIGN_ARTIFACT_TOOL_') ? 'untrusted_server' : stdin.includes('LEGACY_OWNED_ARTIFACT_TOOL_') ? 'codex_security_artifacts' : 'cs_artifacts';
-  const tool = stdin.includes('ADDITIONAL_OWNED_ARTIFACT_TOOL_') ? 'additional_codex_security_worker_tool' : stdin.includes('DISCOVERY_OWNED_ARTIFACT_TOOL_') ? 'record_codex_security_discovery_candidates' : 'record_codex_security_deep_reduction';
-  const item = { id: 'mcp-1', type: 'mcp_tool_call', server, tool, arguments: { secret: 'Bearer synthetic-secret', source: 'private source text' }, result: stdin.includes('REJECTED') ? { content: [{ type: 'text', text: 'private output sk-proj-synthetic-secret' }] } : null, error: stdin.includes('TRANSPORT_FAILED') ? { message: '--provider-error transport closed sk-proj-synthetic-secret /private/customer/path' } : null, status: 'failed' };
-  console.log(JSON.stringify({ type: 'item.completed', item }));
-}
-console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));
-console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
-if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
-}
-`,
+async function recordedWorkerLaunches<T extends { markerPath: string }>(
+  launches: readonly T[],
+) {
+  const recorded = await Promise.all(
+    launches.map(async (launch) => ({
+      ...launch,
+      invocation: await readJson(launch.markerPath),
+    })),
   );
-  await chmod(scriptPath, 0o755);
-  process.env.FAKE_CODEX_MARKER = markerPath;
-  return { root, markerPath, preflightMarkerPath, executablePath: scriptPath };
+  return recorded.filter(({ invocation }) => invocation.thread !== undefined);
+}
+
+function assertWorkerProtocol(
+  invocation: Awaited<ReturnType<typeof readJson>>,
+) {
+  assert.deepEqual(invocation.argv.slice(-2), ["app-server", "--stdio"]);
+  assert.equal(invocation.argv.includes("exec"), false);
+  const initialized = invocation.rpc.find(
+    (message: { method: string }) => message.method === "initialize",
+  );
+  assert.equal(initialized.params.capabilities.experimentalApi, true);
+  assert.equal(
+    invocation.thread.params.permissions,
+    "codex_security_deep_scan_worker",
+  );
+  assert.equal(invocation.thread.params.ephemeral, undefined);
+  if (invocation.thread.method === "thread/start") {
+    assert.equal(invocation.thread.params.threadSource, "security_scan");
+  } else {
+    assert.equal(invocation.thread.method, "thread/resume");
+    assert.equal(invocation.thread.params.threadSource, undefined);
+  }
+  assert.deepEqual(invocation.turn.params.input, [
+    { type: "text", text: invocation.stdin, text_elements: [] },
+  ]);
+  assert.equal(
+    invocation.turn.params.threadId,
+    invocation.thread.params.threadId ?? "fixture-thread-id",
+  );
 }
 
 function assertReadOnlyWorkerPolicy(args: readonly string[]) {
@@ -3536,190 +3852,226 @@ async function withWorkerFixture<Result>(
   }
 }
 
-async function testWorkerCancellation() {
+async function testCancelCompletedWorkerDrain() {
   const fixture = await fakeCodexFixture();
+  const restoreDrain = await budgetedWorkerFixture(fixture);
   const previousPath = process.env.CODEX_CLI_PATH;
-  const originalSpawn = childProcess.spawn;
-  let worker: ChildProcess | undefined;
-  let workerSignal: AbortSignal | undefined;
-  let cancelDuringCleanup: (() => void) | undefined;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  const controller = new AbortController();
+  let childPid: number | undefined;
+  let execution: Promise<{ threadId?: string }> | undefined;
   let timeout: NodeJS.Timeout | undefined;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) => {
-    const child = originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    );
-    if (args[0] === "exec") {
-      assertFlagPair(args, "--thread-source", "security_scan");
-      worker = child;
-      workerSignal = options.signal;
-      const kill = child.kill;
-      child.kill = function (...args: Parameters<ChildProcess["kill"]>) {
-        cancelDuringCleanup?.();
-        return kill.apply(this, args);
-      };
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md"),
+      workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "COMPLETE_THEN_FLUSH\n");
+    execution = new CodexSdkWorkerExecutor({
+      parentSandbox: trustedParentSandbox,
+    }).run({
+      kind: "discovery",
+      promptPath,
+      workingDirectory,
+      subagents: 0,
+      signal: controller.signal,
+    });
+    while (true) {
+      try {
+        if (
+          (await readFile(fixture.completionMarkerPath, "utf8")) ===
+          "completed\n"
+        )
+          break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    return child;
-  }) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  process.env.CODEX_CLI_PATH = process.execPath;
+    childPid = JSON.parse(await readFile(fixture.markerPath, "utf8")).pid;
+    controller.abort("coordinator canceled completed worker drain");
+    await assert.rejects(
+      Promise.race([
+        execution,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(new Error("completed worker drain ignored cancellation")),
+            1000,
+          );
+        }),
+      ]),
+      /abort|SIGTERM/i,
+    );
+  } finally {
+    clearTimeout(timeout);
+    controller.abort("fixture cleanup");
+    if (childPid)
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch {}
+    await execution?.catch(() => {});
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreDrain();
+  }
+}
+
+async function testCompletedWorkerFlushesBeforeSettling() {
+  const fixture = await fakeCodexFixture();
+  const restoreDrain = await budgetedWorkerFixture(fixture);
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  const controller = new AbortController();
+  const unexpectedErrors: Error[] = [];
+  const captureUnexpectedError = (error: Error) => unexpectedErrors.push(error);
+  let execution: Promise<{ threadId?: string }> | undefined;
+  let timeout: NodeJS.Timeout | undefined;
+  let childPid: number | undefined;
+
+  process.on("uncaughtException", captureUnexpectedError);
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
     await mkdir(workingDirectory);
-    const executor = new CodexSdkWorkerExecutor({
+    await writeFile(promptPath, "COMPLETE_THEN_FLUSH\n");
+    execution = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
+    }).run({
+      kind: "discovery",
+      promptPath,
+      workingDirectory,
+      subagents: 0,
+      signal: controller.signal,
     });
-    const run = (controller: AbortController, onThreadStarted?: () => void) =>
-      executor.run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory,
-        subagents: 0,
-        signal: controller.signal,
-        onThreadStarted,
-      });
-    const preAborted = new AbortController();
-    const beforeStartup = new Error(
-      "coordinator canceled before worker startup",
-    );
-    preAborted.abort(beforeStartup);
-    await assert.rejects(
-      run(preAborted),
-      (error: Error) => error === beforeStartup,
-    );
-    assert.equal(worker, undefined);
-    await assert.rejects(readFile(fixture.preflightMarkerPath), {
-      code: "ENOENT",
-    });
-    await assert.rejects(readFile(fixture.markerPath), { code: "ENOENT" });
 
-    for (const prompt of [
-      "BLOCK_AFTER_START",
-      "COMPLETE_THEN_HANG",
-      "FAIL_THEN_HANG",
-    ]) {
-      await writeFile(promptPath, `${prompt}\n`);
-      const controller = new AbortController();
-      const cancellation = new Error(
-        "coordinator canceled its remaining workers",
-      );
-      // Exercise cancellation inside the real SDK's iterator cleanup, before kill returns.
-      cancelDuringCleanup =
-        prompt === "COMPLETE_THEN_HANG"
-          ? () => controller.abort(cancellation)
-          : undefined;
-      const deadline = new Promise<never>((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error(`${prompt} worker did not settle`)),
-          10_000,
-        );
-      });
-      const execution = Promise.race([
-        run(controller, () => {
-          if (prompt === "BLOCK_AFTER_START") controller.abort(cancellation);
-        }),
-        deadline,
-      ]);
-      if (prompt === "BLOCK_AFTER_START") {
-        await assert.rejects(
-          execution,
-          (error: Error) =>
-            error?.name === "AbortError" ||
-            /abort|SIGTERM/i.test(error?.message ?? ""),
-        );
-        assert(workerSignal);
-        assert.equal(workerSignal.aborted, true);
-        assert.equal(workerSignal.reason, cancellation);
-      } else {
-        if (prompt === "FAIL_THEN_HANG") {
-          await assert.rejects(execution, /fixture worker failed/);
-          controller.abort(cancellation);
-        } else {
-          const result = await execution;
-          assert.equal(result.threadId, "fixture-thread-id");
-        }
-        assert.equal(controller.signal.aborted, true);
-        assert(workerSignal);
-        assert.equal(workerSignal.aborted, false);
-      }
-      assert.notEqual(workerSignal, controller.signal);
-      const currentWorker = worker as ChildProcess | undefined;
-      assert(currentWorker);
-      assert.equal(currentWorker.killed, true);
-      if (
-        currentWorker.exitCode === null &&
-        currentWorker.signalCode === null
-      ) {
-        await Promise.race([
-          new Promise<void>((resolve) =>
-            worker!.once("close", () => resolve()),
-          ),
-          deadline,
-        ]);
-      }
-      clearTimeout(timeout);
-      cancelDuringCleanup = undefined;
-    }
+    const result = await Promise.race([
+      execution,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort("completed worker fixture timed out");
+          reject(
+            new Error("completed worker did not settle after flushing usage"),
+          );
+        }, 1_000);
+      }),
+    ]);
+    clearTimeout(timeout);
+    assert.ok(result);
+    assert.equal(result.threadId, "fixture-thread-id");
+    childPid = JSON.parse(await readFile(fixture.markerPath, "utf8")).pid;
+    assert.equal(
+      await readFile(fixture.completionMarkerPath, "utf8"),
+      "flushed\n",
+    );
+
+    controller.abort("coordinator immediately canceled its remaining workers");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.deepEqual(unexpectedErrors, []);
+    assert.throws(() => process.kill(childPid!, 0), { code: "ESRCH" });
   } finally {
     clearTimeout(timeout);
-    cancelDuringCleanup = undefined;
-    if (worker && worker.exitCode === null && worker.signalCode === null)
-      worker.kill("SIGKILL");
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
+    if (!controller.signal.aborted)
+      controller.abort("completed worker fixture cleanup");
+    await execution?.catch(() => {});
+    if (childPid) {
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch {}
+    }
+    process.removeListener("uncaughtException", captureUnexpectedError);
     restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreDrain();
   }
 }
 
-async function testNullUsageCompletion() {
-  const fixture = await fakeCodexFixture();
-  const previousPath = process.env.CODEX_CLI_PATH;
-  const originalSpawn = childProcess.spawn;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) =>
-    originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    )) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  process.env.CODEX_CLI_PATH = process.execPath;
-  try {
-    const promptPath = path.join(fixture.root, "prompt.md");
-    await writeFile(promptPath, "NULL_USAGE\n");
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-        const result = await new CodexSdkWorkerExecutor({
+async function budgetedWorkerFixture(
+  fixture: Awaited<ReturnType<typeof fakeCodexFixture>>,
+) {
+  const saved = [
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  ].map((name) => [name, process.env[name]] as const);
+  const config = path.join(fixture.root, "budget-config.toml");
+  const worker = path.join(fixture.root, "budget-worker.toml");
+  await writeFile(config, "");
+  await writeFile(worker, "[worker_runtime]\ndrain_session_records = true\n");
+  process.env.CODEX_SECURITY_CONFIG_PATH = config;
+  process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = worker;
+  return () => {
+    for (const [name, value] of saved) restoreEnv(name, value);
+  };
+}
+
+async function testUnbudgetedCompletedWorkerReturns() {
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumed of [false, true]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        await writeFile(promptPath, "COMPLETE_THEN_HANG\n");
+        const originalSpawn = childProcess.spawn;
+        const previousPath = process.env.CODEX_CLI_PATH;
+        process.env.CODEX_CLI_PATH = process.execPath;
+        childProcess.spawn = ((
+          command: string,
+          args: readonly string[] = [],
+          options: SpawnOptions = {},
+        ) =>
+          originalSpawn(
+            command,
+            command === process.execPath ||
+              command === path.win32.toNamespacedPath(process.execPath)
+              ? [fixture.executablePath, ...args]
+              : args,
+            options,
+          )) as typeof childProcess.spawn;
+        syncBuiltinESMExports();
+        const controller = new AbortController();
+        let childPid: number | undefined;
+        let timeout: NodeJS.Timeout | undefined;
+        const execution = new CodexSdkWorkerExecutor({
           parentSandbox: trustedParentSandbox,
         }).run({
           kind,
           promptPath,
-          workingDirectory: fixture.root,
+          workingDirectory,
           subagents: 0,
-          resumeThreadId,
-          signal: new AbortController().signal,
+          signal: controller.signal,
+          ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
+          onThreadStarted: async () => {
+            childPid = (await readJson(fixture.markerPath)).pid;
+          },
         });
-        assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
-      }
+        try {
+          const result = await Promise.race([
+            execution,
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(() => {
+                controller.abort("fixture completion bound");
+                reject(
+                  new Error(
+                    "unbudgeted worker did not close its idle app-server",
+                  ),
+                );
+              }, 5_000);
+            }),
+          ]);
+          assert.equal(
+            result.threadId,
+            resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
+          );
+          assert.equal(controller.signal.aborted, false);
+        } finally {
+          clearTimeout(timeout);
+          controller.abort("fixture cleanup");
+          if (childPid)
+            try {
+              process.kill(childPid, "SIGKILL");
+            } catch {}
+          await execution.catch(() => {});
+          childProcess.spawn = originalSpawn;
+          syncBuiltinESMExports();
+          restoreEnv("CODEX_CLI_PATH", previousPath);
+        }
+      });
     }
-  } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    restoreEnv("CODEX_CLI_PATH", previousPath);
   }
 }

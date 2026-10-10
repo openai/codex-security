@@ -18,19 +18,13 @@ import {
   sep,
   win32,
 } from "node:path";
-import {
-  Codex,
-  type CyberAccessProgram,
-  type ThreadEvent,
-} from "@openai/codex-sdk";
-import { readCodexSessionTurn } from "../../../scripts/codex_session.mjs";
+import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import {
-  createCodexProfileClient,
   preflightProviderDefinitions,
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
-import { executablePathForSpawn } from "./executable-path.js";
+import { runAppServerWorker } from "./app-server-worker.js";
 import {
   classifyCodexWorkerError,
   DeepScanNonRetryableError,
@@ -68,7 +62,9 @@ interface CodexSdkWorkerRuntimeSettings {
   environment?: Record<string, string>;
   config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
+  privateProviders?: Record<string, unknown>;
   nativeProfile?: string;
+  drainSessionRecords?: boolean;
   cyberAccessProgram?: CyberAccessProgram;
 }
 
@@ -140,7 +136,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         process.arch,
         originalCwd,
       );
-      const { useOpenAiApiKey } =
+      const { useOpenAiApiKey, useCodexApiKey } =
         await preflightDeepScanWorkerPermissionProfile({
           codexPath,
           cwd: request.workingDirectory,
@@ -149,97 +145,47 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           expectedProfile: workerProfile,
           env: childEnv,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
+          allowCodexApiKey: Boolean(codexApiKey),
           signal: request.signal,
         });
       const prompt = await fs.readFile(request.promptPath, "utf8");
-      const codexOptions = {
-        codexPathOverride: executablePathForSpawn(codexPath),
-        env: childEnv,
-        // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
-        // Keep native credentials unless the worker has no configured account.
-        ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
-        // Raw overrides preserve literal filesystem and MCP keys.
+      const diagnostics: CodexWorkerDiagnostic[] = [];
+      const result = await runAppServerWorker({
+        codexPath,
+        environment: {
+          ...childEnv,
+          CODEX_INTERNAL_ORIGINATOR_OVERRIDE:
+            childEnv.CODEX_INTERNAL_ORIGINATOR_OVERRIDE || "codex_sdk_ts",
+          ...(useOpenAiApiKey ? { CODEX_API_KEY: openAiApiKey! } : {}),
+        },
         configOverrides,
+        providerConfigOverrides: runtimeSettings.preflightProviderOverrides,
+        privateProviders: runtimeSettings.privateProviders,
+        apiKey: useCodexApiKey
+          ? codexApiKey
+          : useOpenAiApiKey
+            ? openAiApiKey
+            : undefined,
+        model: this.modelSettings.model,
+        cyberAccessProgram: runtimeSettings.cyberAccessProgram,
+        request,
+        input: request.resumeThreadId
+          ? (request.continuationPrompt ?? prompt)
+          : prompt,
+        onDiagnostic: (item) => {
+          if (isRecord(item) && item.type === "error") {
+            const fallback = deepScanPermissionProfileFallbackError(
+              item.message,
+            );
+            if (fallback) throw fallback;
+          }
+          appendItemDiagnostic(diagnostics, item);
+        },
+      });
+      return {
+        ...result,
+        ...(diagnostics.length > 0 ? { diagnostics } : {}),
       };
-      const codex =
-        runtimeSettings.nativeProfile === undefined
-          ? new Codex(codexOptions)
-          : createCodexProfileClient<ThreadEvent>({
-              ...codexOptions,
-              profileName: runtimeSettings.nativeProfile,
-            });
-      const threadOptions = {
-        ...(this.modelSettings.model
-          ? { model: this.modelSettings.model }
-          : {}),
-        threadSource: "security_scan",
-        skipGitRepoCheck: true,
-        workingDirectory: request.workingDirectory,
-      } as const;
-      const thread = request.resumeThreadId
-        ? codex.resumeThread(request.resumeThreadId, threadOptions)
-        : codex.startThread(threadOptions);
-      const input = request.resumeThreadId
-        ? (request.continuationPrompt ?? prompt)
-        : prompt;
-      const controller = new AbortController();
-      const forwardAbort = () => controller.abort(request.signal.reason);
-      if (request.signal.aborted) {
-        forwardAbort();
-      } else {
-        request.signal.addEventListener("abort", forwardAbort, { once: true });
-      }
-
-      try {
-        const { events } = await thread.runStreamed(input, {
-          signal: controller.signal,
-          cyberAccessProgram: runtimeSettings.cyberAccessProgram,
-        });
-        const diagnostics: CodexWorkerDiagnostic[] = [];
-        const turn = await readCodexSessionTurn({
-          thread,
-          events,
-          stopOnCompletion: true,
-          onEvent: async (event) => {
-            const item = event.type === "item.completed" ? event.item : event;
-            if (item.type === "error") {
-              const fallbackError = deepScanPermissionProfileFallbackError(
-                item.message,
-              );
-              if (fallbackError) {
-                controller.abort(fallbackError);
-                throw fallbackError;
-              }
-            }
-            if (event.type === "thread.started") {
-              await request.onThreadStarted?.(event.thread_id);
-            } else if (event.type === "item.completed") {
-              appendItemDiagnostic(diagnostics, event.item);
-            } else if (event.type === "turn.completed") {
-              request.signal.removeEventListener("abort", forwardAbort);
-            } else if (event.type === "turn.failed") {
-              throw new Error(event.error.message);
-            } else if (event.type === "error") {
-              // Codex exec emits retry-in-progress notifications as error events.
-              appendStreamDiagnostic(diagnostics, event.message);
-            }
-          },
-        });
-        if (turn.status !== "completed") {
-          const detail = turn.lastStreamError
-            ? `: ${turn.lastStreamError}`
-            : "";
-          throw new Error(
-            `Codex worker stream ended before turn.completed${detail}`,
-          );
-        }
-        return {
-          threadId: turn.threadId ?? thread.id ?? undefined,
-          ...(diagnostics.length > 0 ? { diagnostics } : {}),
-        };
-      } finally {
-        request.signal.removeEventListener("abort", forwardAbort);
-      }
     } catch (error) {
       throw classifyCodexWorkerError(error);
     }
@@ -533,9 +479,11 @@ async function workerRuntimeSettings(
   const {
     environment: workerEnvironment,
     native_profile: nativeProfile,
+    drain_session_records: drainSessionRecords,
     model_providers: legacyProviders,
     ...workerConfig
   } = isRecord(snapshot) ? snapshot : {};
+  settings.drainSessionRecords = drainSessionRecords === true;
   if (isRecord(workerEnvironment)) {
     settings.environment = workerEnvironment as Record<string, string>;
   }
@@ -557,6 +505,7 @@ async function workerRuntimeSettings(
       ),
     );
     if (isRecord(nativeProfileConfig.model_providers)) {
+      settings.privateProviders = nativeProfileConfig.model_providers;
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,
       );

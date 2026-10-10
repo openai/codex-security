@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     begin_deep_scan,
+    claim_deep_scan_dedup,
     create_saved_workspace,
     fail_scan,
     initialize_git_repository,
@@ -367,6 +368,56 @@ def test_completion_includes_cached_and_cache_write_tokens(
     }
 
 
+@pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
+@pytest.mark.parametrize(
+    ("snapshots", "expected_input", "expected_writes"),
+    [
+        ([(100, 50), (100, None), (100, 50)], 100, 50),
+        ([(100, 80), (200, None), (200, 80)], 200, 80),
+        ([(100, 40), (200, None), (300, 60)], 300, 60),
+        ([(100, 40), (20, None), (100, 20)], 200, 60),
+        ([(100, 40), (200, 20), (300, 30)], 300, 70),
+        ([(100, None), (100, 50)], 100, 50),
+    ],
+    ids=[
+        "same-total",
+        "increasing",
+        "new-writes",
+        "epoch-reset",
+        "explicit-decrease",
+        "initial-omission",
+    ],
+)
+def test_completion_retains_cache_write_baseline_across_omissions(
+    tmp_path: Path,
+    cache_write_field: str,
+    snapshots: list[tuple[int, int | None]],
+    expected_input: int,
+    expected_writes: int,
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    events = []
+    for input_tokens, writes in snapshots:
+        event = _token_event(counted, input_tokens, 0)
+        reported = event["payload"]["info"]["total_token_usage"]
+        reported.pop("cache_write_input_tokens")
+        if writes is not None:
+            reported[cache_write_field] = writes
+        events.append(event)
+    parent = _rollout(tmp_path, "scan-parent", events)
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert usage == {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(expected_input, 0, 0, cache_write_input_tokens=expected_writes),
+        "threadCount": 1,
+    }
+
+
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -561,7 +612,12 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
     }
 
 
-def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "kind,retried", [("discovery", False), ("discovery", True), ("dedup", True)]
+)
+def test_completion_counts_deep_sdk_workers_and_descendants(
+    tmp_path: Path, kind: str, retried: bool
+) -> None:
     state_dir = tmp_path / "workbench-state"
     target = tmp_path / "target"
     target.mkdir()
@@ -602,23 +658,115 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
     artifact.mkdir(parents=True)
     prompt = artifact / "prompt.md"
     prompt.write_text("Review the fixture target.\n", encoding="utf-8")
-    upsert_deep_worker(
-        state_dir,
-        scan_id,
-        str(uuid.uuid4()),
-        "discovery",
-        "running",
-        str(prompt),
-        str(artifact),
-        "--sdk-thread-id",
-        "sdk-worker",
-        environment=environment,
-    )
+    worker_id = str(uuid.uuid4())
+    if kind == "dedup":
+        inputs = []
+        for index in range(2):
+            seed = artifact / f"discovery-{index}"
+            seed.mkdir()
+            result = seed / "result.json"
+            result.write_text("{}\n", encoding="utf-8")
+            seed_id = str(uuid.uuid4())
+            for status in ("running", "succeeded"):
+                upsert_deep_worker(
+                    state_dir,
+                    scan_id,
+                    seed_id,
+                    "discovery",
+                    status,
+                    str(prompt),
+                    str(seed),
+                    *(["--result-manifest-path", str(result)] if status == "succeeded" else []),
+                    environment=environment,
+                )
+            inputs.extend(("--input-worker-id", seed_id))
+        claim_deep_scan_dedup(
+            state_dir,
+            scan_id,
+            worker_id,
+            str(prompt),
+            str(artifact),
+            *inputs,
+            environment=environment,
+        )
+    for attempt, thread_id in ([(1, "sdk-prior-worker")] if retried else []) + [
+        (2 if retried else 1, "sdk-worker")
+    ]:
+        upsert_deep_worker(
+            state_dir,
+            scan_id,
+            worker_id,
+            kind,
+            "running",
+            str(prompt),
+            str(artifact),
+            "--sdk-thread-id",
+            thread_id,
+            "--attempt",
+            str(attempt),
+            environment=environment,
+        )
+    if retried:
+        # A new process must retain prior attempts when reopening the saved scan.
+        scan_command(
+            state_dir,
+            "get-deep-scan",
+            scan_id,
+            "--thread-id",
+            "scan-parent",
+            environment=environment,
+        )
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            assert connection.execute(
+                "SELECT sdk_thread_id FROM deep_scan_worker_threads WHERE worker_id = ? ORDER BY sdk_thread_id",
+                (worker_id,),
+            ).fetchall() == [("sdk-prior-worker",), ("sdk-worker",)]
+        other_target = tmp_path / "other-target"
+        other_target.mkdir()
+        other = begin_deep_scan(
+            state_dir,
+            "other-parent",
+            "--target-path",
+            str(other_target),
+            "--scope",
+            ".",
+            "--scan-root",
+            str(tmp_path / "other-scans"),
+            environment=environment,
+        )["deepScan"]
+        other_artifact = Path(str(other["scanDir"])) / "artifacts" / "worker"
+        other_artifact.mkdir(parents=True)
+        other_prompt = other_artifact / "prompt.md"
+        other_prompt.write_text("Separate scan.\n", encoding="utf-8")
+        upsert_deep_worker(
+            state_dir,
+            str(other["scanId"]),
+            str(uuid.uuid4()),
+            "discovery",
+            "running",
+            str(other_prompt),
+            str(other_artifact),
+            "--sdk-thread-id",
+            "unrelated-worker",
+            environment=environment,
+        )
     _state_graph(
         environment,
         {
             "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
             "sdk-worker": _rollout(tmp_path, "sdk-worker", [_token_event(counted, 20, 5)]),
+            **(
+                {
+                    "sdk-prior-worker": _rollout(
+                        tmp_path, "sdk-prior-worker", [_token_event(counted, 30, 6)]
+                    ),
+                    "unrelated-worker": _rollout(
+                        tmp_path, "unrelated-worker", [_token_event(counted, 1000, 100)]
+                    ),
+                }
+                if retried
+                else {}
+            ),
             "sdk-child": _rollout(
                 tmp_path,
                 "sdk-child",
@@ -632,8 +780,8 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
     assert usage == {
         "coverage": "complete",
         "source": "codex_rollout",
-        **_counts(37, 0, 10),
-        "threadCount": 3,
+        **_counts(67 if retried else 37, 0, 16 if retried else 10),
+        "threadCount": 4 if retried else 3,
     }
 
 
