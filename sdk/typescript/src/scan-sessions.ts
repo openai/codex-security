@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { isRecord } from "./record.js";
 
@@ -6,7 +6,14 @@ export async function recordedScanCodexHome(
   _scanDirectory: string,
   attribution?: ScanExecutionAttribution | null,
 ): Promise<string | undefined> {
-  return attribution?.workerCodexHome ?? undefined;
+  const home = attribution?.workerCodexHome;
+  if (home == null) return undefined;
+  try {
+    return await realpath(home);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 export interface ScanExecutionAttribution {

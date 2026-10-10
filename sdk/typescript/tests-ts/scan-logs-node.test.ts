@@ -1,6 +1,7 @@
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { zstdCompressSync } from "node:zlib";
@@ -93,3 +94,72 @@ test.each(["native", "without zstd"])(
     ]);
   },
 );
+
+for (const directory of ["sessions", "archived_sessions"]) {
+  const name = `Node reads recorded homes through directory links in ${directory}`;
+  test(name, async () => {
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const root = await temporaryDirectory();
+    const current = join(root, "current");
+    const original = join(root, "original");
+    await mkdir(current);
+    await mkdir(join(original, "child"), { recursive: true });
+    await mkdir(join(original, directory));
+    const link = join(current, "original-home-link");
+    await symlink(
+      join(original, "child"),
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const recorded = `${link}${sep}..`;
+    const timestamp = "2026-08-11T12:01:00.000Z";
+    const event = {
+      type: "response_item",
+      timestamp,
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "saved original activity" }],
+      },
+    };
+    await writeFile(
+      join(original, directory, "owner.jsonl"),
+      [
+        { type: "session_meta", payload: { id: "owner" } },
+        { type: "turn_context", timestamp, payload: { turn_id: "scan-turn" } },
+        event,
+      ]
+        .map((value) => JSON.stringify(value) + "\n")
+        .join(""),
+    );
+    const built = await Bun.build({
+      entrypoints: [
+        fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
+      ],
+      target: "node",
+      format: "esm",
+    });
+    expect(built.success).toBe(true);
+    const modulePath = join(root, "scan-logs.mjs");
+    await writeFile(modulePath, await built.outputs[0]!.text());
+    const { stdout } = await promisify(execFile)("node", [
+      "--input-type=module",
+      "--eval",
+      `
+      import assert from "node:assert/strict";
+      const { readSavedScanLogs } = await import(${JSON.stringify(pathToFileURL(modulePath).href)});
+      const attribution = { formatVersion: 1, workerCodexHome: ${JSON.stringify(recorded)}, executionThreadIds: [],
+        owner: { threadId: "owner", turnId: "scan-turn", startedAt: ${JSON.stringify(timestamp)} },
+        startedAt: ${JSON.stringify(timestamp)}, completedAt: ${JSON.stringify(timestamp)},
+      };
+      const logs = await readSavedScanLogs({ scanId: "scan-1", mode: "deep", scanDir: ${JSON.stringify(root)}, continuationThreadId: "owner", executionAttribution: attribution }, ${JSON.stringify(current)});
+      assert.equal(logs.sessions.length, 1);
+      assert.equal(logs.sessions[0].path, ${JSON.stringify(join(original, directory, "owner.jsonl"))});
+      assert.deepEqual(logs.events.at(-1).event, ${JSON.stringify(event)});
+      assert.equal(attribution.workerCodexHome, ${JSON.stringify(recorded)});
+      console.log("original logs recovered");
+    `,
+    ]);
+    expect(stdout.trim()).toBe("original logs recovered");
+  });
+}
