@@ -12,15 +12,17 @@ const root = await realpath(process.argv[2]!);
 const alias = join(root, "alias");
 const physical = join(root, "physical");
 await Promise.all([
-  mkdir(alias),
+  mkdir(join(alias, "home"), { recursive: true }),
   mkdir(join(physical, "nested"), { recursive: true }),
+  mkdir(join(physical, "home"), { recursive: true }),
 ]);
 await symlink(
   join(physical, "nested"),
   join(alias, "link"),
   process.platform === "win32" ? "junction" : "dir",
 );
-const rawHome = `${alias}${sep}link${sep}..`;
+// Keep the junction outside either directory selected as the credential home.
+const rawHome = `${alias}${sep}link${sep}..${sep}home`;
 // Native startup uses Node's realpath before writing its private replay file.
 const selectedHome = await realpath(rawHome);
 const privateConfig = {
@@ -47,8 +49,8 @@ const original = await readFile(profile.path);
 const results = [];
 for (const [spelling, requestedHome] of [
   ["absolute", rawHome],
-  ["relative", `${relative(process.cwd(), alias)}${sep}link${sep}..`],
-  ["home-relative", `~${sep}alias${sep}link${sep}..`],
+  ["relative", `${relative(process.cwd(), alias)}${sep}link${sep}..${sep}home`],
+  ["home-relative", `~${sep}alias${sep}link${sep}..${sep}home`],
 ] as const) {
   for (const command of ["resume", "rerun"] as const) {
     const environment = {
