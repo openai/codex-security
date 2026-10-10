@@ -3676,21 +3676,6 @@ describe("patch change tracking", () => {
       await writeFile(join(outside, "file"), content);
       await symlink(join(outside, "file"), join(directory, source));
     } else await writeFile(join(directory, source), content);
-    const unreadable =
-      change === "different" &&
-      process.platform !== "win32" &&
-      process.getuid?.() !== 0
-        ? join(directory, ".cache/unreadable")
-        : undefined;
-    if (unreadable) {
-      await mkdir(dirname(unreadable), { recursive: true });
-      await writeFile(unreadable, "Unrelated ignored content\n");
-      await chmod(unreadable, 0);
-      await expect(readFile(unreadable)).rejects.toMatchObject({
-        code: "EACCES",
-      });
-    }
-    const permissions = unreadable ? await stat(unreadable) : undefined;
     let removed = false;
     const before = git("rev-parse", "HEAD");
     const index = await readFile(join(directory, ".git/index"));
@@ -3749,20 +3734,6 @@ describe("patch change tracking", () => {
       },
     );
     if (change === "vanished") expect(removed).toBe(true);
-    if (unreadable && permissions) {
-      expect(await stat(unreadable)).toMatchObject({
-        mode: permissions.mode,
-        uid: permissions.uid,
-        gid: permissions.gid,
-      });
-      await expect(readFile(unreadable)).rejects.toMatchObject({
-        code: "EACCES",
-      });
-      await chmod(unreadable, 0o600);
-      expect(await readFile(unreadable, "utf8")).toBe(
-        "Unrelated ignored content\n",
-      );
-    }
     const blocked = [
       "move",
       "copy",
@@ -3780,6 +3751,80 @@ describe("patch change tracking", () => {
       publishedContent,
     );
   });
+
+  test
+    .skipIf(process.platform === "win32" || process.getuid?.() === 0)
+    .each(["saved", "supplied"])(
+    "stops before patching when ignored content cannot be read (%s)",
+    async (mode) => {
+      const { directory, git } = await publicationRepository();
+      await writeFile(join(directory, ".gitignore"), ".env\n");
+      git("add", ".gitignore");
+      git("commit", "-m", "Synthetic ignored paths");
+      const ignored = join(directory, ".env");
+      await writeFile(ignored, "SYNTHETIC_LOCAL_CONTENT\n");
+      await chmod(ignored, 0);
+      const before = git("rev-parse", "HEAD");
+      const index = await readFile(join(directory, ".git/index"));
+      let codexCalls = 0;
+      try {
+        await expect(readFile(ignored)).rejects.toMatchObject({
+          code: "EACCES",
+        });
+        const result = resultWithFindings(["high"]);
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            ...(mode === "saved" ? ["--scan", "scan-1"] : ["Synthetic issue"]),
+            "--create-pr",
+            "--json",
+          ],
+          {
+            currentDirectory: directory,
+            onWorkbench: () => savedScan(result, "scan-1", directory),
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : Promise.resolve(
+                    args[1] === "list"
+                      ? "[]"
+                      : "https://github.example.test/example/repository/pull/1",
+                  ),
+            onCodex: async (_args, output) => {
+              codexCalls++;
+              await chmod(ignored, 0o600);
+              await writeFile(
+                join(directory, "new.ts"),
+                await readFile(ignored),
+              );
+              output?.stdout.write(
+                JSON.stringify({
+                  patches: [
+                    {
+                      occurrenceId: "occ_1",
+                      status: "verified",
+                      files: ["new.ts"],
+                      verification: "Synthetic verification.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain("EACCES");
+        expect(codexCalls).toBe(0);
+        expect(git("rev-parse", "HEAD")).toBe(before);
+        expect(await readFile(join(directory, ".git/index"))).toEqual(index);
+        expect(git("ls-remote", "origin")).toBe("");
+        expect((await stat(ignored)).mode & 0o777).toBe(0);
+      } finally {
+        await chmod(ignored, 0o600);
+      }
+    },
+  );
 
   test.each(
     ["root", "src"].flatMap((scope) =>
