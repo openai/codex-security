@@ -90,6 +90,24 @@ try {
       return true;
     },
   );
+  await assert.rejects(
+    promisify(execFile)(
+      process.execPath,
+      ["-e", 'process.stdout.write("x".repeat(65536))'],
+      { maxBuffer: 1024 },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok("code" in error);
+      assert.equal(error.code, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+      failure = error;
+      return true;
+    },
+  );
+  await assert.rejects(
+    executeWorkbench("fixture-python", ["cancel-scan"]),
+    (error) => error === failure,
+  );
 } finally {
   delete globalThis.workbenchProcessFixture;
 }
@@ -293,3 +311,65 @@ try {
   else process.env.CODEX_SECURITY_STATE_DIR = previousStateDir;
   await rm(root, { recursive: true, force: true });
 }
+
+await test("large saved context retains cancellation results and diagnostics", async () => {
+  const root = await temporaryDirectory("workbench-large-context-");
+  const previousStateDir = process.env.CODEX_SECURITY_STATE_DIR;
+  try {
+    const target = path.join(root, "target");
+    await mkdir(target);
+    await writeFile(path.join(target, "example.py"), "value = 1\n");
+    const state = path.join(root, "state");
+    process.env.CODEX_SECURITY_STATE_DIR = state;
+    const python = process.env.PYTHON || "python3";
+    const userContext = "x".repeat(1_500_000);
+    const begun = (await executeWorkbench(
+      python,
+      [
+        "begin-deep-scan",
+        "--target-path",
+        target,
+        "--scope",
+        ".",
+        "--thread-id",
+        "synthetic-owner",
+        "--scan-root",
+        path.join(root, "scans"),
+        "--user-context-stdin",
+      ],
+      userContext,
+    )) as { deepScan: { scanId: string } };
+    const scanId = begun.deepScan.scanId;
+    const readScan = async () =>
+      (await executeWorkbench(python, ["get-scan", "--scan-id", scanId])) as {
+        workspace: {
+          results: { userContext: string; progress: { status: string } };
+        };
+      };
+    const current = await readScan();
+    assert.equal(current.workspace.results.userContext, userContext);
+    assert.equal(current.workspace.results.progress.status, "running");
+    await executeWorkbench(python, ["cancel-scan", "--scan-id", scanId]);
+    assert.equal(
+      (await readScan()).workspace.results.progress.status,
+      "canceled",
+    );
+    await assert.rejects(
+      executeWorkbench(python, [
+        "cancel-scan",
+        "--scan-id",
+        "00000000-0000-4000-8000-000000000000",
+      ]),
+      (error: unknown) => {
+        assert.ok(error instanceof Error && "stderr" in error);
+        assert.match(String(error.stderr), /Codex Security scan not found/);
+        return true;
+      },
+    );
+  } finally {
+    if (previousStateDir === undefined)
+      delete process.env.CODEX_SECURITY_STATE_DIR;
+    else process.env.CODEX_SECURITY_STATE_DIR = previousStateDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});

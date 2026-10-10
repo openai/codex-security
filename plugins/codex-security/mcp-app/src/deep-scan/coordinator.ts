@@ -58,6 +58,11 @@ interface SchedulerResult {
   result?: DeepReductionInput;
 }
 
+export interface ParentScanState {
+  status: string | undefined;
+  failureMessage?: string;
+}
+
 export interface CoordinatorOptions {
   run: DeepScanRunState;
   store: DeepScanStore;
@@ -107,6 +112,7 @@ export class DeepScanCoordinator {
   private terminal = false;
   private canceled = false;
   private externallyFailed = false;
+  private failurePersisted = false;
   private setupComplete = false;
   private discoveryDeadlineReached = false;
   private state: DeepScanRunState;
@@ -234,27 +240,95 @@ export class DeepScanCoordinator {
   async cancelAfterPersistence(
     reason: string,
     persistCancellation: () => Promise<void>,
+    readParentState: () => Promise<ParentScanState>,
   ): Promise<DeepScanRunState> {
-    if (this.terminal || this.state.status !== "running")
+    const existing = this.cancellationPersistence;
+    if (existing) {
+      try {
+        await existing.promise;
+      } catch (error) {
+        if (existing.failure) await this.settled();
+        throw error;
+      }
       return await this.settled();
-    this.cancellationPersistence ??= Promise.withResolvers<void>();
-    this.cancel(reason);
-    await this.cancellationReady.promise;
+    }
+    if (
+      this.terminal ||
+      this.canceled ||
+      this.failurePersisted ||
+      this.state.status === "canceled" ||
+      this.state.status === "interrupted"
+    )
+      return await this.settled();
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    // Cancellation callers share operation errors; terminal waiters inspect only
+    // persistence failures below. Handle a rejection even with no joined caller.
+    void promise.catch(() => {});
+    const persistence: NonNullable<typeof this.cancellationPersistence> = {
+      promise,
+      resolve,
+    };
+    this.cancellationPersistence = persistence;
     try {
-      await persistCancellation();
+      const parent = await readParentState();
+      const parentStatus = parent.status;
+      if (parentStatus === "failed")
+        this.failExternallyPersisted(parent.failureMessage);
+      if (parentStatus === "canceled") this.cancel(reason);
+      if (
+        parentStatus === "running" &&
+        !this.failurePersisted &&
+        !["canceled", "interrupted"].includes(this.state.status)
+      ) {
+        // Terminal discovery has no active writers to stop. Keep its outcome
+        // until the parent actually accepts cancellation.
+        if (this.state.status === "running") this.cancel(reason);
+        await this.cancellationReady.promise;
+        if (!this.failurePersisted) {
+          try {
+            await persistCancellation();
+            this.cancel(reason);
+          } catch (error) {
+            let parentStopped = false;
+            if (this.state.status === "succeeded") {
+              try {
+                parentStopped = ["complete", "failed"].includes(
+                  (await readParentState()).status ?? "",
+                );
+              } catch {
+                // Preserve the cancellation diagnostic if reconciliation fails.
+              }
+            }
+            if (!parentStopped) persistence.failure = { error };
+            throw error;
+          }
+        }
+      }
     } catch (error) {
-      this.cancellationPersistence.failure = { error };
+      reject(error);
+      if (!persistence.failure) {
+        this.cancellationPersistence = undefined;
+        throw error;
+      }
     } finally {
       // Cleanup still inspects durable state and preserves results when the
       // process lost a committed response, then reports the persistence failure.
-      this.cancellationPersistence.resolve();
+      persistence.resolve();
     }
-    return await this.settled();
+    const settled = await this.settled();
+    if (persistence.failure) throw persistence.failure.error;
+    return settled;
   }
 
-  failExternallyPersisted(reason: string): void {
+  failExternallyPersisted(reason: string | undefined): void {
     if (this.externallyFailed || this.terminal) return;
     this.externallyFailed = true;
+    this.failurePersisted = true;
     this.state = { ...this.state, status: "failed", error: reason };
     this.log({
       event: "coordinator_external_failure",
@@ -352,6 +426,7 @@ export class DeepScanCoordinator {
         );
         if (this.canceled || this.externallyFailed) return;
         this.state = failed;
+        this.failurePersisted ||= this.state.status === "failed";
       } catch (persistError) {
         if (this.canceled || this.externallyFailed) return;
         if (
@@ -384,20 +459,29 @@ export class DeepScanCoordinator {
       await this.settleSchedulerWork();
       await this.ownershipCheck;
       this.cancellationReady.resolve();
-      await this.cancellationPersistence?.promise;
       if (this.options.onStopped && this.options.threadId) {
         let current: DeepScanRunState | undefined;
-        try {
-          current = await this.options.store.get(
-            this.state.scanId,
-            this.options.threadId,
-          );
-        } catch (error) {
-          this.log({
-            event: "coordinator_terminal_state_read_failed",
-            scanId: this.state.scanId,
-            reason: errorKind(error),
-          });
+        let persistence: Promise<void> | undefined;
+        do {
+          persistence = this.cancellationPersistence?.promise;
+          await persistence?.catch(() => {});
+          current = undefined;
+          try {
+            current = await this.options.store.get(
+              this.state.scanId,
+              this.options.threadId,
+            );
+          } catch (error) {
+            this.log({
+              event: "coordinator_terminal_state_read_failed",
+              scanId: this.state.scanId,
+              reason: errorKind(error),
+            });
+          }
+        } while (persistence !== this.cancellationPersistence?.promise);
+        if (current?.status === "failed" || current?.status === "canceled") {
+          this.state = current;
+          this.failurePersisted = current.status === "failed";
         }
         if (
           current &&
@@ -453,10 +537,13 @@ export class DeepScanCoordinator {
           scanId: this.state.scanId,
         });
       }
-      if (this.cancellationPersistence?.failure) {
+      if (this.cancellationPersistence)
+        await this.cancellationPersistence.promise.catch(() => {});
+      if (this.cancellationPersistence?.failure && !this.failurePersisted) {
         throw this.cancellationPersistence.failure.error;
       }
-      if (this.canceled) this.state = { ...this.state, status: "canceled" };
+      if (this.canceled && !this.failurePersisted)
+        this.state = { ...this.state, status: "canceled" };
       if (this.stopLocally())
         this.terminalResult.resolve(cloneState(this.state));
     }
@@ -563,6 +650,7 @@ export class DeepScanCoordinator {
     let current = confirmedOwnershipChange(error, this.state.scanId)?.run;
     try {
       current ??= await this.options.store.get(this.state.scanId, threadId);
+      this.failurePersisted ||= current.status === "failed";
     } catch (readError) {
       this.log({
         event: "coordinator_ownership_read_failed",
@@ -591,6 +679,7 @@ export class DeepScanCoordinator {
           current,
           this.observationAbortController.signal,
         );
+        this.failurePersisted ||= this.state.status === "failed";
       } catch (observeError) {
         this.log({
           event: "coordinator_replacement_observation_failed",
