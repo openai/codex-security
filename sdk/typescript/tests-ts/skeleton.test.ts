@@ -263,7 +263,8 @@ describe("TypeScript package skeleton", () => {
     expect(nativeCoverageStep).not.toHaveProperty("continue-on-error");
     for (const name of [
       "Install plugin dependencies",
-      "Build SDK and type-check eval tooling",
+      "Set up Node.js for triage evals",
+      "Set up triage eval dependencies and host runtime",
     ]) {
       expect(job.steps!.find((step) => step.name === name)?.if).toBe(
         "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
@@ -345,8 +346,9 @@ describe("TypeScript package skeleton", () => {
       ["Check formatting", "static-checks"],
       ["Check MCP formatting", "static-checks"],
     ] as const) {
-      expect(steps.filter((step) => step.name === name)).toHaveLength(1);
-      expect(jobs[job]!.steps!.some((step) => step.name === name)).toBe(true);
+      expect(
+        jobs[job]!.steps!.filter((step) => step.name === name),
+      ).toHaveLength(1);
     }
     for (const name of [
       "Upload test reports",
@@ -448,6 +450,13 @@ describe("TypeScript package skeleton", () => {
         args,
       });
     }
+    for (let shard = 1; shard <= 7; shard += 1) {
+      expect(runner.strategy?.matrix["include"]).toContainEqual({
+        os: "windows-latest",
+        mode: `isolated-${shard}`,
+        args: `--isolate --shard=${shard}/7`,
+      });
+    }
     const command = runner.steps!.find(
       (step) => step.name === "Test runner mode",
     )?.run;
@@ -483,9 +492,6 @@ describe("TypeScript package skeleton", () => {
 
     expect(packageJson.scripts.build).not.toMatch(/\b(?:pnpm|npm|bun)\b/u);
     expect(packageJson.scripts.build).toMatch(/^node --run clean &&/u);
-    expect(packageJson.scripts.build).toContain(
-      "node scripts/build-dashboard.mjs",
-    );
     expect(packageJson.scripts["build:plugin"]).toBe(
       "node scripts/build-plugin.mjs",
     );

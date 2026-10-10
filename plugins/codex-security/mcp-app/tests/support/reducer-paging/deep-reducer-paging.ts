@@ -21,16 +21,34 @@ import {
   gradeReducerPagingResult,
 } from "./deep-reducer-paging-fixture.ts";
 
-/** Run one reducer through real code-mode IPC and the production artifact tools. */
-export async function runReducerPagingEval({
-  root,
-  mode = "deterministic",
-  model,
-}: {
+interface ReducerPagingEvalOptions {
   root: string;
   mode?: "deterministic" | "model";
   model?: string;
-}) {
+}
+
+/** Run one reducer through real code-mode IPC and the production artifact tools. */
+export async function runReducerPagingEval(options: ReducerPagingEvalOptions) {
+  try {
+    const result = await runReducer(options);
+    await writeJson(path.join(options.root, "report.json"), result.report);
+    return result;
+  } catch (error) {
+    await writeJson(path.join(options.root, "report.json"), {
+      mode: options.mode ?? "deterministic",
+      ...(options.model ? { model: options.model } : {}),
+      error: error instanceof Error ? error.stack : String(error),
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+async function runReducer({
+  root,
+  mode = "deterministic",
+  model,
+}: ReducerPagingEvalOptions) {
+  assert.ok(mode === "deterministic" || mode === "model");
   const fixture = await createReducerPagingFixture(root);
   const tracePath = path.join(root, "tool-trace.jsonl");
   const serverConfigPath = path.join(root, "server-config.json");
@@ -111,6 +129,7 @@ export async function runReducerPagingEval({
   const trace = (await readFile(tracePath, "utf8"))
     .trim()
     .split("\n")
+    .filter(Boolean)
     .map((line) => JSON.parse(line));
   const report = {
     mode,
@@ -121,10 +140,6 @@ export async function runReducerPagingEval({
     ...(await gradeReducerPagingResult(fixture)),
     ...(usage ? { usage } : {}),
   };
-  await writeFile(
-    path.join(root, "report.json"),
-    JSON.stringify(report, null, 2),
-  );
   return { report, fixture };
 }
 
@@ -133,6 +148,7 @@ export function gradeReducerPagingTrace(
   trace: ReducerTraceEvent[],
   ipcFrameLimitBytes: number,
 ) {
+  assert.ok(trace.length > 0, "The reducer produced no tool trace.");
   const reads = trace.filter(
     (event) =>
       event.event === "request" &&

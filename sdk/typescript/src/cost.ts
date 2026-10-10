@@ -1,6 +1,7 @@
 import { parseJson } from "./value.js";
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { isRecord } from "./record.js";
 import {
   estimateScanCost,
@@ -14,6 +15,7 @@ import {
 } from "./scan-activity.js";
 import {
   isScanArtifactDirectory,
+  sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
@@ -47,7 +49,8 @@ interface SessionReasoning {
 
 interface SessionUsage {
   offset: number;
-  pendingLine: Buffer[];
+  decoder: StringDecoder;
+  pendingLine: string[];
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
@@ -93,6 +96,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
+    decoder: new StringDecoder("utf8"),
     pendingLine: [],
     unreadable: false,
     threadId: null,
@@ -211,6 +215,10 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
+    const repository =
+      this.#options.onActivity === undefined
+        ? undefined
+        : this.#options.repository;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
@@ -221,7 +229,7 @@ export class ScanCostTracker {
         this.#sessions.set(path, session);
       }
       try {
-        await readSessionUsage(path, session, this.#options.repository);
+        await readSessionUsage(path, session, repository);
       } catch (error) {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
@@ -284,7 +292,7 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage();
         session.events = [];
-        await readSessionUsage(path, session, this.#options.repository);
+        await readSessionUsage(path, session, repository);
         this.#sessions.set(path, session);
       }
       let worker: number | undefined;
@@ -388,7 +396,10 @@ export class ScanCostTracker {
   }
 }
 
-export async function* sessionFiles(directory: string): AsyncGenerator<string> {
+export async function* sessionFiles(
+  directory: string,
+  compressed = false,
+): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -399,8 +410,12 @@ export async function* sessionFiles(directory: string): AsyncGenerator<string> {
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      yield* sessionFiles(path);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      yield* sessionFiles(path, compressed);
+    } else if (
+      entry.isFile() &&
+      (entry.name.endsWith(".jsonl") ||
+        (compressed && entry.name.endsWith(".jsonl.zst")))
+    ) {
       yield path;
     }
   }
@@ -431,7 +446,14 @@ async function readSessionUsage(
       if (bytesRead === 0) return;
       session.offset += bytesRead;
       try {
-        readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
+        const lines = session.decoder
+          .write(buffer.subarray(0, bytesRead))
+          .split("\n");
+        session.pendingLine.push(lines[0]!);
+        for (const line of lines.slice(1)) {
+          readSessionEvent(session.pendingLine.join(""), session, repository);
+          session.pendingLine = [line];
+        }
       } catch (error) {
         session.unreadable = true;
         session.pendingLine = [];
@@ -440,39 +462,6 @@ async function readSessionUsage(
     }
   } finally {
     await file.close();
-  }
-}
-
-function readSessionChunk(
-  contents: Buffer,
-  session: SessionUsage,
-  repository?: string,
-): void {
-  let lineStart = 0;
-  while (lineStart < contents.length) {
-    const newline = contents.indexOf(0x0a, lineStart);
-    const lineEnd = newline === -1 ? contents.length : newline;
-    const fragment = contents.subarray(lineStart, lineEnd);
-
-    if (newline === -1) {
-      if (fragment.length > 0) {
-        session.pendingLine.push(Buffer.from(fragment));
-      }
-      return;
-    }
-
-    if (session.pendingLine.length === 0) {
-      readSessionEvent(fragment.toString("utf8"), session, repository);
-    } else {
-      if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
-      readSessionEvent(
-        Buffer.concat(session.pendingLine).toString("utf8"),
-        session,
-        repository,
-      );
-      session.pendingLine = [];
-    }
-    lineStart = newline + 1;
   }
 }
 
@@ -508,20 +497,12 @@ function readSessionEvent(
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
       if (usage !== null) session.inheritedUsage = usage;
     }
-    if (payload["type"] === "task_started") {
-      // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.
-      const threadOrder = uuid7Order(session.threadId);
-      const turnOrder = uuid7Order(payload["turn_id"]);
-      const owned =
-        threadOrder === null
-          ? typeof payload["started_at"] === "number" &&
-            session.startedAt !== null &&
-            payload["started_at"] >= Math.floor(session.startedAt / 1_000)
-          : turnOrder !== null && turnOrder >= threadOrder;
-      if (owned) {
-        session.replaying = false;
-        session.events?.push(event);
-      }
+    if (
+      payload["type"] === "task_started" &&
+      sessionOwnsTurn(session, payload)
+    ) {
+      session.replaying = false;
+      session.events?.push(event);
     }
     return;
   }
@@ -659,18 +640,6 @@ function readSessionEvent(
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) session.usage = ownUsage;
-}
-
-function uuid7Order(value: unknown): bigint | null {
-  if (
-    typeof value !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-      value,
-    )
-  ) {
-    return null;
-  }
-  return BigInt(`0x${value.replaceAll("-", "")}`);
 }
 
 function readSessionReasoning(

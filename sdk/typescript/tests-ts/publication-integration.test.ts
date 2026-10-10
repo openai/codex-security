@@ -999,7 +999,7 @@ describe("database-backed Linear publication integration", () => {
       const publisherPidFile = join(root, "sdk-publication-child.pid");
       await writeFile(
         preload,
-        'const fs = require("node:fs");fs.readFileSync(0, "utf8");fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));const waiter = new Int32Array(new SharedArrayBuffer(4));for (;;) Atomics.wait(waiter, 0, 0, 1000);',
+        'if (require("node:path").basename(process.argv[1] ?? "") !== "exec") return; const fs = require("node:fs");fs.readFileSync(0, "utf8");fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));const waiter = new Int32Array(new SharedArrayBuffer(4));for (;;) Atomics.wait(waiter, 0, 0, 1000);',
         { mode: 0o600 },
       );
       const publishing = publishScanInternal(completed.scanDirectory, OPTIONS, {
@@ -1088,7 +1088,8 @@ describe("database-backed Linear publication integration", () => {
       'const fs = require("node:fs");process.on("SIGINT", () => {});process.on("SIGTERM", () => {});fs.writeFileSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID, String(process.pid));setInterval(() => {}, 1000);';
     await writeFile(
       preload,
-      `const fs = require("node:fs"); const { spawn } = require("node:child_process");
+      `if (require("node:path").basename(process.argv[1] ?? "") !== "exec") return;
+const fs = require("node:fs"); const { spawn } = require("node:child_process");
 const prompt = fs.readFileSync(0, "utf8"); const payload = JSON.parse(prompt.split("BEGIN UNTRUSTED PUBLICATION DATA\\n")[1].split("\\nEND UNTRUSTED PUBLICATION DATA")[0]); const finding = JSON.parse(fs.readFileSync(payload.publicationFile, "utf8")).batches[0][0];
 fs.appendFileSync(payload.handoffFile, JSON.stringify({ scanId: payload.scanId, findingId: finding.findingId, occurrenceId: finding.occurrenceId, error: "Synthetic connected publication may have completed.", possibleMutation: true, arguments: finding.arguments }) + "\\n"); fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));
 spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { env: { ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}), CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });
