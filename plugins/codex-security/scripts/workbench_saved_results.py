@@ -2022,7 +2022,12 @@ def merge_saved_results(
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
-    if stopped or any(warning not in initial_warnings for warning in warnings):
+    # Retained work can survive a complete parent or terminal checkpoint.
+    if (
+        stopped
+        or coverage.get("deferred")
+        or any(warning not in initial_warnings for warning in warnings)
+    ):
         coverage["completeness"] = "partial"
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
