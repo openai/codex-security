@@ -1,9 +1,25 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  readFile,
+  realpath,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [installedRoot, consumer, selectedPlugin] = process.argv.slice(2);
+assert.ok(selectedPlugin, "Compatibility fixture requires a selected plugin.");
+assert.notEqual(
+  await realpath(selectedPlugin),
+  await realpath(join(installedRoot, "_bundled_plugin")),
+);
+const selectedHelper = await import(
+  pathToFileURL(join(selectedPlugin, "mcp", "helpers.mjs")).href
+);
+assert.equal(selectedHelper.default, undefined);
 const { CodexSecurity } = await import(
   pathToFileURL(join(installedRoot, "dist", "index.js")).href
 );
@@ -163,6 +179,10 @@ try {
     outputDir: join(consumer, "compatibility-output"),
     postScanPrompt,
   });
+  assert.equal(
+    await realpath(scanEnvironment.CODEX_SECURITY_PLUGIN_ROOT),
+    await realpath(selectedPlugin),
+  );
   assert.equal(result.manifest.scan.status, "completed");
   assert.ok(result.manifest.scan.sealedAt);
   assert.deepEqual(
