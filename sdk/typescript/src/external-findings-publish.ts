@@ -33,6 +33,12 @@ import type {
 
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 
+// Cloud's import catalog contains GitHub repositories, including custom Enterprise
+// hosts. Match its case-insensitive URL identity without merging schemes or ports.
+function cloudRepositoryUrlKey(value: string): string {
+  return repositoryUrlKey(value).toLowerCase();
+}
+
 /** CLI and plugin callers prepare the same immutable request before approval. */
 export interface ExternalPublicationOptions {
   repository: string;
@@ -312,7 +318,8 @@ export async function prepareExternalPublication(
       ...result.data.filter(
         (item) =>
           item.id === options.repository ||
-          repositoryUrlKey(item.url) === repositoryUrlKey(options.repository),
+          cloudRepositoryUrlKey(item.url) ===
+            cloudRepositoryUrlKey(options.repository),
       ),
     );
     page = result.next;
@@ -422,8 +429,8 @@ export async function prepareExternalPublication(
       const sourceRepository = finding.evidence.details?.repository;
       if (
         sourceRepository &&
-        repositoryUrlKey(sourceRepository.url) !==
-          repositoryUrlKey(destination.url)
+        cloudRepositoryUrlKey(sourceRepository.url) !==
+          cloudRepositoryUrlKey(destination.url)
       )
         throw new CodexSecurityError(
           `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository.url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,

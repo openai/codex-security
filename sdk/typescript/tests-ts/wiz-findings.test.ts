@@ -784,9 +784,9 @@ test.each([
     false,
   ],
   [
-    "https://code.example.test/Team/Project",
-    "https://code.example.test/team/project",
-    false,
+    "https://github.example.test/Team/Project.git/",
+    "https://github.example.test/team/project",
+    true,
   ],
   [
     "http://github.com/example/project",
@@ -827,18 +827,80 @@ test.each([
   },
 );
 
-test("Cloud repository selection accepts a GitHub URL case variant", async () => {
-  const f = await cloudFixture(envelope("sastFindings", [sast]));
+test.each(["github.com", "example.ghe.com", "github.example.test"])(
+  "Cloud GitHub repository selection accepts a URL case variant on %s",
+  async (host) => {
+    const url = "https://" + host + "/example/project";
+    const record = { ...sast, repository: { ...repository, url } };
+    const f = await cloudFixture(envelope("sastFindings", [record], false));
+    f.destination.url = url;
+    const prepared = await prepareExternalPublication(
+      f.file,
+      {
+        ...f.options,
+        repository: "HTTPS://" + host.toUpperCase() + "/Example/PROJECT.git/",
+      },
+      f.deps,
+    );
+    expect(prepared.preview.destination.id).toBe(f.destination.id);
+    expect(f.posts).toEqual([]);
+  },
+);
+
+test("custom GitHub Enterprise binding preserves branch case and exact source evidence", async () => {
+  const record = {
+    ...sast,
+    repository: {
+      ...repository,
+      name: "Team/Project",
+      url: "https://github.example.test/Team/Project.git/",
+    },
+    repositoryBranch: {
+      id: "wiz-branch",
+      name: "Team/Project/Feature/Parser/More",
+    },
+  };
+  const f = await cloudFixture(envelope("sastFindings", [record], false));
+  f.destination.url = "https://github.example.test/team/project";
+  f.destination.repo_connector_id = "custom-github";
   const prepared = await prepareExternalPublication(
     f.file,
-    {
-      ...f.options,
-      repository: "HTTPS://GITHUB.COM/Example/PROJECT.git/",
-    },
+    { ...f.options, repository: f.destination.id },
     f.deps,
   );
-  expect(prepared.preview.destination.id).toBe(f.destination.id);
-  expect(f.posts).toEqual([]);
+  expect((await prepared.publish()).verified).toBe(1);
+  const evidence = f.posts[0]!.items[0]!.evidence;
+  expect(evidence.branch).toBe("Feature/Parser/More");
+  expect(evidence.details!.repository.url).toBe(record.repository.url);
+  expect(evidence.source_data).toEqual(record);
+});
+
+test("unidentified source hosts still require exact supplied and inventory URL paths", async () => {
+  const record = {
+    ...sast,
+    repository: {
+      ...repository,
+      url: "https://code.example.test/Team/Project",
+    },
+  };
+  const parsed = await parse({
+    data: {
+      sastFindings: { nodes: [record] },
+      versionControlResources: {
+        nodes: [
+          {
+            id: "unidentified-branch",
+            repository: {
+              ...repository,
+              url: "https://code.example.test/team/project",
+            },
+          },
+        ],
+      },
+    },
+  });
+  expect(parsed.findings).toEqual([]);
+  expect(parsed.excluded[0]!.reason).toContain("conflicting repository URLs");
 });
 
 test("Node reads a large complete named collection without a function argument limit", async () => {
