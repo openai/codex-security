@@ -388,10 +388,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   const owner = "package-sdk-owner";
   let scanId;
   const client = new sdk.CodexSecurity(
-    {
-      pythonPath: f.env.PYTHON,
-      codexOverrides: { model: "gpt-5.5", model_reasoning_effort: "high" },
-    },
+    { pythonPath: f.env.PYTHON },
     {
       environment: f.env,
       prepareRuntime: async () => ({
@@ -407,15 +404,15 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
-      createCodex({ env }) {
-        scanId = env.CODEX_SECURITY_SCAN_ID;
+      // The installed SDK runs the direct engine without a parent model turn.
+      createCodex() {
         return {
           startThread() {
             return {
-              id: null,
+              id: owner,
               async runStreamed() {
                 assert.fail(
-                  "API-key Deep Scans must not start a parent model turn.",
+                  "The direct engine must not start a parent model turn.",
                 );
               },
             };
@@ -433,6 +430,9 @@ async function runInstalledSdk(pluginRoot, executable) {
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
       outputDir: join(f.directory, "output"),
+      onScanRegistered(scan) {
+        scanId = scan.scanId;
+      },
     });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
@@ -446,12 +446,6 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  const sessions = (await readExecutions(f)).filter(
-    (entry) => entry.phase === "parent-session",
-  );
-  assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].threadId, owner);
-  assert.equal(sessions[0].scanId, scanId);
   await assertExecutions(f, scanId, 5);
 }
 

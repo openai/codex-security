@@ -59,6 +59,7 @@ const distModules = [
   "scan-comparison",
   "scan-dashboard",
   "scan-history-renderer",
+  "scan-inputs",
   "scan-logs",
   "security-policy",
   "security-policy-cli",
