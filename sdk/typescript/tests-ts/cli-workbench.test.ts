@@ -2,6 +2,8 @@ import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { Writable } from "node:stream";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, expect, test, mock, spyOn } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
@@ -19,6 +21,7 @@ import {
 } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   createCliTest,
   captureCli,
@@ -1097,6 +1100,484 @@ describe("CLI workbench", () => {
       uncertainPairs: 1,
     });
   });
+
+  test.each(["first", "middle"] as const)(
+    "keeps matching later scans after the %s batch conflicts",
+    async (position) => {
+      const batch = (id: string) => ({
+        afterScanId: `after-${id}`,
+        afterFindings: [
+          { occurrenceId: `after-${id}`, findingId: `finding-after-${id}` },
+          {
+            occurrenceId: `related-after-${id}`,
+            findingId: `related-after-${id}`,
+          },
+        ],
+        beforeScans: [
+          {
+            scanId: `before-${id}`,
+            findings: [
+              {
+                occurrenceId: `before-${id}`,
+                findingId: `finding-before-${id}`,
+              },
+              {
+                occurrenceId: `related-before-${id}`,
+                findingId: `related-before-${id}`,
+              },
+            ],
+          },
+        ],
+      });
+      const batches = (
+        position === "first"
+          ? ["conflict", "first", "last"]
+          : ["first", "conflict", "last"]
+      ).map(batch);
+      const inputs: ScanComparisonInput[] = [];
+      const saved: { args: readonly string[]; input: unknown }[] = [];
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["scans", "match", "--all", "--json"],
+          dependencies({
+            onWorkbench: (args, input): JsonObject => {
+              if (args[0] === "list-unmatched-scan-pairs")
+                return {
+                  repository: "/synthetic/repository",
+                  scanCount: 6,
+                  unavailableScans: 0,
+                  skippedPairs: 0,
+                  batches,
+                };
+              saved.push({ args, input: JSON.parse(input!) });
+              return {};
+            },
+            onMatch: async (input) => {
+              inputs.push(input);
+              const before = input.before[0]!.occurrenceId;
+              const after = input.after[0]!.occurrenceId;
+              return {
+                matches: [
+                  {
+                    beforeOccurrenceIds: [before],
+                    afterOccurrenceIds: [after],
+                    confidence: "high",
+                    reason: "Same synthetic root cause.",
+                  },
+                ],
+                uncertain:
+                  after === "after-conflict"
+                    ? [
+                        {
+                          beforeOccurrenceId: before,
+                          afterOccurrenceId: after,
+                          reason: "Conflicting synthetic uncertainty.",
+                        },
+                      ]
+                    : [],
+                related: [
+                  {
+                    beforeOccurrenceId: input.before[1]!.occurrenceId,
+                    afterOccurrenceId: input.after[1]!.occurrenceId,
+                    reason: "Related but distinct controls.",
+                  },
+                ],
+              };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(saved.map(({ args }) => args[4])).toEqual([
+        "after-first",
+        "after-last",
+      ]);
+      expect(
+        saved.every(({ args }) => args.at(-1) === "--matches-json-stdin"),
+      ).toBe(true);
+      expect(
+        saved.every(
+          ({ input }) => (input as { related: unknown[] }).related.length === 1,
+        ),
+      ).toBe(true);
+      expect(inputs.at(-1)?.knownFindingGroups).toEqual([
+        ["finding-before-first", "finding-after-first"],
+      ]);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        matchedPairs: 2,
+        findingMatches: 2,
+        relatedPairs: 2,
+        uncertainPairs: 0,
+        unmatchedBatches: 1,
+      });
+      expect(stderr.text()).toContain("after-conflict");
+      expect(stderr.text()).toContain(
+        "conflicting confirmed and uncertain findings",
+      );
+    },
+  );
+
+  test.each(["mixed", "all-failed"] as const)(
+    "preserves %s matching outcomes when warning output throws",
+    async (outcome) => {
+      const saved: string[] = [];
+      const matched: string[] = [];
+      const warnings: string[] = [];
+      let diagnostic = "";
+      const failure = new Error("Original synthetic matching failure");
+      const loggingFailure = new Error("Synthetic warning writer failure");
+      const stderr = new Writable({
+        write(chunk, _encoding, callback) {
+          diagnostic += String(chunk);
+          callback();
+        },
+      });
+      const write = stderr.write.bind(stderr);
+      stderr.write = (
+        chunk: unknown,
+        encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+        callback?: (error?: Error | null) => void,
+      ) => {
+        const message = String(chunk);
+        if (message.startsWith("codex-security: warning:")) {
+          warnings.push(message);
+          throw loggingFailure;
+        }
+        return typeof encodingOrCallback === "string"
+          ? write(chunk, encodingOrCallback, callback)
+          : write(chunk, encodingOrCallback);
+      };
+      const { stdout } = createCliTest(main);
+      try {
+        const exitCode = await main(
+          ["scans", "match", "--all", "--json"],
+          stdout.stream,
+          stderr,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              if (args[0] === "list-unmatched-scan-pairs")
+                return {
+                  batches: ["first", "failed", "last"].map((id) => ({
+                    afterScanId: id,
+                    afterFindings: [{ occurrenceId: id }],
+                    beforeScans: [
+                      {
+                        scanId: `before-${id}`,
+                        findings: [{ occurrenceId: `before-${id}` }],
+                      },
+                    ],
+                  })),
+                };
+              saved.push(args[4]!);
+              return {};
+            },
+            onMatch: async (input) => {
+              const id = input.after[0]!.occurrenceId;
+              matched.push(id);
+              if (outcome === "all-failed" || id === "failed") throw failure;
+              return { matches: [], uncertain: [] };
+            },
+          }),
+        );
+        expect(matched).toEqual(["first", "failed", "last"]);
+        expect(warnings).toHaveLength(outcome === "all-failed" ? 3 : 1);
+        expect(diagnostic).not.toContain(loggingFailure.message);
+        if (outcome === "mixed") {
+          expect(exitCode).toBe(0);
+          expect(saved).toEqual(["first", "last"]);
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            matchedPairs: 2,
+            unmatchedBatches: 1,
+          });
+        } else {
+          expect(exitCode).toBe(2);
+          expect(saved).toEqual([]);
+          expect(stdout.text()).toBe("");
+          expect(diagnostic).toContain(failure.message);
+        }
+      } finally {
+        stderr.destroy();
+      }
+    },
+  );
+
+  test.each([
+    "normal",
+    "mixed",
+    "last-failed",
+    "all-failed",
+    "save-failure",
+    "canceled",
+  ] as const)(
+    "preserves %s matching with asynchronous warning-stream errors",
+    async (outcome) => {
+      const name = `preserves ${outcome} matching with asynchronous warning-stream errors`;
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const signals = new FakeSignals();
+      const batchIds =
+        outcome === "all-failed" ? ["warning"] : ["first", "warning", "last"];
+      const matched: string[] = [];
+      const saved: string[] = [];
+      const saveAttempts: string[] = [];
+      let warningWrites = 0;
+      const stderr = new Writable({
+        write(chunk, _encoding, callback) {
+          if (String(chunk).startsWith("codex-security: warning:")) {
+            warningWrites += 1;
+            setImmediate(() =>
+              callback(
+                Object.assign(new Error("Synthetic closed warning pipe"), {
+                  code: "EPIPE",
+                }),
+              ),
+            );
+          } else callback();
+        },
+      });
+      const { stdout } = createCliTest(main);
+      try {
+        const exitCode = await main(
+          ["scans", "match", "--all", "--json"],
+          stdout.stream,
+          stderr,
+          dependencies({
+            signals,
+            onWorkbench: (args): JsonObject => {
+              if (args[0] === "list-unmatched-scan-pairs")
+                return {
+                  batches: batchIds.map((id) => ({
+                    afterScanId: id,
+                    afterFindings: [{ occurrenceId: id }],
+                    beforeScans: [
+                      {
+                        scanId: `before-${id}`,
+                        findings: [{ occurrenceId: `before-${id}` }],
+                      },
+                    ],
+                  })),
+                };
+              const id = args[4]!;
+              saveAttempts.push(id);
+              if (outcome === "save-failure" && id === "last")
+                throw new Error("Synthetic fatal comparison save failure");
+              saved.push(id);
+              return {};
+            },
+            onMatch: async (input) => {
+              await nextTurn();
+              const id = input.after[0]!.occurrenceId;
+              matched.push(id);
+              if (
+                outcome === "all-failed" ||
+                (outcome === "last-failed"
+                  ? id === "last"
+                  : outcome !== "normal" && id === "warning")
+              )
+                throw new Error("Synthetic matching failure");
+              if (outcome === "canceled" && id === "last")
+                signals.emit("SIGINT");
+              return { matches: [], uncertain: [] };
+            },
+          }),
+        );
+        await nextTurn();
+        expect(matched).toEqual(batchIds);
+        expect(warningWrites).toBe(outcome === "normal" ? 0 : 1);
+        expect(stderr.listenerCount("error")).toBe(0);
+        expect(
+          [...signals.listeners.values()].every(
+            (listeners) => listeners.size === 0,
+          ),
+        ).toBe(true);
+        if (
+          outcome === "normal" ||
+          outcome === "mixed" ||
+          outcome === "last-failed"
+        ) {
+          expect(exitCode).toBe(0);
+          const result = JSON.parse(stdout.text());
+          if (outcome === "normal") {
+            expect(saved).toEqual(["first", "warning", "last"]);
+            expect(result).not.toHaveProperty("unmatchedBatches");
+          } else {
+            expect(saved).toEqual(
+              outcome === "last-failed"
+                ? ["first", "warning"]
+                : ["first", "last"],
+            );
+            expect(result).toMatchObject({
+              matchedPairs: 2,
+              unmatchedBatches: 1,
+            });
+          }
+        } else {
+          expect(exitCode).toBe(outcome === "canceled" ? 130 : 2);
+          expect(stdout.text()).toBe("");
+          expect(saved).toEqual(outcome === "all-failed" ? [] : ["first"]);
+          expect(saveAttempts).toEqual(
+            outcome === "save-failure"
+              ? ["first", "last"]
+              : outcome === "canceled"
+                ? ["first"]
+                : [],
+          );
+        }
+      } finally {
+        stderr.destroy();
+      }
+    },
+  );
+
+  test("reports the underlying failure when no batch could be matched", async () => {
+    const failure = new Error("Synthetic matching service unavailable");
+    const saves: string[] = [];
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["scans", "match", "--all", "--json"],
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            if (args[0] !== "list-unmatched-scan-pairs") saves.push(args[0]!);
+            return {
+              batches: [
+                {
+                  afterScanId: "after",
+                  afterFindings: [{ occurrenceId: "after" }],
+                  beforeScans: [
+                    {
+                      scanId: "before",
+                      findings: [{ occurrenceId: "before" }],
+                    },
+                  ],
+                },
+              ],
+            };
+          },
+          onMatch: async () => {
+            throw failure;
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(saves).toEqual([]);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(failure.message);
+  });
+
+  test("fails on a later comparison save after earlier comparisons were persisted", async () => {
+    const saved: string[] = [];
+    const matched: string[] = [];
+    const failure = new Error("Synthetic workbench write failed");
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["scans", "match", "--all", "--json"],
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            if (args[0] === "list-unmatched-scan-pairs")
+              return {
+                batches: [
+                  {
+                    afterScanId: "after",
+                    afterFindings: [{ occurrenceId: "after" }],
+                    beforeScans: ["first", "second"].map((id) => ({
+                      scanId: id,
+                      findings: [{ occurrenceId: id }],
+                    })),
+                  },
+                  {
+                    afterScanId: "later",
+                    afterFindings: [{ occurrenceId: "later" }],
+                    beforeScans: [
+                      {
+                        scanId: "third",
+                        findings: [{ occurrenceId: "third" }],
+                      },
+                    ],
+                  },
+                ],
+              };
+            saved.push(args[2]!);
+            if (saved.length === 2) throw failure;
+            return {};
+          },
+          onMatch: async (input) => {
+            matched.push(input.after[0]!.occurrenceId);
+            return { matches: [], uncertain: [] };
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(saved).toEqual(["first", "second"]);
+    expect(matched).toEqual(["after"]);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(failure.message);
+  });
+
+  test.each([
+    ["matching", "SIGINT", 130],
+    ["save", "SIGTERM", 143],
+  ] as const)(
+    "preserves %s cancellation after an earlier batch was saved",
+    async (phase, signal, expectedExit) => {
+      const signals = new FakeSignals();
+      const saved: string[] = [];
+      const matched: string[] = [];
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["scans", "match", "--all", "--json"],
+          dependencies({
+            signals,
+            onWorkbench: (args, _input, observedSignal): JsonObject => {
+              if (args[0] === "list-unmatched-scan-pairs")
+                return {
+                  batches: ["first", "interrupted", "last"].map((id) => ({
+                    afterScanId: id,
+                    afterFindings: [{ occurrenceId: id }],
+                    beforeScans: [
+                      {
+                        scanId: `before-${id}`,
+                        findings: [{ occurrenceId: `before-${id}` }],
+                      },
+                    ],
+                  })),
+                };
+              saved.push(args[4]!);
+              if (phase === "save" && args[4] === "interrupted") {
+                signals.emit(signal);
+                expect(observedSignal?.aborted).toBe(true);
+                throw new Error("Synthetic canceled save");
+              }
+              return {};
+            },
+            onMatch: async (input, options) => {
+              const id = input.after[0]!.occurrenceId;
+              matched.push(id);
+              if (phase === "matching" && id === "interrupted") {
+                signals.emit(signal);
+                expect(options?.signal?.aborted).toBe(true);
+                throw new Error("Synthetic canceled matching");
+              }
+              return { matches: [], uncertain: [] };
+            },
+          }),
+        ),
+      ).toBe(expectedExit);
+      expect(matched).toEqual(["first", "interrupted"]);
+      expect(saved).toEqual(
+        phase === "save" ? ["first", "interrupted"] : ["first"],
+      );
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("Saved comparisons are preserved");
+      expect(stderr.text()).not.toContain("warning:");
+      expect(
+        [...signals.listeners.values()].every(
+          (listeners) => listeners.size === 0,
+        ),
+      ).toBe(true);
+    },
+  );
 
   test("preserves confirmed groups and related pairs while matching all scans", async () => {
     const before = [{ occurrenceId: "before", findingId: "known-a" }];
