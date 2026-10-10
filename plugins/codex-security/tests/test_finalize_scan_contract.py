@@ -2381,6 +2381,55 @@ The extraction root is not enforced.
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_rejects_remote_unsupported_port(self) -> None:
+        for remote in ("https://example.com:bad/repo", "https://example.com:99999/repo"):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_unsafe_authority(self) -> None:
+        for remote in (
+            "https://exa mple.com/repo",
+            "https://example.com>/repo",
+            "https://exa^mple.com/repo",
+            "https://exa|mple.com/repo",
+            "https://:8022/repo",
+            "https://a:b:80/repo",
+            "https://[::1/repo",
+            "https://[example]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_bare_userinfo_separator(self) -> None:
+        self.manifest["scan"]["target"]["remote"] = "https://@example.com/repo"
+        self.write_scan()
+        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
+            FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_seals_remote_port_and_ipv6_authority(self) -> None:
+        for remote in (
+            "https://example.com:8022/repo",
+            "https://example.com:/repo",
+            "https://[::1]:8022/repo",
+            "https://[::ffff:1.2.3.4]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir)
+                manifest = self.read_json("scan-manifest.json")
+                self.assertEqual(manifest["scan"]["target"]["remote"], remote)
+
     def test_rejects_repository_root_finding_location(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "."
         self.write_scan()

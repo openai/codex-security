@@ -9,6 +9,7 @@ import csv
 import errno
 import hashlib
 import io
+import ipaddress
 import json
 import math
 import os
@@ -67,6 +68,7 @@ RFC3339_RE = re.compile(
     re.ASCII,
 )
 REMOTE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+REMOTE_UNSAFE_HOST_RE = re.compile(r"[\s<>^|]")
 GITHUB_HASH_BLOCK_SIZE = 100
 GITHUB_HASH_MOD = 37
 GITHUB_HASH_MASK = (1 << 64) - 1
@@ -870,13 +872,35 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 def _validate_remote(remote: str, context: str) -> None:
     if REMOTE_CONTROL_RE.search(remote):
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
-    parsed = urlsplit(remote)
+    try:
+        parsed = urlsplit(remote)
+    except ValueError as exc:
+        # urlsplit rejects authorities with unbalanced brackets.
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
     if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+    if "@" in parsed.netloc or parsed.query or parsed.fragment:
         raise ContractError(
             f"{context}: remote URL must not contain credentials, query, or fragment"
         )
+    # Mirrors the authority rules of the WHATWG URL parser the SDK reader applies.
+    authority = parsed.netloc
+    if authority.startswith("["):
+        try:
+            ipaddress.IPv6Address(authority.partition("]")[0][1:])
+        except ValueError as exc:
+            raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
+        authority = authority.partition("]")[2]
+        if authority and not authority.startswith(":"):
+            raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
+    port = authority.partition(":")[2]
+    hostname = parsed.hostname
+    if (
+        not hostname
+        or REMOTE_UNSAFE_HOST_RE.search(hostname)
+        or (port and (not port.isascii() or not port.isdigit() or int(port) > 65535))
+    ):
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
 
 
 def parse_timestamp(value: str) -> datetime:
