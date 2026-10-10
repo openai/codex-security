@@ -405,12 +405,6 @@ describe("CodexSecurity orchestration", () => {
                   },
                 },
               });
-              const codexConfig = await readFile(
-                join(codexHome!, "config.toml"),
-                "utf8",
-              );
-              expect(codexConfig).not.toContain("model_reasoning_summary");
-              expect(codexConfig).not.toContain("show_raw_agent_reasoning");
               expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
               expect(options.config).toHaveProperty("projects");
               expect(options.config).toHaveProperty(
@@ -519,6 +513,12 @@ describe("CodexSecurity orchestration", () => {
       await client.run(repository);
       expect(capturedConfigPath).toBeDefined();
       expect(capturedCodexHome).toBeDefined();
+      const persistentConfig = await readFile(
+        join(capturedCodexHome!, "config.toml"),
+        "utf8",
+      );
+      expect(persistentConfig).not.toContain("model_reasoning_summary");
+      expect(persistentConfig).not.toContain("show_raw_agent_reasoning");
     } finally {
       await client.close();
     }

@@ -74,6 +74,7 @@ function git(repository: string, ...args: string[]): string {
 async function repository(
   root: string,
   name: string,
+  objectFormat = "sha1",
 ): Promise<{ path: string; revision: string }> {
   const path = join(root, name);
   await mkdir(join(path, "src"), { recursive: true });
@@ -81,7 +82,7 @@ async function repository(
     join(path, "src", "app.ts"),
     `export const name = "${name}";\n`,
   );
-  git(path, "init", "-q");
+  git(path, "init", "-q", `--object-format=${objectFormat}`);
   git(path, "add", ".");
   git(
     path,
@@ -3034,10 +3035,20 @@ describe("multiscan", () => {
   });
 
   test("removes mixed-case repository Git variables before cloning", async () => {
+    if (
+      runTestInSubprocess(
+        "./tests-ts/multiscan.test.ts",
+        "removes mixed-case repository Git variables before cloning",
+      )
+    )
+      return;
     const { paths } = await repositoryFixture("isolated");
     const trace = join(paths.root, "git-events.jsonl");
 
     const repositoryVariables = [
+      "GIT_DIR",
+      "GIT_COMMON_DIR",
+      "gIt_Replace_Ref_Base",
       "Git_Dir",
       "gIt_Work_Tree",
       "Git_Index_File",
@@ -3056,11 +3067,19 @@ describe("multiscan", () => {
       }
       process.env["GIT_TRACE2_EVENT"] = trace;
       process.env["GIT_TRACE2_ENV_VARS"] = repositoryVariables.join(",");
+      const inherited = repositoryVariables.map((name) => process.env[name]);
 
       const summary = await runMultiscan(
         options(paths, client(completeRunWithoutAwait)),
       );
       expect(summary).toMatchObject({ completed: 1, failed: 0 });
+      const resumed = await runMultiscan(
+        options(paths, client(completeRunWithoutAwait)),
+      );
+      expect(resumed).toMatchObject({ completed: 1, skipped: 1, failed: 0 });
+      expect(repositoryVariables.map((name) => process.env[name])).toEqual(
+        inherited,
+      );
 
       const leakedVariables = parseJsonLines<{
         event: string;
@@ -3456,3 +3475,37 @@ describe("multiscan", () => {
     ]);
   });
 });
+
+test.each(["sha1", "sha256"])(
+  "bulk checkout preserves %s object format despite Git defaults",
+  async (objectFormat) => {
+    const name = `bulk checkout preserves ${objectFormat} object format despite Git defaults`;
+    if (runTestInSubprocess(fileURLToPath(import.meta.url), name)) return;
+    const paths = await fixture();
+    const repo = await repository(paths.root, "source", objectFormat);
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
+    );
+    const run = mock(async (checkout: string, scanOptions = {}) => {
+      expect(git(checkout, "rev-parse", "--show-object-format")).toBe(
+        objectFormat,
+      );
+      return completeRun(checkout, scanOptions);
+    });
+    const previous = process.env["GIT_DEFAULT_HASH"];
+    process.env["GIT_DEFAULT_HASH"] =
+      objectFormat === "sha1" ? "sha256" : "sha1";
+    try {
+      const result = await runMultiscan(options(paths, client(run)));
+      expect(result.failed).toBe(0);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(process.env["GIT_DEFAULT_HASH"]).toBe(
+        objectFormat === "sha1" ? "sha256" : "sha1",
+      );
+    } finally {
+      if (previous === undefined) delete process.env["GIT_DEFAULT_HASH"];
+      else process.env["GIT_DEFAULT_HASH"] = previous;
+    }
+  },
+);

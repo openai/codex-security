@@ -129,6 +129,8 @@ describe("bundled plugin build", () => {
         "reserved_artifact_paths.json",
         "codex_profile.mjs",
         "codex_profile.d.mts",
+        "codex_session.mjs",
+        "codex_session.d.mts",
       ]) {
         await writeFixture(
           source,

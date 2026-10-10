@@ -41,7 +41,8 @@ import {
   type ScanObserverName,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { copyCompletedScan } from "./plugin-root.js";
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
+import { collectResult } from "../src/scan-publication.js";
 import { throwing } from "./support/errors.js";
 
 import {
@@ -1692,10 +1693,31 @@ test.each([
   },
 );
 
+function collectCompletedResult(scanDir: string) {
+  return collectResult(
+    {
+      scanDir,
+      pluginRoot: PLUGIN_ROOT,
+      signal: new AbortController().signal,
+      expectation: {
+        repository: "/repository",
+        repositoryRevision: null,
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: "0.1.0",
+      },
+    },
+    {
+      threadId: "completed-thread",
+      turnResult: { status: "completed", usage: null },
+    },
+  );
+}
+
 test("missing required artifacts remain incomplete scans", async () => {
   const scanDir = await copyCompletedScan(await temporaryDirectory());
   await rm(join(scanDir, "report.md"));
-  await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+  await expect(collectCompletedResult(scanDir)).rejects.toMatchObject({
     name: IncompleteScanError.name,
     message:
       "Codex Security scan completed without required artifacts: report.md",
@@ -1707,7 +1729,7 @@ test.skipIf(process.platform === "win32")(
   async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     await chmod(scanDir, 0o755);
-    await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+    await expect(collectCompletedResult(scanDir)).rejects.toMatchObject({
       name: ContractValidationError.name,
       message: expect.stringContaining("chmod 700"),
       cause: expect.any(Error),

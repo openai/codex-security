@@ -120,12 +120,6 @@ export function resolveNativeParentSandbox(
     }
   }
 
-  if (literalFilesystemDenies.some((path) => filesystemDenies.includes(path))) {
-    throw unsupportedParentSandbox(
-      "literal path and glob denials with the same key cannot be preserved",
-    );
-  }
-
   if (!hasRootRead) {
     throw unsupportedParentSandbox(
       "the parent restricts readable paths beyond the supported ordinary scan sandbox",

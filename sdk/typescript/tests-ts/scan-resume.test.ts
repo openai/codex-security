@@ -1778,6 +1778,8 @@ test("resumed Bedrock scans retain provider context for the account advisory", a
   expect(code).not.toBe(0);
   expect(parentResumed).toBe(true);
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
+  expect(stderr.text()).toContain(`scans show ${f.scanId}`);
+  expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
 });
 
 test("resuming Deep Scan includes archived spending before starting another turn", async () => {

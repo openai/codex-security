@@ -1133,6 +1133,7 @@ describe("live scan cost tracking", () => {
           parent: "scan-thread",
         });
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        await expect(tracker.refresh()).rejects.toMatchObject({ code });
         denied = false;
         const snapshot = await tracker.stop();
         expect(snapshot.cost?.inputTokens).toBe(1_000_030);

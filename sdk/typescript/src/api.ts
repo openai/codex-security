@@ -331,6 +331,12 @@ export interface ScanOptions extends ScanSettings {
   ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  /** @internal Authoritative registration receipt for CLI scan navigation. */
+  onScanRegistered?: (scan: {
+    scanId: string;
+    scanDir: string;
+    startedAt?: string;
+  }) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onScanStarted?: () => void;
@@ -408,6 +414,7 @@ export type ScanObserverName =
   | "onCost"
   | "onOutputArchived"
   | "onOutputDirReady"
+  | "onScanRegistered"
   | "onScanStarted"
   | "onTrustedAccessStatus"
   | "onReconnect"
@@ -1532,6 +1539,16 @@ export class CodexSecurity {
             workbench: (args, input) => workbench(readOptions, args, input),
           });
           if (registered.sealed) {
+            notifyObserver(
+              options,
+              "onScanRegistered",
+            )({
+              scanId: registered.scanId,
+              scanDir,
+              ...(typeof registered.registration["startedAt"] === "string"
+                ? { startedAt: registered.registration["startedAt"] }
+                : {}),
+            });
             notifyObserver(options, "onOutputDirReady")(scanDir);
             const model = scanModel({
               ...DEFAULT_CODEX_CONFIG,
@@ -1786,6 +1803,16 @@ export class CodexSecurity {
         targetRevision,
         sealed,
       } = registered;
+      notifyObserver(
+        options,
+        "onScanRegistered",
+      )({
+        scanId: registered.scanId,
+        scanDir,
+        ...(typeof registered.registration["startedAt"] === "string"
+          ? { startedAt: registered.registration["startedAt"] }
+          : {}),
+      });
       if (!sealed && typeof registered.resumeThreadId !== "string")
         activeScan = { id: scanId, options: workbenchOptions };
       if (typeof registration["archivedScanDir"] === "string") {
@@ -3746,6 +3773,16 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      notifyObserver(
+        options,
+        "onScanRegistered",
+      )({
+        scanId,
+        scanDir,
+        ...(typeof registration["startedAt"] === "string"
+          ? { startedAt: registration["startedAt"] }
+          : {}),
+      });
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           options,

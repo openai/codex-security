@@ -26,6 +26,7 @@ import {
 import {
   enclosingGitWorktreeRoot,
   gitMarkerRoot,
+  isGitMetadataDirectory,
   gitProtectionRoots,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -741,6 +742,35 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
   expect(
     await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
   ).toBe(repo);
+});
+
+test("ordinary storage folders with malformed config are not Git metadata", async () => {
+  const root = await temporaryDirectory();
+  await mkdir(join(root, "objects"));
+  await mkdir(join(root, "refs"));
+  await writeFile(join(root, "config"), "ordinary application configuration\n");
+  expect(await isGitMetadataDirectory(root)).toBe(false);
+  expect(await normalizeRepository(root)).toBe(await realpath(root));
+});
+
+test("invalid diff refs retain the Git diagnostic", async () => {
+  const repo = await repository();
+  const original = spawnSync(
+    "git",
+    [
+      "-C",
+      repo,
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      "missing-fixture-ref^{commit}",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(original.status).not.toBe(0);
+  await expect(
+    normalizeTarget(repo, DiffTarget.refs({ base: "missing-fixture-ref" })),
+  ).rejects.toThrow(original.stderr.trim());
 });
 
 test("executable protection retains lexical and canonical checkout roots", async () => {
