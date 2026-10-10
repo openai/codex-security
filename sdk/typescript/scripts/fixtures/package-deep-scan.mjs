@@ -62,6 +62,11 @@ try {
   if (process.platform === "win32")
     await copyFile(process.execPath, executable);
   await chmod(executable, 0o700);
+  if (process.platform === "win32") {
+    // The direct SDK engine launches its preflight from this process too.
+    process.env.PACKAGE_DEEP_EXECUTABLE = executable;
+    await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
+  }
 
   await runInstalledSdk(installedPlugin, executable);
   await runDetachedPlugin(detachedPlugin, executable);
@@ -386,43 +391,16 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
-      // Replace only the parent model's tool choice. The installed SDK registers
-      // and finalizes the scan; the packaged MCP runs the real Deep lifecycle.
-      createCodex({ env, apiKey }) {
+      // The installed SDK runs the direct engine without a parent model turn.
+      createCodex() {
         return {
           startThread() {
             return {
               id: owner,
               async runStreamed() {
-                return {
-                  events: (async function* () {
-                    yield { type: "thread.started", thread_id: owner };
-                    scanId = env.CODEX_SECURITY_SCAN_ID;
-                    // The pinned SDK maps its apiKey option to this child variable.
-                    const rpc = await server(f, {
-                      ...env,
-                      ...(apiKey ? { CODEX_API_KEY: apiKey } : {}),
-                    });
-                    try {
-                      const result = await rpc.call(
-                        "start_codex_security_deep_scan",
-                        { scanId },
-                        metadata(f, owner),
-                      );
-                      await assertDraft(result.manifestPath);
-                    } finally {
-                      await rpc.close();
-                    }
-                    yield {
-                      type: "turn.completed",
-                      usage: {
-                        input_tokens: 1,
-                        cached_input_tokens: 0,
-                        output_tokens: 1,
-                      },
-                    };
-                  })(),
-                };
+                assert.fail(
+                  "The direct engine must not start a parent model turn.",
+                );
               },
             };
           },
@@ -439,6 +417,9 @@ async function runInstalledSdk(pluginRoot, executable) {
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
       outputDir: join(f.directory, "output"),
+      onScanRegistered(scan) {
+        scanId = scan.scanId;
+      },
     });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
@@ -452,7 +433,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  await assertExecutions(f, scanId, 4);
+  await assertExecutions(f, scanId, 5);
 }
 
 async function assertDraft(path) {
