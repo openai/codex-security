@@ -1,5 +1,13 @@
 import { hash } from "node:crypto";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -1002,53 +1010,172 @@ test("Node reads a large complete named collection without a function argument l
   });
 });
 
-test("Unicode member reordering preserves readback equality and historical checkpoint filenames", async () => {
-  const input = {
-    source_finding_id: "unicode-evidence",
-    evidence: {
-      title: "Unicode vendor metadata",
-      severity: "high",
-      source_data: { é: "precomposed", "e\u0301": "combining", Z: 1, a: 2 },
-    },
-  };
-  const f = await cloudFixture([input]);
-  const deps = {
-    ...f.deps,
-    environment: {
-      ...f.environment,
-      CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
-    },
-  };
-  const prepared = await prepareExternalPublication(f.file, f.options, deps);
-  f.state.failReadback = true;
-  let failure: ExternalPublicationError | undefined;
-  try {
-    await prepared.publish();
-  } catch (error) {
-    expect(error).toBeInstanceOf(ExternalPublicationError);
-    failure = error as ExternalPublicationError;
-  }
-  // Frozen from the original publisher's production checkpoint format.
-  expect(failure?.result.savedSubmission).toBe(
-    join(
+test.each([false, true])(
+  "Unicode readback resumes historical checkpoints (canonical present: %j)",
+  async (keepCanonical) => {
+    const input = {
+      source_finding_id: "unicode-evidence",
+      evidence: {
+        title: "Unicode vendor metadata",
+        severity: "high",
+        source_data: { é: "precomposed", "e\u0301": "combining", Z: 1, a: 2 },
+      },
+    };
+    const f = await cloudFixture([input]);
+    const deps = {
+      ...f.deps,
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+      },
+    };
+    const prepared = await prepareExternalPublication(f.file, f.options, deps);
+    f.state.failReadback = true;
+    let failure: ExternalPublicationError | undefined;
+    try {
+      await prepared.publish();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ExternalPublicationError);
+      failure = error as ExternalPublicationError;
+    }
+    const pendingPath = failure!.result.savedSubmission!;
+    const saved = await readFile(pendingPath, "utf8");
+    // Frozen from the original publisher's production checkpoint format.
+    const historicalPath = join(
       f.environment.CODEX_SECURITY_STATE_DIR,
       "external-finding-publications",
       "ddeb8ec0be8765f89ef5aeb759dde7753d7ff72f8b8bb25f89a591b045ad40ae.pending.json",
-    ),
+    );
+    expect(pendingPath).not.toBe(historicalPath);
+    if (keepCanonical) {
+      const legacy = JSON.parse(saved);
+      legacy.requests[0].request_id = "synthetic-older-request";
+      legacy.receipts = [];
+      await writeFile(historicalPath, JSON.stringify(legacy));
+    } else {
+      await rename(pendingPath, historicalPath);
+    }
+    const evidence = structuredClone(prepared.preview.findings[0]!.evidence);
+    evidence.source_data = Object.fromEntries(
+      Object.entries(evidence.source_data!).reverse(),
+    );
+    f.state.readbackEvidence = evidence;
+    f.state.failReadback = false;
+    const retry = await prepareExternalPublication(f.file, f.options, deps);
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(prepared.preview.requests);
+    expect(await readFile(pendingPath, "utf8")).toBe(saved);
+    expect(
+      (
+        await readdir(
+          join(
+            f.environment.CODEX_SECURITY_STATE_DIR,
+            "external-finding-publications",
+          ),
+        )
+      ).includes(historicalPath.split(/[\\/]/u).at(-1)!),
+    ).toBe(keepCanonical);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts).toHaveLength(1);
+    expect(f.posts[0]!.items[0]!.evidence.source_data).toEqual(
+      input.evidence.source_data,
+    );
+  },
+);
+
+test("Node resumes the same uncertain publication across locales and Unicode key order", async () => {
+  const input = {
+    source_finding_id: "locale-evidence",
+    evidence: {
+      title: "Synthetic Unicode metadata",
+      severity: "high",
+      source_data: { z: 1, ä: 2, é: "precomposed", "e\u0301": "combining" },
+    },
+  };
+  const f = await cloudFixture([input]);
+  const bundle = await mkdtemp(join(import.meta.dir, "..", ".wiz-locale-"));
+  directories.push(bundle);
+  const runner = join(bundle, "publication.mts");
+  await writeFile(
+    runner,
+    `
+    import { prepareExternalPublication } from "../src/external-findings-publish.js";
+    // Select ICU collation explicitly so this also exercises both locales on
+    // Windows hosts whose process default does not follow LANG.
+    const collation = new Intl.Collator(process.argv[2]);
+    String.prototype.localeCompare = function(other) {
+      return collation.compare(String(this), other);
+    };
+    const prepared = await prepareExternalPublication(
+      ${JSON.stringify(f.file)}, ${JSON.stringify(f.options)}, {
+        environment: ${JSON.stringify({
+          CODEX_HOME: f.environment.CODEX_HOME,
+          CODEX_SECURITY_STATE_DIR: f.environment.CODEX_SECURITY_STATE_DIR,
+        })},
+        credentials: async () => ({ access_token: "synthetic-token", account_id: "synthetic-account" }),
+        fetch: async (url, options) => {
+          if (options.method === "POST") throw new Error("Synthetic uncertain upload");
+          const body = new URL(url).pathname.endsWith("/repositories")
+            ? { data: [${JSON.stringify(f.destination)}], has_more: false, next: null }
+            : { data: [], has_more: false, next: null };
+          return new Response(JSON.stringify(body));
+        },
+      },
+    );
+    try { await prepared.publish(); } catch (error) {
+      console.log(JSON.stringify({
+        locale: collation.resolvedOptions().locale,
+        resumed: prepared.preview.resumed,
+        requestId: prepared.preview.requests[0].request_id,
+        savedSubmission: error.result.savedSubmission,
+      }));
+    }
+    `,
   );
-  const evidence = structuredClone(prepared.preview.findings[0]!.evidence);
-  evidence.source_data = Object.fromEntries(
-    Object.entries(evidence.source_data!).reverse(),
-  );
-  f.state.readbackEvidence = evidence;
-  f.state.failReadback = false;
-  const retry = await prepareExternalPublication(f.file, f.options, deps);
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).verified).toBe(1);
-  expect(f.posts).toHaveLength(1);
-  expect(f.posts[0]!.items[0]!.evidence.source_data).toEqual(
-    input.evidence.source_data,
-  );
+  const built = await Bun.build({
+    entrypoints: [runner],
+    outdir: bundle,
+    target: "node",
+    format: "esm",
+    packages: "external",
+  });
+  expect(built.success).toBe(true);
+  const run = async (locale: string) => {
+    const child = Bun.spawn(
+      [Bun.which("node")!, built.outputs[0]!.path, locale],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    return JSON.parse(stdout) as {
+      locale: string;
+      resumed: boolean;
+      requestId: string;
+      savedSubmission: string;
+    };
+  };
+  const first = await run("en-US");
+  expect(first.resumed).toBe(false);
+  const second = await run("sv-SE");
+  expect(second.locale).not.toBe(first.locale);
+  expect(second.resumed).toBe(true);
+  expect(second.requestId).toBe(first.requestId);
+  expect(second.savedSubmission).toBe(first.savedSubmission);
+  input.evidence.source_data = Object.fromEntries(
+    Object.entries(input.evidence.source_data).reverse(),
+  ) as typeof input.evidence.source_data;
+  await writeFile(f.file, JSON.stringify([input]));
+  const reordered = await run("en-US");
+  expect(reordered.resumed).toBe(true);
+  expect(reordered.requestId).toBe(first.requestId);
+  expect(reordered.savedSubmission).toBe(first.savedSubmission);
 });
 
 for (const format of ["json", "jsonl"] as const) {
@@ -1314,11 +1441,53 @@ test.each([0, 1, 2])(
     expect(parsed.findings[0]!.evidence.details!.repository).toEqual({
       id: repository.id,
       name: null,
-      url: enterpriseUrl,
+      url: urls[1]!,
     });
     expect(parsed.findings[0]!.evidence.source_data).toEqual(record);
   },
 );
+
+test("equivalent inventory rows preserve publication identity when reordered", async () => {
+  const record = { ...sast, repository: { id: repository.id } };
+  const nodes = [
+    {
+      ...inventoryNode("GITHUB"),
+      repository: {
+        ...repository,
+        name: "Example/Project",
+        url: "https://github.com/Example/Project.git",
+      },
+    },
+    {
+      ...inventoryNode(undefined),
+      repository: { ...repository, url: repositoryUrl },
+    },
+  ];
+  const payload = {
+    data: {
+      sastFindings: { nodes: [record] },
+      versionControlResources: { nodes },
+    },
+  };
+  const f = await cloudFixture(payload);
+  const prepared = await prepareExternalPublication(f.file, f.options, f.deps);
+  f.state.failReadback = true;
+  await expect(prepared.publish()).rejects.toBeInstanceOf(
+    ExternalPublicationError,
+  );
+  nodes.reverse();
+  await writeFile(f.file, JSON.stringify(payload));
+  const retry = await prepareExternalPublication(f.file, f.options, f.deps);
+  expect(retry.preview.findings).toEqual(prepared.preview.findings);
+  expect(retry.preview.findings[0]!.evidence.source_data).toEqual(record);
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.requests[0]!.request_id).toBe(
+    prepared.preview.requests[0]!.request_id,
+  );
+  f.state.failReadback = false;
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toHaveLength(1);
+});
 
 test.each([
   ["GITHUB", "GITLAB"],

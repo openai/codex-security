@@ -344,26 +344,53 @@ export async function prepareExternalPublication(
     codexSecurityStateDirectory(environment),
     "external-finding-publications",
   );
-  const key = hash(
+  const checkpointIdentity = [
+    // Keep existing production checkpoints readable; other deployments must
+    // never share a saved request or receipt with the production default.
+    ...(apiBaseUrl === DEFAULT_CLOUD_BASE_URL ? [] : [apiBaseUrl]),
+    credentials.account_id,
+    destination.id,
+    destination.repo_connector_id,
+    source,
+    parsed.findings,
+  ];
+  const key = hash("sha256", canonicalJson(checkpointIdentity));
+  const pendingPath = join(state, `${key}.pending.json`);
+  const legacyKey = hash(
     "sha256",
-    // Retain the original ordering only for checkpoint filenames so existing
-    // saved requests remain discoverable. Evidence comparisons use a total,
-    // locale-independent key order, including collating-equivalent Unicode keys.
-    canonicalJson(
-      [
-        // Keep existing production checkpoints readable; other deployments must
-        // never share a saved request or receipt with the production default.
-        ...(apiBaseUrl === DEFAULT_CLOUD_BASE_URL ? [] : [apiBaseUrl]),
-        credentials.account_id,
-        destination.id,
-        destination.repo_connector_id,
-        source,
-        parsed.findings,
-      ],
-      (left, right) => left.localeCompare(right),
+    canonicalJson(checkpointIdentity, (left, right) =>
+      left.localeCompare(right),
     ),
   );
-  const pendingPath = join(state, `${key}.pending.json`);
+  if (legacyKey !== key) {
+    const legacyPath = join(state, `${legacyKey}.pending.json`);
+    const legacy = await lstat(legacyPath).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      },
+    );
+    if (legacy) {
+      // Preserve requests staged by the earlier locale-based filename format.
+      // Hold both publication locks while moving the original checkpoint.
+      await withImportLock(state, key, dependencies.signal, async () =>
+        withImportLock(state, legacyKey, dependencies.signal, async () => {
+          const current = await lstat(pendingPath).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return undefined;
+              throw error;
+            },
+          );
+          if (!current)
+            await rename(legacyPath, pendingPath).catch(
+              (error: NodeJS.ErrnoException) => {
+                if (error.code !== "ENOENT") throw error;
+              },
+            );
+        }),
+      );
+    }
+  }
   let saved: SavedSubmission | undefined;
   try {
     const serialized = await readFile(pendingPath, "utf8");
