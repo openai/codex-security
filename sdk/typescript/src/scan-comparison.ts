@@ -10,8 +10,11 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
-import { parse, stringify } from "smol-toml";
-import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
+import {
+  scanCodexHome,
+  type CodexSecuritySurface,
+  type ScanAuthMode,
+} from "./api.js";
 import {
   accountStatus,
   configuredCodexHome,
@@ -25,6 +28,7 @@ import {
   hasCommandAuth,
   inlineToml,
   mergedCodexConfig,
+  readCodexFileProfile,
   normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
   resolveCommandAuthConfig,
@@ -528,10 +532,14 @@ async function startReadOnlyCodexThread(
   thread: ReturnType<ReadOnlyCodex["startThread"]>;
   cleanup?: () => Promise<void>;
 }> {
+  const source = {
+    ...(options.environment ?? process.env),
+    CODEX_HOME: scanCodexHome(options.environment ?? process.env),
+  };
   const config =
     options.config === undefined
       ? undefined
-      : await mergedCodexConfig(options.config);
+      : await mergedCodexConfig(options.config, configuredCodexHome(source));
   const configuredModel =
     config === undefined ? undefined : scanModelConfiguration(config);
   const model = options.model ?? configuredModel?.model;
@@ -552,16 +560,24 @@ async function startReadOnlyCodexThread(
   if (options.codex !== undefined) {
     return { thread: options.codex.startThread(threadOptions) };
   }
-  const source = options.environment ?? process.env;
   const homeConfig = await readCodexHomeConfig(source, options.signal);
   const homeExecutionConfig = resolveCodexProfile(homeConfig);
   normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
   const providerConfig = resolveCommandAuthConfig(
-    deepMerge(homeConfig, parse(stringify(config ?? {})) as JsonObject),
+    deepMerge(
+      structuredClone(homeExecutionConfig),
+      resolveCodexProfile(config ?? {}),
+    ),
     configuredCodexHome(source),
   );
   const suppliedConfig = resolveCodexProfile(
-    options.config?.codexOverrides ?? {},
+    deepMerge(
+      await readCodexFileProfile(
+        options.config?.codexOverrides ?? {},
+        configuredCodexHome(source),
+      ),
+      options.config?.codexOverrides ?? {},
+    ),
   );
   normalizeLegacyWindowsSandboxOverride(suppliedConfig);
   const windows =
@@ -598,7 +614,7 @@ async function startReadOnlyCodexThread(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
   const environment = await comparisonEnvironment(
-    options.environment,
+    source,
     accountStatus,
     options.signal,
     undefined,

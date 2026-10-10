@@ -117,6 +117,52 @@ function policyDependencies(
 }
 
 describe("policy CLI", () => {
+  test.each(["openai", "openrouter", "amazon-bedrock", "command"] as const)(
+    "uses the file-profile %s provider before interactive policy authentication",
+    async (provider) => {
+      const f = await fixture();
+      const home = join(f.root, "profile-home");
+      await mkdir(home, { mode: 0o700 });
+      await writeFile(
+        join(home, "review.config.toml"),
+        provider === "command"
+          ? 'model_provider = "synthetic-command"\n[model_providers.synthetic-command]\nname = "Synthetic"\nwire_api = "responses"\n[model_providers.synthetic-command.auth]\ncommand = "synthetic-auth"\n'
+          : `model_provider = "${provider}"\n`,
+      );
+      const draft = await f.generate();
+      let authPrompts = 0;
+      const deps = {
+        ...policyDependencies(f, {
+          draft,
+          prompt: prompt({ isInteractive: () => true }),
+        }),
+        environment: {
+          CODEX_HOME: home,
+          OPENAI_API_KEY: "synthetic-openai-key",
+        },
+        hasStoredChatGPTSignIn: async () => true,
+        scanAuthenticationPrompt: {
+          isInteractive: () => true,
+          select: async <T>(
+            _message: string,
+            choices: readonly { value: T }[],
+          ) => {
+            authPrompts += 1;
+            return choices[0]!.value;
+          },
+        },
+      };
+      const code = await main(
+        ["policy", "--codex", 'profile="review"'],
+        capture().stream,
+        capture(true).stream,
+        deps,
+      );
+      expect(code).toBe(0);
+      expect(authPrompts).toBe(provider === "openai" ? 1 : 0);
+    },
+  );
+
   test("documents the policy workflow in help", async () => {
     const stdout = captureCli(main, "stdout");
     expect(await stdout.run(["policy", "--help"], dependencies())).toBe(0);

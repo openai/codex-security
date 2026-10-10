@@ -188,6 +188,8 @@ test.each([
   "null profile",
   "profile override",
   "profile only",
+  "file custom only",
+  "file default key",
 ] as const)(
   "concurrent provider snapshots preserve %s credentials",
   async (selection) => {
@@ -213,13 +215,63 @@ test.each([
       for (let index = 0; index < 2; index++) {
         const scan = join(root, `scan-${index}`);
         await mkdir(scan, { mode: 0o700 });
+        const fileProfile = selection.startsWith("file ");
+        const agentFile = fileProfile
+          ? join(sourceHome, `reviewer-${index}.toml`)
+          : join(scan, "reviewer.toml");
+        await writeFile(agentFile, 'model_reasoning_effort = "high"\n');
+        const agents = {
+          max_depth: index + 2,
+          reviewer: {
+            description: `Synthetic reviewer ${index}`,
+            config_file: fileProfile
+              ? `reviewer-${index}.toml`
+              : "reviewer.toml",
+          },
+        };
+        const resolvedAgents = {
+          ...agents,
+          reviewer: { ...agents.reviewer, config_file: agentFile },
+        };
+        const explicitFileSkills = selection === "file default key";
+        const skills = {
+          config: [
+            { path: `skill-${index}/SKILL.md`, enabled: index === 0 },
+            { path: join(scan, "absolute-skill", "SKILL.md"), enabled: true },
+            { path: "~/synthetic-skill/SKILL.md", enabled: false },
+          ],
+        };
+        const resolvedSkills = {
+          config: skills.config.map((skill, skillIndex) =>
+            skillIndex === 0
+              ? {
+                  ...skill,
+                  path: join(
+                    fileProfile && !explicitFileSkills ? sourceHome : scan,
+                    skill.path,
+                  ),
+                }
+              : skill,
+          ),
+        };
+        const providerKey =
+          selection === "file default key"
+            ? "OPENROUTER_API_KEY"
+            : "SYNTHETIC_CUSTOM_API_KEY";
+        const canonicalHeader: Record<string, string> =
+          selection === "root"
+            ? { OPENROUTER_API_KEY: ` synthetic-canonical-header-${index} ` }
+            : {};
         const provider = {
           name: `Synthetic ${index}`,
           base_url: `https://provider-${index}.example.test/v1`,
           wire_api: "responses",
-          env_key: "SYNTHETIC_CUSTOM_API_KEY",
+          env_key: providerKey,
           env_http_headers: {
             "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
+            ...(selection === "root"
+              ? { "X-Synthetic-Canonical": "OPENROUTER_API_KEY" }
+              : {}),
             "X-Synthetic-Missing": "SYNTHETIC_UNSET",
           },
           ...(index === 1
@@ -236,78 +288,122 @@ test.each([
           inherit: "none",
           set: { SYNTHETIC_WORKER_VALUE: `shell-value-${index}` },
         };
-        const providerEnvironment = {
-          SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
+        const providerEnvironment: Record<string, string> = {
+          [providerKey]: fileProfile
+            ? `synthetic-key-${index}`
+            : ` synthetic-key-${index} `,
           SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
+          ...canonicalHeader,
           SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
         };
+        // Authentication trims the selected API key; other inherited provider
+        // variables, including header values, retain their original bytes.
+        const workerEnvironment = {
+          ...providerEnvironment,
+          [providerKey]: providerEnvironment[providerKey]!.trim(),
+        };
+        if (fileProfile) {
+          await writeFile(
+            join(sourceHome, `review-${index}.config.toml`),
+            stringifyToml({
+              model: "gpt-5.6-terra",
+              model_provider: "openrouter",
+              model_providers: {
+                openrouter: provider,
+                "required.gateway": {
+                  name: "Managed selection",
+                  wire_api: "responses",
+                  env_key: "SYNTHETIC_REQUIRED_KEY",
+                },
+              },
+              features: featureOverrides,
+              agents,
+              skills,
+              web_search: webSearch,
+              shell_environment_policy: shellPolicy,
+            }),
+          );
+        }
         clients.push(
           new TestClient(
             {
               pluginPath: PLUGIN_ROOT,
-              codexOverrides: {
-                model_provider: "openrouter",
-                web_search: selection === "root" ? webSearch : "live",
-                shell_environment_policy:
-                  selection === "root" ? shellPolicy : { inherit: "all" },
-                features: selection === "root" ? featureOverrides : {},
-                ...(selection === "profile only"
-                  ? {}
-                  : {
-                      model_providers: {
-                        openrouter:
-                          selection === "profile override"
-                            ? {
-                                ...provider,
-                                env_key: "SYNTHETIC_UNUSED_KEY",
-                              }
-                            : provider,
-                        "required.gateway": {
-                          name: "Managed selection",
-                          wire_api: "responses",
-                          env_key: "SYNTHETIC_REQUIRED_KEY",
-                        },
-                      },
-                    }),
-                ...(selection === "root"
-                  ? {}
-                  : {
-                      profile: "selected",
-                      profiles: {
-                        selected: {
-                          features: featureOverrides,
-                          web_search: webSearch,
-                          shell_environment_policy: shellPolicy,
-                          ...(selection === "null profile"
-                            ? {
-                                model_provider: null,
-                                model: null,
-                                model_reasoning_effort: null,
-                              }
-                            : selection === "selected profile"
-                              ? {}
-                              : {
-                                  model_provider: "openrouter",
-                                  model_providers: {
-                                    openrouter: provider,
-                                    "required.gateway": {
-                                      name: "Managed selection",
-                                      wire_api: "responses",
-                                      env_key: "SYNTHETIC_REQUIRED_KEY",
-                                    },
-                                  },
-                                }),
-                        },
-                      },
-                    }),
-              },
+              codexOverrides: fileProfile
+                ? {
+                    profile: `review-${index}`,
+                    ...(explicitFileSkills ? { skills } : {}),
+                  }
+                : {
+                    model_provider: "openrouter",
+                    web_search: selection === "root" ? webSearch : "live",
+                    shell_environment_policy:
+                      selection === "root" ? shellPolicy : { inherit: "all" },
+                    features: selection === "root" ? featureOverrides : {},
+                    agents: selection === "root" ? agents : {},
+                    skills: selection === "root" ? skills : {},
+                    ...(selection === "profile only"
+                      ? {}
+                      : {
+                          model_providers: {
+                            openrouter:
+                              selection === "profile override"
+                                ? {
+                                    ...provider,
+                                    env_key: "SYNTHETIC_UNUSED_KEY",
+                                  }
+                                : provider,
+                            "required.gateway": {
+                              name: "Managed selection",
+                              wire_api: "responses",
+                              env_key: "SYNTHETIC_REQUIRED_KEY",
+                            },
+                          },
+                        }),
+                    ...(selection === "root"
+                      ? {}
+                      : {
+                          profile: "selected",
+                          profiles: {
+                            selected: {
+                              features: featureOverrides,
+                              agents,
+                              skills,
+                              web_search: webSearch,
+                              shell_environment_policy: shellPolicy,
+                              ...(selection === "null profile"
+                                ? {
+                                    model_provider: null,
+                                    model: null,
+                                    model_reasoning_effort: null,
+                                  }
+                                : selection === "selected profile"
+                                  ? {}
+                                  : {
+                                      model_provider: "openrouter",
+                                      model_providers: {
+                                        openrouter: provider,
+                                        "required.gateway": {
+                                          name: "Managed selection",
+                                          wire_api: "responses",
+                                          env_key: "SYNTHETIC_REQUIRED_KEY",
+                                        },
+                                      },
+                                    }),
+                            },
+                          },
+                        }),
+                  },
             },
             {
               environment: {
-                CODEX_HOME: sourceHome,
+                [selection === "file custom only"
+                  ? "codex_home"
+                  : "CODEX_HOME"]: sourceHome,
                 CODEX_SECURITY_STATE_DIR: state,
                 OPENAI_API_KEY: "synthetic-account-key",
-                OPENROUTER_API_KEY: "synthetic-sdk-account-key",
+                ...(selection === "file custom only"
+                  ? {}
+                  : { OPENROUTER_API_KEY: "synthetic-sdk-account-key" }),
                 ...providerEnvironment,
                 SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
               },
@@ -352,11 +448,26 @@ test.each([
                     await readFile(workerSnapshotPath, "utf8"),
                   );
                   expect(workerSnapshot["worker_runtime"]).toMatchObject({
-                    environment: providerEnvironment,
+                    environment: workerEnvironment,
                     shell_environment_policy: shellPolicy,
                     features: featureOverrides,
+                    agents: resolvedAgents,
+                    skills: resolvedSkills,
                     web_search: webSearch,
                   });
+                  if (fileProfile)
+                    expect(options.config!["model"]).toBe("gpt-5.6-terra");
+                  expect(options.config!["agents"]).toEqual(
+                    fileProfile ? resolvedAgents : agents,
+                  );
+                  expect(options.config!["skills"]).toEqual(
+                    fileProfile && !explicitFileSkills
+                      ? resolvedSkills
+                      : skills,
+                  );
+                  expect(skills.config[0]!.path).toBe(
+                    `skill-${index}/SKILL.md`,
+                  );
                   expect(options.config!["web_search"]).toBe(webSearch);
                   expect(options.config!["shell_environment_policy"]).toEqual(
                     shellPolicy,
@@ -368,7 +479,7 @@ test.each([
                     (workerSnapshot["worker_runtime"] as JsonObject)[
                       "environment"
                     ],
-                  ).toEqual(providerEnvironment);
+                  ).toEqual(workerEnvironment);
                   if (process.platform !== "win32") {
                     expect((await stat(workerSnapshotPath)).mode & 0o777).toBe(
                       0o600,
@@ -381,7 +492,7 @@ test.each([
                     }),
                   ).not.toContain("synthetic-key-");
                   const settings = await workerRuntimeSettings(environment);
-                  expect(settings.environment).toEqual(providerEnvironment);
+                  expect(settings.environment).toEqual(workerEnvironment);
                   expect(settings.config["features"]).toMatchObject(
                     featureOverrides,
                   );
@@ -389,6 +500,7 @@ test.each([
                   expect(settings.config["shell_environment_policy"]).toEqual(
                     shellPolicy,
                   );
+                  expect(settings.config["agents"]).toEqual(resolvedAgents);
                   expect(settings.config["model_provider"]).toBe("openrouter");
                   expect(settings.nativeProfile).toBeDefined();
                   expect(settings.nativeProfile).toBe(options.nativeProfile);
@@ -412,9 +524,15 @@ test.each([
                   expect(actual["http_headers"] ?? {}).toEqual(
                     provider.http_headers ?? {},
                   );
-                  expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
-                    providerEnvironment.SYNTHETIC_CUSTOM_API_KEY,
+                  expect(environment[providerKey]).toBe(
+                    workerEnvironment[providerKey],
                   );
+                  expect(environment["SYNTHETIC_CUSTOM_HEADER"]).toBe(
+                    workerEnvironment["SYNTHETIC_CUSTOM_HEADER"],
+                  );
+                  for (const [name, value] of Object.entries(canonicalHeader)) {
+                    expect(environment[name]).toBe(value);
+                  }
                   const saved = await readFile(
                     join(sharedHome, "config.toml"),
                     "utf8",
@@ -427,6 +545,16 @@ test.each([
             },
           ),
         );
+      }
+      if (selection.startsWith("file ")) {
+        for (const client of clients) {
+          expect(
+            await client.preflight(repository, { mode: "deep" }),
+          ).toMatchObject({
+            model: "gpt-5.6-terra",
+            modelProvider: "openrouter",
+          });
+        }
       }
       // A's snapshot exists before B updates the shared credential home.
       runs.push(clients[0]!.run(repository, { mode: "deep" }));
@@ -457,6 +585,233 @@ test.each([
   },
   30_000,
 );
+
+const fileProviderKeyCases = [
+  ["openrouter", "default", "OPENROUTER_API_KEY"],
+  ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "default", "FIREWORKS_API_KEY"],
+  ["fireworks", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "custom Codex key", "CODEX_API_KEY"],
+  ["openrouter", "other external key", "FIREWORKS_API_KEY"],
+] as const;
+
+test.each(["openrouter", "fireworks"] as const)(
+  "native file profile accepts the %s custom environment key",
+  async (providerId) => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home, { mode: 0o700 });
+    await writeFile(
+      join(home, "review.config.toml"),
+      stringifyToml({
+        model_provider: providerId,
+        model: "synthetic-model",
+        model_providers: {
+          [providerId]: {
+            name: "Synthetic provider",
+            wire_api: "responses",
+            base_url: "https://provider.example.test/v1",
+            env_key: "SYNTHETIC_CUSTOM_API_KEY",
+          },
+        },
+      }),
+    );
+    const selected = await effectiveProvider(
+      { CODEX_HOME: home, SYNTHETIC_CUSTOM_API_KEY: "synthetic-custom-key" },
+      root,
+      [],
+      "review",
+    );
+    expect(selected).toMatchObject({ env_key: "SYNTHETIC_CUSTOM_API_KEY" });
+  },
+  30_000,
+);
+
+for (const mode of ["standard", "deep"] as const) {
+  test.each(fileProviderKeyCases)(
+    `file provider %s preserves %s authentication for ${mode} preflight and children`,
+    async (providerId, _selection, providerKey) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const scan = join(root, "scan");
+      const sourceHome = join(root, "source-home");
+      const report = join(root, "environment.json");
+      await mkdir(repository);
+      await mkdir(scan, { mode: 0o700 });
+      await mkdir(sourceHome, { mode: 0o700 });
+      const plugin = await createPluginProbe(root, report);
+      const canonicalKey = `${providerId.toUpperCase()}_API_KEY`;
+      const headerEnvironment =
+        _selection === "canonical header" ||
+        _selection === "missing custom primary"
+          ? { [canonicalKey]: " synthetic-header-key " }
+          : {};
+      const inheritedEnvironment = {
+        ...(_selection === "custom Codex key" ||
+        _selection === "other external key"
+          ? Object.fromEntries(
+              [
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "OPENROUTER_API_KEY",
+                "FIREWORKS_API_KEY",
+              ]
+                .filter((name) => name !== providerKey)
+                .map((name) => [name, "synthetic-unrelated-key"]),
+            )
+          : {}),
+        ...headerEnvironment,
+        ...(_selection === "missing custom primary"
+          ? {}
+          : { [providerKey]: "synthetic-file-key" }),
+      };
+      const workerEnvironment = {
+        ...headerEnvironment,
+        [providerKey]: "synthetic-file-key",
+      };
+      const provider = {
+        name: "Synthetic file provider",
+        wire_api: "responses",
+        base_url: "https://provider.example.test/v1",
+        env_key: providerKey,
+        ...(_selection === "canonical header"
+          ? { env_http_headers: { "X-Synthetic-Token": canonicalKey } }
+          : {}),
+      };
+      const original = stringifyToml({
+        model: "synthetic-model",
+        model_provider: providerId,
+        model_providers: { [providerId]: provider },
+        features: { shell_tool: false, unified_exec: false },
+      });
+      await writeFile(join(sourceHome, "review.config.toml"), original);
+      let launched = false;
+      const client = new TestClient(
+        { pluginPath: plugin, codexOverrides: { profile: "review" } },
+        {
+          environment: {
+            CODEX_HOME: sourceHome,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            ...inheritedEnvironment,
+          },
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scan,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options) => {
+            launched = true;
+            return {
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  expect(options.apiKey).toBeUndefined();
+                  const environment = options.env!;
+                  expect(environment[providerKey]).toBe("synthetic-file-key");
+                  for (const name of [
+                    "OPENAI_API_KEY",
+                    "CODEX_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    "FIREWORKS_API_KEY",
+                  ]) {
+                    expect(environment[name]).toBe(
+                      name === providerKey || name === canonicalKey
+                        ? inheritedEnvironment[name]
+                        : undefined,
+                    );
+                  }
+                  if (mode === "deep") {
+                    const settings = await (
+                      await loadWorkerSettings(root)
+                    )(environment);
+                    expect(settings.environment).toEqual(workerEnvironment);
+                    expect(
+                      await effectiveProvider(
+                        environment,
+                        repository,
+                        profileConfigOverrides(settings.config),
+                        settings.nativeProfile,
+                      ),
+                    ).toMatchObject(provider);
+                    const status = await nativeRequest(
+                      environment,
+                      repository,
+                      [],
+                      "mcpServerStatus/list",
+                      {
+                        serverName: "codex-security",
+                        detail: "toolsAndAuthOnly",
+                      },
+                    );
+                    expect(status.data[0].toolsError).toBeNull();
+                    expect(status.data[0].tools).toHaveProperty(
+                      "synthetic_environment",
+                    );
+                    expect(
+                      JSON.parse(await readFile(report, "utf8")).recovered,
+                    ).toEqual(workerEnvironment);
+                    const snapshot =
+                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                    if (process.platform !== "win32")
+                      expect((await stat(snapshot)).mode & 0o777).toBe(0o600);
+                    expect(await readFile(snapshot, "utf8")).toContain(
+                      '"synthetic-file-key"',
+                    );
+                  }
+                  for (const text of [
+                    await readFile(
+                      environment["CODEX_SECURITY_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                    JSON.stringify({
+                      config: options.config,
+                      overrides: options.configOverrides,
+                    }),
+                  ]) {
+                    expect(text).not.toContain("synthetic-file-key");
+                    expect(text).not.toContain("synthetic-header-key");
+                  }
+                  throw new Error("synthetic file provider child checked");
+                },
+              }),
+            };
+          },
+        },
+      );
+      try {
+        if (_selection === "missing custom primary") {
+          await expect(client.preflight(repository, { mode })).rejects.toThrow(
+            providerKey,
+          );
+          await expect(client.run(repository, { mode })).rejects.toThrow(
+            providerKey,
+          );
+          expect(launched).toBe(false);
+          return;
+        }
+        const preflight = await client.preflight(repository, { mode });
+        expect(preflight.authentication).toEqual({
+          method: "api_key",
+          source: providerKey,
+          verified: false,
+        });
+        expect(preflight.modelProvider).toBe(providerId);
+        await expect(client.run(repository, { mode })).rejects.toThrow(
+          "synthetic file provider child checked",
+        );
+        expect(launched).toBe(true);
+        expect(
+          await readFile(join(sourceHome, "review.config.toml"), "utf8"),
+        ).toBe(original);
+      } finally {
+        await client.close();
+      }
+    },
+    30_000,
+  );
+}
 
 test("workers preserve native provider inheritance without an explicit selection", async () => {
   const root = await temporaryDirectory();
@@ -822,52 +1177,58 @@ test.each(legacyScanCases)(
         repositoryRevision: async () => "deadbeef",
         createCodex: (options) => {
           launched = true;
-          return codexFactory(async function runStreamed() {
-            const config = parseToml(
-              await readFile(
-                options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                "utf8",
-              ),
-            );
-            expect(
-              resolveCodexProfile(config as JsonObject)["model_provider"],
-            ).toBe(resolveCodexProfile(overrides)["model_provider"]);
-            const endpoint = resolveCodexProfile(overrides)["openai_base_url"];
-            expect(endpoint).toBe(options.config?.["openai_base_url"]);
-            expect(config).not.toHaveProperty("openai_base_url");
-            if (mode === "deep" && endpoint !== undefined) {
-              const worker = parseToml(
-                await readFile(
-                  options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                  "utf8",
-                ),
-              );
-              expect(
-                (worker["worker_runtime"] as JsonObject)["openai_base_url"],
-              ).toBe(endpoint);
-            }
-            if (native.capability === 2 || native.capability === 3) {
-              const worker = parseToml(
-                await readFile(
-                  options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                  "utf8",
-                ),
-              );
-              expect(
-                (worker["worker_runtime"] as JsonObject)["model_provider"],
-              ).toBe("openai");
-            }
-            expect(
-              existsSync(
-                join(
-                  options.env!["CODEX_HOME"]!,
-                  ".codex-security-preflight",
-                  ".codex-security-scan.lock",
-                ),
-              ),
-            ).toBe(false);
-            throw new Error("synthetic compatible scan started");
-          })();
+          return {
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                const config = parseToml(
+                  await readFile(
+                    options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "utf8",
+                  ),
+                );
+                expect(
+                  resolveCodexProfile(config as JsonObject)["model_provider"],
+                ).toBe(resolveCodexProfile(overrides)["model_provider"]);
+                const endpoint =
+                  resolveCodexProfile(overrides)["openai_base_url"];
+                expect(endpoint).toBe(options.config?.["openai_base_url"]);
+                expect(config).not.toHaveProperty("openai_base_url");
+                if (mode === "deep" && endpoint !== undefined) {
+                  const worker = parseToml(
+                    await readFile(
+                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                  );
+                  expect(
+                    (worker["worker_runtime"] as JsonObject)["openai_base_url"],
+                  ).toBe(endpoint);
+                }
+                if (native.capability === 2 || native.capability === 3) {
+                  const worker = parseToml(
+                    await readFile(
+                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                  );
+                  expect(
+                    (worker["worker_runtime"] as JsonObject)["model_provider"],
+                  ).toBe("openai");
+                }
+                expect(
+                  existsSync(
+                    join(
+                      options.env!["CODEX_HOME"]!,
+                      ".codex-security-preflight",
+                      ".codex-security-scan.lock",
+                    ),
+                  ),
+                ).toBe(false);
+                throw new Error("synthetic compatible scan started");
+              },
+            }),
+          };
         },
       },
     );
@@ -1025,68 +1386,74 @@ test.each([
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options) =>
-          codexFactory(async function runStreamed() {
-            expect(options.apiKey).toBe(
-              external ? undefined : "synthetic-account-key",
-            );
-            const status = await nativeRequest(
-              {
-                ...options.env!,
-                ...(options.apiKey === undefined
-                  ? {}
-                  : { CODEX_API_KEY: options.apiKey }),
-              },
-              repository,
-              [],
-              // Tool enumeration starts the real MCP child without a model turn.
-              "mcpServerStatus/list",
-              { serverName: "codex-security", detail: "toolsAndAuthOnly" },
-            );
-            expect(status.data).toHaveLength(1);
-            expect(status.data[0].name).toBe("codex-security");
-            expect(status.data[0].toolsError).toBeNull();
-            expect(status.data[0].tools).toHaveProperty(
-              "synthetic_environment",
-            );
-            expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
-              inherited: {
-                SYNTHETIC_CUSTOM_API_KEY: null,
-                SYNTHETIC_CUSTOM_HEADER: null,
-                SYNTHETIC_REQUIRED_KEY: null,
-                SYNTHETIC_UNUSED_KEY: null,
-              },
-              recovered: {
-                ...providerEnvironment,
-                ...(process.platform === "win32"
-                  ? { [headerKey]: " synthetic-child-header " }
-                  : {}),
-                ...(external ? { [providerKey]: "synthetic-custom-key" } : {}),
-                ...(providerKey === "CODEX_API_KEY"
-                  ? { CODEX_API_KEY: "synthetic-account-key" }
-                  : {}),
-              },
-            });
-            for (const text of [
-              await readFile(
-                options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                "utf8",
-              ),
-              await readFile(
-                join(options.env!["CODEX_HOME"]!, "config.toml"),
-                "utf8",
-              ),
-              JSON.stringify({
-                config: options.config,
-                overrides: options.configOverrides,
-              }),
-            ]) {
-              for (const marker of Object.values(providerEnvironment)) {
-                expect(text).not.toContain(marker);
+        createCodex: (options) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              expect(options.apiKey).toBe(
+                external ? undefined : "synthetic-account-key",
+              );
+              const status = await nativeRequest(
+                {
+                  ...options.env!,
+                  ...(options.apiKey === undefined
+                    ? {}
+                    : { CODEX_API_KEY: options.apiKey }),
+                },
+                repository,
+                [],
+                // Tool enumeration starts the real MCP child without a model turn.
+                "mcpServerStatus/list",
+                { serverName: "codex-security", detail: "toolsAndAuthOnly" },
+              );
+              expect(status.data).toHaveLength(1);
+              expect(status.data[0].name).toBe("codex-security");
+              expect(status.data[0].toolsError).toBeNull();
+              expect(status.data[0].tools).toHaveProperty(
+                "synthetic_environment",
+              );
+              expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
+                inherited: {
+                  SYNTHETIC_CUSTOM_API_KEY: null,
+                  SYNTHETIC_CUSTOM_HEADER: null,
+                  SYNTHETIC_REQUIRED_KEY: null,
+                  SYNTHETIC_UNUSED_KEY: null,
+                },
+                recovered: {
+                  ...providerEnvironment,
+                  ...(process.platform === "win32"
+                    ? { [headerKey]: " synthetic-child-header " }
+                    : {}),
+                  ...(external
+                    ? { [providerKey]: "synthetic-custom-key" }
+                    : {}),
+                  ...(providerKey === "CODEX_API_KEY"
+                    ? { CODEX_API_KEY: "synthetic-account-key" }
+                    : {}),
+                },
+              });
+              for (const text of [
+                await readFile(
+                  options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                  "utf8",
+                ),
+                await readFile(
+                  join(options.env!["CODEX_HOME"]!, "config.toml"),
+                  "utf8",
+                ),
+                JSON.stringify({
+                  config: options.config,
+                  overrides: options.configOverrides,
+                }),
+              ]) {
+                for (const marker of Object.values(providerEnvironment)) {
+                  expect(text).not.toContain(marker);
+                }
               }
-            }
-            throw new Error("synthetic native plugin environment checked");
-          })(),
+              throw new Error("synthetic native plugin environment checked");
+            },
+          }),
+        }),
       },
     );
     try {

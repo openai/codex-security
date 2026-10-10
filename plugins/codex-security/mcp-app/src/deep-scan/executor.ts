@@ -322,7 +322,7 @@ function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
-    ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
+    ...(subagents > 0 ? { "agents.max_threads": subagents } : {}),
     features: {
       ...(isRecord(inheritedFeatures) ? inheritedFeatures : {}),
       multi_agent_v2: {
@@ -517,6 +517,11 @@ async function workerRuntimeSettings(
     [
       "model_reasoning_summary",
       "service_tier",
+      "model_instructions_file",
+      "model_catalog_json",
+      "experimental_compact_prompt_file",
+      "model_verbosity",
+      "web_search",
       "analytics",
       "responses_api_metadata",
     ].map((key) => [key, selected[key]]),
@@ -581,19 +586,50 @@ async function workerRuntimeSettings(
     settings.cyberAccessProgram =
       security.cyber_access_program as CyberAccessProgram;
   }
-  const features = isRecord(config.features) ? config.features : {};
+  const features = {
+    ...(isRecord(config.features) ? config.features : {}),
+    ...(isRecord(profile) && isRecord(profile.features)
+      ? profile.features
+      : {}),
+  };
   settings.config = {
     ...inherited,
     ...workerConfig,
     features: {
       ...Object.fromEntries(
-        ["api_key_cyber_access_programs", "api_key_model_discovery"].map(
-          (key) => [key, features[key]],
-        ),
+        [
+          "api_key_cyber_access_programs",
+          "api_key_model_discovery",
+          "shell_tool",
+          "unified_exec",
+          "code_mode",
+        ].map((key) => [key, features[key]]),
       ),
       ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
     },
   };
+  const parentScanDirectory = environmentVariable(
+    environment,
+    "CODEX_SECURITY_SCAN_DIR",
+    process.platform,
+  );
+  if (parentScanDirectory) {
+    for (const key of [
+      "model_instructions_file",
+      "model_catalog_json",
+      "experimental_compact_prompt_file",
+    ]) {
+      const value = settings.config[key];
+      if (
+        typeof value === "string" &&
+        value.length > 0 &&
+        !isAbsolute(value) &&
+        !value.startsWith("~")
+      ) {
+        settings.config[key] = resolve(parentScanDirectory, value);
+      }
+    }
+  }
   return settings;
 }
 

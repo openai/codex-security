@@ -8,6 +8,7 @@ import {
   inlineToml,
   modelProviderConfigOverride,
   resolveCodexProfile,
+  resolveCommandAuthConfig,
   scanModelConfiguration,
   scanModelProvider,
 } from "../src/config.js";
@@ -31,6 +32,25 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 
 afterEach(cleanup);
+
+test.each([
+  ["absent", undefined],
+  ["null", null],
+])(
+  "omits an optional %s profile selector before native configuration",
+  async (_name, profile) => {
+    const config = await mergedCodexConfig({
+      codexOverrides: {
+        ...(profile === undefined ? {} : { profile }),
+        model: "synthetic-selected-model",
+      },
+    });
+    expect(resolveCodexProfile(config)).toMatchObject({
+      model: "synthetic-selected-model",
+    });
+    expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
+  },
+);
 
 test("inline Codex overrides omit optional null fields like the file writer", async () => {
   for (const value of [null, { args: ["fixture", null] }]) {
@@ -196,6 +216,273 @@ describe("Codex configuration", () => {
       });
       expect(scanModelConfiguration(config)).toEqual(scenario.expected);
     }
+  });
+
+  test("loads a native profile below explicit scan overrides", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model = "profile-model"\nmodel_reasoning_effort = "high"\nmodel_provider = "synthetic"\n',
+    );
+    const config = await mergedCodexConfig(
+      {
+        codexOverrides: {
+          profile: "review",
+          model: "explicit-model",
+        },
+      },
+      home,
+    );
+
+    expect(scanModelConfiguration(config)).toEqual({
+      model: "explicit-model",
+      reasoningEffort: "high",
+    });
+    expect(scanModelProvider(config)).toBe("synthetic");
+    expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
+  });
+
+  test.each(
+    [
+      "model_instructions_file",
+      "experimental_compact_prompt_file",
+      "model_catalog_json",
+      "sqlite_home",
+      "log_dir",
+    ].flatMap((key) =>
+      [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
+    ),
+  )(
+    "resolves file-profile paths before explicit overrides: %j",
+    async ({ key, explicit }) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        `${key} = "instructions.md"\n`,
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined ? {} : { [key]: explicit }),
+      };
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config[key]).toBe(explicit ?? join(home, "instructions.md"));
+      expect(overrides).toEqual({
+        profile: "review",
+        ...(explicit === undefined ? {} : { [key]: explicit }),
+      });
+    },
+  );
+
+  test.each([undefined, "explicit.toml"])(
+    "resolves file-profile agent paths before explicit overrides: %j",
+    async (explicit) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        '[agents.reviewer]\ndescription = "Synthetic reviewer"\nconfig_file = "agents/reviewer.toml"\n',
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { agents: { reviewer: { config_file: explicit } } }),
+      };
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["agents"]).toMatchObject({
+        reviewer: {
+          description: "Synthetic reviewer",
+          config_file: explicit ?? join(home, "agents/reviewer.toml"),
+        },
+      });
+      expect(overrides).toEqual({
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { agents: { reviewer: { config_file: explicit } } }),
+      });
+    },
+  );
+
+  test.each([undefined, "explicit/SKILL.md", "~/native/SKILL.md"])(
+    "preserves native skill path origins before explicit overrides (%s)",
+    async (explicit) => {
+      const home = await temporaryDirectory("codex-security-skill-profile-");
+      await writeFile(
+        join(home, "review.config.toml"),
+        '[[skills.config]]\npath="skill/SKILL.md"\nenabled=false\n',
+      );
+      const config = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            ...(explicit === undefined
+              ? {}
+              : { skills: { config: [{ path: explicit, enabled: true }] } }),
+          },
+        },
+        home,
+      );
+      expect(config["skills"]).toEqual({
+        config: [
+          {
+            path: explicit ?? join(home, "skill/SKILL.md"),
+            enabled: explicit !== undefined,
+          },
+        ],
+      });
+    },
+  );
+
+  test("validates effective native multi-agent settings after file overrides", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      "[features.multi_agent_v2]\nenabled = false\n",
+    );
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "review" } }, home),
+    ).rejects.toThrow("cannot be disabled");
+    await expect(
+      mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            features: { multi_agent_v2: { enabled: true } },
+          },
+        },
+        home,
+      ),
+    ).resolves.toMatchObject({
+      features: { multi_agent_v2: { enabled: true } },
+    });
+  });
+
+  test.each(
+    ["exporter", "trace_exporter", "metrics_exporter"].flatMap((exporter) =>
+      ["otlp-http", "otlp-grpc"].flatMap((protocol) =>
+        [undefined, "explicit-client.key", "~/native/client.key"].map(
+          (explicit) => ({
+            exporter,
+            protocol,
+            explicit,
+          }),
+        ),
+      ),
+    ),
+  )(
+    "preserves OTEL file origins before explicit TLS overrides: %j",
+    async ({ exporter, protocol, explicit }) => {
+      const home = await temporaryDirectory();
+      const paths = {
+        "ca-certificate": "tls/ca.pem",
+        "client-certificate": "tls/client.pem",
+        "client-private-key": "tls/client.key",
+      };
+      await writeFile(
+        join(home, "review.config.toml"),
+        `[otel.${exporter}.${protocol}.tls]\n` +
+          Object.entries(paths)
+            .map(([key, value]) => `${key}=${JSON.stringify(value)}\n`)
+            .join(""),
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : {
+              otel: {
+                [exporter]: {
+                  [protocol]: { tls: { "client-private-key": explicit } },
+                },
+              },
+            }),
+      };
+      const original = structuredClone(overrides);
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["otel"]).toEqual({
+        [exporter]: {
+          [protocol]: {
+            tls: {
+              "ca-certificate": join(home, paths["ca-certificate"]),
+              "client-certificate": join(home, paths["client-certificate"]),
+              "client-private-key":
+                explicit ?? join(home, paths["client-private-key"]),
+            },
+          },
+        },
+      });
+      expect(overrides).toEqual(original);
+    },
+  );
+
+  test.each([undefined, "other helpers", "~/helpers"])(
+    "retains inherited command auth cwd unless the profile overrides it: %s",
+    async (cwd) => {
+      const home = await temporaryDirectory();
+      const config: JsonObject = {
+        profile: "review",
+        model_provider: "synthetic",
+        model_providers: {
+          synthetic: {
+            auth: {
+              command: "./token",
+              cwd: "helpers",
+              refresh_interval_ms: 1000,
+            },
+          },
+        },
+        profiles: {
+          review: {
+            model_providers: {
+              synthetic: {
+                auth: {
+                  refresh_interval_ms: 2000,
+                  ...(cwd === undefined ? {} : { cwd }),
+                },
+              },
+            },
+          },
+        },
+      };
+      const saved = structuredClone(config);
+      expect(
+        resolveCodexProfile(resolveCommandAuthConfig(config, home)),
+      ).toMatchObject({
+        model_providers: {
+          synthetic: {
+            auth: {
+              command: "./token",
+              cwd: cwd?.startsWith("~") ? cwd : join(home, cwd ?? "helpers"),
+              refresh_interval_ms: 2000,
+            },
+          },
+        },
+      });
+      expect(config).toEqual(saved);
+    },
+  );
+
+  test("rejects invalid native profile names and owned settings", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      "[features]\nplugins = false\n",
+    );
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "../review" } }, home),
+    ).rejects.toThrow("plain name");
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "review" } }, home),
+    ).rejects.toThrow("owns plugin loading configuration");
   });
 
   test("ignores model overrides from unselected Codex profiles", async () => {

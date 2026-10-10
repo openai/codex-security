@@ -486,43 +486,66 @@ exec "$SYNTHETIC_REAL_GIT" "$@"
   );
 }
 
-test("keeps renamed-file blame citations at HEAD and inherits SDK model settings", async () => {
-  const repo = await repository();
-  const path = "record [1].ts";
-  await repo.git("mv", "handler.ts", path);
-  await repo.git("commit", "-qm", "Rename record handler");
-  const { codex, calls } = fakeCodex();
-  const report = await suggestOwners(
-    repo.path,
-    [{ ...finding, locations: [{ path, startLine: 2, endLine: 3 }] }],
-    {
-      codex,
-      config: {
-        codexOverrides: {
-          model: "configured-model",
-          model_reasoning_effort: "low",
+test.each(["inline", "CODEX_HOME", "codex_home"])(
+  "keeps renamed-file blame citations at HEAD and inherits SDK model settings via %s",
+  async (homeKey) => {
+    const repo = await repository();
+    const path = "record [1].ts";
+    await repo.git("mv", "handler.ts", path);
+    await repo.git("commit", "-qm", "Rename record handler");
+    const { codex, calls } = fakeCodex();
+    const sourceHome =
+      homeKey === "inline" ? undefined : await temporaryDirectory();
+    if (sourceHome !== undefined)
+      await writeFile(
+        join(sourceHome, "review.config.toml"),
+        'model = "configured-model"\nmodel_reasoning_effort = "low"\n',
+      );
+    const report = await suggestOwners(
+      repo.path,
+      [{ ...finding, locations: [{ path, startLine: 2, endLine: 3 }] }],
+      {
+        codex,
+        ...(sourceHome === undefined
+          ? {}
+          : {
+              environment: {
+                ...process.env,
+                CODEX_HOME: undefined,
+                codex_home: undefined,
+                [homeKey]: sourceHome,
+              },
+            }),
+        config: {
+          codexOverrides:
+            sourceHome === undefined
+              ? {
+                  model: "configured-model",
+                  model_reasoning_effort: "low",
+                }
+              : { profile: "review" },
         },
       },
-    },
-  );
-  expect(report.results[0]!.status).toBe("identified");
-  expect(
-    report.results[0]!.evidence.find(({ kind }) => kind === "blame"),
-  ).toMatchObject({
-    path,
-    commit: await repo.git("rev-parse", "HEAD"),
-    startLine: 2,
-    endLine: 3,
-  });
-  expect(calls[0]!.thread).toMatchObject({
-    model: "configured-model",
-    modelReasoningEffort: "low",
-  });
-  expect(report).toMatchObject({
-    model: "configured-model",
-    reasoningEffort: "low",
-  });
-});
+    );
+    expect(report.results[0]!.status).toBe("identified");
+    expect(
+      report.results[0]!.evidence.find(({ kind }) => kind === "blame"),
+    ).toMatchObject({
+      path,
+      commit: await repo.git("rev-parse", "HEAD"),
+      startLine: 2,
+      endLine: 3,
+    });
+    expect(calls[0]!.thread).toMatchObject({
+      model: "configured-model",
+      modelReasoningEffort: "low",
+    });
+    expect(report).toMatchObject({
+      model: "configured-model",
+      reasoningEffort: "low",
+    });
+  },
+);
 
 test("rejects invented identities and citations and preserves later results", async () => {
   const repo = await repository();

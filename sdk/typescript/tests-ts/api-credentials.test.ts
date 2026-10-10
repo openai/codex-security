@@ -1,3 +1,10 @@
+import {
+  mergedCodexConfig,
+  EXTERNAL_CODEX_PROVIDERS,
+  resolveCodexProfile,
+  type JsonObject,
+} from "../src/config.js";
+import { rejecting } from "./support/errors.js";
 import { nodeCommand } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -6,12 +13,16 @@ import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test, mock } from "bun:test";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
-import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
+import {
+  mockWorkbench,
+  shellEnvironmentReference,
+  TestClient,
+} from "./support/api-client.js";
 import {
   codexFactory,
   completedEvents,
@@ -693,6 +704,104 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toBe(true);
   });
 
+  test.each([
+    ["inline", "account"],
+    ["file", "account"],
+    ["inline", "api-key login"],
+    ["file", "api-key login"],
+    ["inline", "logout"],
+    ["file", "logout"],
+  ])(
+    "loads %s provider metadata for the %s authentication command",
+    async (selection, operation) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "model-home");
+      const state = join(root, "state");
+      const script = join(root, "synthetic-codex.mjs");
+      const observed = join(root, "native-arguments.jsonl");
+      await mkdir(home, { mode: 0o700 });
+      await mkdir(state, { mode: 0o700 });
+      await writeFile(join(home, "auth.json"), '{"auth_mode":"chatgpt"}\n');
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        requires_openai_auth: true,
+        http_headers: { "X-Synthetic": "synthetic-provider-header" },
+      };
+      const configuration = {
+        model_provider: "synthetic_gateway",
+        model_providers: { synthetic_gateway: provider },
+      };
+      await writeFile(
+        join(home, "review.config.toml"),
+        stringify(configuration),
+      );
+      await writeFile(
+        script,
+        `
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(observed)}, JSON.stringify(args) + "\\n");
+if (args.includes("--with-api-key")) {
+  for await (const _chunk of process.stdin) {}
+}
+console.log("Logged in using ChatGPT");
+`,
+      );
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides:
+            selection === "file" ? { profile: "review" } : configuration,
+        },
+        {
+          environment: {
+            PATH: process.env["PATH"],
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: state,
+          },
+          resolveCodexCommand: () => ({ ...nodeCommand(), args: [script] }),
+        },
+      );
+      try {
+        if (operation === "account") {
+          expect((await client.account()).authenticated).toBe(true);
+        } else if (operation === "api-key login") {
+          await client.loginApiKey("synthetic-login-token");
+        } else {
+          await client.logout();
+        }
+        const arguments_ = (await readFile(observed, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as string[])
+          .find((args) =>
+            args.includes(operation === "logout" ? "logout" : "login"),
+          );
+        expect(arguments_).toBeDefined();
+        const definitions = arguments_!.find((argument) =>
+          argument.startsWith("model_providers="),
+        );
+        expect(definitions).toBeDefined();
+        expect(parseToml(definitions!)).toEqual({
+          model_providers: {
+            synthetic_gateway: {
+              name: "Synthetic",
+              wire_api: "responses",
+              requires_openai_auth: true,
+            },
+          },
+        });
+        expect(arguments_!.join("\n")).not.toContain(
+          "synthetic-provider-header",
+        );
+        expect(arguments_!.join("\n")).not.toContain("synthetic-login-token");
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("respects another client's logout when switching from API-key to ChatGPT scans", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -828,6 +937,364 @@ process.exit(process.exitCode ?? 0);
         expect(existsSync(join(stateDir, "codex-home", "auth.json"))).toBe(
           true,
         );
+      } finally {
+        await client.close();
+      }
+    },
+  );
+  test.each([
+    ["openrouter", "generated"],
+    ["fireworks", "generated"],
+    ["openrouter", "file"],
+    ["fireworks", "file"],
+    ["openrouter", "refined"],
+    ["fireworks", "refined"],
+  ] as const)(
+    "preserves %s provider settings in a %s file-profile recipe",
+    async (provider, selection) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const home = join(root, "home");
+      const runtimeHome = join(root, "runtime");
+      const scanDir = join(root, "scan");
+      for (const path of [repository, home, runtimeHome, scanDir])
+        await mkdir(path, { mode: 0o700 });
+      const fileProvider = {
+        ...EXTERNAL_CODEX_PROVIDERS[provider],
+        base_url: "https://file-provider.example.test/v1",
+      };
+      const explicitProvider: JsonObject | undefined =
+        selection === "generated"
+          ? { ...EXTERNAL_CODEX_PROVIDERS[provider] }
+          : selection === "refined"
+            ? {
+                base_url: "https://caller-provider.example.test/v1",
+                http_headers: { "X-Synthetic": "synthetic-caller-header" },
+              }
+            : undefined;
+      await writeFile(
+        join(home, "review.config.toml"),
+        stringify({
+          model: "synthetic-model",
+          ...(selection === "generated"
+            ? {}
+            : {
+                model_provider: provider,
+                model_providers: { [provider]: fileProvider },
+              }),
+        }),
+      );
+      let savedRecipe: JsonObject | undefined;
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides: {
+            profile: "review",
+            model_provider: provider,
+            ...(explicitProvider === undefined
+              ? {}
+              : {
+                  model_providers: { [provider]: explicitProvider },
+                }),
+          },
+        },
+        {
+          environment: {
+            CODEX_HOME: home,
+            [EXTERNAL_CODEX_PROVIDERS[provider].env_key]:
+              "synthetic-provider-key",
+          },
+          resolvePluginPython: async () => "/managed/python",
+          prepareRuntime: async () => preparedRuntime(runtimeHome),
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_runtime, args, input) => {
+            if (args[0] === "register-cli-scan")
+              savedRecipe = JSON.parse(input!).recipe as JsonObject;
+            return mockWorkbench(args, input);
+          },
+          createCodex: async (options) => {
+            const profile = parseToml(
+              await readFile(
+                join(runtimeHome, `${options.nativeProfile}.config.toml`),
+                "utf8",
+              ),
+            );
+            expect(profile["model_providers"]).toEqual({
+              [provider]:
+                selection === "generated"
+                  ? EXTERNAL_CODEX_PROVIDERS[provider]
+                  : { ...fileProvider, ...explicitProvider },
+            });
+            return {
+              startThread: () => ({
+                id: null,
+                runStreamed: rejecting(
+                  "synthetic generated provider scan started",
+                ),
+              }),
+            };
+          },
+        },
+      );
+      try {
+        await expect(client.run(repository)).rejects.toThrow(
+          "synthetic generated provider scan started",
+        );
+        const config = savedRecipe!["config"] as JsonObject;
+        expect(config["profile"]).toBe("review");
+        expect(JSON.stringify(savedRecipe)).not.toContain(
+          "synthetic-caller-header",
+        );
+        const replay = resolveCodexProfile(
+          await mergedCodexConfig({ codexOverrides: config }, home),
+        );
+        expect(replay["model_provider"]).toBe(provider);
+        expect(replay["model_providers"]).toEqual({
+          [provider]:
+            selection === "generated"
+              ? EXTERNAL_CODEX_PROVIDERS[provider]
+              : fileProvider,
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    "direct",
+    "profile",
+    "profile-partial",
+    "native-profile",
+    "native-openrouter",
+    "native-fireworks",
+  ])(
+    "preserves file-profile command authentication through private profiles (%s)",
+    async (selection) => {
+      const profile = selection !== "direct";
+      const nativeProfile = selection.startsWith("native-");
+      const providerName =
+        selection === "native-openrouter"
+          ? "openrouter"
+          : selection === "native-fireworks"
+            ? "fireworks"
+            : "synthetic.provider";
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const home = join(root, "model-home");
+      const state = join(root, "state");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(home);
+      await mkdir(scanDir, { mode: 0o700 });
+      const runtimeHome = join(state, "codex-home");
+      if (profile) await mkdir(runtimeHome, { recursive: true, mode: 0o700 });
+      await writeFile(join(home, "auth.json"), '{"auth_mode":"chatgpt"}\n');
+      const auth = {
+        command: "./synthetic-auth",
+        args: ["token"],
+        refresh_interval_ms: 1000,
+        ...(profile ? { cwd: "helpers" } : {}),
+      };
+      const providerConfig = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth,
+      };
+      if (nativeProfile) {
+        await writeFile(
+          join(home, "compact.md"),
+          "Synthetic compact prompt.\n",
+        );
+        await writeFile(
+          join(home, "review.config.toml"),
+          stringify({
+            model: "native-model",
+            model_reasoning_effort: "high",
+            model_reasoning_summary: "concise",
+            experimental_compact_prompt_file: "compact.md",
+            model_catalog_json: "models.json",
+            agents: {
+              reviewer: {
+                config_file: "agents/reviewer.toml",
+                description: "Synthetic reviewer",
+              },
+            },
+            model_provider: providerName,
+            features: { shell_tool: false, unified_exec: false },
+            model_providers: { [providerName]: providerConfig },
+          }),
+        );
+      }
+      const overrides = {
+        ...(nativeProfile
+          ? { profile: "review" }
+          : profile
+            ? {
+                profile: "review",
+                profiles: {
+                  review: {
+                    model_provider: providerName,
+                    features: { shell_tool: false, unified_exec: false },
+                    ...(selection === "profile-partial"
+                      ? {
+                          model_providers: {
+                            [providerName]: {
+                              auth: { refresh_interval_ms: 2000 },
+                            },
+                          },
+                        }
+                      : {}),
+                  },
+                },
+              }
+            : { model_provider: providerName }),
+        ...(nativeProfile
+          ? {}
+          : { model_providers: { [providerName]: providerConfig } }),
+      };
+      let captured: (CodexOptions & { nativeProfile?: string }) | undefined;
+      let savedRecipe: JsonObject | undefined;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
+        {
+          environment: {
+            CODEX_HOME: relative(process.cwd(), home),
+            CODEX_SECURITY_STATE_DIR: state,
+            ...(profile
+              ? {
+                  OPENAI_API_KEY: "synthetic-ambient-key",
+                  CODEX_API_KEY: "synthetic-other-key",
+                }
+              : {}),
+          },
+          runWorkbench: async (_runtime, args, input) => {
+            if (args[0] === "register-cli-scan") {
+              savedRecipe = JSON.parse(input!).recipe as JsonObject;
+            }
+            return mockWorkbench(args, input);
+          },
+          resolvePluginPython: async () => "/managed/python",
+          ...(profile && !nativeProfile
+            ? {
+                prepareRuntime: async () => ({
+                  ...preparedRuntime(runtimeHome),
+                  configPath: join(root, "scan-preflight.toml"),
+                  credentialsAvailable: false,
+                }),
+              }
+            : {}),
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options) => {
+            captured = options;
+            return {
+              startThread: () => ({
+                id: null,
+                runStreamed: rejecting("synthetic command-auth scan started"),
+              }),
+            };
+          },
+        },
+      );
+      try {
+        const preflight = await client.preflight(repository);
+        expect(preflight.authentication).toEqual({
+          method: "command",
+          verified: false,
+        });
+        expect(JSON.stringify(preflight)).not.toContain("synthetic-auth");
+        if (nativeProfile) {
+          expect(preflight).toMatchObject({
+            model: "native-model",
+            reasoningEffort: "high",
+            modelProvider: providerName,
+          });
+        }
+        await expect(client.run(repository)).rejects.toThrow(
+          "synthetic command-auth scan started",
+        );
+        expect(savedRecipe).toBeDefined();
+        const savedConfig = savedRecipe!["config"] as JsonObject;
+        expect(JSON.stringify(savedConfig)).not.toContain("synthetic-auth");
+        if (nativeProfile) {
+          expect(savedConfig["profile"]).toBe("review");
+          const replay = resolveCodexProfile(
+            await mergedCodexConfig({ codexOverrides: savedConfig }, home),
+          );
+          expect(replay["model_providers"]).toEqual({
+            [providerName]: providerConfig,
+          });
+        }
+        if (profile) {
+          expect(captured?.config?.["features"]).toMatchObject({
+            shell_tool: false,
+            unified_exec: false,
+          });
+          const snapshot = parseToml(
+            await readFile(
+              captured!.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+              "utf8",
+            ),
+          );
+          expect(snapshot["features"]).toMatchObject({
+            shell_tool: false,
+            unified_exec: false,
+          });
+        }
+        expect(captured?.apiKey).toBeUndefined();
+        expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+        expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+        expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
+        const provider = {
+          ...providerConfig,
+          auth: {
+            ...auth,
+            cwd: profile ? join(home, "helpers") : home,
+            ...(selection === "profile-partial"
+              ? { refresh_interval_ms: 2000 }
+              : {}),
+          },
+        };
+        expect(
+          parseToml(
+            await readFile(
+              join(runtimeHome, `${captured!.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          ),
+        ).toEqual({
+          model_providers: { [providerName]: provider },
+        });
+        expect(captured?.config).not.toHaveProperty("profile");
+        expect(captured?.config).not.toHaveProperty("profiles");
+        expect(captured?.config?.["model_provider"]).toBe(providerName);
+        if (nativeProfile) {
+          expect(captured?.config).toMatchObject({
+            model: "native-model",
+            model_reasoning_effort: "high",
+            model_reasoning_summary: "concise",
+            experimental_compact_prompt_file: join(home, "compact.md"),
+            model_catalog_json: join(home, "models.json"),
+            agents: {
+              reviewer: {
+                config_file: join(home, "agents/reviewer.toml"),
+                description: "Synthetic reviewer",
+              },
+            },
+          });
+        }
+        if (!profile || nativeProfile) {
+          const saved = parseToml(
+            await readFile(join(runtimeHome, "config.toml"), "utf8"),
+          );
+          expect(saved).not.toHaveProperty("profile");
+          expect(saved).not.toHaveProperty("profiles");
+          expect(saved["model_providers"]).toBeUndefined();
+        }
+        expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);
       } finally {
         await client.close();
       }

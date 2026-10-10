@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { resolveCodexProfile } from "../src/config.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -853,50 +854,62 @@ describe("custom validation", () => {
     ).rejects.toThrow("incompatible");
   });
 
-  test("the bundled Codex honors the invocation-only completion restriction", async () => {
-    const home = await temporaryDirectory();
-    const marketplace = await createMarketplace(home, PLUGIN_ROOT);
-    const command = resolveCodexCommand({}).command;
-    const run = (args: string[]) =>
-      execFileSync(command, args, {
-        env: {
-          PATH: process.env["PATH"],
-          SystemRoot: process.env["SystemRoot"],
-          TEMP: process.env["TEMP"],
-          TMP: process.env["TMP"],
-          CODEX_HOME: home,
-        },
-        encoding: "utf8",
-        windowsHide: true,
-      });
-    run(["plugin", "marketplace", "add", marketplace]);
-    run(["plugin", "add", "--json", "codex-security@codex-security-sdk"]);
-    const config = await customValidationConfig(
-      {
+  test.each([false, true])(
+    "the bundled Codex honors the invocation-only completion restriction with inline profile: %s",
+    async (profiled) => {
+      const home = await temporaryDirectory();
+      const marketplace = await createMarketplace(home, PLUGIN_ROOT);
+      const command = resolveCodexCommand({}).command;
+      const run = (args: string[]) =>
+        execFileSync(command, args, {
+          env: {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            TEMP: process.env["TEMP"],
+            TMP: process.env["TMP"],
+            CODEX_HOME: home,
+          },
+          encoding: "utf8",
+          windowsHide: true,
+        });
+      run(["plugin", "marketplace", "add", marketplace]);
+      run(["plugin", "add", "--json", "codex-security@codex-security-sdk"]);
+      const settings = {
         mcp_servers: {
           "codex-security": { disabled_tools: ["user_disabled_tool"] },
         },
-      },
-      PLUGIN_ROOT,
-    );
-    const server = (config["mcp_servers"] as Record<string, unknown>)[
-      "codex-security"
-    ] as Record<string, unknown>;
-    const overrides = Object.entries(server).flatMap(([key, value]) => [
-      "-c",
-      `mcp_servers.codex-security.${key}=${JSON.stringify(value)}`,
-    ]);
-    const effective = JSON.parse(
-      run([...overrides, "mcp", "get", "codex-security", "--json"]),
-    );
-    expect(effective.disabled_tools).toContain("complete_codex_security_scan");
-    expect(effective.disabled_tools).toContain("user_disabled_tool");
-    expect(effective.transport.cwd).toBe(resolve(PLUGIN_ROOT));
-    const ordinary = JSON.parse(
-      run(["mcp", "get", "codex-security", "--json"]),
-    );
-    expect(ordinary.disabled_tools).toBeNull();
-  });
+      };
+      const config = resolveCodexProfile(
+        await customValidationConfig(
+          profiled
+            ? { profile: "review", profiles: { review: settings } }
+            : settings,
+          PLUGIN_ROOT,
+        ),
+      );
+      const server = (config["mcp_servers"] as Record<string, unknown>)[
+        "codex-security"
+      ] as Record<string, unknown>;
+      const overrides = Object.entries(server).flatMap(([key, value]) => [
+        "-c",
+        `mcp_servers.codex-security.${key}=${JSON.stringify(value)}`,
+      ]);
+      const effective = JSON.parse(
+        run([...overrides, "mcp", "get", "codex-security", "--json"]),
+      );
+      expect(effective.disabled_tools).toContain(
+        "complete_codex_security_scan",
+      );
+      expect(effective.disabled_tools).toContain("user_disabled_tool");
+      expect(config).not.toHaveProperty("profile");
+      expect(config).not.toHaveProperty("profiles");
+      expect(effective.transport.cwd).toBe(resolve(PLUGIN_ROOT));
+      const ordinary = JSON.parse(
+        run(["mcp", "get", "codex-security", "--json"]),
+      );
+      expect(ordinary.disabled_tools).toBeNull();
+    },
+  );
 });
 
 const unexpectedValidation = rejecting("unexpected validation");

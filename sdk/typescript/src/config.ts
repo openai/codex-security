@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
@@ -106,6 +106,19 @@ export function scanModel(config: Readonly<JsonObject>): unknown {
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
+}
+
+/** @internal Use the selected native provider's configured credential key. */
+export function scanProviderEnvKey(
+  config: Readonly<JsonObject>,
+): string | undefined {
+  const selected = scanModelProvider(config);
+  if (!isExternalModelProvider(selected)) return undefined;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  return isObject(provider) && typeof provider["env_key"] === "string"
+    ? provider["env_key"]
+    : EXTERNAL_CODEX_PROVIDERS[selected].env_key;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
@@ -226,8 +239,120 @@ export function scanCyberAccessConfig(
   };
 }
 
+/** @internal Read file-profile settings before wrapper defaults or CLI model validation. */
+export async function readCodexFileProfile(
+  overrides: JsonObject,
+  profileHome?: string,
+): Promise<JsonObject> {
+  let nativeProfile: JsonObject = {};
+  const profileName = overrides["profile"];
+  if (profileName != null && typeof profileName !== "string") {
+    throw new ConfigurationError("Codex profile must be a name.");
+  }
+  if (
+    profileHome !== undefined &&
+    typeof profileName === "string" &&
+    selectedScanProfile(overrides) === undefined
+  ) {
+    if (!/^[A-Za-z0-9_-]+$/u.test(profileName)) {
+      throw new ConfigurationError("Codex profile must be a plain name.");
+    }
+    try {
+      nativeProfile = parse(
+        await readFile(join(profileHome, `${profileName}.config.toml`), "utf8"),
+      ) as JsonObject;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new ConfigurationError(
+          `Could not read Codex profile ${profileName}.`,
+          {
+            cause: error,
+          },
+        );
+      }
+    }
+    if ("profile" in nativeProfile || "profiles" in nativeProfile) {
+      throw new ConfigurationError(
+        `Codex profile ${profileName} contains legacy profile settings.`,
+      );
+    }
+    validateOverrideKeys(nativeProfile);
+    validateOverrides(nativeProfile);
+    // CLI overrides otherwise resolve this file against the scan directory.
+    for (const key of [
+      "model_instructions_file",
+      "experimental_compact_prompt_file",
+      "model_catalog_json",
+      "sqlite_home",
+      "log_dir",
+    ]) {
+      const path = nativeProfile[key];
+      if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+        nativeProfile[key] = resolve(profileHome, path);
+      }
+    }
+    resolveAgentPaths(nativeProfile, profileHome);
+    resolveSkillPaths(nativeProfile, profileHome);
+    resolveOtelPaths(nativeProfile, profileHome);
+    normalizeLegacyWindowsSandboxOverride(nativeProfile);
+  }
+  return nativeProfile;
+}
+
+/** @internal Preserve agent file origins when a native config changes directories. */
+export function resolveAgentPaths(config: JsonObject, directory: string): void {
+  const agents = config["agents"];
+  if (!isObject(agents)) return;
+  for (const agent of Object.values(agents)) {
+    if (!isObject(agent)) continue;
+    const path = agent["config_file"];
+    if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+      agent["config_file"] = resolve(directory, path);
+    }
+  }
+}
+
+/** @internal Preserve skill file origins when a native config changes directories. */
+export function resolveSkillPaths(config: JsonObject, directory: string): void {
+  const skills = config["skills"];
+  if (isObject(skills) && Array.isArray(skills["config"])) {
+    for (const skill of skills["config"]) {
+      if (!isObject(skill)) continue;
+      const path = skill["path"];
+      if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+        skill["path"] = resolve(directory, path);
+      }
+    }
+  }
+}
+
+/** @internal Preserve TLS file origins when a native config changes directories. */
+export function resolveOtelPaths(config: JsonObject, directory: string): void {
+  const otel = config["otel"];
+  if (!isObject(otel)) return;
+  for (const key of ["exporter", "trace_exporter", "metrics_exporter"]) {
+    const exporter = otel[key];
+    if (!isObject(exporter)) continue;
+    for (const configuration of Object.values(exporter)) {
+      if (!isObject(configuration) || !isObject(configuration["tls"])) continue;
+      const tls = configuration["tls"];
+      for (const field of [
+        "ca-certificate",
+        "client-certificate",
+        "client-private-key",
+      ]) {
+        const path = tls[field];
+        if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+          tls[field] = resolve(directory, path);
+        }
+      }
+    }
+  }
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
+  profileHome?: string,
 ): Promise<JsonObject> {
   if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
     throw new ConfigurationError("codexOverrides must be an object.");
@@ -235,65 +360,24 @@ export async function mergedCodexConfig(
   validateOverrideKeys(config.codexOverrides ?? {});
   const overrides = structuredClone(config.codexOverrides ?? {});
   validateOverrides(overrides);
-  const agents = overrides["agents"];
-  if (isObject(agents) && "max_threads" in agents) {
-    throw new ConfigurationError(
-      "The selected Codex Security plugin requires native multi-agent v2; " +
-        "agents.max_threads is a legacy v1 setting. Use " +
-        "features.multi_agent_v2.max_concurrent_threads_per_session instead.",
-    );
-  }
-  const features = overrides["features"];
-  if (isObject(features) && "multi_agent_v2" in features) {
-    const multiAgentV2 = features["multi_agent_v2"];
-    if (!isObject(multiAgentV2)) {
-      throw new ConfigurationError(
-        "The selected Codex Security plugin requires native multi-agent v2; " +
-          "features.multi_agent_v2 must remain a table with enabled = true.",
-      );
-    }
-    if ("enabled" in multiAgentV2 && multiAgentV2["enabled"] !== true) {
-      throw new ConfigurationError(
-        "The selected Codex Security plugin requires native multi-agent v2; " +
-          "features.multi_agent_v2.enabled cannot be disabled.",
-      );
-    }
-  }
-
-  const profiles = Object.entries(
-    (overrides["profiles"] ?? {}) as Record<string, JsonObject>,
-  );
-  for (const [name, profile] of profiles) {
-    const profileAgents = profile["agents"];
-    if (isObject(profileAgents) && "max_threads" in profileAgents) {
-      throw new ConfigurationError(
-        `The selected Codex Security plugin requires native multi-agent v2; profile ${name} agents.max_threads is a legacy v1 setting.`,
-      );
-    }
-    const profileFeatures = profile["features"];
-    if (!isObject(profileFeatures) || !("multi_agent_v2" in profileFeatures)) {
-      continue;
-    }
-    const profileV2 = profileFeatures["multi_agent_v2"];
-    if (
-      !isObject(profileV2) ||
-      ("enabled" in profileV2 && profileV2["enabled"] !== true)
-    ) {
-      throw new ConfigurationError(
-        `The selected Codex Security plugin requires native multi-agent v2; profile ${name} features.multi_agent_v2 cannot be disabled.`,
-      );
-    }
-  }
   normalizeLegacyWindowsSandboxOverride(overrides);
-  for (const [, profile] of profiles) {
-    normalizeLegacyWindowsSandboxOverride(profile);
+  const nativeProfile = await readCodexFileProfile(overrides, profileHome);
+  const profiles = overrides["profiles"];
+  if (isObject(profiles)) {
+    for (const profile of Object.values(profiles)) {
+      if (isObject(profile)) {
+        normalizeLegacyWindowsSandboxOverride(profile);
+      }
+    }
   }
   const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
-  if (scanModelProvider(overrides) === "amazon-bedrock") {
+  const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  validateNativeMultiAgentV2Overrides(effectiveOverrides);
+  if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
   }
-  return deepMerge(defaults, overrides);
+  return deepMerge(defaults, effectiveOverrides);
 }
 
 /** @internal Preserve existing native Windows backend selections. */
@@ -416,6 +500,64 @@ function validateOverrides(overrides: JsonObject): void {
     if (isObject(profileFeatures) && "plugins" in profileFeatures) {
       throw new ConfigurationError(
         `Codex Security owns plugin loading configuration in profile ${name}.`,
+      );
+    }
+  }
+}
+
+function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
+  const agents = overrides["agents"];
+  if (isObject(agents) && "max_threads" in agents) {
+    throw new ConfigurationError(
+      "The selected Codex Security plugin requires native multi-agent v2; " +
+        "agents.max_threads is a legacy v1 setting. Use " +
+        "features.multi_agent_v2.max_concurrent_threads_per_session instead.",
+    );
+  }
+  const features = overrides["features"];
+  if (isObject(features)) {
+    if ("multi_agent_v2" in features) {
+      const multiAgentV2 = features["multi_agent_v2"];
+      if (!isObject(multiAgentV2)) {
+        throw new ConfigurationError(
+          "The selected Codex Security plugin requires native multi-agent v2; " +
+            "features.multi_agent_v2 must remain a table with enabled = true.",
+        );
+      }
+      if ("enabled" in multiAgentV2 && multiAgentV2["enabled"] !== true) {
+        throw new ConfigurationError(
+          "The selected Codex Security plugin requires native multi-agent v2; " +
+            "features.multi_agent_v2.enabled cannot be disabled.",
+        );
+      }
+    }
+  }
+
+  const profiles = overrides["profiles"];
+  if (!isObject(profiles)) {
+    return;
+  }
+  for (const [name, profile] of Object.entries(profiles)) {
+    if (!isObject(profile)) {
+      continue;
+    }
+    const profileAgents = profile["agents"];
+    if (isObject(profileAgents) && "max_threads" in profileAgents) {
+      throw new ConfigurationError(
+        `The selected Codex Security plugin requires native multi-agent v2; profile ${name} agents.max_threads is a legacy v1 setting.`,
+      );
+    }
+    const profileFeatures = profile["features"];
+    if (!isObject(profileFeatures) || !("multi_agent_v2" in profileFeatures)) {
+      continue;
+    }
+    const profileV2 = profileFeatures["multi_agent_v2"];
+    if (
+      !isObject(profileV2) ||
+      ("enabled" in profileV2 && profileV2["enabled"] !== true)
+    ) {
+      throw new ConfigurationError(
+        `The selected Codex Security plugin requires native multi-agent v2; profile ${name} features.multi_agent_v2 cannot be disabled.`,
       );
     }
   }

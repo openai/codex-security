@@ -130,9 +130,11 @@ import {
   resolveCommandAuthConfig,
   resolveCodexProfile,
   mergedCodexConfig,
+  readCodexFileProfile,
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
+  scanProviderEnvKey,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -1381,6 +1383,7 @@ export async function runCodexSkillCommand(
         processEnvironment,
         authentication.method === "command" ? "chatgpt" : output.auth,
         provider,
+        providerEnvKey,
       );
       if (
         explicitChatgpt &&
@@ -1492,6 +1495,7 @@ export async function runCodexSkillCommand(
           codexHome,
           output.auth,
           provider,
+          providerEnvKey,
         );
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
         apiKey = environmentValue(selected, authentication.source)?.trim();
@@ -3414,6 +3418,14 @@ export async function main(
         try {
           if (argumentError !== undefined) return fail(argumentError, 2);
           const directory = dependencies.currentDirectory();
+          const codexOverrides = await parseScanCodexOverrides(
+            options.codex,
+            options.model,
+            options.effort,
+            options.provider,
+            undefined,
+            scanCodexHome(dependencies.environment),
+          );
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
               {
@@ -3421,12 +3433,7 @@ export async function main(
                 config: {
                   pluginPath: options.pluginPath,
                   pythonPath: options.python,
-                  codexOverrides: parseCodexOverrides(
-                    options.codex,
-                    options.model,
-                    options.effort,
-                    options.provider,
-                  ),
+                  codexOverrides,
                 },
                 generation: {
                   auth: options.auth,
@@ -3450,20 +3457,23 @@ export async function main(
                   dependencies.createPolicySecurity ??
                   ((config) =>
                     new CodexSecurity(config, undefined, { surface: "cli" })),
-                chooseAuthentication: (config, auth, signal) =>
-                  chooseInteractiveAuthentication(
+                chooseAuthentication: async (config, auth, signal) => {
+                  const effectiveConfig = await mergedCodexConfig(
+                    config,
+                    scanCodexHome(dependencies.environment),
+                  );
+                  if (hasCommandAuth(effectiveConfig)) return auth;
+                  return await chooseInteractiveAuthentication(
                     {
                       auth,
-                      provider: scanModelProvider({
-                        ...DEFAULT_CODEX_CONFIG,
-                        ...config.codexOverrides,
-                      }),
+                      provider: scanModelProvider(effectiveConfig),
                       command: "policy",
                       signal,
                     },
                     errorOutput,
                     dependencies,
-                  ),
+                  );
+                },
                 prompt:
                   dependencies.policyPrompt ??
                   createTerminalPrompt(errorOutput),
@@ -3691,12 +3701,13 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
+              codexOverrides: await parseScanCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
                 options.provider,
                 project?.input.codex,
+                scanCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -4289,12 +4300,13 @@ export async function main(
               ...pickScanSettings({ ...options, workers: undefined }),
               knowledgeBasePaths: options.knowledgeBase,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
+              codexOverrides: await parseScanCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
                 options.provider,
                 project?.input.codex,
+                scanCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -4330,7 +4342,12 @@ export async function main(
             const candidate = new ScanDashboard(errorOutput, {
               repository,
               presentation: "components",
-              model: scanModelConfiguration(await mergedCodexConfig(config)),
+              model: scanModelConfiguration(
+                await mergedCodexConfig(
+                  config,
+                  scanCodexHome(dependencies.environment),
+                ),
+              ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
               showCost: options.showCost,
@@ -4613,12 +4630,13 @@ export async function main(
             config: {
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
-                parseCodexOverrides(
+                await parseScanCodexOverrides(
                   options.codex,
                   options.model,
                   options.effort,
                   options.provider,
                   project?.input.codex,
+                  scanCodexHome(dependencies.environment),
                 ),
               ),
               pluginPath: options.pluginPath,
@@ -5754,7 +5772,10 @@ export async function main(
           dependencies,
         );
         const resolved = resolveScanSettings(project, {}, directory);
-        const codex = await mergedCodexConfig(resolved.config);
+        const codex = await mergedCodexConfig(
+          resolved.config,
+          scanCodexHome(dependencies.environment),
+        );
         const deep =
           resolved.options.mode === "deep"
             ? await resolveDeepScanConfig(
@@ -7501,7 +7522,7 @@ async function runSkill(
               : { model_providers: { [provider]: providerConfiguration } }),
           },
     ),
-    configuredCodexHome(options.environment ?? dependencies.environment),
+    scanCodexHome(options.environment ?? dependencies.environment),
   );
   const directory = options.directory ?? dependencies.currentDirectory();
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
@@ -8307,10 +8328,19 @@ async function executeScan(
       codexOverrides: arguments_.codexOverrides,
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
-    const effectiveConfiguration = {
-      ...DEFAULT_CODEX_CONFIG,
-      ...config.codexOverrides,
-    };
+    const inlineProfiles = config.codexOverrides?.["profiles"];
+    // Saved recipes keep their existing validation path; file profiles need
+    // an early merge so CLI reporting reflects the selected file.
+    const effectiveConfiguration =
+      typeof selectedProfileName === "string" &&
+      (inlineProfiles === undefined ||
+        !isJsonObject(inlineProfiles) ||
+        !isJsonObject(inlineProfiles[selectedProfileName] ?? null))
+        ? await mergedCodexConfig(
+            config,
+            scanCodexHome(dependencies.environment),
+          )
+        : { ...DEFAULT_CODEX_CONFIG, ...config.codexOverrides };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
     patchServiceTier =
@@ -8353,6 +8383,7 @@ async function executeScan(
           auth,
           provider,
           hasCommandAuth(effectiveConfiguration),
+          scanProviderEnvKey(effectiveConfiguration),
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
@@ -8392,7 +8423,7 @@ async function executeScan(
         repository,
         mode: arguments_.mode,
         showCost,
-        model: scanModelConfiguration(await mergedCodexConfig(config)),
+        model: scanModelConfiguration(effectiveConfiguration),
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),
@@ -9670,6 +9701,52 @@ function resolveCliScope(
     ...(changed ? { target: projectScopeTarget(scope) ?? "repository" } : {}),
     sources,
   };
+}
+
+async function parseScanCodexOverrides(
+  values: readonly string[],
+  model: string | undefined,
+  effort: ModelCliOptions["effort"],
+  provider: "openai" | "amazon-bedrock" | ExternalModelProvider | undefined,
+  defaults: JsonObject | undefined,
+  profileHome: string,
+): Promise<JsonObject> {
+  if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
+    return parseCodexOverrides(values, model, effort, provider, defaults);
+  }
+  const explicit = parseCodexOverrides(values, model, effort);
+  const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
+  const profile = await readCodexFileProfile(overrides, profileHome);
+  const result = parseCodexOverrides(
+    values,
+    model,
+    effort,
+    provider,
+    mergeCodexOverrides(profile, defaults ?? {}),
+  );
+  const providers = profile["model_providers"];
+  if (
+    isExternalModelProvider(provider) &&
+    isJsonObject(providers) &&
+    isJsonObject(providers[provider])
+  ) {
+    // Fill missing defaults without replacing file settings or combining
+    // native command auth with the generated env-key definition.
+    const generated: JsonObject = { ...EXTERNAL_CODEX_PROVIDERS[provider] };
+    for (const key of Object.keys(providers[provider])) delete generated[key];
+    if (providers[provider]["auth"] !== undefined) delete generated["env_key"];
+    delete result["model_providers"];
+    if (Object.keys(generated).length > 0) {
+      result["model_providers"] = { [provider]: generated };
+    }
+    if (explicit["model_providers"] !== undefined) {
+      result["model_providers"] = mergeCodexOverrides(
+        (result["model_providers"] as JsonObject | undefined) ?? {},
+        explicit["model_providers"] as JsonObject,
+      );
+    }
+  }
+  return result;
 }
 
 export function parseCodexOverrides(
