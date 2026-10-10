@@ -1489,10 +1489,17 @@ test("equivalent inventory rows preserve publication identity when reordered", a
   expect(f.posts).toHaveLength(1);
 });
 
-test.each([false, true])(
-  "inventory normalization upgrades saved immutable requests and receipts (reset: %j)",
-  async (reset) => {
+test.each(["resume", "reset", "coverage", "rebind"])(
+  "inventory normalization upgrades saved immutable requests and receipts (%s)",
+  async (scenario) => {
     const record = { ...sast, repository: { id: repository.id } };
+    const selected =
+      scenario === "coverage"
+        ? [
+            { ...record, id: "already-ready", repository },
+            { ...record, id: "newly-ready" },
+          ]
+        : [record];
     const nodes = [
       {
         ...inventoryNode("GITHUB"),
@@ -1504,12 +1511,16 @@ test.each([false, true])(
       },
       {
         ...inventoryNode("GITHUB"),
-        repository: { ...repository, url: repositoryUrl },
+        repository: {
+          ...repository,
+          name: scenario === "coverage" ? "z".repeat(513) : repository.name,
+          url: repositoryUrl,
+        },
       },
     ];
     const payload = {
       data: {
-        sastFindings: { nodes: [record] },
+        sastFindings: { nodes: selected },
         versionControlResources: { nodes },
       },
     };
@@ -1564,7 +1575,16 @@ test.each([false, true])(
     );
     if (oldPath !== originalPath) await rename(originalPath, oldPath);
     await writeFile(f.file, JSON.stringify(payload));
-    if (reset) {
+    if (scenario === "coverage") {
+      expect((await readVendorFindings(f.file)).findings).toHaveLength(2);
+      await expect(
+        prepareExternalPublication(f.file, f.options, deps),
+      ).rejects.toThrow("selects different findings");
+      expect(JSON.parse(await readFile(oldPath, "utf8"))).toEqual(saved);
+      expect(f.posts).toHaveLength(1);
+      return;
+    }
+    if (scenario === "reset") {
       f.destination.reset_marker = "generation-2";
       await expect(
         prepareExternalPublication(f.file, f.options, deps),
@@ -1610,11 +1630,25 @@ test.each([false, true])(
       prepareExternalPublication(f.file, f.options, deps),
     ).rejects.toThrow("Saved import evidence");
     await writeFile(migratedPath, migrated);
+    let replay = reordered;
+    if (scenario === "rebind") {
+      nodes.unshift({
+        ...nodes[1]!,
+        repository: { ...nodes[1]!.repository, name: "EXAMPLE/PROJECT" },
+      });
+      await writeFile(f.file, JSON.stringify(payload));
+      replay = await prepareExternalPublication(f.file, f.options, deps);
+      expect(replay.preview.resumed).toBe(true);
+      expect(replay.preview.requests).toEqual(original.preview.requests);
+      expect(
+        replay.preview.findings[0]!.evidence.details!.repository.name,
+      ).toBe("EXAMPLE/PROJECT");
+    }
     const newer = f.reports.get("sast:occurrence-1")!;
     newer.version += 1;
     newer.evidence.description = "Newer Cloud evidence";
     f.state.failReadback = false;
-    expect((await reordered.publish()).verified).toBe(1);
+    expect((await replay.publish()).verified).toBe(1);
     expect(f.posts).toHaveLength(1);
     expect(f.reports.get("sast:occurrence-1")!.evidence.description).toBe(
       "Newer Cloud evidence",
@@ -1679,4 +1713,151 @@ test("GITHUB inventory provenance does not permit a different repository URL", a
       },
     }),
   ).rejects.toThrow("conflicting URLs");
+});
+test("concurrent legacy inventory resumers retain the acknowledged request after migration finishes", async () => {
+  const name =
+    "concurrent legacy inventory resumers retain the acknowledged request after migration finishes";
+  const { runTestInSubprocess } = await import("./support/test-subprocess.js");
+  if (runTestInSubprocess(import.meta.filename, name)) return;
+  const fs = await import("node:fs/promises");
+  const { spyOn } = await import("bun:test");
+  const record = { ...sast, repository: { id: repository.id } };
+  const nodes = [
+    {
+      ...inventoryNode("GITHUB"),
+      repository: {
+        ...repository,
+        name: "Example/Project",
+        url: "https://github.com/Example/Project.git",
+      },
+    },
+    {
+      ...inventoryNode("GITHUB"),
+      repository: { ...repository, url: repositoryUrl },
+    },
+  ];
+  const payload = {
+    data: {
+      sastFindings: { nodes: [record] },
+      versionControlResources: { nodes },
+    },
+  };
+  const f = await cloudFixture({
+    data: { ...payload.data, versionControlResources: { nodes: [nodes[1]] } },
+  });
+  const deps = {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+    },
+  };
+  const original = await prepareExternalPublication(f.file, f.options, deps);
+  f.state.failReadback = true;
+  let originalPath = "";
+  try {
+    await original.publish();
+  } catch (error) {
+    expect(error).toBeInstanceOf(ExternalPublicationError);
+    originalPath = (error as ExternalPublicationError).result.savedSubmission!;
+  }
+  const saved = JSON.parse(await readFile(originalPath, "utf8"));
+  expect(saved.receipts).toHaveLength(1);
+  const identity = [
+    original.preview.accountId,
+    original.preview.destination.id,
+    original.preview.destination.repo_connector_id,
+    original.preview.source,
+  ];
+  const encode = (value: unknown, legacy: boolean) =>
+    JSON.stringify(value, (_key, child) =>
+      child !== null && typeof child === "object" && !Array.isArray(child)
+        ? Object.fromEntries(
+            Object.keys(child)
+              .sort(
+                legacy ? (left, right) => left.localeCompare(right) : undefined,
+              )
+              .map((key) => [key, child[key]]),
+          )
+        : child,
+    );
+  const directory = join(
+    f.environment.CODEX_SECURITY_STATE_DIR,
+    "external-finding-publications",
+  );
+  const oldKey = hash(
+    "sha256",
+    encode([...identity, original.preview.findings], true),
+  );
+  const oldPath = join(directory, `${oldKey}.pending.json`);
+  if (oldPath !== originalPath) await rename(originalPath, oldPath);
+  await writeFile(f.file, JSON.stringify(payload));
+  const current = await readVendorFindings(f.file);
+  const key = hash("sha256", encode([...identity, current.findings], false));
+  const pendingPath = join(directory, `${key}.pending.json`);
+  const lockPath = join(directory, `${key}.lock.sqlite`);
+  expect(pendingPath).not.toBe(oldPath);
+  const firstAtLock = Promise.withResolvers<void>();
+  const secondAtLock = Promise.withResolvers<void>();
+  const releaseSecond = Promise.withResolvers<void>();
+  const originalLstat = fs.lstat;
+  let lockEntries = 0;
+  const metadata = spyOn(fs, "lstat").mockImplementation((async (
+    ...args: Parameters<typeof fs.lstat>
+  ) => {
+    if (String(args[0]) === lockPath) {
+      lockEntries += 1;
+      if (lockEntries === 1) {
+        firstAtLock.resolve();
+        await secondAtLock.promise;
+      } else if (lockEntries === 2) {
+        secondAtLock.resolve();
+        await releaseSecond.promise;
+      }
+    }
+    return await originalLstat(...args);
+  }) as typeof fs.lstat);
+  let first: ReturnType<typeof prepareExternalPublication> | undefined;
+  let second: ReturnType<typeof prepareExternalPublication> | undefined;
+  try {
+    first = prepareExternalPublication(f.file, f.options, deps);
+    await firstAtLock.promise;
+    second = prepareExternalPublication(f.file, f.options, deps);
+    await secondAtLock.promise;
+    const leading = await first;
+    expect(leading.preview.resumed).toBe(true);
+    expect(leading.preview.requests).toEqual(saved.requests);
+    expect(JSON.parse(await readFile(pendingPath, "utf8")).receipts).toEqual(
+      saved.receipts,
+    );
+    f.state.failReadback = false;
+    expect((await leading.publish()).verified).toBe(1);
+    await expect(readFile(pendingPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(readFile(oldPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const newer = structuredClone(f.reports.get("sast:occurrence-1")!);
+    newer.version += 1;
+    newer.evidence.description =
+      "Newer Cloud evidence after the first resumer completed";
+    f.reports.set("sast:occurrence-1", newer);
+    releaseSecond.resolve();
+    const trailing = await second;
+    const result = await trailing.publish();
+    expect(f.posts).toHaveLength(1);
+    expect(trailing.preview.resumed).toBe(true);
+    expect(trailing.preview.requests).toEqual(saved.requests);
+    expect(result.receipts).toEqual(saved.receipts);
+    expect(result.verified).toBe(1);
+    expect(f.reports.get("sast:occurrence-1")).toEqual(newer);
+  } finally {
+    secondAtLock.resolve();
+    releaseSecond.resolve();
+    await Promise.allSettled(
+      [first, second].filter((value) => value !== undefined),
+    );
+    metadata.mockRestore();
+  }
 });
