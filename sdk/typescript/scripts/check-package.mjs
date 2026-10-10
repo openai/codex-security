@@ -212,6 +212,7 @@ const allowedFiles = new Set([
     "security-policy-cli",
     "suggest-owners",
     "scan-sessions",
+    "selected-scan-recovery",
     "server/api",
     "deduplication/codex-review",
     "deduplication/checkpointed-review",
