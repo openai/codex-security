@@ -665,7 +665,70 @@ a larger total or `undefined`. It runs once per limit without blocking the scan.
 Late responses after cancellation/completion are ignored; invalid increases or
 save failures keep the existing limit. `onCost(cost, maxCostUsd)` reports changes.
 
+## Review one system across repositories
+
+Use a single directory/path scan when an application spans repositories and you
+want Codex to follow relationships between their source files. Put the checkouts
+under one parent directory; that parent does not need to be a Git repository.
+Select the relevant paths beneath it and supply the shared architecture and
+reporting instructions explicitly:
+
+```text
+workspace/
+├── application/
+│   ├── api/       # Git checkout
+│   ├── web/       # Git checkout
+│   └── shared/    # Git checkout
+├── context/
+│   ├── architecture.md
+│   └── scan-instructions.md
+└── results/
+```
+
+From `workspace/`, run:
+
+```bash
+codex-security scan ./application \
+  --mode deep \
+  --path api/src --path web/src --path shared/src \
+  --knowledge-base ./context/architecture.md \
+  --scan-prompt-file ./context/scan-instructions.md \
+  --output-dir ./results/system-review
+```
+
+Scope paths are relative to `application/`. Context and output paths in this
+example are relative to the working directory. Keep results outside the scanned
+directory and any enclosing Git worktree. You do not need to add `AGENTS.md` or
+`SECURITY.md` to each checkout to pass these documents.
+
+Include both sides of a boundary you want reviewed, such as an API caller and
+its authorization implementation. Architecture documents can explain deployment
+facts and trust boundaries, but cannot replace missing source evidence. Identify
+excluded or unavailable services in the context so their dependencies remain
+explicit coverage limitations. Distinguish source that supports an investigation
+from locations where you want findings reported.
+
+Record each checkout's commit and local changes before scanning, and keep the
+checkouts unchanged while a scan or resume is active. A non-Git parent is recorded
+as one directory snapshot, rather than one pinned revision per child repository.
+Use the saved scan ID when inspecting results and logs:
+
+```bash
+codex-security scans show SCAN_ID
+codex-security scans logs SCAN_ID
+```
+
+See [scan history and reruns](#scan-history-and-reruns) for the distinction between
+continuing an interrupted scan and starting a new run. Neither approach proves
+that every possible cross-service path was reviewed; inspect the reported
+coverage and unresolved questions alongside findings.
+
 ## Bulk scans
+
+Bulk scans run independent repository reviews in one resumable campaign. Shared
+knowledge-base documents give each review application context; they do not make
+the campaign a joint source review across repositories. For that workflow, use
+[one system scan](#review-one-system-across-repositories).
 
 Run `gh auth login`, then `codex-security bulk-scan` for interactive GitHub
 selection. It lists repositories pushed in the last 90 days, excluding forks
@@ -1072,6 +1135,25 @@ least eight characters.
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
 | `findings list [REPOSITORY]`                          | List open findings.                                        |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
+
+Without an ID, `scans show` selects the latest completed scan, while `scans logs`
+selects the latest scan of any status. After a successful scan followed by a
+failed or active scan, these defaults refer to different runs. Human output
+identifies the selected run, labels its saved update time, and gives matching
+commands with its full scan ID:
+
+```bash
+codex-security scans show SCAN_ID
+codex-security scans logs SCAN_ID
+```
+
+Completion summaries include that ID and the saved results directory. Failure
+summaries include the same navigation when the current run was registered, plus
+the last observed phase when available. A failure before registration has no
+scan ID. The handoff uses that run's registration receipt without querying scan
+history. Inspect its saved status before choosing resume or rerun, and supply
+the original custom prompt files for reruns. Structured history and log output
+and command selection defaults are unchanged.
 
 Recipes save settings and authentication choice, not credentials. Reruns use the
 current checkout/context files and do not reload project files. Supply replacement

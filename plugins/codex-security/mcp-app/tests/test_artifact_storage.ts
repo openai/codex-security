@@ -455,6 +455,7 @@ try {
     await mkdir(defaultState, { recursive: true });
     await chmod(defaultState, 0o500);
     try {
+      const repositoryEntries = await readdir(repository);
       await client.close();
       client = await connect({
         CODEX_HOME: codexHome,
@@ -469,16 +470,15 @@ try {
             path: "artifacts/standalone.md",
             content,
           }),
-        /Artifact storage must be outside the target repository/,
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /EACCES: permission denied, mkdir/);
+          assert.ok(error.message.includes(path.join(defaultState, "scans")));
+          return true;
+        },
       );
-      const fallbackStates = (await readdir(repository)).filter((name) =>
-        name.startsWith("codex-security-state-"),
-      );
-      assert.equal(fallbackStates.length, 1);
-      await assert.rejects(
-        stat(path.join(repository, fallbackStates[0], "scans")),
-        { code: "ENOENT" },
-      );
+      assert.deepEqual(await readdir(defaultState), []);
+      assert.deepEqual(await readdir(repository), repositoryEntries);
     } finally {
       await chmod(defaultState, 0o700);
     }

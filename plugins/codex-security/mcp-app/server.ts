@@ -7,8 +7,7 @@ import { isRecord as isJsonObject } from "./src/record.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
@@ -25,14 +24,11 @@ import {
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { registerFindingIssueTools } from "./src/server/finding-issue-tools.js";
-import { createScanArtifactContext } from "./src/artifact-context.js";
-import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
   AsyncLock,
-  startOrJoinDeepScanCoordinator,
 } from "./src/deep-scan/registry.js";
-import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
+import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveDeepWorkerParentSandbox,
@@ -40,30 +36,13 @@ import {
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
 import type { DeepScanRunState } from "./src/deep-scan/types.js";
-import {
-  WORKBENCH_PYTHON,
-  WORKBENCH_STATE_UNAVAILABLE_EXIT_CODE,
-} from "./src/server/workbench-process.js";
+import { WORKBENCH_PYTHON } from "./src/server/workbench-process.js";
 
 const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
-const CONFIGURED_WORKBENCH_STATE_DIR =
-  process.env.CODEX_SECURITY_STATE_DIR?.trim();
 const PLUGIN_ROOT =
   process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
-const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
-  "resolve-scan-root",
-  "inspect-target",
-  "inspect-setup",
-  "save-artifact",
-  "read-artifact",
-]);
-
-let fallbackWorkbenchStateDir: Promise<string> | undefined;
-let persistentWorkbenchStateSucceeded = false;
-const workbenchStateSelectionLock = new AsyncLock();
-
 const userContextSchema = z.string().trim().min(1);
 const editableUserContextSchema = z.string().trim();
 const pathSchema = z
@@ -117,18 +96,6 @@ const daybreakEntitlementContextSchema = z.object({
 });
 
 async function scanRoot(): Promise<string> {
-  if (
-    !CONFIGURED_SCAN_ROOT &&
-    !CONFIGURED_WORKBENCH_STATE_DIR &&
-    !persistentWorkbenchStateSucceeded &&
-    !fallbackWorkbenchStateDir
-  ) {
-    // Select the workbench state before choosing its default artifact directory.
-    await runWorkbench(["list-scans", "--limit", "1"]);
-  }
-  if (!CONFIGURED_SCAN_ROOT && fallbackWorkbenchStateDir) {
-    return join(await fallbackWorkbenchStateDir, "scans");
-  }
   const result = await runWorkbench([
     "resolve-scan-root",
     ...optionalArg("--scan-root", CONFIGURED_SCAN_ROOT),
@@ -1055,64 +1022,18 @@ export function createCodexSecurityServer(): McpServer {
           }
           const immediate = deepScanTerminalResult(begun);
           if (immediate) return { begun, immediate };
-          const started = await startOrJoinDeepScanCoordinator({
+          const started = await startDeepScanEngine({
             run: begun,
             registry: deepScanCoordinators,
-            options: {
-              store: deepScanStore,
-              executor: new CodexSdkWorkerExecutor({
-                ...modelSettings,
-                parentSandbox,
-                artifactContext: {
-                  pluginRoot: PLUGIN_ROOT,
-                  repoRoot: begun.targetPath,
-                  scanId: begun.scanId,
-                  scope: begun.scope,
-                  pythonCommand: await resolvePythonCommand(),
-                },
-              }),
-              pluginRoot: PLUGIN_ROOT,
-              log: logDeepScanEvent,
-              handoffClaimToken,
-              threadId,
-              onComplete: async (draft, signal) => {
-                const context = await createScanArtifactContext(
-                  begun.scanId,
-                  runWorkbench,
-                  {
-                    requireRunning: true,
-                    requireClaim: true,
-                    handoffClaimToken,
-                    pluginRoot: PLUGIN_ROOT,
-                  },
-                );
-                await recordCodexSecurityScanDraftViaWorkbench(
-                  context,
-                  {
-                    ...draft,
-                    ...(handoffClaimToken === undefined
-                      ? {}
-                      : { handoffClaimToken }),
-                  },
-                  runWorkbench,
-                  signal,
-                );
-              },
-              onStopped: async (run) => {
-                await runWorkbench([
-                  "preserve-scan-results",
-                  "--scan-id",
-                  run.scanId,
-                  "--thread-id",
-                  threadId,
-                  ...optionalArg("--claim-token", handoffClaimToken),
-                  ...optionalArg(
-                    "--coordinator-generation",
-                    run.coordinatorGeneration?.toString(),
-                  ),
-                ]);
-              },
-            },
+            store: deepScanStore,
+            runWorkbench,
+            ...modelSettings,
+            parentSandbox,
+            pythonCommand: await resolvePythonCommand(),
+            pluginRoot: PLUGIN_ROOT,
+            log: logDeepScanEvent,
+            handoffClaimToken,
+            threadId,
           });
           return { begun, ...started };
         })
@@ -2239,14 +2160,19 @@ function logDeepScanEvent(event: {
   );
 }
 
-async function runWorkbench(
+interface WorkbenchOptions {
+  isolatedPython?: boolean;
+}
+
+export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
+  options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbenchWithStateSelection(pythonCommand, args, input);
+    return await executeWorkbench(pythonCommand, args, input, options);
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -2261,100 +2187,11 @@ async function runWorkbench(
   }
 }
 
-async function executeWorkbenchWithStateSelection(
-  pythonCommand: string,
-  args: string[],
-  input?: string | Buffer,
-): Promise<JsonObject> {
-  if (
-    WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "") ||
-    CONFIGURED_WORKBENCH_STATE_DIR
-  ) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
-  if (fallbackWorkbenchStateDir || persistentWorkbenchStateSucceeded) {
-    return await executeWorkbench(
-      pythonCommand,
-      args,
-      await fallbackWorkbenchStateDir,
-      input,
-    );
-  }
-  return await workbenchStateSelectionLock.run(async () => {
-    if (fallbackWorkbenchStateDir || persistentWorkbenchStateSucceeded) {
-      return await executeWorkbench(
-        pythonCommand,
-        args,
-        await fallbackWorkbenchStateDir,
-        input,
-      );
-    }
-    if (CONFIGURED_SCAN_ROOT) {
-      const primary = await executeWorkbench(pythonCommand, [
-        "resolve-scan-root",
-      ]);
-      if (
-        !(await workbenchStoreMayExist(dirname(primary.scanRoot as string)))
-      ) {
-        const fallback = join(await scanRoot(), "workbench-state");
-        if (await workbenchStoreMayExist(fallback)) {
-          fallbackWorkbenchStateDir = Promise.resolve(fallback);
-          return await executeWorkbench(pythonCommand, args, fallback, input);
-        }
-      }
-    }
-    try {
-      const result = await executeWorkbench(
-        pythonCommand,
-        args,
-        undefined,
-        input,
-      );
-      if (result.storeExists !== false)
-        persistentWorkbenchStateSucceeded = true;
-      return result;
-    } catch (error) {
-      if (
-        !isExecError(error) ||
-        !("code" in error) ||
-        error.code !== WORKBENCH_STATE_UNAVAILABLE_EXIT_CODE
-      )
-        throw error;
-      const fallbackStateDir = await pinFallbackWorkbenchStateDir();
-      console.error(
-        JSON.stringify({
-          component: "codex_security_workbench",
-          event: "state_fallback_pinned",
-          reason: "persistent_sqlite_unwritable",
-        }),
-      );
-      return await executeWorkbench(
-        pythonCommand,
-        args,
-        fallbackStateDir,
-        input,
-      );
-    }
-  });
-}
-
-async function workbenchStoreMayExist(stateDir: string): Promise<boolean> {
-  try {
-    await fs.stat(join(stateDir, "workbench.sqlite3"));
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return false;
-    if (code === "EACCES" || code === "EPERM") return true;
-    throw error;
-  }
-}
-
 async function executeWorkbench(
   pythonCommand: string,
   args: string[],
-  stateDir?: string,
   input?: string | Buffer,
+  options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
   const timeout = [
     "begin-deep-scan",
@@ -2386,13 +2223,16 @@ async function executeWorkbench(
     : 30_000;
   const execution = execFileAsync(
     pythonCommand,
-    ["-c", WORKBENCH_PYTHON, workbenchScriptPath()],
+    [
+      ...(options.isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      "-c",
+      WORKBENCH_PYTHON,
+      workbenchScriptPath(),
+    ],
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,
-      env: stateDir
-        ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
-        : process.env,
+      env: process.env,
       encoding: "utf8" as const,
       // Preserve complete artifact bytes and issue receipt diagnostics/history.
       maxBuffer: ["read-artifact", "finding-issues"].includes(args[0] ?? "")
@@ -2429,17 +2269,6 @@ async function executeWorkbench(
     throw new Error("Codex Security workbench helper returned invalid JSON.");
   }
   return result;
-}
-
-async function pinFallbackWorkbenchStateDir(): Promise<string> {
-  fallbackWorkbenchStateDir ??= (async () => {
-    const stateDir = CONFIGURED_SCAN_ROOT
-      ? join(await scanRoot(), "workbench-state")
-      : await fs.mkdtemp(join(tmpdir(), "codex-security-state-"));
-    await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
-    return stateDir;
-  })();
-  return await fallbackWorkbenchStateDir;
 }
 
 function workbenchScriptPath(): string {

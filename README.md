@@ -88,6 +88,11 @@ cs scan . --mode deep
 Use `cs --help` to browse commands, or `cs scan --help`
 for scan options, cost limits, and patching after a scan.
 
+For an application spread across repositories, see
+[review one system across repositories](sdk/typescript/docs/cli.md#review-one-system-across-repositories).
+Use [bulk scans](sdk/typescript/docs/cli.md#bulk-scans) for independent repository
+reviews in one resumable campaign.
+
 ## TypeScript SDK
 
 Install the package locally in your TypeScript project:
