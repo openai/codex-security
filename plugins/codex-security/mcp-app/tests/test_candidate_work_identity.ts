@@ -1,3 +1,4 @@
+import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
@@ -155,9 +156,7 @@ for (const collision of [false, true]) {
 }
 
 const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
-  await importSource("../src/artifact-discovery.ts", {
-    absWorkingDir: import.meta.dirname,
-  });
+  await importDiscoverySource();
 
 for (const collision of [false, true]) {
   test(`later Diff discovery preserves an already requested generic closure (collision=${collision})`, async (t) => {

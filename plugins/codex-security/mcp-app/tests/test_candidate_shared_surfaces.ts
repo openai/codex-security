@@ -1,3 +1,4 @@
+import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -21,9 +22,7 @@ const { recordCodexSecurityScanDraftViaWorkbench: record } = await importSource(
   },
 );
 const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
-  await importSource("../src/artifact-discovery.ts", {
-    absWorkingDir: import.meta.dirname,
-  });
+  await importDiscoverySource();
 
 for (const shared of [false, true]) {
   for (const disposition of ["rejected", "not_applicable"] as const) {

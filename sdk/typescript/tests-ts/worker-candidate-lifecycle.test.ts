@@ -1,3 +1,4 @@
+import { importDiscoverySource } from "../../../plugins/codex-security/mcp-app/tests/support/discovery.ts";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile, unlink } from "node:fs/promises";
 import { join, sep } from "node:path";
@@ -25,8 +26,8 @@ async function fixture(diff = false) {
     reducer: await load("artifact-deep-reducer"),
     validation: await load("deep-scan/artifact-validation"),
     artifacts: await load("deep-scan/artifacts"),
-    discovery: await load("artifact-discovery"),
-    validate: await load("artifact-validation-phase"),
+    discovery: await importDiscoverySource(join(directory, "discovery.mjs")),
+    validate: await load("artifact-candidate-ledger"),
   };
   const repoRoot = join(directory, "repository"),
     home = join(directory, "home");

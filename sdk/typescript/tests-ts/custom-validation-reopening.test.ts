@@ -1,3 +1,4 @@
+import { importDiscoverySource } from "../../../plugins/codex-security/mcp-app/tests/support/discovery.ts";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -33,10 +34,7 @@ for (const disposition of [
     const {
       recordCodexSecurityDiscoveryCandidates,
       listCodexSecurityCandidates,
-    } = await import(
-      pathToFileURL(join(sourcePlugin, "mcp-app/src/artifact-discovery.ts"))
-        .href
-    );
+    } = await importDiscoverySource(join(directory, "discovery.mjs"));
     const repository = join(directory, "repository");
     const home = join(directory, "home");
     await mkdir(repository);

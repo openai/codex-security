@@ -1,3 +1,4 @@
+import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
@@ -25,9 +26,9 @@ const { recordCodexSecurityScanDraftViaWorkbench: record } = await importSource(
   options,
 );
 const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
-  await importSource("../src/artifact-discovery.ts", options);
+  await importDiscoverySource();
 const { recordCodexSecurityCandidateValidations } = await importSource(
-  "../src/artifact-validation-phase.ts",
+  "../src/artifact-candidate-ledger.ts",
   options,
 );
 

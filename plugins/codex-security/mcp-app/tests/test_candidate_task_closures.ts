@@ -2,29 +2,48 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
-import { build } from "esbuild";
-import { importSource } from "./import-module.ts";
+import { execFileSync } from "node:child_process";
+import {
+  discoveryPluginRoot,
+  importDiscoverySource,
+} from "./support/discovery.ts";
 import { fixture } from "./scan-draft-recovery-fixture.ts";
 
 const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
-  await importSource("../src/artifact-discovery.ts", {
-    absWorkingDir: import.meta.dirname,
-  });
+  await importDiscoverySource();
 
 for (const replayRows of [false, true]) {
   for (const collision of [false, true]) {
     test(`discovered candidate stays pending when a separate task closes (same semantic ID=${collision}, replay rows=${replayRows})`, async (t) => {
       const f = await fixture(t, "diff");
-      const runtime = path.join(path.dirname(f.root), "runtime");
-      await build({
-        bundle: true,
-        entryPoints: [path.join(import.meta.dirname, "../helpers-main.ts")],
-        outfile: path.join(runtime, "mcp/helpers.mjs"),
-        format: "esm",
-        platform: "node",
-      });
-      f.context.pluginRoot = runtime;
+      f.context.pluginRoot = discoveryPluginRoot;
+      const git = (...args: string[]) =>
+        execFileSync(
+          "git",
+          [
+            "-C",
+            f.root,
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            ...args,
+          ],
+          { encoding: "utf8" },
+        ).trim();
+      git("init", "-q");
+      await writeFile(path.join(f.root, "app.ts"), "export const value = 0;\n");
+      git("add", "app.ts");
+      git("commit", "-qm", "Synthetic baseline");
+      const baseRevision = git("rev-parse", "HEAD");
       await writeFile(path.join(f.root, "app.ts"), "export const value = 1;\n");
+      git("commit", "-qam", "Synthetic update");
+      const headRevision = git("rev-parse", "HEAD");
+      f.context.targetRevision = headRevision;
+      f.context.targetContract = {
+        ...f.context.targetContract,
+        diffTarget: { kind: "range", baseRevision, headRevision },
+      };
       const discovery = path.join(f.root, "artifacts/02_discovery");
       await mkdir(discovery, { recursive: true });
       await writeFile(path.join(discovery, "in_scope_files.txt"), "app.ts\n");

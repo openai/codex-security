@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   rm,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1443,6 +1444,14 @@ for (const authored of [false, true]) {
     coverage.surfaces[0].notes = authored
       ? "Independent authored evidence."
       : previous.attack_path.counterevidence;
+    const checkpointRoot = path.join(context.root, "checkpoints");
+    const earlierFiles = [
+      path.join(context.root, "checkpoint-head.json"),
+      ...(await readdir(checkpointRoot)).map((name) =>
+        path.join(checkpointRoot, name),
+      ),
+    ];
+    await Promise.all(earlierFiles.map((file) => utimes(file, 1, 1)));
     await writeFile(
       path.join(context.root, "coverage.json"),
       JSON.stringify(coverage),

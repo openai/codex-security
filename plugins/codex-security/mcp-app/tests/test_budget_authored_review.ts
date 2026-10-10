@@ -1,3 +1,5 @@
+import { recordCodexSecurityScanDraft } from "./scan-draft-recovery-fixture.ts";
+import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -8,14 +10,11 @@ import { importSource } from "./import-module.ts";
 import { finding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
-const {
-  recordCodexSecurityScanDraft,
-  recordCodexSecurityScanDraftViaWorkbench,
-} = await importSource(
+const { recordCodexSecurityScanDraftViaWorkbench } = await importSource(
   new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
 );
 const { recordCodexSecurityCandidateValidations } = await importSource(
-  new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
+  new URL("../src/artifact-candidate-ledger.ts", import.meta.url).pathname,
 );
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
 const python = process.env.PYTHON?.trim() || "python3";
@@ -71,7 +70,7 @@ print(json.dumps(get_scan(state, scan_id)["scan"]))
   const context = {
     root: scan.scanDir,
     repoRoot: scan.targetPath,
-    layout: "scan",
+    layout: "scan" as const,
     scanId: scan.scanId,
     scope: scan.scope,
     targetContract: scan.contract,
@@ -366,9 +365,7 @@ const { prepareCodexSecurityReviewItems } = await importSource(
   new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
 );
 const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
-  await importSource(
-    new URL("../src/artifact-discovery.ts", import.meta.url).pathname,
-  );
+  await importDiscoverySource();
 for (const disposition of ["rejected", "not_applicable"]) {
   for (const kind of [
     "missing-pattern",

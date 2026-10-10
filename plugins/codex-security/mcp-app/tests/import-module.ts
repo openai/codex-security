@@ -9,7 +9,7 @@ export async function importModule(options: BuildOptions) {
     ...options,
   });
   return import(
-    `data:text/javascript;base64,${Buffer.from(result.outputFiles![0].contents).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(result.outputFiles![0]!.contents).toString("base64")}`
   );
 }
 

@@ -1,3 +1,4 @@
+import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -17,11 +18,9 @@ const { recordCodexSecurityScanDraftViaWorkbench: record } = await importSource(
   { absWorkingDir: import.meta.dirname },
 );
 const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
-  await importSource("../src/artifact-discovery.ts", {
-    absWorkingDir: import.meta.dirname,
-  });
+  await importDiscoverySource();
 const { recordCodexSecurityCandidateValidations } = await importSource(
-  "../src/artifact-validation-phase.ts",
+  "../src/artifact-candidate-ledger.ts",
   { absWorkingDir: import.meta.dirname },
 );
 
