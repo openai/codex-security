@@ -51,20 +51,45 @@ function fixture() {
     command: string,
     args: string[] = [],
     env: NodeJS.ProcessEnv = toolEnvironment,
-  ) =>
-    spawnSync(
-      node,
-      [
-        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
-        command,
-        "--repo",
-        repo,
-        "--out",
-        out,
-        ...args,
-      ],
-      { env, encoding: "utf8" },
-    );
+  ) => {
+    const arguments_ = [
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+      command,
+      "--repo",
+      repo,
+      "--out",
+      out,
+      ...args,
+    ];
+    const home = env["HOME"];
+    if (process.platform === "win32" && home && !home.isWellFormed()) {
+      const binding = join(
+        PLUGIN_ROOT,
+        "mcp",
+        "native",
+        `win32-${process.arch}`,
+        "windows.node",
+      );
+      const check = join(root, "raw-home-check.cjs");
+      writeFileSync(
+        check,
+        `require("node:assert/strict").equal(require(${JSON.stringify(binding)}).windowsEnvironment(Buffer.from("HOME", "utf16le"))?.toString("utf16le"), ${JSON.stringify(home)});`,
+      );
+      // The native launch preserves HOME before the helper reads its environment.
+      const script = `
+const native = require(${JSON.stringify(binding)});
+const wide = value => Buffer.from(value, "utf16le");
+const result = native.runWindowsProcess(wide(process.execPath), ["--require", ${JSON.stringify(check)}, ...process.argv.slice(1)].map(wide), undefined, [{ name: wide("HOME"), value: wide(${JSON.stringify(home)}) }]);
+if (result.error) throw Object.assign(new Error(result.message), { errno: result.error });
+process.exitCode = result.status;
+`;
+      return spawnSync(node, ["-e", script, ...arguments_], {
+        env,
+        encoding: "utf8",
+      });
+    }
+    return spawnSync(node, arguments_, { env, encoding: "utf8" });
+  };
   const success = (command: string, args: string[] = []) => {
     const result = run(command, args);
     expect(result.status, result.stderr).toBe(0);
