@@ -374,12 +374,10 @@ const VALIDATION_DISPOSITIONS = [
   "deferred",
 ] as const;
 
-const validationResponseSchema = z
-  .object({
-    disposition: z.enum(VALIDATION_DISPOSITIONS),
-    report: z.string().trim().min(1),
-  })
-  .strict();
+const validationResponseSchema = z.strictObject({
+  disposition: z.enum(VALIDATION_DISPOSITIONS),
+  report: z.string().trim().min(1),
+});
 
 export interface ValidationResult {
   disposition: (typeof VALIDATION_DISPOSITIONS)[number];
@@ -736,6 +734,7 @@ export class CodexSecurity {
       };
       const { codex } = this.#createSessionCodex(
         session,
+        "validate",
         {
           CODEX_SECURITY_REPOSITORY: inputs.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1045,6 +1044,7 @@ export class CodexSecurity {
       ].filter((path, index, roots) => roots.indexOf(path) === index);
       const { codex } = this.#createSessionCodex(
         session,
+        "policy",
         {
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1321,6 +1321,7 @@ export class CodexSecurity {
         input,
       );
     };
+    const reportedInaccessibleSessionLogs = new Set<string>();
     const reportTrackingError = (error: unknown): void => {
       if (options.maxCostUsd !== undefined || options.requireCost) {
         costAbortController.abort(
@@ -1331,6 +1332,16 @@ export class CodexSecurity {
           ),
         );
         return;
+      }
+      if (
+        isRecord(error) &&
+        (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+        error["syscall"] === "open" &&
+        typeof error["path"] === "string"
+      ) {
+        const path = error["path"];
+        if (reportedInaccessibleSessionLogs.has(path)) return;
+        reportedInaccessibleSessionLogs.add(path);
       }
       notifyObserver(
         options,
@@ -2176,6 +2187,7 @@ export class CodexSecurity {
       checkOpen();
       const { codex, environment } = this.#createSessionCodex(
         execution,
+        "scan",
         runtimePaths,
         undefined,
         [],
@@ -2258,6 +2270,7 @@ export class CodexSecurity {
           };
           const followUp = this.#createSessionCodex(
             { ...session, policy: "discovery", sessionConfig: config },
+            "scan",
             runtimePaths,
             undefined,
             [],
@@ -2692,6 +2705,7 @@ export class CodexSecurity {
                 }
                 const { codex } = this.#createSessionCodex(
                   session,
+                  "compare",
                   runtimePaths,
                   matcherConfig,
                   configOverrides,
@@ -2822,8 +2836,7 @@ export class CodexSecurity {
               activeScan.id,
               "--cost-json",
               JSON.stringify(finalCost),
-              "--message",
-              failure.message.slice(0, 2400),
+              `--message=${failure.message.slice(0, 2400)}`,
             ],
           );
           activeScan = null;
@@ -2951,8 +2964,7 @@ export class CodexSecurity {
             ...(canceled
               ? []
               : [
-                  "--message",
-                  errorMessage(failure).slice(0, 2400),
+                  `--message=${errorMessage(failure).slice(0, 2400)}`,
                   ...(preservedCost
                     ? ["--cost-json", JSON.stringify(preservedCost)]
                     : []),
@@ -3218,6 +3230,7 @@ export class CodexSecurity {
 
   #createSessionCodex(
     session: PreparedExecution,
+    command: string,
     runtimePaths: Record<string, string>,
     config?: JsonObject,
     configOverrides: string[] = [],
@@ -3226,6 +3239,7 @@ export class CodexSecurity {
     return createExecutionCodex(
       {
         surface: this.#surface,
+        command,
         createCodex: this.#dependencies.createCodex,
       },
       session,
@@ -3717,9 +3731,7 @@ export class CodexSecurity {
             mock: true,
           },
           userContext: options.scanPrompt,
-          ...(options.workflowId === undefined
-            ? {}
-            : { workflowId: options.workflowId }),
+          workflowId: options.workflowId,
         }),
       );
       const scanId = registration["scanId"];
@@ -3831,7 +3843,7 @@ export class CodexSecurity {
           activeScan.id,
           ...(canceled
             ? []
-            : ["--message", errorMessage(error).slice(0, 2400)]),
+            : [`--message=${errorMessage(error).slice(0, 2400)}`]),
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();
@@ -4535,9 +4547,11 @@ export function scanPreflightCodexConfig(
     }
     return result;
   };
-  const result = executionConfig(config);
-  // Keep effective worker settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
+  const result = executionConfig(
+    safeProfileName(config["profile"]) ? config : resolved,
+  );
+  // Keep effective worker settings even when preflight filters the profile name.
   for (const key of [
     "model_context_window",
     "model_auto_compact_token_limit",

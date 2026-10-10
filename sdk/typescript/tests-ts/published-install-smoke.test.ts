@@ -1,8 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { verifyInstalledPackage } from "../scripts/smoke-published-package.mjs";
+import {
+  verifyInstalledPackage,
+  verifyInstalledPlugin,
+} from "../scripts/smoke-published-package.mjs";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const directories = createTemporaryDirectories();
@@ -40,6 +45,50 @@ async function installedFixture(cliVersion: string) {
   return { consumer, shim };
 }
 
+test.each([
+  { args: [], version: "latest" },
+  { args: ["99.1.2"], version: "99.1.2" },
+])(
+  "installs the requested published package $version",
+  async ({ args, version }) => {
+    const directory = await directories.create("published smoke npm ");
+    const npm = join(directory, "npm-cli.js");
+    const capturedArgs = join(directory, "arguments.json");
+    await writeFile(
+      npm,
+      `require("node:fs").writeFileSync(process.env.SMOKE_NPM_ARGUMENTS, JSON.stringify(process.argv.slice(2))); process.exit(7);`,
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("../scripts/smoke-published-package.mjs", import.meta.url),
+        ),
+        ...args,
+      ],
+      {
+        env: {
+          ...process.env,
+          npm_execpath: npm,
+          SMOKE_NPM_ARGUMENTS: capturedArgs,
+        },
+        encoding: "utf8",
+      },
+    );
+    expect(result.status).not.toBe(0);
+    expect(JSON.parse(await readFile(capturedArgs, "utf8"))).toContain(
+      `@openai/codex-security@${version}`,
+    );
+  },
+);
+
+test("fails when the installed package differs from the requested release", async () => {
+  const { consumer } = await installedFixture("99.1.2");
+  await expect(
+    verifyInstalledPackage(consumer, process.env, "99.1.3"),
+  ).rejects.toThrow("99.1.3");
+});
+
 test("fails when the installed CLI reports a different package version", async () => {
   const { consumer } = await installedFixture("99.1.1");
   await expect(verifyInstalledPackage(consumer, process.env)).rejects.toThrow(
@@ -59,3 +108,53 @@ test("fails when the installed CLI cannot start", async () => {
     "synthetic CLI startup failure",
   );
 });
+
+test.each(["node", "./scripts/launch_codex_security_mcp"])(
+  "initializes an installed plugin using %s",
+  async (command) => {
+    const pluginRoot = await directories.create("published plugin smoke ");
+    await mkdir(join(pluginRoot, "mcp"));
+    await mkdir(join(pluginRoot, "scripts"));
+    await writeFile(
+      join(pluginRoot, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "codex-security": {
+            command,
+            args:
+              command === "node"
+                ? ["./mcp/server.mjs", "--stdio"]
+                : ["--stdio"],
+            cwd: ".",
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(pluginRoot, "mcp", "server.mjs"),
+      `import assert from "node:assert/strict";
+import { readFileSync, realpathSync } from "node:fs";
+assert.equal(process.argv[2], "--stdio");
+assert.equal(realpathSync(process.cwd()), realpathSync(process.env.SMOKE_PLUGIN_ROOT));
+const request = JSON.parse(readFileSync(0, "utf8"));
+assert.equal(request.method, "initialize");
+console.log(JSON.stringify({ id: request.id, result: { serverInfo: { name: "codex-security" } } }));
+`,
+    );
+    const launcher = join(pluginRoot, "scripts", "launch_codex_security_mcp");
+    await writeFile(
+      launcher,
+      '#!/bin/sh\nexec "$CODEX_MCP_NODE_PATH" ./mcp/server.mjs "$@"\n',
+    );
+    await chmod(launcher, 0o755);
+    await writeFile(
+      `${launcher}.cmd`,
+      '@echo off\r\n"%CODEX_MCP_NODE_PATH%" .\\mcp\\server.mjs %*\r\n',
+    );
+    await verifyInstalledPlugin(pluginRoot, {
+      ...process.env,
+      CODEX_MCP_NODE_PATH: process.execPath,
+      SMOKE_PLUGIN_ROOT: pluginRoot,
+    });
+  },
+);

@@ -89,6 +89,23 @@ def test_scan_name_search_ignores_unicode_case(tmp_path: Path, name: str, query:
     assert [(item["scanId"], item["name"]) for item in listed] == [(scan["scanId"], name)]
 
 
+def test_scan_history_search_casefolds_displayed_fields(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "Straße"
+    (repository / "Ä").mkdir(parents=True)
+    (repository / "Ä" / "source.py").write_text("pass\n")
+    scan = start_prompt_only_scan(
+        state_dir,
+        repository,
+        tmp_path / "scans",
+        extra_args=("--scope=Ä", "--target-summary=Überblick"),
+    )["scan"]
+    for query in ("Straße", "STRASSE", "Ä", "ä", "Überblick", "ÜBERBLICK"):
+        listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
+        assert [item["scanId"] for item in listed] == [scan["scanId"]]
+    assert run_workbench(state_dir, "list-scans", "--query", "unrelated")["scans"] == []
+
+
 def test_rename_does_not_reorder_scan_history(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
@@ -96,7 +113,10 @@ def test_rename_does_not_reorder_scan_history(tmp_path: Path) -> None:
     older = create_cli_scan(state_dir, tmp_path / "scans", repository)
     newer = create_cli_scan(state_dir, tmp_path / "scans", repository)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        for scan, timestamp in ((older, "2026-08-01"), (newer, "2026-08-02")):
+        for scan, timestamp in (
+            (older, "2026-08-01T00:00:00Z"),
+            (newer, "2026-08-02T00:00:00Z"),
+        ):
             connection.execute(
                 "UPDATE scans SET started_at = ?, updated_at = ? WHERE id = ?",
                 (timestamp, timestamp, scan["scanId"]),

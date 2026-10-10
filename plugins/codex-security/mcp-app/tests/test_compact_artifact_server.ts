@@ -166,6 +166,7 @@ async function testCompactDiffScanCompletion() {
       "start compact diff scan",
     );
     const scanId = started.workspace.results.scanId;
+    const scanDir = started.workspace.results.scanDir;
     const handoffClaimToken = randomUUID();
     requireSuccessfulTool(
       await call("claim_codex_security_scan_handoff_delivery", {
@@ -189,6 +190,24 @@ async function testCompactDiffScanCompletion() {
       }),
       "authenticate compact diff owner",
     );
+
+    for (const name of [
+      "list_codex_security_review_items",
+      "list_codex_security_candidates",
+    ]) {
+      for (const page of [
+        { cursor: "-1" },
+        { cursor: "01" },
+        { limit: 0 },
+        { limit: 1001 },
+      ]) {
+        requireToolError(
+          await call(name, { scanId, ...page }),
+          /Input validation error/,
+          `${"compact diff"}: reject invalid ${name} paging`,
+        );
+      }
+    }
 
     for (const reserved of [
       "artifacts/02_discovery/candidate_ledger.jsonl",
@@ -229,22 +248,35 @@ async function testCompactDiffScanCompletion() {
       { path: "src/handler.py" },
     ]);
 
+    const candidateInput = {
+      cwe_ids: [],
+      locations: [
+        { path: "src/handler.py", start_line: 1, role: "root_control" },
+      ],
+      summary: "The changed handler may rely on the removed guard.",
+      evidence: "The selected change removes a neighboring guard.",
+    };
     requireSuccessfulTool(
       await call("record_codex_security_discovery_candidates", {
         scanId,
-        candidates: [
-          {
-            cwe_ids: [],
-            locations: [
-              { path: "src/handler.py", start_line: 1, role: "root_control" },
-            ],
-            summary: "The changed handler may rely on the removed guard.",
-            evidence: "The selected change removes a neighboring guard.",
-          },
-        ],
+        candidates: [candidateInput],
       }),
       "record a diff candidate alongside a deleted file",
     );
+    const ledger = path.join(
+      scanDir,
+      "artifacts/02_discovery/candidate_ledger.jsonl",
+    );
+    const before = await readFile(ledger, "utf8");
+    requireToolError(
+      await call("record_codex_security_discovery_candidates", {
+        scanId,
+        candidates: [candidateInput, { ...candidateInput, evidence: "  " }],
+      }),
+      /Input validation error/,
+      `${"compact diff"}: reject a malformed mixed discovery batch`,
+    );
+    assert.equal(await readFile(ledger, "utf8"), before);
     const candidates = requireSuccessfulTool<{
       rows: Record<string, unknown>[];
     }>(
@@ -383,6 +415,7 @@ async function testSemanticScanDraftCompletion() {
       "start semantic-draft scan",
     );
     const scanId = started.workspace.results.scanId;
+    const scanDir = started.workspace.results.scanDir;
     const scanDirectory = started.workspace.results.scanDir;
     const handoffClaimToken = randomUUID();
 
@@ -945,6 +978,7 @@ async function testClaimedParentArtifactOperations() {
       "start claimed parent scan",
     );
     const scanId = started.workspace.results.scanId;
+    const scanDir = started.workspace.results.scanDir;
     const scanDirectory = started.workspace.results.scanDir;
     const inventoryPath = path.join(
       scanDirectory,
@@ -1206,6 +1240,43 @@ async function testClaimedParentArtifactOperations() {
     });
 
     const originalLedger = await readFile(ledgerPath, "utf8");
+    const { validation, attack_path: attackPath } = JSON.parse(originalLedger);
+    const validationLedger = `${originalLedger}${JSON.stringify({
+      ...seededCandidate,
+      candidate_id: "candidate-valid",
+    })}\n`;
+    await writeFile(ledgerPath, validationLedger);
+    requireToolError(
+      await call("record_codex_security_candidate_validations", {
+        scanId,
+        validations: [
+          { candidateId, validation: { ...validation, confidence: "certain" } },
+          { candidateId: "candidate-valid", validation },
+        ],
+      }),
+      /confidence/,
+      `${"compact diff"}: reject invalid validation confidence`,
+    );
+    assert.equal(await readFile(ledgerPath, "utf8"), validationLedger);
+    await writeFile(ledgerPath, originalLedger);
+    for (const invalid of [
+      { severity: "moderate" },
+      { decision: "ignore" },
+      { decision: "deferred" },
+      { severity_rationale: "  " },
+    ]) {
+      requireToolError(
+        await call("record_candidate_attack_paths", {
+          scanId,
+          attackPaths: [
+            { candidateId, attackPath: { ...attackPath, ...invalid } },
+          ],
+        }),
+        /Input validation error/,
+        `${"compact diff"}: reject invalid attack-path judgment`,
+      );
+      assert.equal(await readFile(ledgerPath, "utf8"), originalLedger);
+    }
     for (const [name, arguments_] of phaseCalls) {
       requireToolError(
         await call(name, arguments_, otherThread),

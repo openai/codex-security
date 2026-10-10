@@ -24,6 +24,7 @@ import {
   providerProcessConfiguration,
   mcpProcessConfiguration,
   hasCommandAuth,
+  inlineToml,
   mergedCodexConfig,
   normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
@@ -37,6 +38,7 @@ import {
 import { prepareReadOnlyExecution } from "./execution-preparation.js";
 import { createExecutionProfileCodex } from "./execution-profile.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import {
   compactFinding,
   findingCatalogue,
@@ -191,48 +193,38 @@ const reason = z
   .string()
   .min(1)
   .refine((value) => value.trim().length > 0);
-const findingPairSchema = z
-  .object({
-    beforeOccurrenceId: z.string(),
-    afterOccurrenceId: z.string(),
-    reason,
-  })
-  .strict();
-const comparisonSchema = z
-  .object({
-    matches: z.array(
-      z
-        .object({
-          beforeOccurrenceIds: z.array(z.string()).min(1),
-          afterOccurrenceIds: z.array(z.string()).min(1),
-          confidence: z.literal("high"),
-          reason,
-        })
-        .strict(),
-    ),
-    uncertain: z.array(findingPairSchema),
-    related: z.array(findingPairSchema).optional(),
-  })
-  .strict();
+const findingPairSchema = z.strictObject({
+  beforeOccurrenceId: z.string(),
+  afterOccurrenceId: z.string(),
+  reason,
+});
+const comparisonSchema = z.strictObject({
+  matches: z.array(
+    z.strictObject({
+      beforeOccurrenceIds: z.array(z.string()).min(1),
+      afterOccurrenceIds: z.array(z.string()).min(1),
+      confidence: z.literal("high"),
+      reason,
+    }),
+  ),
+  uncertain: z.array(findingPairSchema),
+  related: z.array(findingPairSchema).optional(),
+});
 
-const evidenceRequestSchema = z
-  .object({
-    kind: z.literal("evidence"),
-    beforeOccurrenceIds: z.array(z.string()),
-    afterOccurrenceIds: z.array(z.string()),
-    offset: z.number().int().nonnegative(),
-  })
-  .strict();
+const evidenceRequestSchema = z.strictObject({
+  kind: z.literal("evidence"),
+  beforeOccurrenceIds: z.array(z.string()),
+  afterOccurrenceIds: z.array(z.string()),
+  offset: z.number().int().nonnegative(),
+});
 type EvidenceRequest = z.infer<typeof evidenceRequestSchema>;
 const matchingTurnSchema = comparisonSchema.extend({
   request: z
     .union([
-      z
-        .object({
-          kind: z.literal("catalogue"),
-          page: z.number().int().nonnegative(),
-        })
-        .strict(),
+      z.strictObject({
+        kind: z.literal("catalogue"),
+        page: z.number().int().nonnegative(),
+      }),
       evidenceRequestSchema,
     ])
     .nullable()
@@ -323,6 +315,7 @@ export async function matchScanFindingsInternal(
   }
   const thread = await startReadOnlyCodexThread(options, {
     ...runtimeOptions,
+    command: "compare",
     threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
   });
   const remainingPages = new Set(pages.keys());
@@ -555,6 +548,7 @@ async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
   runtimeOptions: {
     surface: CodexSecuritySurface;
+    command: string;
     threadSource: ReadOnlyCodexThreadSource;
   },
 ): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
@@ -646,6 +640,16 @@ async function startReadOnlyCodexThread(
     options.inheritedPermissions,
   );
   const sdkConfig = prepared.config;
+  const requestMetadata = {
+    ...(homeExecutionConfig["responses_api_metadata"] as
+      JsonObject | undefined),
+    ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
+    ...codexSecurityRequestMetadata(
+      runtimeOptions.surface,
+      runtimeOptions.command,
+    ),
+  };
+  delete sdkConfig["responses_api_metadata"];
   if (preparedFactory === undefined) {
     const suppliedConfig = resolveCodexProfile(
       options.config?.codexOverrides ?? {},
@@ -660,7 +664,10 @@ async function startReadOnlyCodexThread(
   }
   if (commandAuth)
     sdkConfig["model_providers"] = providerConfig["model_providers"]!;
-  const configOverrides = prepared.overrides;
+  const configOverrides = [
+    ...prepared.overrides,
+    `responses_api_metadata=${inlineToml(requestMetadata)}`,
+  ];
   const environment =
     preparedFactory === undefined
       ? await comparisonEnvironment(
@@ -717,9 +724,6 @@ async function startReadOnlyCodexThread(
         : await disabledMcpServers(command!, config, environment!, options),
       allow_login_shell: false,
       project_doc_max_bytes: 0,
-      responses_api_metadata: {
-        codex_security_surface: runtimeOptions.surface,
-      },
       features: {
         ...(effectiveFeatures?.["api_key_cyber_access_programs"] === undefined
           ? {}
@@ -773,6 +777,7 @@ export async function runReadOnlyCodex(
   options: ReadOnlyCodexOptions,
   runtimeOptions: {
     surface: CodexSecuritySurface;
+    command: string;
     threadSource: ReadOnlyCodexThreadSource;
   },
 ): Promise<string> {

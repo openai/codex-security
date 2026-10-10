@@ -9,6 +9,7 @@ import re
 import sqlite3
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -18,6 +19,10 @@ import finalize_scan_contract as finalizer
 from workbench_constants import reject_nonstandard_json_number
 
 reject_non_finite_json = finalizer._reject_non_finite_json
+
+
+def timestamp_key(value: str) -> datetime:
+    return finalizer.parse_timestamp(value)
 
 
 def require_uuid(value: str, label: str) -> str:

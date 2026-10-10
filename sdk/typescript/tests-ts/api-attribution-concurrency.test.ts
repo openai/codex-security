@@ -11,6 +11,7 @@ import type { WorkbenchCommandOptions } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { InternalSecurity } from "./support/internal-security.js";
+import { VERSION } from "../src/version.js";
 
 const fixtures = createApiTestFixtures();
 
@@ -88,6 +89,13 @@ describe("delegated scan attribution", () => {
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
+                analytics: { enabled: surface === "sdk" },
+                responses_api_metadata: {
+                  custom_attribution: surface,
+                  codex_security_surface: "spoofed",
+                  codex_security_command: "spoofed",
+                  codex_security_package_version: "spoofed",
+                },
                 ...(rootEndpoint === undefined
                   ? {}
                   : { openai_base_url: rootEndpoint }),
@@ -208,8 +216,16 @@ describe("delegated scan attribution", () => {
                           );
                           expect(options.config).toMatchObject({
                             features,
+                            analytics: { enabled: surface === "sdk" },
+                          });
+                          expect(
+                            parseToml(options.configOverrides!.join("\n")),
+                          ).toMatchObject({
                             responses_api_metadata: {
+                              custom_attribution: surface,
                               codex_security_surface: surface,
+                              codex_security_command: "scan",
+                              codex_security_package_version: VERSION,
                             },
                           });
                           expect(threadOptions.threadSource).toBe(
@@ -261,6 +277,7 @@ describe("delegated scan attribution", () => {
                           expect(sharedConfig).not.toHaveProperty(
                             "codex_security",
                           );
+                          expect(sharedConfig).not.toHaveProperty("analytics");
                           expect(JSON.stringify(sharedConfig)).not.toContain(
                             "openai_base_url",
                           );

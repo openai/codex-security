@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
-import { chmod, cp, writeFile } from "node:fs/promises";
+import { chmod, cp, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { brotliDecompressSync } from "node:zlib";
 
 const bundledPlugin = new URL("../_bundled_plugin/", import.meta.url);
 const hasMonorepoSdk = existsSync(
@@ -13,6 +14,21 @@ export const PLUGIN_ROOT = fileURLToPath(bundledPlugin);
 export const INTEGRATION_TARGET = hasMonorepoSdk
   ? "project/codex-security-sdk/src"
   : "sdk/typescript/src";
+
+let bundledRuntime: Promise<string> | undefined;
+
+export function loadBundledRuntime(): Promise<string> {
+  return (bundledRuntime ??= (async () => {
+    const directory = new URL("mcp/", bundledPlugin);
+    const names = (await readdir(directory))
+      .filter((name) => /^server\.mjs\.br\.part-\d+$/.test(name))
+      .sort();
+    const parts = await Promise.all(
+      names.map((name) => readFile(new URL(name, directory))),
+    );
+    return brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+  })());
+}
 
 export const copyCompletedScanFixture = (destination: string) =>
   cp(new URL("examples/completed-scan/", bundledPlugin), destination, {

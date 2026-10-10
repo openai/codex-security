@@ -748,3 +748,51 @@ test("migrates existing databases without changing findings and reads older stat
     await query(environment, "SELECT * FROM findings ORDER BY id"),
   ).toEqual(original);
 });
+
+test("classifying another scan preserves both recurring-finding assessments", async () => {
+  const first = await fixture();
+  const second = await fixture();
+  const manifestPath = join(second.scanDirectory, "scan-manifest.json");
+  const manifest = JSON.parse(
+    await readFile(manifestPath, "utf8"),
+  ) as ScanManifest;
+  manifest.scan.id = "scan_example_002";
+  for (const file of ["findings.json", "coverage.json"]) {
+    const path = join(second.scanDirectory, file);
+    const document = JSON.parse(await readFile(path, "utf8"));
+    document.scanId = manifest.scan.id;
+    if (file === "findings.json") {
+      for (const finding of document.findings as Finding[]) {
+        finding.occurrenceId = `occ_${sha256([manifest.scan.id, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
+      }
+    }
+    await writeFile(path, JSON.stringify(document));
+  }
+  for (const artifact of manifest.scan.artifacts)
+    artifact.sha256 = sha256(
+      await readFile(join(second.scanDirectory, artifact.path)),
+    );
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const { codex, calls } = recordingClassifier();
+  const options = {
+    environment: first.environment,
+    rubricPath: first.rubricPath,
+    codex,
+  };
+  await classifyScanDirectorySeverity(first.scanDirectory, options);
+  await classifyScanDirectorySeverity(second.scanDirectory, options);
+  expect(calls).toHaveLength(4);
+  calls.length = 0;
+  for (const scan of [first, second, first, second]) {
+    expect(
+      (
+        await prepareScanPublication(scan.scanDirectory, {
+          ...destination,
+          environment: first.environment,
+        })
+      ).issues,
+    ).toHaveLength(2);
+    await classifyScanDirectorySeverity(scan.scanDirectory, options);
+  }
+  expect(calls).toEqual([]);
+});

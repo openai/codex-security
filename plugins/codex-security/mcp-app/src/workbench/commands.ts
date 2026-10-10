@@ -11,8 +11,6 @@ import {
   storeDedupeGroups,
 } from "./duplicates";
 
-import { dashboard, type DashboardQuery } from "./dashboard";
-
 export async function findingsCommand(
   command: string,
   input: string,
@@ -35,6 +33,7 @@ export async function findingsCommand(
     );
   const selection = payload as {
     findingId: string;
+    cacheKeys?: Record<string, string>;
     scope?: { repositoryId?: string; allRepositories?: true };
   };
   if (
@@ -81,6 +80,7 @@ export async function findingsCommand(
         database,
         (payload as { groups: string[][] }).groups,
         new Date().toISOString(),
+        selection.cacheKeys,
       );
     if (command === "list-dedupe-groups")
       return listDedupeGroups(database, selection.findingId);
@@ -89,9 +89,8 @@ export async function findingsCommand(
         database,
         selection.findingId,
         selection.scope!.repositoryId,
+        selection.cacheKeys,
       );
-    if (command === "dashboard")
-      return dashboard(database, payload as DashboardQuery);
     return listStoredFindings(database, page);
   } finally {
     database.close();

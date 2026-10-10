@@ -13,7 +13,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
-from workbench_validation import bounded_output_text
+from workbench_validation import bounded_output_text, timestamp_key
 
 
 def list_global_findings(
@@ -105,7 +105,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         row["target_id"]: row["id"]
         for row in connection.execute(
             "SELECT target_id, id FROM scans WHERE status = 'complete' "
-            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY started_at, id"
+            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY julianday(upper(started_at)), id"
         )
     }
 
@@ -122,7 +122,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
             scans.target_id,
             targets.current_path AS target_path,
             scans.scope,
-            MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
+            scans.updated_at,
             triage.status AS decision_status,
             triage.close_reason,
             triage.updated_at AS decision_updated_at,
@@ -148,33 +148,46 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
 
     findings = []
     for occurrences in grouped.values():
-        latest = max(occurrences, key=lambda row: (row["created_at"], row["occurrence_id"]))
+        latest = max(
+            occurrences,
+            key=lambda row: (timestamp_key(row["created_at"]), row["occurrence_id"]),
+        )
         decision = max(
             (row for row in occurrences if row["decision_status"] is not None),
-            key=lambda row: (row["decision_updated_at"], row["occurrence_id"]),
+            key=lambda row: (timestamp_key(row["decision_updated_at"]), row["occurrence_id"]),
             default=None,
         )
         status = decision["decision_status"] if decision is not None else "open"
         if (
             status == "closed"
             and decision["close_reason"] == "already_fixed"
-            and latest["created_at"] > decision["decision_updated_at"]
+            and timestamp_key(latest["created_at"]) > timestamp_key(decision["decision_updated_at"])
         ):
             status = "open"
-        scans = sorted({(row["scan_started_at"], row["scan_id"]) for row in occurrences})
+        scans = sorted(
+            {(row["scan_started_at"], row["scan_id"]) for row in occurrences},
+            key=lambda scan: (timestamp_key(scan[0]), scan[1]),
+        )
         findings.append(
             {
                 **dict(latest),
-                "confirmed_in_latest_scan": latest_scan_by_target.get(latest["target_id"])
-                == latest["scan_id"],
+                "confirmed_in_latest_scan": any(
+                    row["scan_id"] == latest_scan_by_target.get(row["target_id"])
+                    for row in occurrences
+                ),
                 "known_since": scans[0][0],
                 "known_scan_ids": [scan_id for _, scan_id in scans],
                 "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),
                 "occurrence_count": len(occurrences),
                 "status": status,
-                "updated_at": max(
-                    latest["updated_at"],
-                    decision["decision_updated_at"] if decision is not None else "",
+                "updated_at": (
+                    max(
+                        latest["updated_at"],
+                        decision["decision_updated_at"],
+                        key=lambda value: (timestamp_key(value), value),
+                    )
+                    if decision is not None
+                    else latest["updated_at"]
                 ),
             }
         )
@@ -184,7 +197,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         key=lambda finding: (
             finding["status"] == "open",
             -scan_history.SEVERITY_ORDER.get(finding["severity"], 5),
-            finding["created_at"],
+            timestamp_key(finding["created_at"]),
         ),
         reverse=True,
     )
@@ -198,7 +211,9 @@ def list_repositories(
     scans = scan_history.list_scans(connection)["scans"]
     scan_count_by_target = dict(Counter(scan["targetId"] for scan in scans))
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
-    for scan in sorted(scans, key=lambda scan: (scan["startedAt"], scan["scanId"]), reverse=True):
+    for scan in sorted(
+        scans, key=lambda scan: (timestamp_key(scan["startedAt"]), scan["scanId"]), reverse=True
+    ):
         latest_scan_by_target.setdefault(scan["targetId"], scan)
 
     open_findings_by_target = Counter(

@@ -163,7 +163,7 @@ export async function withEvalState<T>(
   let root: string | undefined;
   let state: { home: string } | undefined;
   try {
-    root = await mkdtemp(join(tmpdir(), "source-audit-"));
+    root = await realpath(await mkdtemp(join(tmpdir(), "source-audit-")));
     state = await createHome();
     controller.signal.throwIfAborted();
     const result = await run({ root, ...state, signal: controller.signal });

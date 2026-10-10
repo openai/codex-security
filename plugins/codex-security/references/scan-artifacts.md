@@ -73,7 +73,6 @@ The worklist, per-finding receipt, and phase-report paths below apply only to st
 
 - Repository-wide coverage ledger: `<coverage_dir>/repository_coverage_ledger.md`
   - This is a coverage artifact, not a findings list: it should include checked surfaces with not_applicable, suppressed, deferred, or reportable dispositions.
-- Reviewed surfaces summary: `<coverage_dir>/reviewed_surfaces.md` if applicable
 
 ## Validation (Phase 3) Paths
 

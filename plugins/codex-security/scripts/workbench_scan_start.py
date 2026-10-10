@@ -120,6 +120,8 @@ def archive_scan(
         if previous_scan["status"] == "running":
             raise SystemExit("Cannot archive the output of a running scan.")
     has_contents = next(scan_dir.iterdir(), None) is not None
+    if has_contents and (not args.archive_existing or archived_scan_dir is not None):
+        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
     if previous_scan is None and not (args.archive_existing and has_contents):
         yield archived_scan_dir
         return
@@ -146,8 +148,9 @@ def archive_scan(
     moved = False
     try:
         if archived_scan_dir is None:
+            configured_state = state_dir(canonical=False)
             protected_directories = [
-                state_dir(),
+                *(path.resolve() for path in (configured_state, *configured_state.parents)),
                 *(
                     Path(row[2]).resolve().parent
                     for row in connection.execute("PRAGMA database_list")
@@ -177,6 +180,19 @@ def archive_scan(
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
                 (str(archived_scan_dir / relative_directory), timestamp, scan["id"]),
+            )
+            connection.execute(
+                """UPDATE finding_workflows SET scan_dir = ?,
+                    results_json = CASE WHEN json_extract(results_json, '$.scan.sarifPath') = ?
+                        THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
+                    WHERE scan_id = ? AND scan_dir = ?""",
+                (
+                    str(archived_scan_dir / relative_directory),
+                    str(Path(scan["scan_dir"]) / "exports" / "results.sarif"),
+                    str(archived_scan_dir / relative_directory / "exports" / "results.sarif"),
+                    scan["id"],
+                    scan["scan_dir"],
+                ),
             )
         for artifact in artifacts:
             try:

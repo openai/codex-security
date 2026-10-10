@@ -2,8 +2,6 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
-    "dashboard/**/*.ts",
-    "dashboard/**/*.tsx",
     "tests-ts/**/*.ts",
     "../../.github/scripts/*.mts",
     "../../plugins/codex-security/native/*.mts",

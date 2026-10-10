@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createCliTest } from "./support/cli-run.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import { gitText } from "./support/shell.js";
 import { readSealedScanTurn } from "../src/scan-publication.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
@@ -19,7 +20,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import type { ScanOptions } from "../src/api.js";
+import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import { formatTokenUsage } from "../src/cost-model.js";
@@ -77,7 +78,12 @@ async function interruptedScan(
     | "auth"
     | "inheritedPermissions"
     | "preserveProviderEnvironment"
-  > & { model?: string; modelProvider?: string; scopedPaths?: string[] } = {},
+  > & {
+    config?: JsonObject;
+    model?: string;
+    modelProvider?: string;
+    scopedPaths?: string[];
+  } = {},
   resolvedDeep = false,
   startedMerge = true,
   ordinaryPass: {
@@ -182,8 +188,7 @@ async function interruptedScan(
       ? {}
       : { OPENAI_API_KEY: "synthetic-resume-key" }),
   };
-  const command = (args: readonly string[], input?: string) =>
-    runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args, input);
+  const command = workbenchCommand(python, () => environment);
   const knowledge = settings.knowledgeBasePaths?.length
     ? await prepareKnowledgeBase(settings.knowledgeBasePaths, undefined, root)
     : undefined;
@@ -684,12 +689,7 @@ test.each(["chatgpt", "api-key"] as const)(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-launch-key",
     };
-    const command = (args: readonly string[], input?: string) =>
-      runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
-        args,
-        input,
-      );
+    const command = workbenchCommand(python, () => environment);
     const { stderr, runCli } = createCliTest(main);
 
     const code = await runCli(
@@ -760,7 +760,24 @@ test.each([
 ] as const)(
   "resume restores saved launch settings with %s auth (bulk: %p, native provider: %p)",
   async (auth, bulk, preserveProviderEnvironment) => {
+    const profile =
+      auth === "chatgpt"
+        ? "review.v2"
+        : auth === "api-key"
+          ? "review mode"
+          : "分析";
+    const selected = {
+      model: `synthetic-${auth ?? "auto"}-model`,
+      model_reasoning_effort: "high",
+      features: { goals: false },
+    };
     const settings = {
+      config: scanPreflightCodexConfig({
+        model: "synthetic-root-model",
+        model_reasoning_effort: "low",
+        profile,
+        profiles: { [profile]: selected },
+      }),
       auth,
       ...(preserveProviderEnvironment
         ? { preserveProviderEnvironment: true }
@@ -801,6 +818,7 @@ test.each([
         }),
         runWorkbench: f.command,
         createSecurity: resumeClient(f, (options) => {
+          expect(options.config).toMatchObject(selected);
           expect(options.config).toMatchObject({
             permissions: { codex_security_scan: settings.inheritedPermissions },
           });
@@ -1883,7 +1901,7 @@ test.each([
   async ({ mode, location, beforeScan, receipt, tokens }) => {
     const f = await interruptedScan(mode);
     const cost = {
-      model: f.recipe.config.model,
+      model: f.recipe.config.model as string,
       inputTokens: 100,
       cachedInputTokens: 0,
       cacheWriteInputTokens: 0,
@@ -1922,7 +1940,7 @@ test.each([
       scanId: f.scanId,
       scanDir: f.scanDir,
       codexHome: f.codexHome,
-      model: f.recipe.config.model,
+      model: f.recipe.config.model as string,
       startedAt: "2026-10-01T01:00:00Z",
       checkpoint: null,
       expectation: {

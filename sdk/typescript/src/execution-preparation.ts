@@ -1,3 +1,4 @@
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import { mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -69,6 +70,7 @@ const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 export type ExecutionPolicy = "ordinary" | "discovery" | "merge";
 interface ExecutionClient {
   surface: "cli" | "sdk";
+  command?: string;
   createCodex?: (options: CodexOptions) => CodexClientLike;
 }
 
@@ -309,6 +311,19 @@ export function createExecutionCodex(
   )
     ? sdkCodexConfig["responses_api_metadata"]
     : {};
+  const requestMetadata = {
+    ...configuredResponsesMetadata,
+    ...codexSecurityRequestMetadata(
+      client.surface,
+      client.command ?? "scan",
+      runtime.plugin.version,
+    ),
+  };
+  delete processConfig["responses_api_metadata"];
+  configOverrides = [
+    ...configOverrides,
+    `responses_api_metadata=${inlineToml(requestMetadata)}`,
+  ];
   let codexPathOverride =
     !checkPermissions &&
     environmentValue(session.source.environment, "CODEX_CLI_PATH") === undefined
@@ -359,10 +374,6 @@ export function createExecutionCodex(
     env: sdkEnvironment,
     config: {
       ...(processConfig as NonNullable<CodexOptions["config"]>),
-      responses_api_metadata: {
-        ...configuredResponsesMetadata,
-        codex_security_surface: client.surface,
-      },
     },
   });
   const deepWorker = session.policy !== "ordinary";

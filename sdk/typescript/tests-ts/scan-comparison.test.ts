@@ -46,6 +46,9 @@ import {
 } from "../src/scan-comparison.js";
 import { temporaryDirectory as createTemporaryDirectory } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
+import { planComponents } from "../src/component-plan.js";
+import { VERSION } from "../src/version.js";
+import { nodeCommand } from "./support/shell.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -181,6 +184,197 @@ console.log(JSON.stringify(await matchScanFindings(input, { codex })));
           config.codexOverrides?.model_reasoning_effort ??
           DEFAULT_CODEX_CONFIG["model_reasoning_effort"],
       });
+    },
+  );
+
+  test.each([
+    ["sdk", "matching"],
+    ["cli", "matching"],
+    ["sdk", "planning"],
+    ["cli", "planning"],
+  ] as const)(
+    "preserves request metadata and attributes %s %s at the model boundary",
+    async (surface, helper) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const repository = join(root, "repository");
+      await mkdir(home);
+      await mkdir(repository);
+      await writeFile(join(repository, "source.ts"), "export {};\n");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          responses_api_metadata: {
+            synthetic_home: "preserved",
+            codex_security_surface: "previous",
+          },
+        }),
+      );
+      const options = {
+        config: {
+          codexOverrides: {
+            responses_api_metadata: {
+              synthetic_caller: "preserved",
+              codex_security_command: "previous",
+            },
+          },
+        },
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-key",
+        },
+      };
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex(
+        helper === "matching"
+          ? { matches: [], uncertain: [] }
+          : { components: [{ name: "Source", paths: ["source.ts"] }] },
+      );
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        if (helper === "planning") {
+          await planComponents(repository, {
+            ...options,
+            ...(surface === "cli" ? { surface } : {}),
+          });
+        } else {
+          const input = {
+            before: [finding("before")],
+            after: [finding("after")],
+          };
+          if (surface === "sdk") await matchScanFindings(input, options);
+          else await matchScanFindingsInternal(input, options, { surface });
+        }
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.config).not.toHaveProperty("responses_api_metadata");
+        expect(
+          parse(captured!.configOverrides!.join("\n"))[
+            "responses_api_metadata"
+          ],
+        ).toEqual({
+          synthetic_home: "preserved",
+          synthetic_caller: "preserved",
+          codex_security_surface: surface,
+          codex_security_command:
+            helper === "matching" ? "compare" : "scan-components",
+          codex_security_package_version: VERSION,
+        });
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "preserves literal metadata keys in SDK arguments with provider profile %p",
+    async (withProfile) => {
+      const home = await temporaryDirectory();
+      const preload = join(home, "capture-codex.mjs");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          responses_api_metadata: {
+            "team.tag": "from-home",
+            "overlap.tag": "home",
+          },
+        }),
+      );
+      await writeFile(
+        preload,
+        [
+          "for await (const _chunk of process.stdin) {}",
+          "const send = (event) => console.log(JSON.stringify(event));",
+          'send({ type: "thread.started", thread_id: "fixture-thread" });',
+          'send({ type: "item.completed", item: { id: "reply", type: "agent_message", text: JSON.stringify(process.argv.slice(2)) } });',
+          'send({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } });',
+          "process.exit(0);",
+        ].join("\n"),
+      );
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(home, "state"),
+              OPENAI_API_KEY: "synthetic-key",
+            },
+            workingDirectory: home,
+            config: {
+              codexOverrides: {
+                responses_api_metadata: {
+                  "caller.tag": "from-caller",
+                  "overlap.tag": "caller",
+                },
+                ...(withProfile
+                  ? {
+                      model_provider: "synthetic",
+                      model_providers: {
+                        synthetic: {
+                          name: "Synthetic",
+                          wire_api: "responses",
+                          base_url: "https://provider.example.test/v1",
+                        },
+                      },
+                    }
+                  : {}),
+              },
+            },
+          },
+        );
+      } finally {
+        startThread.mockRestore();
+      }
+      expect(captured).toBeDefined();
+      const capture = new Codex({
+        ...captured,
+        codexPathOverride: nodeCommand().command,
+        env: {
+          ...captured!.env,
+          NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+        },
+      });
+      const turn = await capture
+        .startThread({ workingDirectory: home, skipGitRepoCheck: true })
+        .run("Capture the invocation.");
+      const args: string[] = JSON.parse(turn.finalResponse);
+      const metadataOverrides = args
+        .flatMap((arg, index) => (arg === "--config" ? [args[index + 1]!] : []))
+        .filter((value) => value.startsWith("responses_api_metadata"));
+      expect(metadataOverrides).toHaveLength(1);
+      expect(parse(metadataOverrides[0]!)).toEqual({
+        responses_api_metadata: {
+          "team.tag": "from-home",
+          "caller.tag": "from-caller",
+          "overlap.tag": "caller",
+          codex_security_surface: "sdk",
+          codex_security_command: "compare",
+          codex_security_package_version: VERSION,
+        },
+      });
+      const parsed = await runCodexCommand(
+        resolveCodexCommand(captured!.env),
+        [
+          ...metadataOverrides.flatMap((value) => ["-c", value]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        captured!.env!,
+      );
+      expect(parsed).toMatchObject({ success: true });
     },
   );
 
@@ -1101,6 +1295,7 @@ process.exit(0);
           } else {
             await runReadOnlyCodex("Plan components.", {}, options, {
               surface: "cli",
+              command: "scan-components",
               threadSource: "security_scan",
             });
           }

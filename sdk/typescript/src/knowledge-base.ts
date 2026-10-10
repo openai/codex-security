@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
+import { ConfigurationError, errorMessage } from "./errors.js";
 import { expandHome } from "./runtime.js";
 import {
   gitMarkerRoot,
@@ -47,78 +48,85 @@ export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<KnowledgeBaseSnapshot> {
-  const sources = new Set<string>();
-  const documents = new Set<string>();
-  const protectedRoots = new Set<string>();
+  try {
+    const sources = new Set<string>();
+    const documents = new Set<string>();
+    const protectedRoots = new Set<string>();
 
-  for (const requested of paths) {
-    signal?.throwIfAborted();
-    if (!requested.trim())
-      throw new Error("Knowledge base paths cannot be empty.");
-    const path = resolve(expandHome(requested));
-    const metadata = await lstat(path);
-    if (metadata.isSymbolicLink()) {
-      throw new Error(`Knowledge base paths cannot be symbolic links: ${path}`);
-    }
-    if (!metadata.isFile() && !metadata.isDirectory()) {
-      throw new Error(
-        `Knowledge base path is not a file or directory: ${path}`,
+    for (const requested of paths) {
+      signal?.throwIfAborted();
+      if (!requested.trim())
+        throw new Error("Knowledge base paths cannot be empty.");
+      const path = resolve(expandHome(requested));
+      const metadata = await lstat(path);
+      if (metadata.isSymbolicLink()) {
+        throw new Error(
+          `Knowledge base paths cannot be symbolic links: ${path}`,
+        );
+      }
+      if (!metadata.isFile() && !metadata.isDirectory()) {
+        throw new Error(
+          `Knowledge base path is not a file or directory: ${path}`,
+        );
+      }
+
+      const source = await realpath(path);
+      protectedRoots.add(
+        (await gitMarkerRoot(source, signal, "outermost")) ?? source,
       );
+      const selected = metadata.isDirectory()
+        ? (await discover(source, signal)).sort()
+        : [source];
+      if (selected.length === 0) {
+        throw new Error(
+          `Knowledge base directory contains no supported documents: ${path}`,
+        );
+      }
+      for (const document of selected) {
+        documents.add(document);
+      }
+      sources.add(source);
     }
 
-    const source = await realpath(path);
-    protectedRoots.add(
-      (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-    );
-    const selected = metadata.isDirectory()
-      ? (await discover(source, signal)).sort()
-      : [source];
-    if (selected.length === 0) {
-      throw new Error(
-        `Knowledge base directory contains no supported documents: ${path}`,
-      );
+    const extracted: Record<string, string> = {};
+    let index = 0;
+    for (const document of documents) {
+      signal?.throwIfAborted();
+      const metadata = await lstat(document);
+      if (process.platform !== "win32" && (metadata.mode & 0o444) === 0) {
+        throw new Error(`Knowledge base document is not readable: ${document}`);
+      }
+      const bytes = await readFile(document, {
+        flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+        signal,
+      });
+      const extension = extname(document).toLowerCase();
+      const text =
+        extension === ".pdf"
+          ? await extractPdf(document, bytes, signal)
+          : extension === ".docx"
+            ? extractDocx(document, bytes)
+            : decodeText(document, bytes);
+      if ((extension === ".pdf" || extension === ".docx") && !text.trim()) {
+        throw new Error(
+          `Knowledge base document contains no extractable text: ${document}`,
+        );
+      }
+      const name = `${index}-${basename(document)}.txt`;
+      // The prefix and suffix can exceed the filesystem's 255-byte name limit.
+      const filename = Buffer.byteLength(name) > 255 ? `${index}.txt` : name;
+      extracted[filename] = text;
+      index++;
     }
-    for (const document of selected) {
-      documents.add(document);
-    }
-    sources.add(source);
-  }
-
-  const extracted: Record<string, string> = {};
-  let index = 0;
-  for (const document of documents) {
-    signal?.throwIfAborted();
-    const metadata = await lstat(document);
-    if (process.platform !== "win32" && (metadata.mode & 0o444) === 0) {
-      throw new Error(`Knowledge base document is not readable: ${document}`);
-    }
-    const bytes = await readFile(document, {
-      flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-      signal,
+    return Object.freeze({
+      sources: Object.freeze([...sources]),
+      documents: Object.freeze(extracted),
+      protectedRoots: Object.freeze([...protectedRoots]),
     });
-    const extension = extname(document).toLowerCase();
-    const text =
-      extension === ".pdf"
-        ? await extractPdf(document, bytes, signal)
-        : extension === ".docx"
-          ? extractDocx(document, bytes)
-          : decodeText(document, bytes);
-    if ((extension === ".pdf" || extension === ".docx") && !text.trim()) {
-      throw new Error(
-        `Knowledge base document contains no extractable text: ${document}`,
-      );
-    }
-    const name = `${index}-${basename(document)}.txt`;
-    // The prefix and suffix can exceed the filesystem's 255-byte name limit.
-    const filename = Buffer.byteLength(name) > 255 ? `${index}.txt` : name;
-    extracted[filename] = text;
-    index++;
+  } catch (error) {
+    if (signal?.aborted || error instanceof ConfigurationError) throw error;
+    throw new ConfigurationError(errorMessage(error), { cause: error });
   }
-  return Object.freeze({
-    sources: Object.freeze([...sources]),
-    documents: Object.freeze(extracted),
-    protectedRoots: Object.freeze([...protectedRoots]),
-  });
 }
 
 export async function prepareKnowledgeBase(
@@ -126,34 +134,39 @@ export async function prepareKnowledgeBase(
   signal?: AbortSignal,
   directory?: string,
 ): Promise<PreparedKnowledgeBase> {
-  const snapshot =
-    "documents" in input
-      ? input
-      : await readKnowledgeBaseSnapshot(input, signal);
-  const path = await mkdtemp(
-    join(directory ?? tmpdir(), "codex-security-knowledge-"),
-  );
   try {
-    for (const [filename, text] of Object.entries(snapshot.documents)) {
-      signal?.throwIfAborted();
-      await writeFile(join(path, filename), text, {
-        encoding: "utf8",
-        mode: 0o600,
-        signal,
-      });
+    const snapshot =
+      "documents" in input
+        ? input
+        : await readKnowledgeBaseSnapshot(input, signal);
+    const path = await mkdtemp(
+      join(directory ?? tmpdir(), "codex-security-knowledge-"),
+    );
+    try {
+      for (const [filename, text] of Object.entries(snapshot.documents)) {
+        signal?.throwIfAborted();
+        await writeFile(join(path, filename), text, {
+          encoding: "utf8",
+          mode: 0o600,
+          signal,
+        });
+      }
+    } catch (error) {
+      await rm(path, { recursive: true, force: true });
+      throw error;
     }
+    return {
+      path,
+      sources: [...snapshot.sources],
+      snapshot,
+      // Keep the persisted document identity independent of execution metadata.
+      sha256: snapshotDigest(snapshot),
+      cleanup: () => rm(path, { recursive: true, force: true }),
+    };
   } catch (error) {
-    await rm(path, { recursive: true, force: true });
-    throw error;
+    if (signal?.aborted || error instanceof ConfigurationError) throw error;
+    throw new ConfigurationError(errorMessage(error), { cause: error });
   }
-  return {
-    path,
-    sources: [...snapshot.sources],
-    snapshot,
-    // Keep the persisted document identity independent of execution metadata.
-    sha256: snapshotDigest(snapshot),
-    cleanup: () => rm(path, { recursive: true, force: true }),
-  };
 }
 
 // Preserve the saved JSON identity without joining every document into one string.
@@ -279,7 +292,7 @@ async function extractPdf(
       await loadingTask.destroy();
     }
   } catch (error) {
-    signal?.throwIfAborted();
+    if (signal?.aborted) throw error;
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });

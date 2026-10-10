@@ -22,11 +22,9 @@ import {
 import {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} from "../artifact-validation-phase.js";
-import {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} from "../artifact-attack-path.js";
+} from "../artifact-candidate-ledger.js";
 import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
@@ -107,7 +105,7 @@ export function registerCompactArtifactTools(
     readOnly: false,
     handler: async (input, requestContext) => {
       return recordCodexSecurityDiscoveryCandidates(
-        { candidates: input.candidates },
+        input,
         await phaseScanContext(input, options, requestContext, "diff"),
       );
     },
@@ -121,10 +119,7 @@ export function registerCompactArtifactTools(
     readOnly: true,
     handler: async (input, requestContext) => {
       return listCodexSecurityCandidates(
-        {
-          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-          ...(input.limit === undefined ? {} : { limit: input.limit }),
-        },
+        input,
         await phaseScanContext(input, options, requestContext),
       );
     },
@@ -140,7 +135,7 @@ export function registerCompactArtifactTools(
     handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateValidations(
         await phaseScanContext(input, options, requestContext),
-        { validations: input.validations },
+        input,
       );
     },
   });
@@ -155,7 +150,7 @@ export function registerCompactArtifactTools(
     handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateAttackPaths(
         await phaseScanContext(input, options, requestContext),
-        { attackPaths: input.attackPaths },
+        input,
       );
     },
   });

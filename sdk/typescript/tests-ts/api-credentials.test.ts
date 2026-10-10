@@ -26,7 +26,6 @@ import {
   preparedRuntime,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { rejecting } from "./support/errors.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -236,7 +235,30 @@ describe("CodexSecurity orchestration", () => {
             return {
               startThread: () => ({
                 id: null,
-                runStreamed: rejecting("synthetic command-auth scan started"),
+                async runStreamed() {
+                  if (!profile) {
+                    const preflightConfig = parseToml(
+                      await readFile(
+                        options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                        "utf8",
+                      ),
+                    );
+                    expect(preflightConfig["model_provider"]).toBe(
+                      "synthetic.provider",
+                    );
+                    expect(preflightConfig["model_providers"]).toBeUndefined();
+                    if (process.platform !== "win32") {
+                      expect(
+                        (
+                          await stat(
+                            options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                          )
+                        ).mode & 0o777,
+                      ).toBe(0o600);
+                    }
+                  }
+                  throw new Error("synthetic command-auth scan started");
+                },
               }),
             };
           },
@@ -383,6 +405,12 @@ describe("CodexSecurity orchestration", () => {
                   },
                 },
               });
+              const codexConfig = await readFile(
+                join(codexHome!, "config.toml"),
+                "utf8",
+              );
+              expect(codexConfig).not.toContain("model_reasoning_summary");
+              expect(codexConfig).not.toContain("show_raw_agent_reasoning");
               expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
               expect(options.config).toHaveProperty("projects");
               expect(options.config).toHaveProperty(
@@ -403,6 +431,10 @@ describe("CodexSecurity orchestration", () => {
                 shell_environment_policy: {
                   set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
                 },
+              });
+              expect(
+                parseToml(options.configOverrides!.join("\n")),
+              ).toMatchObject({
                 responses_api_metadata: {
                   request_trace: "preserve-configured-metadata",
                   codex_security_surface: "sdk",

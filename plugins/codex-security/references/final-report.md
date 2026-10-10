@@ -160,8 +160,6 @@ Recommended outcomes:
 - `Not applicable`: the risk class does not apply to that surface.
 - `Needs follow-up`: plausible but not fully closed because of a concrete blocker or proof gap.
 
-Write the same content, or a slightly more detailed version, to `<coverage_dir>/reviewed_surfaces.md`.
-
 For broad scans where the completed coverage is useful for triage but too large for high-precision review, include a concise `## Open Questions And Follow Up` section near the end of the report. Use concrete, copyable prompt ideas that narrow the next review to individual commits from the current scan. Do not include this section for precise scans where the requested scope was already sufficient.
 
 Follow-up prompts should be tailored to the actual scan results:

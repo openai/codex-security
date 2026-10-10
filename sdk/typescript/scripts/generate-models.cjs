@@ -8,6 +8,29 @@ const schemas = resolve(packageRoot, "../../plugins/codex-security/schemas");
 
 if (!existsSync(schemas)) throw new Error("Could not find the plugin schemas.");
 
+function modelSchema(value, root = value) {
+  if (Array.isArray(value))
+    return value.map((child) => modelSchema(child, root));
+  if (value === null || typeof value !== "object") return value;
+  if (typeof value.$ref === "string") {
+    return modelSchema(
+      value.$ref
+        .slice(2)
+        .split("/")
+        .reduce(
+          (node, key) => node[key.replaceAll("~1", "/").replaceAll("~0", "~")],
+          root,
+        ),
+      root,
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "allOf" && key !== "$defs")
+      .map(([key, child]) => [key, modelSchema(child, root)]),
+  );
+}
+
 function withoutAllOf(value) {
   if (Array.isArray(value)) return value.map(withoutAllOf);
   if (value === null || typeof value !== "object") return value;
@@ -37,7 +60,7 @@ async function generate() {
   const models = await Promise.all(
     documents.map(async ([filename, name]) => {
       const schema = JSON.parse(readFileSync(join(schemas, filename), "utf8"));
-      return compileModel(schema, name);
+      return compileModel(modelSchema(schema), name);
     }),
   );
 

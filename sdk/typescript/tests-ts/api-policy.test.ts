@@ -40,6 +40,7 @@ import {
   addPolicySubmodule,
   createPolicyTestFixtures,
   policyGit,
+  policyGitDirectory,
   policyPlugin,
   stageResult,
 } from "./support/security-policy.js";
@@ -343,11 +344,7 @@ describe("CodexSecurity policy API", () => {
           join(f.root, "submodule-source"),
         );
       }
-      let metadata = execFileSync(
-        "git",
-        ["-C", checkout, "rev-parse", "--absolute-git-dir"],
-        { encoding: "utf8" },
-      ).trim();
+      let metadata = policyGitDirectory(checkout);
       if (kind.startsWith("unregistered-")) {
         const common = metadata;
         metadata = join(
@@ -502,11 +499,7 @@ describe("CodexSecurity policy API", () => {
         policyGit(repository, "worktree", "add", "--quiet", "--detach", linked);
         repository = linked;
       }
-      const gitDirectory = execFileSync(
-        "git",
-        ["-C", repository, "rev-parse", "--absolute-git-dir"],
-        { encoding: "utf8" },
-      ).trim();
+      const gitDirectory = policyGitDirectory(repository);
       for (const metadata of new Set([common, gitDirectory])) {
         const outputDir = join(metadata, "policy-artifacts");
         for (const operation of [
@@ -1219,7 +1212,7 @@ describe("CodexSecurity policy API", () => {
       sandbox_workspace_write: { network_access: false },
     });
     expect(f.configuration()?.config?.["responses_api_metadata"]).toMatchObject(
-      { codex_security_surface: "cli" },
+      { codex_security_surface: "cli", codex_security_command: "policy" },
     );
     expect(f.configuration()?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
       f.repository,
