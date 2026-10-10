@@ -13,6 +13,7 @@ import {
   scanRuntimeDependencies,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -220,6 +221,13 @@ test.each(["configured", "managed"] as const)(
 );
 
 test("Node retains the direct Deep Scan capability", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "Node retains the direct Deep Scan capability",
+    )
+  )
+    return;
   const root = await temporaryDirectory();
   const source = new URL("../src/deep-scan.ts", import.meta.url);
   const built = await Bun.build({
