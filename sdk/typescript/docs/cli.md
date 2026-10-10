@@ -985,7 +985,10 @@ in `data.versionControlResources.nodes`. For secrets, repository metadata is und
 `repository.id` to that source ID and uses `repository.url`; inventory node IDs,
 `providerID`, names, and Wiz UUIDs are not Cloud repository IDs. A supplied URL
 must agree with the inventory and with the selected Cloud repository before any
-finding is uploaded. For example, this synthetic selection supplies the inventory
+finding is uploaded. Keep each inventory node's `platform` field: `GITHUB`
+establishes case-insensitive repository and branch-prefix matching on custom
+GitHub Enterprise hosts. Duplicate entries for one repository ID must agree on
+their platform and repository URL. For example, this synthetic selection supplies the inventory
 alongside its SAST collection:
 
 ```json
