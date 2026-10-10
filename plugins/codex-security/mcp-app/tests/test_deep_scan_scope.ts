@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { finding } from "./scan-draft-fixture.ts";
@@ -92,15 +92,21 @@ test("artifact MCP uses the coordinator's multi-path binding", async (t) => {
     { absWorkingDir: import.meta.dirname },
   );
   const f = await fixture(t, "worker");
+  const scopeFile = join(f.root, "../scope café.json");
+  await writeFile(
+    scopeFile,
+    JSON.stringify([
+      "api",
+      "background jobs",
+      ...Array.from({ length: 1024 }, (_, index) => `source ${index}/café`),
+    ]),
+  );
   const server = await createCodexSecurityArtifactWriterServer({
     CODEX_SECURITY_ARTIFACT_ROOT: f.root,
     CODEX_SECURITY_REPO_ROOT: f.root,
     CODEX_SECURITY_SCAN_ID: f.context.scanId,
     CODEX_SECURITY_SCOPE: ".",
-    CODEX_SECURITY_INCLUDE_PATHS_JSON: JSON.stringify([
-      "api",
-      "background jobs",
-    ]),
+    CODEX_SECURITY_INCLUDE_PATHS_FILE: scopeFile,
   });
   const client = new Client({ name: "scope-fixture", version: "1.0.0" });
   const [clientTransport, serverTransport] =

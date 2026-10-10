@@ -105,6 +105,7 @@ const deniedWorkerPermissionProfile = {
 
 try {
   testCodeModeFrameDiagnosticBoundaries();
+  await testLargeScopeTransport();
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
@@ -2018,9 +2019,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(invocation.argv, {
               "mcp_servers.cs_artifacts.command": process.execPath,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
-                index % 2 === 0
-                  ? JSON.stringify(["api", `background jobs ${index}`])
-                  : undefined,
+                undefined,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
               "mcp_servers.cs_artifacts.args.0": path.join(
                 fixture.root,
@@ -2033,6 +2032,21 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
                 kind === "dedup" ? "reducer" : "worker",
             });
+            const servers = nativeConfigOverrides(invocation.argv)
+              .map((value) => parseToml(value))
+              .find((value) => value["mcp_servers"])!["mcp_servers"] as Record<
+              string,
+              { env: Record<string, string> }
+            >;
+            const scopeFile =
+              servers["cs_artifacts"]!.env["CODEX_SECURITY_INCLUDE_PATHS_FILE"];
+            if (index % 2 === 0) {
+              assert.ok(scopeFile && path.isAbsolute(scopeFile));
+              assert.deepEqual(JSON.parse(await readFile(scopeFile, "utf8")), [
+                "api",
+                `background jobs ${index}`,
+              ]);
+            } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
             assert.equal(
               invocation.deepConfigPath,
@@ -2430,6 +2444,129 @@ async function testZeroSubagentsPreservesHostRestrictions() {
       assertWorkerSubagentPolicy(invocation.argv, 0);
       assertReadOnlyWorkerPolicy(invocation.argv);
     });
+  }
+}
+
+async function testLargeScopeTransport() {
+  const names = [
+    "CODEX_CLI_PATH",
+    "CODEX_HOME",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "FAKE_CODEX_MARKER",
+  ];
+  const saved = names.map((name) => [name, process.env[name]] as const);
+  const originalSpawn = childProcess.spawn;
+  const fixture = await fakeCodexFixture();
+  const scanIds = [randomUUID(), randomUUID()];
+  try {
+    process.env.CODEX_CLI_PATH = process.execPath;
+    process.env.CODEX_HOME = fixture.root;
+    delete process.env.CODEX_SECURITY_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    childProcess.spawn = ((
+      command: string,
+      args: readonly string[],
+      options: SpawnOptions,
+    ) =>
+      originalSpawn(command, [fixture.executablePath, ...args], {
+        ...options,
+        env: {
+          ...options.env,
+          FAKE_CODEX_MARKER: path.join(
+            String(options.cwd ?? args[args.indexOf("--cd") + 1]),
+            "invocation.json",
+          ),
+          FAKE_CODEX_PREFLIGHT_MARKER: path.join(
+            String(options.cwd),
+            "preflight.json",
+          ),
+        },
+      })) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumed of [false, true]) {
+        let control: number[] = [];
+        for (const count of [2, 16384]) {
+          const sizes = await Promise.all(
+            scanIds.map(async (scanId, index) => {
+              const workerRoot = path.join(
+                fixture.root,
+                `scan-${index} café`,
+                `${kind}-${resumed}`,
+              );
+              const output = path.join(workerRoot, "output");
+              const prompt = path.join(workerRoot, "prompt.md");
+              await mkdir(output, { recursive: true });
+              await writeFile(prompt, "CAPTURE_SCOPE_INPUT");
+              const includePaths = Array.from(
+                { length: count },
+                (_, row) =>
+                  `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
+              );
+              const executor = new CodexSdkWorkerExecutor({
+                parentSandbox: trustedParentSandbox,
+                artifactContext: {
+                  pluginRoot: fixture.root,
+                  repoRoot: fixture.root,
+                  scanId,
+                  scope: ".",
+                  includePaths,
+                },
+              });
+              await executor.run(
+                workerRequest(prompt, output, {
+                  kind,
+                  ...(resumed
+                    ? { resumeThreadId: `scope-thread-${index}` }
+                    : {}),
+                  artifactContext: {
+                    root: output,
+                    layout: kind === "dedup" ? "reducer" : "worker",
+                    ...(kind === "dedup"
+                      ? {
+                          deepReducer: {
+                            scanRoot: workerRoot,
+                            claimedWorkers: [
+                              {
+                                id: "source-worker",
+                                resultPath: path.join(
+                                  workerRoot,
+                                  "accepted.json",
+                                ),
+                              },
+                            ],
+                          },
+                        }
+                      : {}),
+                  },
+                }),
+              );
+              const invocation = await readJson(output, "invocation.json");
+              assert.deepEqual(invocation.scopeInput.paths, includePaths);
+              assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
+              assert.equal(invocation.argv.includes("resume"), resumed);
+              const argument = nativeConfigOverrides(invocation.argv).find(
+                (value) => value.startsWith("mcp_servers="),
+              )!;
+              assert.ok(argument);
+              return Buffer.byteLength(argument);
+            }),
+          );
+          if (count === 2) control = sizes;
+          else
+            assert.deepEqual(
+              sizes,
+              control,
+              "scope size must not increase the native command arguments",
+            );
+        }
+      }
+    }
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const [name, value] of saved) restoreEnv(name, value);
   }
 }
 
@@ -3335,6 +3472,15 @@ if (process.argv.includes('app-server')) {
   process.stdin.on('end', () => process.exit(0));
 } else {
 const stdin = (await process.stdin.toArray()).join('');
+let scopeInput;
+if (stdin.includes('CAPTURE_SCOPE_INPUT')) {
+  const { parse } = await import(${JSON.stringify(import.meta.resolve("smol-toml"))});
+  const configuration = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []).findLast(value => value.mcp_servers?.cs_artifacts);
+  const environment = configuration.mcp_servers.cs_artifacts.env;
+  const file = environment.CODEX_SECURITY_INCLUDE_PATHS_FILE;
+  scopeInput = { file, paths: JSON.parse(file ? readFileSync(file, 'utf8') : environment.CODEX_SECURITY_INCLUDE_PATHS_JSON) };
+}
+
 const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
@@ -3347,7 +3493,7 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ ...(scopeInput === undefined ? {} : { scopeInput }), argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   canonicalDirectory,
@@ -43,9 +44,11 @@ export async function createCodexSecurityArtifactWriterServer(
     ? environment.CODEX_SECURITY_SCOPE
     : undefined;
   const includePaths: unknown =
-    environment.CODEX_SECURITY_INCLUDE_PATHS_JSON === undefined
+    environment.CODEX_SECURITY_INCLUDE_PATHS_FILE === undefined
       ? undefined
-      : JSON.parse(environment.CODEX_SECURITY_INCLUDE_PATHS_JSON);
+      : JSON.parse(
+          await readFile(environment.CODEX_SECURITY_INCLUDE_PATHS_FILE, "utf8"),
+        );
   if (
     includePaths !== undefined &&
     (!Array.isArray(includePaths) ||
