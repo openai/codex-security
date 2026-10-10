@@ -160,7 +160,8 @@ codex-security dedupe --scan SCAN_ID --findings-url https://findings.example.com
 
 A scan or workflow selector is required. `--scan`
 accepts a full ID, unique prefix, or `latest` for the current repository. The
-scan must be complete, with sealed artifacts and a local checkout available.
+scan must be complete, with sealed artifacts. Review that reads source also
+requires its local checkout.
 Local `latest` lookup verifies the checkout generation and component scope.
 Non-Git targets can match by exact path; Git history and matching across worktrees
 or clones require a Git executable outside all saved scan targets. If Git is

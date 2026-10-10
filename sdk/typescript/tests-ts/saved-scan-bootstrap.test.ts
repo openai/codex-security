@@ -1599,45 +1599,62 @@ test("latest continues to an older valid scan after rejecting a replaced same-or
   expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
 });
 
-test("latest retains generation-bound history after its linked worktree is removed", async () => {
-  const f = await fixture(true);
-  const linked = join(f.root, "linked");
-  execFileSync("git", [
-    "-C",
-    f.repository,
-    "worktree",
-    "add",
-    "--quiet",
-    "--detach",
-    linked,
-    "HEAD",
-  ]);
-  const newest = await f.scan("removed-worktree-scan", linked);
-  execFileSync("git", [
-    "-C",
-    f.repository,
-    "worktree",
-    "remove",
-    "--force",
-    linked,
-  ]);
-  const canonical = await resolveCompletedScan("latest", {
-    currentDirectory: () => f.repository,
-    runWorkbench: (args, input, signal) =>
-      runWorkbench(
-        {
-          environment: f.environment,
-          pluginRoot: PLUGIN_ROOT,
-          python: f.python,
-          signal,
-        },
-        args,
-        input,
-      ),
-  });
-  expect(canonical.scanId).toBe(newest.scanId);
-  expect((await latestFor(f, f.repository)).scanId).toBe(newest.scanId);
-});
+test.each(["removed", "recreated directory", "replacement Git checkout"])(
+  "latest retains generation-bound history when its worktree path is %s",
+  async (state) => {
+    const f = await fixture(true);
+    const linked = join(f.root, "linked");
+    execFileSync("git", [
+      "-C",
+      f.repository,
+      "worktree",
+      "add",
+      "--quiet",
+      "--detach",
+      linked,
+      "HEAD",
+    ]);
+    const newest = await f.scan("removed-worktree-scan", linked);
+    execFileSync("git", [
+      "-C",
+      f.repository,
+      "worktree",
+      "remove",
+      "--force",
+      linked,
+    ]);
+    if (state !== "removed") await mkdir(linked);
+    if (state === "replacement Git checkout")
+      execFileSync("git", ["init", "--quiet", linked]);
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      db.query("UPDATE scans SET status = 'failed' WHERE id IN (?, ?)").run(
+        f.first.scanId,
+        f.second.scanId,
+      );
+    } finally {
+      db.close();
+    }
+    const canonical = await resolveCompletedScan("latest", {
+      currentDirectory: () => f.repository,
+      runWorkbench: (args, input, signal) =>
+        runWorkbench(
+          {
+            environment: f.environment,
+            pluginRoot: PLUGIN_ROOT,
+            python: f.python,
+            signal,
+          },
+          args,
+          input,
+        ),
+    });
+    expect(canonical.scanId).toBe(newest.scanId);
+    expect((await latestFor(f, f.repository)).scanId).toBe(newest.scanId);
+  },
+);
 
 test("latest preserves submillisecond update ordering ahead of scan-ID ties", async () => {
   const f = await fixture();
@@ -1665,3 +1682,32 @@ test("latest preserves submillisecond update ordering ahead of scan-ID ties", as
   }
   expect((await latestFor(f, f.repository)).scanId).toBe(newer!.scanId);
 });
+
+test.skipIf(process.platform === "win32")(
+  "latest ignores an unrelated registered Git target around configured Python",
+  async () => {
+    const f = await fixture(true);
+    const unrelated = join(f.root, "unrelated");
+    execFileSync("git", ["clone", "--quiet", f.repository, unrelated]);
+    await f.scan("unrelated-scan", unrelated);
+    const interpreter = join(unrelated, "python");
+    await writeFile(
+      interpreter,
+      `#!/bin/sh\nexec ${JSON.stringify(f.python)} "$@"\n`,
+      { mode: 0o700 },
+    );
+    const workbench = await savedScanWorkbench("latest", {
+      environment: { ...f.environment, PYTHON: interpreter },
+      pluginRoot: PLUGIN_ROOT,
+      currentDirectory: f.repository,
+    });
+    expect(
+      (
+        await resolveCompletedScan("latest", {
+          currentDirectory: () => f.repository,
+          runWorkbench: workbench,
+        })
+      ).scanId,
+    ).toBe(f.second.scanId);
+  },
+);

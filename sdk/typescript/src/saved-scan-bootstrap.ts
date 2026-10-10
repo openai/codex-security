@@ -25,7 +25,9 @@ interface ScanTarget {
   id: string;
   target_path: string;
   repository_generation?: string | null;
+  target_repository_identity?: string | null;
   originFallback?: boolean;
+  protectPython?: boolean;
 }
 
 interface BootstrapDatabase {
@@ -87,12 +89,15 @@ export async function savedScanWorkbench(
     options.currentDirectory,
     options.signal,
   );
+  const liveTargets = targets.filter(
+    (target) => target.protectPython !== false,
+  );
   const protectedRoots = [
     ...callerRoots,
-    ...targets.map((row) => row.target_path),
+    ...liveTargets.map((row) => row.target_path),
     ...(
       await Promise.all(
-        targets.map((row) =>
+        liveTargets.map((row) =>
           gitProtectionRoots(row.target_path, options.signal),
         ),
       )
@@ -334,11 +339,21 @@ async function latestTargets(
       (column) => column.name,
     ),
   );
+  const targetColumns = new Set(
+    readRows<{ name: string }>(
+      database,
+      "PRAGMA table_info(security_targets)",
+    ).map((column) => column.name),
+  );
+  const hasTargetIdentity =
+    columns.has("target_id") && targetColumns.has("repository_identity");
   const scans = readRows<ScanTarget>(
     database,
     `SELECT scans.id, scans.target_path,
-        ${columns.has("repository_generation") ? "scans.repository_generation" : "NULL"} AS repository_generation
+        ${columns.has("repository_generation") ? "scans.repository_generation" : "NULL"} AS repository_generation,
+        ${hasTargetIdentity ? "targets.repository_identity" : "NULL"} AS target_repository_identity
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
+      ${hasTargetIdentity ? "LEFT JOIN security_targets AS targets ON targets.id = scans.target_id" : ""}
       WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
       ORDER BY MAX(scans.updated_at, progress.updated_at) DESC,
         scans.started_at DESC, scans.id`,
@@ -416,8 +431,12 @@ async function latestTargets(
   for (const scan of scans) {
     signal?.throwIfAborted();
     const match = related.get(scan.target_path);
-    // A removed worktree cannot supply live Git metadata. Keep its persisted candidate
-    // until the caller-scoped workbench query decides whether that generation belongs here.
+    // Retain an intact registry binding even when its old path is removed or reused.
+    // The caller-scoped workbench query decides whether that generation belongs here.
+    const bound =
+      caller !== null &&
+      scan.repository_generation != null &&
+      scan.target_repository_identity === scan.repository_generation;
     const missing =
       caller !== null &&
       scan.repository_generation != null &&
@@ -425,10 +444,13 @@ async function latestTargets(
         () => false,
         (error: NodeJS.ErrnoException) => error.code === "ENOENT",
       ));
-    if (match || missing)
+    if (match || bound || missing)
       selected.push({
         ...scan,
         originFallback: match?.originFallback ?? false,
+        // An existing path unrelated to the caller no longer supplies its source.
+        // Keep the historical binding for lookup without trusting it as a live target.
+        protectPython: match !== undefined || missing,
       });
   }
   if (selected.length === 0 && gitMatchingUnavailable)
