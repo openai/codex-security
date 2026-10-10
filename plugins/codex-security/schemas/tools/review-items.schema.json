@@ -15,17 +15,6 @@
       "required": ["scanId"],
       "additionalProperties": false
     },
-    "prepareOutput": {
-      "type": "object",
-      "properties": {
-        "reviewItemsTotal": {
-          "type": "integer",
-          "minimum": 0
-        }
-      },
-      "required": ["reviewItemsTotal"],
-      "additionalProperties": false
-    },
     "reviewItemsInput": {
       "type": "object",
       "properties": {
@@ -48,9 +37,6 @@
       "required": ["scanId"],
       "additionalProperties": false
     },
-    "reviewItemsWorkerInput": {
-      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/page"
-    },
     "reviewItem": {
       "type": "object",
       "properties": {
@@ -59,21 +45,6 @@
         }
       },
       "required": ["path"],
-      "additionalProperties": false
-    },
-    "reviewItemsOutput": {
-      "type": "object",
-      "properties": {
-        "items": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/reviewItem" }
-        },
-        "nextCursor": {
-          "type": "string",
-          "pattern": "^(?:0|[1-9][0-9]*)$"
-        }
-      },
-      "required": ["items"],
       "additionalProperties": false
     }
   }

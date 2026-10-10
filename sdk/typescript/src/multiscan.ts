@@ -1,3 +1,4 @@
+import { notify } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -65,6 +66,7 @@ import {
 import {
   DiffTarget,
   normalizeTarget,
+  UNSUPPORTED_GIT_ENVIRONMENT,
   relativePathIsOutside,
   type ScanMode,
   type ScanTarget,
@@ -496,21 +498,20 @@ async function runCampaign(
     pending.push(task);
   }
   const skipped = completed + incomplete + untouched;
-  if (pending.length === 0) {
-    return {
-      total: tasks.length,
-      completed,
-      incomplete,
-      failed: 0,
-      skipped,
-      resultsPath: ledger,
-      ...(warnings.length === 0 ? {} : { warnings }),
-      ...(hasPolicy ? { policyFailed } : {}),
-    };
-  }
+  let failed = 0;
+  const summarize = (): MultiscanResult => ({
+    total: tasks.length,
+    completed,
+    incomplete,
+    failed,
+    skipped,
+    resultsPath: ledger,
+    ...(warnings.length === 0 ? {} : { warnings }),
+    ...(hasPolicy ? { policyFailed } : {}),
+  });
+  if (pending.length === 0) return summarize();
 
   let next = 0;
-  let failed = 0;
   const worker = async (
     security: Pick<CodexSecurity, "run" | "close">,
   ): Promise<void> => {
@@ -758,9 +759,7 @@ async function runCampaign(
             ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
             ...(warning === undefined ? {} : { warning }),
             ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
-            ...(attemptPolicyFailed === undefined
-              ? {}
-              : { policyFailed: attemptPolicyFailed }),
+            policyFailed: attemptPolicyFailed,
           })}\n`,
         );
         if (
@@ -809,25 +808,14 @@ async function runCampaign(
   );
   const rejection = results.find((result) => result.status === "rejected");
   if (rejection?.status === "rejected") throw rejection.reason;
-  return {
-    total: tasks.length,
-    completed,
-    incomplete,
-    failed,
-    skipped,
-    resultsPath: ledger,
-    ...(warnings.length === 0 ? {} : { warnings }),
-    ...(hasPolicy ? { policyFailed } : {}),
-  };
+  return summarize();
 }
 
 function notifyProgress(
   options: MultiscanOptions,
   event: Parameters<NonNullable<MultiscanOptions["onProgress"]>>[0],
 ): void {
-  try {
-    void Promise.resolve(options.onProgress?.(event)).catch(() => {});
-  } catch {}
+  notify(() => options.onProgress?.(event));
 }
 
 async function ensureOutputDirectory(
@@ -1757,18 +1745,14 @@ async function checkoutRevision(
   restorePaths: readonly string[] = ["."],
 ): Promise<void> {
   const environment = { ...process.env };
-  const repositoryVariables = new Set([
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  ]);
   for (const name of Object.keys(environment)) {
-    if (repositoryVariables.has(name.toUpperCase())) delete environment[name];
+    if (UNSUPPORTED_GIT_ENVIRONMENT.has(name.toUpperCase()))
+      delete environment[name];
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  environment["GIT_DEFAULT_HASH"] =
+    task.revision.length === 64 ? "sha256" : "sha1";
   const command = await resolveTrustedExecutable(
     "git",
     restoreIncomplete
