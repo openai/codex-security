@@ -141,8 +141,18 @@ type RepositoryMetadata = {
 
 type FindingInput = {
   records: InputRecord[];
-  repositories: Map<string, RepositoryMetadata>;
+  repositories: Map<string, RepositoryMetadata & { platform: string | null }>;
 };
+
+// Wiz's documented inventory platform establishes custom GitHub host semantics.
+// Keep this context separate from the repository metadata published as evidence.
+function inventoryRepositoryUrlKey(
+  value: string,
+  platform: string | null | undefined,
+): string {
+  const key = repositoryUrlKey(value);
+  return platform === "GITHUB" ? key.toLowerCase() : key;
+}
 
 function sourceRepository(
   repository: Record<string, unknown> | undefined,
@@ -154,7 +164,8 @@ function sourceRepository(
   if (
     suppliedUrl &&
     inventory &&
-    repositoryUrlKey(suppliedUrl) !== repositoryUrlKey(inventory.url)
+    inventoryRepositoryUrlKey(suppliedUrl, inventory.platform) !==
+      inventoryRepositoryUrlKey(inventory.url, inventory.platform)
   )
     throw new Error(
       "The finding and repository inventory have conflicting repository URLs.",
@@ -174,6 +185,7 @@ function sourceRepository(
 function sourceBranch(
   branch: Record<string, unknown> | undefined,
   repository: RepositoryMetadata,
+  platform: string | null | undefined,
 ): string | null {
   const name = text(branch?.["name"]);
   if (!name) return null;
@@ -182,18 +194,18 @@ function sourceBranch(
     return name.slice(prefix.length) || null;
 
   // URL-only metadata still identifies Wiz's repository-qualified branch name.
-  // Supported GitHub destinations use case-insensitive repository qualifiers.
-  // Preserve the branch suffix's case and slashes and the original evidence.
-  const repositoryKey = repositoryUrlKey(repository.url).toLowerCase();
+  // Compare only the qualifier, preserving the branch suffix's case and slashes.
+  const repositoryKey = inventoryRepositoryUrlKey(repository.url, platform);
   const url = /^(https?:\/\/[^/?#]+)\/([^?#]+)$/iu.exec(repositoryKey);
   if (!url) return repository.name ? name : null;
   const prefixParts = url[2]!.split("/").length;
   const parts = name.split("/");
   if (
     parts.length > prefixParts &&
-    repositoryUrlKey(
+    inventoryRepositoryUrlKey(
       url[1] + "/" + parts.slice(0, prefixParts).join("/"),
-    ).toLowerCase() === repositoryKey
+      platform,
+    ) === repositoryKey
   )
     return parts.slice(prefixParts).join("/") || null;
   return name;
@@ -302,7 +314,11 @@ function repositoryFinding(
       description: text(record["description"]) ?? text(rule?.["description"]),
       url: text(record["wizUrl"]) ?? text(record["portalUrl"]),
       locations: path ? [{ path, line: line ?? null }] : [],
-      branch: sourceBranch(branch, repository),
+      branch: sourceBranch(
+        branch,
+        repository,
+        repository.id ? repositories.get(repository.id)?.platform : undefined,
+      ),
       code_revision: null,
       source_scan_id: null,
       source_updated_at:
@@ -349,17 +365,48 @@ function records(payload: unknown): FindingInput {
       "Wiz repository inventory has another page. Finish the selected inventory before publishing.",
     );
   if (Array.isArray(inventory?.["nodes"])) {
-    for (const entry of inventory["nodes"]) {
-      const repository = object(object(entry)?.["repository"]);
+    const entries = inventory["nodes"].flatMap((entry) => {
+      const node = object(entry);
+      const repository = object(node?.["repository"]);
       const id = text(repository?.["id"]);
       const url = text(repository?.["url"]);
-      if (!id || !url) continue;
-      const previous = repositories.get(id);
-      if (previous && repositoryUrlKey(previous.url) !== repositoryUrlKey(url))
+      return id && url
+        ? [
+            {
+              id,
+              name: text(repository?.["name"]),
+              url,
+              platform: text(node?.["platform"]),
+            },
+          ]
+        : [];
+    });
+    // Resolve provider hints before comparing URLs, so duplicate row order cannot
+    // discard a known platform or reject a case variant before its GITHUB hint.
+    for (const entry of entries) {
+      const previous = repositories.get(entry.id);
+      if (
+        previous?.platform &&
+        entry.platform &&
+        previous.platform !== entry.platform
+      )
         throw new Error(
-          `Repository inventory contains conflicting URLs for ${JSON.stringify(id)}.`,
+          `Repository inventory contains conflicting platforms for ${JSON.stringify(entry.id)}.`,
         );
-      repositories.set(id, { id, name: text(repository?.["name"]), url });
+      repositories.set(entry.id, {
+        ...entry,
+        platform: entry.platform ?? previous?.platform ?? null,
+      });
+    }
+    for (const entry of entries) {
+      const resolved = repositories.get(entry.id)!;
+      if (
+        inventoryRepositoryUrlKey(entry.url, resolved.platform) !==
+        inventoryRepositoryUrlKey(resolved.url, resolved.platform)
+      )
+        throw new Error(
+          `Repository inventory contains conflicting URLs for ${JSON.stringify(entry.id)}.`,
+        );
     }
   }
   const collections = {
