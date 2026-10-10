@@ -181,29 +181,27 @@ function mergeShards(
       details.push(`unexpected output shards ${formatDiagnostic(unexpected)}`);
     throw new Error(`Rank shard outputs are incomplete: ${details.join("; ")}`);
   }
-  const shardedInputs: RankRow[] = [];
+  let inputIndex = 0;
+  let partitionMatches = true;
   const outputByPath = new Map<string, RankRow>();
   for (const shard of shards) {
     const outputShard = childPath(directory, outputShardName(basename(shard)));
     const [inputs, outputs] = validateShard(shard, outputShard);
-    for (const row of inputs) shardedInputs.push(row);
+    for (const row of inputs) {
+      const expectedRow = authoritative[inputIndex++];
+      partitionMatches &&=
+        expectedRow !== undefined &&
+        row.path === expectedRow.path &&
+        row.area === expectedRow.area &&
+        row.preview === expectedRow.preview;
+    }
     for (const row of outputs) {
       if (outputByPath.has(row.path))
         throw new Error(`Rank outputs contain duplicate path: ${row.path}`);
       outputByPath.set(row.path, row);
     }
   }
-  if (
-    shardedInputs.length !== authoritative.length ||
-    shardedInputs.some((row, index) => {
-      const expectedRow = authoritative[index]!;
-      return (
-        row.path !== expectedRow.path ||
-        row.area !== expectedRow.area ||
-        row.preview !== expectedRow.preview
-      );
-    })
-  )
+  if (inputIndex !== authoritative.length || !partitionMatches)
     throw new Error(
       "Rank input shards do not exactly partition the authoritative rank input",
     );

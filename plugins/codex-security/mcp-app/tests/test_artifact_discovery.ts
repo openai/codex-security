@@ -6,28 +6,39 @@ import type {
   CompactDiscoveryCandidate,
 } from "../src/artifact-discovery.js";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import {
-  copyFile,
   mkdir,
   readFile,
   readdir,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { build } from "esbuild";
+import { syncBuiltinESMExports } from "node:module";
+import { mock } from "node:test";
 import { importSource } from "./import-module.ts";
 
 const {
   compactDiscoveryCandidateSchema,
-  discoveryCandidatesInputSchema,
   listCodexSecurityCandidates,
-  listCodexSecurityCandidatesInputSchema,
   recordCodexSecurityDiscoveryCandidates,
   workbenchDiscoveryCandidatesInputSchema,
   workbenchListCodexSecurityCandidatesInputSchema,
 } = await importSource(
-  new URL("../src/artifact-discovery.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
+  {
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
+          import.meta.url,
+        ).href,
+      ),
+    },
+  },
 );
 
 const pluginRoot = path.join(import.meta.dirname, "../../");
@@ -67,9 +78,6 @@ assert.equal(
   false,
 );
 assert.equal(definitions.$defs.discoveryCandidate.additionalProperties, true);
-assert.deepEqual(toolSchemas.$defs.recordDiscoveryCandidatesInput.required, [
-  "candidates",
-]);
 assert.deepEqual(
   toolSchemas.$defs.workbenchRecordDiscoveryCandidatesInput.required,
   ["scanId", "candidates"],
@@ -83,22 +91,6 @@ const root = await rootDirectories.create("security-artifact-discovery-");
 const runtimePluginRoot = path.join(root, "plugin");
 const repoRoot = path.join(root, "repository");
 try {
-  await build({
-    bundle: true,
-    entryPoints: [path.join(pluginRoot, "mcp-app", "helpers-main.ts")],
-    outfile: path.join(runtimePluginRoot, "mcp", "helpers.mjs"),
-    format: "esm",
-    platform: "node",
-  });
-  if (process.platform === "win32") {
-    const target = `win32-${process.arch}`;
-    const destination = path.join(runtimePluginRoot, "mcp", "native", target);
-    await mkdir(destination, { recursive: true });
-    await copyFile(
-      path.join(pluginRoot, "native", "prebuilt", target, "windows.node"),
-      path.join(destination, "windows.node"),
-    );
-  }
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
   await mkdir(path.join(repoRoot, "support"), { recursive: true });
   await writeFile(
@@ -117,6 +109,7 @@ try {
   const scan = await createContext("scan", "scan");
   await verifyInputSchema();
   await verifyNormalizationAndPagination(scan);
+  await verifyNormalizationRunsOffThread(scan);
   await verifyReaderPreservesSharedPhaseRecords(scan);
   await verifyNormalizerFailuresPreserveOutput(scan);
   await verifyDiffInventoryAllowsDeletedFiles();
@@ -130,7 +123,10 @@ try {
 
 async function verifyInputSchema() {
   const parseCandidate = (value: unknown) =>
-    discoveryCandidatesInputSchema.safeParse({ candidates: [value] });
+    workbenchDiscoveryCandidatesInputSchema.safeParse({
+      scanId: "scan-fixture",
+      candidates: [value],
+    });
   const candidate = rawCandidate();
   assert.equal(parseCandidate(candidate).success, true);
   assert.equal(
@@ -183,17 +179,9 @@ async function verifyInputSchema() {
     false,
   );
   assert.equal(
-    discoveryCandidatesInputSchema.safeParse({ candidates: [] }).success,
-    true,
-  );
-  assert.equal(
-    discoveryCandidatesInputSchema.safeParse({ rows: [candidate] }).success,
-    false,
-  );
-  assert.equal(
-    discoveryCandidatesInputSchema.safeParse({
+    workbenchDiscoveryCandidatesInputSchema.safeParse({
       scanId: "scan-fixture",
-      candidates: [],
+      rows: [candidate],
     }).success,
     false,
   );
@@ -207,16 +195,6 @@ async function verifyInputSchema() {
   assert.equal(
     workbenchDiscoveryCandidatesInputSchema.safeParse({
       candidates: [],
-    }).success,
-    false,
-  );
-  assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({}).success,
-    true,
-  );
-  assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
     }).success,
     false,
   );
@@ -231,15 +209,24 @@ async function verifyInputSchema() {
     false,
   );
   assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({ cursor: "01" }).success,
+    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
+      scanId: "scan-fixture",
+      cursor: "01",
+    }).success,
     false,
   );
   assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({ limit: 0 }).success,
+    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
+      scanId: "scan-fixture",
+      limit: 0,
+    }).success,
     false,
   );
   assert.equal(
-    listCodexSecurityCandidatesInputSchema.safeParse({ limit: 1001 }).success,
+    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
+      scanId: "scan-fixture",
+      limit: 1001,
+    }).success,
     false,
   );
 }
@@ -345,6 +332,29 @@ async function verifyNormalizerFailuresPreserveOutput(
     recordCodexSecurityDiscoveryCandidates(
       {
         candidates: [
+          rawCandidate(),
+          rawCandidate({
+            locations: [
+              { path: "src/missing.ts", start_line: 1, role: "sink" },
+            ],
+          }),
+        ],
+      },
+      context,
+    ),
+    (error) =>
+      error instanceof Error &&
+      /candidate input row 2:.*(?:ENOENT|Windows filesystem error 2)/u.test(
+        error.message,
+      ) &&
+      error.message.includes("missing.ts"),
+  );
+  assert.equal(await readFile(destination, "utf8"), original);
+
+  await assert.rejects(
+    recordCodexSecurityDiscoveryCandidates(
+      {
+        candidates: [
           rawCandidate({
             locations: [{ path: "src/routes.ts", start_line: 9, role: "sink" }],
           }),
@@ -392,51 +402,308 @@ async function verifyNormalizerFailuresPreserveOutput(
   );
   assert.equal(await readFile(destination, "utf8"), original);
 
+  const inventory = path.join(path.dirname(destination), "in_scope_files.txt");
+  const scope = await readFile(inventory);
+  await writeFile(inventory, Buffer.from([0xff]));
   await assert.rejects(
-    recordCodexSecurityDiscoveryCandidates(
-      {
-        candidates: [rawCandidate()],
-      },
-      { ...context, pluginRoot: undefined },
-    ),
-    /plugin runtime is not bound/u,
+    recordCodexSecurityDiscoveryCandidates({ candidates: [] }, context),
+    /UTF-8|encoded data/,
   );
   assert.equal(await readFile(destination, "utf8"), original);
+  await writeFile(inventory, scope);
+
+  assert.deepEqual(
+    await recordCodexSecurityDiscoveryCandidates(
+      { candidates: [rawCandidate()] },
+      { ...context, pluginRoot: undefined },
+    ),
+    { operation: "replace", candidatesRecorded: 1 },
+  );
+}
+
+async function verifyNormalizationRunsOffThread(context: ArtifactContext) {
+  // POSIX normalization uses these synchronous APIs; workers have their own
+  // built-in modules, so reads there remain available while this thread refuses.
+  if (process.platform === "win32") return;
+  const assertOutsideScan = (file: fs.PathOrFileDescriptor) => {
+    const value = Buffer.isBuffer(file) ? file.toString("utf8") : String(file);
+    assert.equal(value.startsWith(context.repoRoot), false, value);
+    assert.equal(value.startsWith(context.root), false, value);
+  };
+  const read = fs.readFileSync;
+  const realpath = fs.realpathSync.native;
+  const readMock = mock.method(
+    fs,
+    "readFileSync",
+    (...args: Parameters<typeof read>) => {
+      assertOutsideScan(args[0]);
+      return read(...args);
+    },
+  );
+  const realpathMock = mock.method(
+    fs.realpathSync,
+    "native",
+    (...args: Parameters<typeof realpath>) => {
+      assertOutsideScan(args[0]);
+      return realpath(...args);
+    },
+  );
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(
+      await recordCodexSecurityDiscoveryCandidates(
+        { candidates: [rawCandidate()] },
+        context,
+      ),
+      { operation: "replace", candidatesRecorded: 1 },
+    );
+  } finally {
+    readMock.mock.restore();
+    realpathMock.mock.restore();
+    syncBuiltinESMExports();
+  }
 }
 
 async function verifyDiffInventoryAllowsDeletedFiles() {
   const context = await createContext("diff-output", "scan");
+  const repository = path.join(root, "diff-repository");
+  await mkdir(repository);
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", repository, ...args], {
+      encoding: "utf8",
+    }).trim();
+  const commit = (stage = true) => {
+    if (stage) git("add", "-A");
+    git(
+      "-c",
+      "user.name=Synthetic",
+      "-c",
+      "user.email=synthetic@example.test",
+      "commit",
+      "-qm",
+      "fixture",
+    );
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "-q");
+  await writeFile(
+    path.join(repository, "deleted.ts"),
+    "one\rtwo\r\nthree\nfour",
+  );
+  await writeFile(path.join(repository, "changed.ts"), "one\ntwo\n");
+  await writeFile(path.join(repository, "support.ts"), "support\n");
+  const linkBlob = execFileSync(
+    "git",
+    ["-C", repository, "hash-object", "-w", "--stdin"],
+    { input: "support.ts", encoding: "utf8" },
+  ).trim();
+  git("add", "-A");
+  git(
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `120000,${linkBlob},base-link.ts`,
+  );
+  const baseRevision = commit(false);
+  await rm(path.join(repository, "deleted.ts"));
+  await writeFile(path.join(repository, "changed.ts"), "one\ntwo\nthree\n");
+  await writeFile(path.join(repository, "head-only.ts"), "one\ntwo\n");
+  git("add", "-A");
+  git("update-index", "--add", "--cacheinfo", `120000,${linkBlob},link.ts`);
+  const headRevision = commit(false);
+  await rm(path.join(repository, "head-only.ts"));
+  await rm(path.join(repository, "support.ts"));
+  await writeFile(path.join(repository, "changed.ts"), "current\n");
+  await writeFile(
+    path.join(repository, "unrelated.ts"),
+    "unrelated current source\n",
+  );
+  commit();
+  if (process.platform === "win32") {
+    git("mv", "changed.ts", "temporary.ts");
+    git("mv", "temporary.ts", "CHANGED.ts");
+    commit();
+  }
   const inventory = path.join(
     context.root,
     "artifacts",
     "02_discovery",
     "in_scope_files.txt",
   );
-  await writeFile(
-    inventory,
-    "src/deleted-guard.ts\nsrc/routes.ts\nsrc/query.ts\n",
-  );
-
-  await assert.rejects(
+  await writeFile(inventory, "deleted.ts\r\nchanged.ts\r\nhead-only.ts\r\n");
+  const record = (scan: ArtifactContext, paths: [string, number][]) =>
     recordCodexSecurityDiscoveryCandidates(
-      { candidates: [rawCandidate()] },
-      context,
-    ),
-    /in-scope file row 1/u,
-  );
-
-  const diffContext = { ...context, mode: "diff" };
-  assert.deepEqual(
-    await recordCodexSecurityDiscoveryCandidates(
-      { candidates: [rawCandidate()] },
-      diffContext,
-    ),
-    { operation: "replace", candidatesRecorded: 1 },
-  );
-  assert.equal(
-    (await listCodexSecurityCandidates({}, diffContext)).rows.length,
-    1,
-  );
+      {
+        candidates: [
+          rawCandidate({
+            locations: paths.map(([path, end_line]) => ({
+              path,
+              start_line: 1,
+              end_line,
+              role: "sink",
+            })),
+          }),
+        ],
+      },
+      scan,
+    );
+  for (const kind of ["commit", "range", "working_tree"]) {
+    if (kind === "working_tree") {
+      git("reset", "--hard", baseRevision);
+      await rm(path.join(repository, "deleted.ts"));
+      await writeFile(path.join(repository, "changed.ts"), "current\n");
+    }
+    const scan: ArtifactContext = {
+      ...context,
+      repoRoot: repository,
+      pluginRoot,
+      pythonCommand: undefined,
+      mode: "diff",
+      targetContract: {
+        diffTarget: {
+          kind,
+          baseRevision,
+          headRevision: kind === "working_tree" ? baseRevision : headRevision,
+        },
+      },
+    };
+    if (kind === "working_tree")
+      await writeFile(inventory, "deleted.ts\nchanged.ts\n");
+    const sources: [string, number][] =
+      kind === "working_tree"
+        ? [
+            ["deleted.ts", 4],
+            ["changed.ts", 1],
+            ["support.ts", 1],
+          ]
+        : [
+            ["deleted.ts", 4],
+            ["changed.ts", 3],
+            ["head-only.ts", 2],
+            ["support.ts", 1],
+          ];
+    assert.deepEqual(await record(scan, sources), {
+      operation: "replace",
+      candidatesRecorded: 1,
+    });
+    const destination = path.join(
+      path.dirname(inventory),
+      "candidate_ledger.jsonl",
+    );
+    const accepted = await readFile(destination, "utf8");
+    await assert.rejects(
+      record(
+        { ...scan, pythonCommand: path.join(root, "missing-python") },
+        sources,
+      ),
+      { code: "ENOENT" },
+    );
+    assert.equal(await readFile(destination, "utf8"), accepted);
+    for (const invalid of [
+      "../outside.ts",
+      path.join(repository, "changed.ts"),
+    ]) {
+      await assert.rejects(
+        recordCodexSecurityDiscoveryCandidates(
+          {
+            candidates: [
+              rawCandidate({
+                locations: [
+                  { path: "changed.ts", start_line: 1, role: "sink" },
+                ],
+              }),
+              rawCandidate({
+                locations: [{ path: invalid, start_line: 1, role: "sink" }],
+              }),
+            ],
+          },
+          scan,
+        ),
+        /candidate input row 2: path: expected a repository-relative path without traversal/u,
+      );
+      assert.equal(await readFile(destination, "utf8"), accepted);
+    }
+    await assert.rejects(
+      record(
+        {
+          ...scan,
+          targetContract: {
+            diffTarget: {
+              kind,
+              baseRevision: "missing-revision",
+              headRevision,
+            },
+          },
+        },
+        sources,
+      ),
+      /fatal: (?:ambiguous argument|bad revision)/,
+    );
+    for (const [file, line] of sources.filter(
+      ([file]) => file !== "support.ts",
+    )) {
+      await assert.rejects(record(scan, [[file, line + 1]]), /line range/);
+      assert.equal(await readFile(destination, "utf8"), accepted);
+    }
+    for (const file of [
+      "missing.ts",
+      "link.ts",
+      "base-link.ts",
+      "../outside.ts",
+    ]) {
+      await assert.rejects(record(scan, [[file, 1]]));
+      assert.equal(await readFile(destination, "utf8"), accepted);
+    }
+    await assert.rejects(
+      record(scan, [["support.ts", 1]]),
+      /at least one in-scope/,
+    );
+    if (kind === "working_tree") {
+      git("rm", "--cached", "changed.ts");
+      await writeFile(
+        path.join(repository, ".git", "info", "exclude"),
+        "changed.ts\nCHANGED.ts\n",
+      );
+      await record(scan, [["changed.ts", 2]]);
+      await assert.rejects(record(scan, [["changed.ts", 3]]), /line range/);
+      await mkdir(path.join(repository, "deleted.ts"));
+      await record(scan, [["deleted.ts", 4]]);
+      await assert.rejects(record(scan, [["deleted.ts", 5]]), /line range/);
+      await rm(path.join(repository, "deleted.ts"), { recursive: true });
+    }
+    if (process.platform === "win32") {
+      for (const prefix of ["", "./", ".\\", ".//./"]) {
+        await record(scan, [
+          [`${prefix}SUPPORT.TS`, 1],
+          [`${prefix}DELETED.TS`, 4],
+          [`${prefix}CHANGED.ts`, kind === "working_tree" ? 2 : 3],
+        ]);
+        const candidate = JSON.parse(await readFile(destination, "utf8"));
+        assert.ok(
+          candidate.locations.some(
+            (location: { path: string }) => location.path === "deleted.ts",
+          ),
+        );
+        if (kind !== "working_tree")
+          assert.ok(
+            candidate.locations.some(
+              (location: { path: string }) => location.path === "changed.ts",
+            ),
+          );
+      }
+      if (kind !== "working_tree") {
+        await assert.rejects(
+          record(scan, [["UNRELATED.TS", 1]]),
+          /no selected source/,
+        );
+      }
+    }
+    if (kind !== "working_tree")
+      await assert.rejects(
+        record(scan, [["unrelated.ts", 1]]),
+        /no selected source/,
+      );
+  }
 }
 
 async function verifyReaderPreservesSharedPhaseRecords(

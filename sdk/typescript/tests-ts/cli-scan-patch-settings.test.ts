@@ -184,10 +184,7 @@ describe("inline patch service tier", () => {
 
   test("keeps overlapping scan tiers isolated", async () => {
     let arrivals = 0;
-    let release!: () => void;
-    const ready = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: ready, resolve: release } = Promise.withResolvers<void>();
     const beforeChild = async () => {
       if (++arrivals === 2) release();
       await ready;

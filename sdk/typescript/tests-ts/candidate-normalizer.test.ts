@@ -1,17 +1,14 @@
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  realpathSync,
-  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -19,7 +16,7 @@ import { parseJsonLines } from "./support/json.js";
 
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
-const roots: string[] = [];
+const roots = createTemporaryDirectoriesSync(true);
 type Row = Record<string, unknown>;
 interface Fixture {
   root: string;
@@ -44,10 +41,7 @@ function write(path: string, data: string | Buffer): void {
   writeFileSync(path, data);
 }
 function fixture(): Fixture {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "candidate-normalizer-")),
-  );
-  roots.push(root);
+  const root = roots.create("candidate-normalizer-");
   const repo = join(root, "İrepository");
   for (const path of [
     "app/routes.py",
@@ -105,10 +99,7 @@ function invoke(
 function ledger(f: Fixture): Row[] {
   return parseJsonLines<Row>(readFileSync(f.output, "utf8"));
 }
-afterEach(() => {
-  for (const root of roots.splice(0))
-    rmSync(root, { recursive: true, force: true });
-});
+afterEach(roots.cleanup);
 
 describe("built candidate normalizer", () => {
   test.skipIf(process.platform !== "linux")(

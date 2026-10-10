@@ -32,7 +32,7 @@ jobs:
     if: ${{ !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && (matrix.mode == 'baseline' && 60 || matrix.mode == 'parallel' && 45) || 30 }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && (matrix.mode == 'baseline' && 90 || matrix.mode == 'parallel' && 60) || 30 }}
     env:
       CODEX_SECURITY_PROPERTY_SEED: ${{ github.event_name == 'pull_request' && 1 || github.run_number }}
     strategy:
@@ -93,7 +93,8 @@ jobs:
             mode: shard-7
             args: --shard=7/7
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - &actions-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Python
@@ -103,7 +104,8 @@ jobs:
           python-version: "3.12"
       - name: Prepare native runtime
         uses: ./.github/actions/download-native
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - &actions-setup-node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.13.0"
       - name: Set up pnpm
@@ -114,8 +116,17 @@ jobs:
             sdk/typescript/pnpm-lock.yaml
             plugins/codex-security/mcp-app/pnpm-lock.yaml
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        if: runner.os == 'Windows'
         with:
           bun-version: "1.4.2"
+      - name: Set up Bun on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Includes the subprocess fix from https://github.com/oven-sh/bun/pull/44581
+          # for the isolated-runner hang tracked in https://github.com/oven-sh/bun/issues/34069.
+          npm install --prefix "$RUNNER_TEMP/bun" --ignore-scripts --no-audit --no-fund @oven/bun-linux-x64@1.4.2-canary.20261008.1
+          echo "$RUNNER_TEMP/bun/node_modules/@oven/bun-linux-x64/bin" >> "$GITHUB_PATH"
       - name: Install dependencies
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
@@ -150,13 +161,10 @@ jobs:
     needs: [runner]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22.13.0"
-      - uses: ./.github/actions/setup-tools
+      - *actions-checkout
+      - *actions-setup-node
+      - &github-actions-setup-tools
+        uses: ./.github/actions/setup-tools
         with:
           setup-node: false
       - name: Install dependencies
@@ -183,16 +191,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+      - *actions-checkout
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # Stryker 10's Babel 8 requires Node 22.18+ or 24.11+.
           node-version: "24.15.0"
-      - uses: ./.github/actions/setup-tools
-        with:
-          setup-node: false
+      - *github-actions-setup-tools
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"

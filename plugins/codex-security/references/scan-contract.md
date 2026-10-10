@@ -26,6 +26,8 @@ Retention is an explicit consumer decision. Producing a sealed bundle must not s
 
 A sealed manifest records the terminal timestamp and hashes for the canonical documents and immutable evidence receipts included in that bundle. Readable reports and generated exports are projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
 
+Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format. All schema-valid fractional widths remain readable on supported Python versions; parsing uses native microsecond precision. History and finding queries use native date precision and stable ID tie-breakers; ordering beyond millisecond precision is not guaranteed. Stored timestamp text remains unchanged.
+
 `scan.status` records why the bundle was sealed:
 
 | Status        | Meaning                                                                                                         |
@@ -134,11 +136,13 @@ For Standard and diff scans, record:
 
 `inventoryStrategy` records how the producer enumerated the reviewed content, independently of the requested scan workflow:
 
+The discovery helper's `in_scope_files.txt` input contains one UTF-8 path per line. LF and CRLF separators are accepted; filenames containing CR or LF are unsupported. Other path whitespace and spelling are preserved.
+
 For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repeated discovery is workflow metadata, not a different inventory strategy.
 
 | Inventory strategy | Meaning                                                   |
 | ------------------ | --------------------------------------------------------- |
-| `repository`       | Repository-wide tracked source-like file inventory        |
+| `repository`       | Repository-wide file inventory                            |
 | `scoped_path`      | Repository inventory constrained to requested paths       |
 | `diff`             | Files selected from the reviewed Git change set           |
 | `directory`        | Deterministic non-Git directory inventory                 |

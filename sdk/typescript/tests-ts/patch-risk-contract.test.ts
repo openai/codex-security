@@ -343,7 +343,9 @@ describe("patch risk assessment contract", () => {
       '{"__proto__":"merge","contradicted":"revise"}',
     );
     expect(validate(payload).status).toBe(0);
-    payload.evidencePlan[0]!.outcomes["__proto__"] = "unsupported";
+    payload.evidencePlan[0]!.outcomes = JSON.parse(
+      '{"__proto__":"unsupported","contradicted":"revise"}',
+    );
     const invalidOutcome = validate(payload);
     expect(invalidOutcome.status).toBe(1);
     expect(invalidOutcome.stderr).toContain("outcomes");
