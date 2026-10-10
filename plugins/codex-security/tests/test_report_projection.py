@@ -746,6 +746,7 @@ def test_projection_escapes_raw_html_in_markdown() -> None:
 def test_projection_omits_informational_findings() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["severity"]["level"] = "informational"
+    original = copy.deepcopy((manifest, findings, coverage))
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
@@ -756,6 +757,53 @@ def test_projection_omits_informational_findings() -> None:
         "and reportability gates."
     ) in markdown
     assert "Parser \\| boundary" not in markdown
+    assert "1 finding is outside the reportable severity set" in markdown
+    assert "informational: 1" in markdown
+    assert "`findings.json`" in markdown.split("## Findings", 1)[1]
+    assert (manifest, findings, coverage) == original
+
+
+@pytest.mark.parametrize("coverage_mode", ["repository", "deep_repository"])
+def test_projection_explains_omitted_findings_alongside_reportable_findings(
+    coverage_mode: str,
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = coverage_mode
+    finding = findings["findings"][0]
+    finding["title"] = "Reportable finding"
+    for index in range(2):
+        informational = copy.deepcopy(finding)
+        informational["occurrenceId"] = f"informational-{index}"
+        informational["title"] = f"Informational detail {index}"
+        informational["severity"]["level"] = "informational"
+        findings["findings"].append(informational)
+    original = copy.deepcopy((manifest, findings, coverage))
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    count_label = (
+        "Reportable DSS findings" if coverage_mode == "deep_repository" else "Reportable findings"
+    )
+    assert f"| {count_label} | 1 |" in markdown
+    assert "Reportable finding" in markdown
+    assert "Informational detail" not in markdown
+    assert "### No findings" not in markdown
+    assert "2 findings are outside the reportable severity set" in markdown
+    assert "informational: 2" in markdown
+    assert "`findings.json`" in markdown.split("## Findings", 1)[1]
+    assert (manifest, findings, coverage) == original
+
+
+@pytest.mark.parametrize("has_findings", [False, True], ids=["empty", "reportable"])
+def test_projection_omits_severity_note_when_no_findings_are_held_back(has_findings: bool) -> None:
+    manifest, findings, coverage = canonical_documents()
+    if not has_findings:
+        findings["findings"] = []
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "outside the reportable severity set" not in markdown
+    assert ("### No findings" in markdown) is not has_findings
 
 
 def test_projection_does_not_claim_completed_gates_for_stopped_scan() -> None:

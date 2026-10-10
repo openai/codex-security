@@ -823,6 +823,34 @@ The extraction root is not enforced.
                     self.scan_file_bytes(*canonical),
                 )
 
+    @pytest.mark.cross_platform
+    def test_informational_report_note_preserves_sealed_findings_and_exports(self) -> None:
+        self.findings["findings"][0]["severity"]["level"] = "informational"
+        self.write_sealed_scan()
+        canonical = self.scan_file_bytes(*CANONICAL_FILES)
+        report_path = self.scan_dir / "report.md"
+        first_report = report_path.read_bytes()
+        self.assertIn(b"informational: 1", first_report)
+        self.assertEqual(
+            self.read_json("findings.json")["findings"][0]["severity"]["level"],
+            "informational",
+        )
+
+        sarif = json.loads(FINALIZER.build_findings_export(self.scan_dir, "sarif"))
+        self.assertEqual(sarif["runs"][0]["results"][0]["level"], "note")
+        rows = list(
+            csv.DictReader(
+                io.StringIO(FINALIZER.build_findings_export(self.scan_dir, "csv").decode())
+            )
+        )
+        self.assertEqual([row["severity"] for row in rows], ["informational"])
+        self.assertEqual(canonical, self.scan_file_bytes(*CANONICAL_FILES))
+
+        report_path.unlink()
+        FINALIZER.finalize_scan(self.scan_dir)
+        self.assertEqual(first_report, report_path.read_bytes())
+        self.assertEqual(canonical, self.scan_file_bytes(*CANONICAL_FILES))
+
     def test_deep_csv_export_includes_the_canonical_candidate_id(self) -> None:
         self.coverage["mode"] = "deep_repository"
         self.finding["extensions"] = {"candidateId": "DSS-145", "reportId": "DSS-145-rogue"}

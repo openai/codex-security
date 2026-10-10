@@ -426,6 +426,16 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _unreported_findings_note(findings: list[dict[str, Any]]) -> str:
+    count = len(findings)
+    subject = "finding is" if count == 1 else "findings are"
+    return (
+        f"{count} {subject} outside the reportable severity set "
+        f"({_level_mix(findings, 'severity', SEVERITY_ORDER)}) and not detailed here. "
+        "These findings are available in `findings.json` and in SARIF and CSV exports."
+    )
+
+
 def _level_mix(findings: list[dict[str, Any]], field: str, order: dict[str, int]) -> str:
     counts = Counter(finding[field]["level"] for finding in findings)
     return ", ".join(f"{level}: {counts[level]}" for level in order if counts[level]) or "none"
@@ -755,6 +765,11 @@ def build_report_markdown(
         ),
         key=_finding_sort_key,
     )
+    unreported = [
+        finding
+        for finding in findings_document["findings"]
+        if finding["severity"]["level"] not in REPORTABLE_SEVERITIES
+    ]
     writeup_paths = [_writeup_report_path(finding) for finding in findings]
     duplicate_writeup_paths = sorted(
         path
@@ -887,6 +902,8 @@ def build_report_markdown(
                     f"| {finding_link} | {finding['severity']['level']} "
                     f"| {finding['confidence']['level']} | {writeup_link} |"
                 )
+        if unreported:
+            lines.extend(["", _unreported_findings_note(unreported)])
         lines.extend(
             [
                 "",
@@ -962,6 +979,8 @@ def build_report_markdown(
                 ),
             ]
         )
+        if unreported:
+            lines.extend(["", _unreported_findings_note(unreported)])
     if hardening_portfolio_path is not None:
         lines.extend(
             [
