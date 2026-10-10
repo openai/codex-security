@@ -112,6 +112,7 @@ test.each([
   { budget: true },
   { budget: true, firstChildBudget: true },
   { budget: false, native: "discovery" },
+  { budget: false, native: "discovery", queuedNativeKnowledge: true },
   { budget: false, native: "discovery", provider: { env_key: "PROVIDER_KEY" } },
   { budget: false, native: "sealed", provider: { env_key: "PROVIDER_KEY" } },
 ] as {
@@ -122,6 +123,7 @@ test.each([
   requiredCost?: boolean;
   provider?: JsonObject;
   native?: "discovery" | "sealed";
+  queuedNativeKnowledge?: boolean;
 }[])(
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
   async ({
@@ -132,6 +134,7 @@ test.each([
     requiredCost,
     provider,
     native,
+    queuedNativeKnowledge,
   }) => {
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
@@ -145,6 +148,12 @@ test.each([
         writeFile(join(repo, name), "print('public synthetic fixture')\n"),
       ),
     );
+    const knowledgeDocument = join(root, "architecture.md");
+    if (queuedNativeKnowledge)
+      await writeFile(knowledgeDocument, "Original synthetic architecture.\n");
+    let knowledgeBytes: string | undefined;
+    let queuedPrepared: CapturedNativeScan | undefined;
+    let preparedCount = 0;
     const childFindings: JsonObject[] = JSON.parse(
       await readFile(
         join(pluginRoot, "examples/completed-scan/findings.json"),
@@ -190,6 +199,9 @@ test.each([
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       CODEX_CLI_PATH: process.execPath,
       SYNTHETIC_SCAN_SETTING: "inherited",
+      ...(queuedNativeKnowledge
+        ? { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeDocument }
+        : {}),
       GIT_SSH_COMMAND: "synthetic-ssh --fixture",
       GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
       CODEX_SAFETY_IDENTIFIER: "ambient-identifier",
@@ -342,16 +354,18 @@ process.exit(0);
             if (value === undefined) delete process.env[key];
             else process.env[key] = value;
           }
-          prepared = await prepareNative({
+          const nativeInput = {
             scan: {
               ...registeredScan,
               targetPath: repo,
               userContext: "Inspect the synthetic source.",
             },
-            recipe: nativeRecipe ?? {
-              postScanPrompt: "Post-scan instructions once.",
-              cyberAccessProgram: "daybreak_blue",
-            },
+            recipe: queuedNativeKnowledge
+              ? undefined
+              : (nativeRecipe ?? {
+                  postScanPrompt: "Post-scan instructions once.",
+                  cyberAccessProgram: "daybreak_blue",
+                }),
             savedDeepScanSettings: {
               workers: 1,
               subagents: 3,
@@ -363,8 +377,22 @@ process.exit(0);
             pluginRoot: PLUGIN_ROOT,
             pythonPath: python,
             parentSandbox: { filesystemDenies: [join(root, "private")] },
-          });
-          nativeOptions = prepared.options;
+          };
+          prepared = queuedPrepared ?? (await prepareNative(nativeInput));
+          if (queuedNativeKnowledge && preparedCount++ === 0) {
+            // Both native callers prepared before either SDK bound its recipe.
+            queuedPrepared = await prepareNative(nativeInput);
+            expect(queuedPrepared.options.resumeScanId).toBeUndefined();
+          }
+          nativeOptions = {
+            ...prepared.options,
+            ...(queuedNativeKnowledge
+              ? {
+                  postScanPrompt: "Post-scan instructions once.",
+                  cyberAccessProgram: "daybreak_blue",
+                }
+              : {}),
+          };
         } finally {
           for (const [key, value] of Object.entries(before)) {
             if (value === undefined) delete process.env[key];
@@ -494,6 +522,24 @@ process.exit(0);
                   expect(options.config).toMatchObject({
                     service_tier: "priority",
                   });
+                  if (queuedNativeKnowledge) {
+                    expect(
+                      await readFile(
+                        join(
+                          env["CODEX_SECURITY_KNOWLEDGE_BASE"]!,
+                          "0-architecture.md.txt",
+                        ),
+                        "utf8",
+                      ),
+                    ).toBe("Original synthetic architecture.\n");
+                    if (knowledgeBytes !== undefined)
+                      expect(
+                        await readFile(
+                          join(scanDir, ".scan-knowledge.json"),
+                          "utf8",
+                        ),
+                      ).toBe(knowledgeBytes);
+                  }
                   const record = registrations.get(id)!;
                   const mode = record["mode"] as string;
                   let groups: Array<{
@@ -1135,6 +1181,11 @@ process.exit(0);
         expect(
           commands.filter(({ command }) => command === "fail-scan"),
         ).toEqual([]);
+        if (queuedNativeKnowledge)
+          knowledgeBytes = await readFile(
+            join(scanDir, ".scan-knowledge.json"),
+            "utf8",
+          );
         controller = new AbortController();
         environment.CODEX_SAFETY_IDENTIFIER = "changed-ambient-identifier";
         await client.close();

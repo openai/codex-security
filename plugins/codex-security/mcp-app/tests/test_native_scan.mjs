@@ -22,6 +22,8 @@ const bundle = await build({
   bundle: true,
   stdin: {
     contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
+      export { saveScanKnowledge, scanInputIdentity } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-inputs.ts", import.meta.url)))};
+      export { readKnowledgeBaseSnapshot } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/knowledge-base.ts", import.meta.url)))};
       export { acquireScanExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-execution.ts", import.meta.url)))};
       export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
@@ -61,6 +63,9 @@ new Function("require", "module", "exports", bundle.outputFiles[0].text)(
 );
 const {
   NativeScanHost,
+  saveScanKnowledge,
+  scanInputIdentity,
+  readKnowledgeBaseSnapshot,
   acquireScanExecution,
   prepareNativeScan,
   nativeScanConfiguration,
@@ -1843,3 +1848,73 @@ else {
     },
   );
 }
+
+test("native rejoin restores bound knowledge without overwriting its snapshot", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-knowledge-resume-")),
+  );
+  const document = join(root, "architecture.md");
+  const scanDir = join(root, "scan");
+  const home = join(root, "home");
+  await mkdir(scanDir);
+  await mkdir(home);
+  await writeFile(document, "Original synthetic architecture.\n");
+  const restoreEnvironment = captureEnvironment([
+    "CODEX_HOME",
+    "CODEX_CLI_PATH",
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  ]);
+  try {
+    Object.assign(process.env, {
+      CODEX_HOME: home,
+      CODEX_CLI_PATH: process.execPath,
+      CODEX_SECURITY_KNOWLEDGE_BASE: document,
+    });
+    delete process.env.CODEX_SECURITY_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    const request = { ...input(), scan: { ...input().scan, scanDir } };
+    const fresh = await prepareNativeScan(request);
+    assert.equal(fresh.options.resumeScanId, undefined);
+    assert.equal(fresh.options.knowledgeBaseSnapshot, undefined);
+    assert.deepEqual(fresh.options.knowledgeBasePaths, [document]);
+    const snapshot = await readKnowledgeBaseSnapshot([document]);
+    await saveScanKnowledge(scanDir, snapshot);
+    const recipe = {
+      knowledgeBasePaths: [document],
+      scanInputs: scanInputIdentity(request.scan.userContext, snapshot),
+    };
+    const snapshotPath = join(scanDir, ".scan-knowledge.json");
+    const original = await readFile(snapshotPath, "utf8");
+    for (const state of ["edited", "deleted"]) {
+      if (state === "edited")
+        await writeFile(document, "Changed architecture.");
+      else await rm(document);
+      const rejoined = await prepareNativeScan({ ...request, recipe });
+      assert.equal(rejoined.options.resumeScanId, request.scan.scanId);
+      assert.equal(rejoined.options.registeredScan.scanId, request.scan.scanId);
+      assert.deepEqual(rejoined.options.knowledgeBaseSnapshot, snapshot);
+      assert.equal(await readFile(snapshotPath, "utf8"), original);
+    }
+    const modified = JSON.parse(original);
+    modified.documents["0-architecture.md.txt"] = "Changed snapshot.";
+    await writeFile(snapshotPath, JSON.stringify(modified));
+    await assert.rejects(
+      prepareNativeScan({ ...request, recipe }),
+      /saved knowledge-base snapshot changed/,
+    );
+    assert.equal(
+      await readFile(snapshotPath, "utf8"),
+      JSON.stringify(modified),
+    );
+    await rm(snapshotPath);
+    await assert.rejects(
+      prepareNativeScan({ ...request, recipe }),
+      /Cannot restore the original scan knowledge base/,
+    );
+  } finally {
+    restoreEnvironment();
+    await rm(root, { recursive: true, force: true });
+  }
+});
