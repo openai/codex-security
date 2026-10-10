@@ -59,6 +59,7 @@
     "schemas/tools/scan-draft.schema.json",
     "scripts/config_preflight.py",
     "scripts/codex_profile.mjs",
+    "scripts/codex_session.mjs",
     "scripts/deep_scan_config.py",
     "scripts/deep_scan_defaults.json",
     "scripts/deep_scan_workbench.py",
