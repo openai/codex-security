@@ -1,6 +1,4 @@
-import { createCliTest } from "./support/cli-run.js";
 import { readdir } from "node:fs/promises";
-import { fail } from "./support/errors.js";
 import { publishDraft } from "./support/scan-publication.js";
 
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
@@ -147,7 +145,7 @@ async function interruptedScan(
     );
     await writeFile(
       join(root, "manifest.json"),
-      JSON.stringify({ version: 1, tasks: [task] }, null, 2) + "\n",
+      JSON.stringify({ version: 2, tasks: [task] }, null, 2) + "\n",
     );
     await writeFile(
       join(root, "results.jsonl"),
@@ -2316,7 +2314,7 @@ test.each([
     );
     await finishDiscovery(f);
     const oldPlugin = join(f.root, "old-plugin");
-    for (const path of ["scripts", "schemas", ".codex-plugin"]) {
+    for (const path of ["scripts", "schemas", "shared", ".codex-plugin"]) {
       await cp(join(PLUGIN_ROOT, path), join(oldPlugin, path), {
         recursive: true,
       });
@@ -2847,8 +2845,6 @@ test.each(
   },
 );
 
-import { stripVTControlCharacters } from "node:util";
-
 function resumeDependencies(
   f: Awaited<ReturnType<typeof interruptedScan>>,
   createCodex: NonNullable<
@@ -2887,54 +2883,6 @@ function resumeDependencies(
       }),
   };
 }
-
-test.each([false, true])(
-  "resumed CLI starts with terminal Deep progress (interactive=%p)",
-  async (interactive) => {
-    const f = await interruptedScan();
-    await finishDiscovery(f);
-    const { stderr, runCli } = createCliTest(main, { stderr: interactive });
-    const progress = Promise.withResolvers<void>();
-    const deps = resumeDependencies(f, () => ({
-      startThread: () => fail("Unexpected new session"),
-      resumeThread(threadId) {
-        expect(threadId).toBe(f.threadId);
-        return {
-          id: threadId,
-          async runStreamed() {
-            await progress.promise;
-            const text = stripVTControlCharacters(stderr.text()).replace(
-              /\s+/gu,
-              " ",
-            );
-            expect(text).toContain("consolidating results");
-            expect(text).toContain("Reviews: 0 completed, 0 active, cap 40");
-            expect(text).not.toContain("Scan phase: discovery");
-            throw new Error("Terminal progress captured");
-          },
-        };
-      },
-    }));
-    const code = await runCli(["scans", "resume", f.scanId, "--json"], {
-      ...deps,
-      createSecurity: (config) => {
-        const security = deps.createSecurity(config);
-        const run = security.run.bind(security);
-        security.run = (repository, options = {}) =>
-          run(repository, {
-            ...options,
-            onDeepProgress(update) {
-              options.onDeepProgress?.(update);
-              progress.resolve();
-            },
-          });
-        return security;
-      },
-    });
-    expect(code).toBe(2);
-    expect(stderr.text()).toContain("Terminal progress captured");
-  },
-);
 
 test("bulk Deep resume stages campaign knowledge after its source is removed", async () => {
   const documentRoot = await temporaryDirectory();

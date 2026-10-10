@@ -443,10 +443,7 @@ async function assertMissingPythonError() {
     assert.match(errorText, /could not start its Python 3 helper/);
     assert.match(errorText, /bundled Python runtime/);
     assert.match(errorText, /set the PYTHON environment variable/);
-    assert.doesNotMatch(
-      errorText,
-      /ENOENT|spawn .*codex-security-missing-python/,
-    );
+    assert.match(errorText, /ENOENT|spawn .*codex-security-missing-python/);
   } finally {
     await missingPythonServer.stop();
   }
@@ -1614,9 +1611,13 @@ try {
     "Codex Security elicitation request",
   );
   assert.equal(elicitationRequest.params.mode, "form");
-  assert.equal(
+  assert.match(
     elicitationRequest.params.message,
-    "Codex Security needs your input before it can continue.",
+    /Another Deep Security Scan is running/,
+  );
+  assert.match(
+    elicitationRequest.params.message,
+    /How should Codex Security handle the blocked preflight/,
   );
   assert.deepEqual(
     elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan
@@ -1634,7 +1635,7 @@ try {
       elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan,
       "description",
     ),
-    false,
+    true,
   );
   assert.deepEqual(
     elicitationRequest.params.requestedSchema.properties.preflight_action.oneOf,
@@ -1655,7 +1656,7 @@ try {
       elicitationRequest.params.requestedSchema.properties.preflight_action,
       "description",
     ),
-    false,
+    true,
   );
   testServer.sendResponse(elicitationRequest.id, {
     action: "accept",
@@ -1725,7 +1726,9 @@ try {
   const declinedElicitation = await testServer.waitForMessage(
     (message) =>
       message.method === "elicitation/create" &&
-      message.params?.message === "Decline this Codex Security input request?",
+      message.params?.message.startsWith(
+        "Decline this Codex Security input request?",
+      ),
     "declined Codex Security elicitation request",
   );
   testServer.sendResponse(declinedElicitation.id, { action: "decline" });
@@ -1763,7 +1766,9 @@ try {
   const cancelledElicitation = await testServer.waitForMessage(
     (message) =>
       message.method === "elicitation/create" &&
-      message.params?.message === "Cancel this Codex Security input request?",
+      message.params?.message.startsWith(
+        "Cancel this Codex Security input request?",
+      ),
     "cancelled Codex Security elicitation request",
   );
   testServer.sendResponse(cancelledElicitation.id, { action: "cancel" });

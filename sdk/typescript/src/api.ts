@@ -1608,12 +1608,6 @@ export class CodexSecurity {
       releaseExecution ??= await (
         this.#dependencies.acquireScanExecution ?? acquireScanExecution
       )(stateDirectory, scanDir, await bundledPluginRoot());
-      notifyObserver(
-        "onOutputDirReady",
-        options.onOutputDirReady,
-        options.onObserverError,
-        scanDir,
-      );
       checkOpen();
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
@@ -1688,6 +1682,20 @@ export class CodexSecurity {
         targetRevision,
         sealed,
       } = registered;
+      if (typeof registration["archivedScanDir"] === "string") {
+        notifyObserver(
+          "onOutputArchived",
+          options.onOutputArchived,
+          options.onObserverError,
+          registration["archivedScanDir"],
+        );
+      }
+      notifyObserver(
+        "onOutputDirReady",
+        options.onOutputDirReady,
+        options.onObserverError,
+        scanDir,
+      );
       let { resumeThreadId } = registered;
       scanThreadId =
         typeof resumeThreadId === "string" ? resumeThreadId : undefined;
@@ -2766,8 +2774,7 @@ export class CodexSecurity {
             ...(canceled
               ? []
               : [
-                  "--message",
-                  errorMessage(failure).slice(0, 2400),
+                  `--message=${errorMessage(failure).slice(0, 2400)}`,
                   ...(preservedCost
                     ? ["--cost-json", JSON.stringify(preservedCost)]
                     : []),
@@ -3195,7 +3202,8 @@ export class CodexSecurity {
         const ambientHome =
           environmentValue(source.environment, "CODEX_HOME") ??
           join(homedir(), ".codex");
-        runtime.credentialsAvailable = await importAmbientAuth(
+        runtime.credentialsAvailable = await initialCredentialsAvailable(
+          scanEnvironment,
           ambientHome,
           runtime.codexHome,
         );
@@ -3668,7 +3676,7 @@ export class CodexSecurity {
           activeScan.id,
           ...(canceled
             ? []
-            : ["--message", errorMessage(error).slice(0, 2400)]),
+            : [`--message=${errorMessage(error).slice(0, 2400)}`]),
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();

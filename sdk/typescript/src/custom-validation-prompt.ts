@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { JsonObject } from "./config.js";
+import { resolveCodexProfile, type JsonObject } from "./config.js";
 import { IncompleteScanError } from "./errors.js";
 import { PLUGIN_NAME } from "./runtime.js";
 
@@ -101,6 +101,7 @@ export async function customValidationConfig(
   config: JsonObject,
   pluginRoot: string,
 ): Promise<JsonObject> {
+  config = resolveCodexProfile(config);
   const manifest = JSON.parse(
     await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
   );

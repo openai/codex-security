@@ -768,7 +768,8 @@ describe("CodexSecurity policy API", () => {
       });
       const overrides = f
         .configuration()!
-        .configOverrides!.map((override) => parseToml(override));
+        .configOverrides!.map((override) => parseToml(override))
+        .filter((override) => override["permissions"] !== undefined);
       expect(overrides).toHaveLength(1);
       expect(overrides[0]).toMatchObject({
         permissions: {

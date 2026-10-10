@@ -584,7 +584,7 @@ describe("bundled plugin finding detail contracts", () => {
       "import json, pathlib, runpy, sys",
       "plugin = pathlib.Path(sys.argv[1])",
       "finding = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())['findings'][0]",
-      "finding['codeEvidence'] = [{'id': 'shared-source', 'code': 'canonical_source()'}]",
+      "finding['codeEvidence'] = [{'id': 'shared-source', 'path': 'src/extract.py', 'startLine': 1, 'endLine': 1, 'code': 'canonical_source()'}]",
       "finding['code_evidence'] = [{'id': 'shared-source', 'code': 'conflicting_legacy_source()'}]",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
       "try:",

@@ -2651,36 +2651,31 @@ describe("multiscan", () => {
                     recipes.push(JSON.parse(input!).recipe);
                   return mockWorkbench(args, input);
                 },
-                createCodex: (codex) => ({
-                  startThread: () => ({
-                    id: null,
-                    async runStreamed() {
-                      const first = calls++ === 0;
-                      if (first) {
-                        await writeFile(
-                          standard,
-                          "Changed after the manifest was saved.",
-                        );
-                        await rm(deep);
-                      }
-                      const directory =
-                        codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
-                      staged.push(
-                        Object.fromEntries(
-                          await Promise.all(
-                            (await readdir(directory)).map(async (name) => [
-                              name,
-                              await readFile(join(directory, name), "utf8"),
-                            ]),
-                          ),
-                        ),
-                      );
-                      throw new Error(
-                        "Synthetic model stop after reading staged knowledge.",
-                      );
-                    },
-                  }),
-                }),
+                createCodex: async (codex) => {
+                  const first = calls++ === 0;
+                  if (first) {
+                    await writeFile(
+                      standard,
+                      "Changed after the manifest was saved.",
+                    );
+                    await rm(deep);
+                  }
+                  const directory =
+                    codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+                  staged.push(
+                    Object.fromEntries(
+                      await Promise.all(
+                        (await readdir(directory)).map(async (name) => [
+                          name,
+                          await readFile(join(directory, name), "utf8"),
+                        ]),
+                      ),
+                    ),
+                  );
+                  throw new Error(
+                    "Synthetic model stop after reading staged knowledge.",
+                  );
+                },
               });
             },
           },

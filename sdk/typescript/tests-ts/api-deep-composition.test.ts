@@ -556,7 +556,28 @@ process.exit(0);
                     expect(options.apiKey).toBeUndefined();
                     expect(env).not.toHaveProperty("OPENAI_API_KEY");
                     expect(env).not.toHaveProperty("CODEX_API_KEY");
-                    expect(options.config).toMatchObject(nativeSettings);
+                    const {
+                      model_providers: providerDefinitions,
+                      ...publicSettings
+                    } = nativeSettings;
+                    expect(options.config).toMatchObject(publicSettings);
+                    if (providerDefinitions !== undefined) {
+                      expect(options.config).not.toHaveProperty(
+                        "model_providers",
+                      );
+                      const profile = parseToml(
+                        await readFile(
+                          join(
+                            codexHome,
+                            `${options.nativeProfile}.config.toml`,
+                          ),
+                          "utf8",
+                        ),
+                      );
+                      expect(profile).toMatchObject({
+                        model_providers: providerDefinitions,
+                      });
+                    }
                     const preflight = parseToml(
                       await readFile(
                         env["CODEX_SECURITY_CONFIG_PATH"]!,
@@ -917,6 +938,13 @@ process.exit(0);
           return originalSpawn(...spawnArgs);
         }) as typeof childProcess.spawn)
       : undefined;
+    const deepProgressUpdates: Array<
+      Parameters<NonNullable<ScanOptions["onDeepProgress"]>>[0]
+    > = [];
+    const progressObserverErrors: unknown[] = [];
+    const progressObserverFailure = new Error(
+      "synthetic progress observer failure",
+    );
     try {
       const scanOptions: ScanOptions = {
         mode: "deep",
@@ -939,6 +967,13 @@ process.exit(0);
             ? { maxCostUsd: 1 }
             : {}),
         postScanPrompt: "Post-scan instructions once.",
+        onDeepProgress: (update) => {
+          deepProgressUpdates.push(update);
+          throw progressObserverFailure;
+        },
+        onObserverError: (observer, error) => {
+          if (observer === "onDeepProgress") progressObserverErrors.push(error);
+        },
         onProgress: (update) => progress.push(update),
         onActivity: (activity) => workerRun.activities.push(activity),
         onSessionEvent: (event) => workerRun.sessions.push(event),
@@ -1188,6 +1223,10 @@ process.exit(0);
             { worker: labels.get(threadId), status: "completed" },
           ]);
       }
+      expect(deepProgressUpdates.length).toBeGreaterThan(0);
+      expect(progressObserverErrors).toEqual(
+        deepProgressUpdates.map(() => progressObserverFailure),
+      );
       for (const updates of progressRuns) {
         const counts = updates.map((update) => update.filesCompleted);
         expect(counts).toEqual([...counts].sort((left, right) => left - right));

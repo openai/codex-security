@@ -378,6 +378,10 @@ export async function collectResult(
       await requireScanFile(scanDir, name, name, signal);
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
+      let cause = error;
+      while (cause instanceof Error && cause.cause !== undefined)
+        cause = cause.cause;
+      if (!isRecord(cause) || cause["code"] !== "ENOENT") throw error;
       missing.push(name);
     }
   }
@@ -409,7 +413,15 @@ export async function collectResult(
     coverage,
     scanDir,
     threadId,
-    turnResult,
+    turnResult:
+      expectation.mode === "deep"
+        ? {
+            ...turnResult,
+            finalResponse: (
+              await readScanFile(scanDir, "report.md", "report.md", signal)
+            ).toString("utf8"),
+          }
+        : turnResult,
     sarifPath,
     threatModelPath: await readThreatModelPath(scanDir, {
       pluginRoot,

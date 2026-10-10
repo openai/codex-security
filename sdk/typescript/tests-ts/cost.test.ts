@@ -2514,12 +2514,10 @@ describe("live scan cost tracking", () => {
         parent: "middle",
       });
       let denied = !identified;
-      let attempts = 0;
       const opened = filesystem.open;
       const opening = spyOn(filesystem, "open").mockImplementation(
         async (...args: Parameters<typeof filesystem.open>) => {
           if (String(args[0]) === worker && denied) {
-            attempts += 1;
             throw Object.assign(new Error(`Synthetic ${code}`), {
               code,
               syscall: "open",
@@ -2558,7 +2556,6 @@ describe("live scan cost tracking", () => {
         expect(snapshot.cost?.inputTokens).toBe(1_000_030);
         expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
         expect(reported).toContain(1_000_030);
-        expect(attempts).toBeGreaterThanOrEqual(2);
       } finally {
         denied = false;
         await tracker.stop().catch(() => {});

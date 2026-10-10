@@ -227,7 +227,10 @@ export async function createExecutionCodex(
   } = session.source;
   const environment: ProcessEnvironment = {
     ...environmentWithGit(
-      pluginExecutionEnvironment(python, withoutCodexHome(scanEnvironment)),
+      pluginExecutionEnvironment(python, {
+        ...withoutCodexHome(scanEnvironment),
+        CODEX_CLI_PATH: session.source.command.command,
+      }),
       git,
     ),
     ...(externalProvider === null
@@ -264,9 +267,12 @@ export async function createExecutionCodex(
   )
     ? sdkCodexConfig["responses_api_metadata"]
     : {};
+  const configuredCodexPath = environmentValue(
+    session.source.environment,
+    "CODEX_CLI_PATH",
+  );
   let codexPathOverride =
-    !checkPermissions &&
-    environmentValue(session.source.environment, "CODEX_CLI_PATH") === undefined
+    !checkPermissions && configuredCodexPath === undefined
       ? undefined
       : session.source.command.command;
   let sdkEnvironment = definedEnvironment(
@@ -276,7 +282,9 @@ export async function createExecutionCodex(
   );
   if (
     checkPermissions ||
-    (process.platform === "win32" && codexPathOverride === undefined)
+    (process.platform === "win32" &&
+      (configuredCodexPath === undefined ||
+        !/\.(?:exe|com)$/iu.test(configuredCodexPath)))
   ) {
     codexPathOverride ??= environment["CODEX_CLI_PATH"]!;
     sdkEnvironment = bundledCodexSdkEnvironment(
