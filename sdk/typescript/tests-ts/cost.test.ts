@@ -3359,6 +3359,105 @@ test.each(
   },
 );
 
+test.each(
+  [false, true].flatMap((fullInArchive) =>
+    [false, true].map((attributed) => ({ fullInArchive, attributed })),
+  ),
+)(
+  "retains the complete copy's counter lower bound with missing receipts: %j",
+  async ({ fullInArchive, attributed }) => {
+    const home = await codexHome();
+    const at = "2026-09-01T00:00:02Z";
+    const usage = (input: number) => ({
+      input_tokens: input,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+    });
+    const counter = (input: number) => ({
+      type: "event_msg",
+      timestamp: at,
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: usage(input) },
+      },
+    });
+    const prefix = [
+      { type: "session_meta", payload: { id: "worker" } },
+      {
+        type: "turn_context",
+        timestamp: at,
+        payload: { model: "gpt-5.6-sol", turn_id: "turn" },
+      },
+      counter(1_000_000),
+    ];
+    const complete = [
+      ...prefix,
+      {
+        type: "token_usage_record",
+        timestamp: at,
+        payload: {
+          thread_id: "worker",
+          turn_id: "turn",
+          response_id: "partial-receipt",
+          model: "gpt-5.6-sol",
+          usage: usage(600_000),
+          thread_token_usage: usage(1_000_000),
+        },
+      },
+      counter(1_300_000),
+    ];
+    const active = join(home, "sessions");
+    const archive = join(home, "archived_sessions");
+    await mkdir(active);
+    await mkdir(archive);
+    const fullPath = join(fullInArchive ? archive : active, "full.jsonl");
+    const prefixPath = join(fullInArchive ? active : archive, "prefix.jsonl");
+    await writeFile(fullPath, jsonLines(complete) + "\n");
+    const observed: number[] = [];
+    const createTracker = () => {
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 5,
+        onCost: (cost) => observed.push(cost.estimatedUsd),
+        onCostLowerBound: (cost) => observed.push(cost.estimatedUsd),
+      });
+      if (attributed)
+        tracker.setAttributionReader(async () => ({
+          formatVersion: 1,
+          executionThreadIds: [],
+          owner: { threadId: "worker", turnId: "turn", startedAt: at },
+          startedAt: at,
+          completedAt: null,
+        }));
+      tracker.start("worker");
+      return tracker;
+    };
+    const tracker = createTracker();
+    let reloaded: ScanCostTracker | undefined;
+    try {
+      const baseline = await tracker.refresh();
+      expect(baseline.usage).toMatchObject({
+        input_tokens: 1_300_000,
+        total_tokens: 1_300_000,
+        coverage: "partial",
+      });
+      expect(observed.at(-1)).toBeCloseTo(5.2, 10);
+      await writeFile(prefixPath, jsonLines(prefix) + "\n");
+      expect((await tracker.refresh()).usage).toEqual(baseline.usage);
+      expect(observed.at(-1)).toBeCloseTo(5.2, 10);
+      reloaded = createTracker();
+      expect((await reloaded.stop()).usage).toEqual(baseline.usage);
+      expect(observed.at(-1)).toBeCloseTo(5.2, 10);
+      expect(observed.every((cost) => cost > 5)).toBe(true);
+    } finally {
+      await tracker.stop();
+      await reloaded?.stop();
+    }
+  },
+);
+
 test.each([
   ["150000/15000 vs 100000/200000", 150_000, 15_000, 100_000, 200_000],
   ["150000/15000 vs 100000/20000", 150_000, 15_000, 100_000, 20_000],

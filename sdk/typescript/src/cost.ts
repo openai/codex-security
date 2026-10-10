@@ -471,14 +471,15 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
-      // Choose one copy for both usage and model pricing. Equal token totals
-      // can still precede later cache-category corrections in the full log.
+      // Choose one copy using both receipts and cumulative lower bounds.
+      // Equal totals can still precede later corrections in the full log.
       const previous = usageSessions.get(threadId);
+      const total = sessionUsageTotal(session);
+      const previousTotal = previous ? sessionUsageTotal(previous) : -1;
       if (
         previous === undefined ||
-        (session.usage?.total_tokens ?? -1) >
-          (previous.usage?.total_tokens ?? -1) ||
-        (session.usage?.total_tokens === previous.usage?.total_tokens &&
+        total > previousTotal ||
+        (total === previousTotal &&
           (session.eventIndex > previous.eventIndex ||
             (session.eventIndex === previous.eventIndex &&
               session.pendingLine.length === 0 &&
@@ -1296,6 +1297,15 @@ function subtractTokenUsage(
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function sessionUsageTotal(session: SessionUsage): number {
+  if (session.usage === null) return session.counterUsage?.total_tokens ?? -1;
+  if (session.counterUsage === null) return session.usage.total_tokens;
+  return (
+    session.usage.total_tokens +
+    tokenUsageRemainder(session.counterUsage, session.usage).total_tokens
+  );
 }
 
 function tokenUsageRemainder(
