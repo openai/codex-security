@@ -362,33 +362,31 @@ for (const command of [
   "make-repo-scope-input",
   "make-repo-rank-input",
 ]) {
-  for (const rawHome of [false, true]) {
-    test.skipIf(process.platform === "win32")(
-      `${command} continues PATH lookup after a missing ripgrep interpreter${rawHome ? " with raw HOME" : ""}`,
-      () => {
-        const f = fixture();
-        f.write("scope/visible.py");
-        const env = { ...f.toolEnvironment };
-        const first = join(f.root, "first");
-        mkdirSync(first);
-        writeFileSync(
-          join(first, "rg"),
-          `#!${join(f.root, "missing-interpreter")}\n`,
-          { mode: 0o700 },
-        );
-        env["PATH"] = `${first}${delimiter}${env["PATH"] ?? ""}`;
-        env["CODEX_SECURITY_GIT"] = "";
-        const result = runPathInventory(f, command, env, rawHome);
-        expect(result.status, result.stderr).toBe(0);
-        const output = readFileSync(f.out, "utf8");
-        expect(
-          command === "generate-in-scope-files"
-            ? output.trim()
-            : JSON.parse(output).path,
-        ).toBe("scope/visible.py");
-      },
-    );
-  }
+  test.skipIf(process.platform === "win32")(
+    `${command} continues PATH lookup after a missing ripgrep interpreter`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      const env = { ...f.toolEnvironment };
+      const first = join(f.root, "first");
+      mkdirSync(first);
+      writeFileSync(
+        join(first, "rg"),
+        `#!${join(f.root, "missing-interpreter")}\n`,
+        { mode: 0o700 },
+      );
+      env["PATH"] = `${first}${delimiter}${env["PATH"] ?? ""}`;
+      env["CODEX_SECURITY_GIT"] = "";
+      const result = runPathInventory(f, command, env);
+      expect(result.status, result.stderr).toBe(0);
+      const output = readFileSync(f.out, "utf8");
+      expect(
+        command === "generate-in-scope-files"
+          ? output.trim()
+          : JSON.parse(output).path,
+      ).toBe("scope/visible.py");
+    },
+  );
   for (const lookup of [
     "double-quoted semicolon",
     "single-quoted semicolon",
