@@ -416,6 +416,35 @@ class ScanContractExamplesTest(unittest.TestCase):
         ]
         validate_schema_node(coverage, schema, "coverage")
 
+    def test_coverage_rejects_unsafe_deferred_paths(self) -> None:
+        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
+        coverage = copy.deepcopy(self.coverage)
+        coverage["completeness"] = "partial"
+        coverage["deferred"] = [
+            {
+                "id": "deferred_source_review",
+                "reason": "A source review was not completed.",
+                "paths": ["src/parser.ts"],
+            }
+        ]
+        validate_schema_node(coverage, schema, "coverage")
+
+        for path in (
+            "../../outside.ts",
+            "/outside.ts",
+            "C:/outside.ts",
+            "src\\outside.ts",
+            "src:outside.ts",
+            ".",
+            "src/../outside.ts",
+            "src/\x00outside.ts",
+        ):
+            with self.subTest(path=repr(path)):
+                invalid = copy.deepcopy(coverage)
+                invalid["deferred"][0]["paths"] = [path]
+                with self.assertRaisesRegex(AssertionError, "does not match"):
+                    validate_schema_node(invalid, schema, "coverage")
+
 
 if __name__ == "__main__":
     unittest.main()
