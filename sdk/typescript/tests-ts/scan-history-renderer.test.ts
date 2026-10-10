@@ -262,6 +262,7 @@ describe("scan history renderer", () => {
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
+      updatedAt: "2026-01-01T12:00:00Z",
       parentScanId: "87654321-abcd-4567-abcd-1234567890ab",
       targetPath: "/demo/juice-shop",
       mode: "standard",
@@ -288,6 +289,7 @@ describe("scan history renderer", () => {
     };
     const output = stripVTControlCharacters(renderScanHistory(scan, "show"));
     for (const expected of [
+      `UPDATED  ${scan.updatedAt}`,
       "FINDINGS  20 of 75",
       "PARENT SCAN  87654321",
       "CONFIGURATION",
