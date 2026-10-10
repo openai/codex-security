@@ -8,6 +8,7 @@ import io
 import os
 import sqlite3
 import sys
+from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -423,7 +424,7 @@ def write_csv_export(
                 candidate_ids_by_occurrence[occurrence_id] = candidate_id
     columns = finding_csv_columns(deep_scan)
     writer.writerow(columns)
-    for row in finding_export_rows(connection, scan["id"]):
+    for row in finding_export_rows(connection, scan["id"], db.finding_triage(connection, scan)):
         values = dict(row)
         values["path"] = row["relative_path"]
         values["candidate_id"] = candidate_ids_by_occurrence.get(row["occurrence_id"])
@@ -448,8 +449,10 @@ def write_csv_export(
     return path
 
 
-def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Cursor:
-    return connection.execute(
+def finding_export_rows(
+    connection: sqlite3.Connection, scan_id: str, triage: dict[str, dict[str, Any]]
+) -> Iterator[dict[str, Any]]:
+    for row in connection.execute(
         """
         SELECT
             occurrences.id AS occurrence_id,
@@ -459,14 +462,10 @@ def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3
             occurrences.severity,
             occurrences.confidence,
             occurrences.remediation,
-            COALESCE(triage.status, 'open') AS status,
-            triage.close_reason,
-            triage.note,
             locations.relative_path,
             locations.start_line,
             locations.end_line
         FROM finding_occurrences AS occurrences
-        LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         LEFT JOIN finding_locations AS locations
             ON locations.occurrence_id = occurrences.id
             AND locations.sort_order = (
@@ -482,7 +481,14 @@ def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3
         ORDER BY occurrences.created_at, occurrences.id
         """,
         (scan_id,),
-    )
+    ):
+        decision = triage[row["occurrence_id"]]
+        yield {
+            **dict(row),
+            "status": decision["status"],
+            "close_reason": decision.get("closeReason"),
+            "note": decision.get("note"),
+        }
 
 
 if __name__ == "__main__":

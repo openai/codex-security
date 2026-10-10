@@ -1,5 +1,21 @@
 [
   [
+    "-- Keep decision-history receipts while moving their preview version numbers.",
+    "WITH input AS (SELECT :history AS history),",
+    "moves(position, version, destination, name) AS (",
+    "    VALUES",
+    "        (0, 44, 49, 'bind new finding decisions to admitted scans'),",
+    "        (1, 43, 49, 'bind new finding decisions to admitted scans'),",
+    "        (2, 43, 48, 'preserve finding decision append chronology'),",
+    "        (3, 42, 48, 'preserve finding decision append chronology')",
+    ")",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination ||",
+    "    ' WHERE version = ' || version || ' AND name = ' || quote(name) AS value",
+    "FROM moves JOIN schema_migrations USING (version, name)",
+    "ORDER BY position;"
+  ],
+  [
     "-- mirror and early-moves: relocate numbers before checking profiles.",
     "WITH",
     "-- Keep the common :history binding even though these moves do not inspect it.",

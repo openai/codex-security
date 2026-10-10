@@ -1,11 +1,13 @@
+import { spawnSync } from "node:child_process";
 import { codexWithRun, jsonCodex } from "./support/codex.js";
-import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import * as fs from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { describe, expect, test, mock, spyOn } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { resolvePluginPython } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   matchScanFindings,
   type ScanComparisonInput,
@@ -26,160 +28,7 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
-  test("findings list matches directory identity when realpath preserves alias spelling", async () => {
-    const root = await temporaryDirectory("finding-repository-identity-");
-    const originalRealpath = fs.realpath;
-    let spelling: ReturnType<typeof spyOn> | undefined;
-    try {
-      const repository = join(root, "repository");
-      const upper = join(root, "first-alias");
-      const lower = join(root, "second-alias");
-      const other = join(root, "other");
-      await Promise.all([mkdir(repository), mkdir(other)]);
-      for (const alias of [upper, lower]) {
-        await symlink(
-          repository,
-          alias,
-          process.platform === "win32" ? "junction" : "dir",
-        );
-      }
-      const [upperMetadata, lowerMetadata, otherMetadata] = await Promise.all(
-        [upper, lower, other].map((path) => fs.stat(path, { bigint: true })),
-      );
-      expect(upperMetadata!.ino).toBe(lowerMetadata!.ino);
-      expect(upperMetadata!.dev).toBe(lowerMetadata!.dev);
-      expect(upperMetadata!.ino).not.toBe(otherMetadata!.ino);
-      // Case-insensitive POSIX realpath may retain each alias's spelling.
-      // Keep actual directory stat calls while controlling only that spelling.
-      const preserveSpelling = (async (
-        ...args: Parameters<typeof realpath>
-      ) => {
-        const result = await originalRealpath(...args);
-        const path = args[0];
-        return path === upper || path === lower
-          ? typeof result === "string"
-            ? path
-            : Buffer.from(path)
-          : result;
-      }) as typeof realpath;
-      spelling = spyOn(fs, "realpath").mockImplementation(preserveSpelling);
-      for (const [requested, stored] of [
-        [upper, lower],
-        [lower, upper],
-      ]) {
-        const calls: Array<readonly string[]> = [];
-        const stdout = captureCli(main, "stdout");
-        expect(
-          await stdout.run(
-            ["findings", "list", requested!, "--json"],
-            dependencies({
-              onWorkbench: (args): JsonObject => {
-                calls.push(args);
-                return args[0] === "list-repositories"
-                  ? {
-                      repositories: [
-                        { targetId: "other", targetPath: other },
-                        {
-                          targetId: "missing",
-                          targetPath: join(root, "missing"),
-                        },
-                        { targetId: "selected", targetPath: stored! },
-                      ],
-                    }
-                  : {
-                      findings: [{ title: "Saved finding" }],
-                      nextOffset: null,
-                    };
-              },
-            }),
-          ),
-        ).toBe(0);
-        expect(calls[1]).toEqual([
-          "list-global-findings",
-          "--target-id",
-          "selected",
-          "--status",
-          "open",
-        ]);
-        expect(JSON.parse(stdout.text()).findings).toEqual([
-          { title: "Saved finding" },
-        ]);
-      }
-    } finally {
-      spelling?.mockRestore();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  test("findings list prefers an exact saved repository before directory aliases", async () => {
-    const root = await temporaryDirectory("finding-exact-repository-");
-    try {
-      const repository = join(root, "repository");
-      const alias = join(root, "previous-checkout");
-      await mkdir(repository);
-      await symlink(
-        repository,
-        alias,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      const unsavedAlias = join(root, "selected-checkout");
-      await symlink(
-        repository,
-        unsavedAlias,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      for (const [requested, first, exact] of [
-        [repository, alias, repository],
-        [alias, repository, alias],
-        [unsavedAlias, alias, repository],
-      ]) {
-        const calls: Array<readonly string[]> = [];
-        const stdout = captureCli(main, "stdout");
-        expect(
-          await stdout.run(
-            ["findings", "list", requested!, "--json"],
-            dependencies({
-              onWorkbench: (args): JsonObject => {
-                calls.push(args);
-                return args[0] === "list-repositories"
-                  ? {
-                      repositories: [
-                        { targetId: "alias-target", targetPath: first! },
-                        { targetId: "exact-target", targetPath: exact! },
-                      ],
-                    }
-                  : {
-                      findings: [
-                        {
-                          title:
-                            args[2] === "exact-target"
-                              ? "Exact saved finding"
-                              : "Other target finding",
-                        },
-                      ],
-                      nextOffset: null,
-                    };
-              },
-            }),
-          ),
-        ).toBe(0);
-        expect(calls[1]).toEqual([
-          "list-global-findings",
-          "--target-id",
-          "exact-target",
-          "--status",
-          "open",
-        ]);
-        expect(JSON.parse(stdout.text()).findings).toEqual([
-          { title: "Exact saved finding" },
-        ]);
-      }
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  test("findings list resolves a repository directory alias", async () => {
+  test("findings list delegates repository aliases to the workbench", async () => {
     const root = await temporaryDirectory("finding-repository-alias-");
     try {
       const repository = join(root, "repository");
@@ -190,35 +39,36 @@ describe("CLI workbench", () => {
         alias,
         process.platform === "win32" ? "junction" : "dir",
       );
-      const canonical = await realpath(repository);
-      for (const [requested, stored] of [
-        [alias, canonical],
-        [canonical, alias],
-        [alias, alias],
-      ]) {
+      for (const requested of [repository, alias]) {
+        const calls: Array<readonly string[]> = [];
         const stdout = captureCli(main, "stdout");
         expect(
           await stdout.run(
-            ["findings", "list", requested!, "--json"],
+            ["findings", "list", requested, "--json"],
             dependencies({
-              onWorkbench: (args): JsonObject =>
-                args[0] === "list-repositories"
-                  ? {
-                      repositories: [
-                        {
-                          targetId: "other",
-                          targetPath: join(root, "missing"),
-                        },
-                        { targetId: "selected", targetPath: stored! },
-                      ],
-                    }
-                  : {
-                      findings: [{ title: "Saved finding" }],
-                      nextOffset: null,
-                    },
+              onWorkbench: (args): JsonObject => {
+                calls.push(args);
+                return {
+                  findings: [{ title: "Saved finding" }],
+                  nextOffset: null,
+                };
+              },
             }),
           ),
         ).toBe(0);
+        expect(calls).toEqual([
+          [
+            "list-global-findings",
+            "--repository",
+            requested,
+            "--status",
+            "open",
+            "--offset",
+            "0",
+            "--limit",
+            "20",
+          ],
+        ]);
         expect(JSON.parse(stdout.text()).findings).toEqual([
           { title: "Saved finding" },
         ]);
@@ -227,48 +77,39 @@ describe("CLI workbench", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
-    const stdout = captureCli(main, "stdout");
+    const stdout = captureCli(main, "stdout", true);
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
       {
-        repositories: [
-          { targetId: "other", targetPath: `${repository}-clone` },
-          { targetId: "selected", targetPath: repository },
-        ],
+        findings: [{ title: "Finding 1", severity: { level: "high" } }],
+        nextOffset: 1,
       },
-      { findings: [{ title: "Finding 1" }], nextOffset: 1 },
-      { findings: [{ title: "Finding 2" }], nextOffset: null },
+      {
+        findings: [{ title: "Finding 2", severity: { level: "high" } }],
+        nextOffset: null,
+      },
     ];
     expect(
       await stdout.run(
-        ["findings", "list", "--json"],
+        ["findings", "list"],
         dependencies({
           onWorkbench: (args) => responses[calls.push(args) - 1]!,
         }),
       ),
     ).toBe(0);
-    expect(calls[0]).toEqual(["list-repositories"]);
-    expect(calls[1]).toEqual([
+    expect(calls[0]).toEqual([
       "list-global-findings",
-      "--target-id",
-      "selected",
+      "--repository",
+      repository,
       "--status",
       "open",
     ]);
-    expect(calls[2]).toEqual([...calls[1]!, "--offset", "1"]);
-    expect(JSON.parse(stdout.text())).toEqual({
-      repository,
-      findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
-    });
-    expect(
-      await runCapturedCli(
-        main,
-        ["findings", "--json"],
-        dependencies({ onWorkbench: () => ({ repositories: [] }) }),
-      ),
-    ).toBe(0);
+    expect(calls[1]).toEqual([...calls[0]!, "--offset", "1"]);
+    expect(stdout.text()).toContain("Finding 1");
+    expect(stdout.text()).toContain("Finding 2");
     for (const confirmed of [[true, false], []]) {
       const result = fakeResult(["high"]);
       Object.assign(result, {
@@ -284,6 +125,60 @@ describe("CLI workbench", () => {
           ? "FINDINGS  2 (1 confirmed this scan; 1 previously found; 2 high)"
           : "FINDINGS  0\n",
       );
+    }
+  });
+
+  test("preserves dash-prefixed finding queries through Python argparse", async () => {
+    const python = await resolvePluginPython();
+    const program = [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv.pop(1))",
+      "from workbench_cli import parse_args",
+      "args = parse_args('Synthetic history query')",
+      "print(json.dumps({'query': args.query}))",
+    ].join("\n");
+    for (const options of [
+      [],
+      ["--all-repositories"],
+      ["--scan", "synthetic-scan"],
+    ]) {
+      for (const query of ["ordinary", "--unsafe"]) {
+        const parsed: string[] = [];
+        const stdout = captureCli(main, "stdout");
+        expect(
+          await stdout.run(
+            [
+              "findings",
+              "list",
+              ...options,
+              `--query=${query}`,
+              "--format=json",
+            ],
+            dependencies({
+              onWorkbench: (args) => {
+                const result = spawnSync(
+                  python,
+                  [
+                    "-I",
+                    "-B",
+                    "-c",
+                    program,
+                    join(PLUGIN_ROOT, "scripts"),
+                    ...args,
+                  ],
+                  { encoding: "utf8" },
+                );
+                expect(result.status, result.stderr).toBe(0);
+                parsed.push(
+                  (JSON.parse(result.stdout) as { query: string }).query,
+                );
+                return { findings: [], nextOffset: null };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(parsed).toEqual([query]);
+      }
     }
   });
 

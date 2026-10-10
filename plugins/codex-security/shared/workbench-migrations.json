@@ -393,5 +393,20 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
     ]
+  },
+  {
+    "version": 48,
+    "name": "preserve finding decision append chronology",
+    "statements": [
+      "ALTER TABLE finding_decisions\n        ADD COLUMN decision_sequence INTEGER NOT NULL DEFAULT 0;",
+      "WITH ordered AS (\n            SELECT id, ROW_NUMBER() OVER (\n                ORDER BY\n                    CASE WHEN id = 'legacy_' || occurrence_id THEN 0 ELSE 1 END,\n                    CASE WHEN id = 'legacy_' || occurrence_id THEN created_at ELSE '' END,\n                    CASE WHEN id = 'legacy_' || occurrence_id THEN id ELSE '' END,\n                    rowid\n            ) AS sequence\n            FROM finding_decisions\n        )\n        UPDATE finding_decisions\n        SET decision_sequence = (SELECT sequence FROM ordered WHERE ordered.id = finding_decisions.id);"
+    ]
+  },
+  {
+    "version": 49,
+    "name": "bind new finding decisions to admitted scans",
+    "statements": [
+      "ALTER TABLE finding_decisions\n        ADD COLUMN scan_sequence INTEGER;"
+    ]
   }
 ]

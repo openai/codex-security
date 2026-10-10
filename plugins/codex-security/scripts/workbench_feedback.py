@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -16,32 +17,68 @@ from workbench_constants import (
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
 )
+from workbench_finding_results import finding_triage_result
+from workbench_native_indexes import _indexed_findings
+from workbench_scan_history import saved_repository_target_ids
 from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
+    connection.create_function(
+        "codex_security_finding_group",
+        2,
+        lambda occurrence_id, finding_id: f"finding:{finding_id}",
+        deterministic=True,
+    )
+    source_ids = {
+        row["id"]
+        for row in connection.execute(
+            "SELECT id FROM scans WHERE (status = 'complete' "
+            "OR (status = 'failed' AND seal_manifest_digest IS NOT NULL)) AND id != ? "
+            "AND target_id IN (SELECT value FROM json_each(?))",
+            (scan["id"], json.dumps(sorted(saved_repository_target_ids(connection, scan)))),
+        )
+    }
+    closed_decisions = {}
+    for finding in _indexed_findings(connection, source_ids, allow_cross_target_matches=True):
+        triage = finding_triage_result(connection, finding["occurrence_id"], finding)
+        if triage["status"] == "closed" and triage.get("closeReason") == "false_positive":
+            closed_decisions.update(
+                (finding_id, triage) for finding_id in finding["matched_finding_ids"]
+            )
+    connection.create_function(
+        "codex_security_feedback_note",
+        1,
+        lambda finding_id: closed_decisions.get(finding_id, {}).get("note"),
+        deterministic=True,
+    )
+    connection.create_function(
+        "codex_security_feedback_updated_at",
+        1,
+        lambda finding_id: closed_decisions.get(finding_id, {}).get("updatedAt"),
+        deterministic=True,
+    )
     rows = connection.execute(
         """
         WITH ranked_decisions AS (
             SELECT findings.id AS finding_id, findings.fingerprint, findings.rule_id,
                 findings.identity_anchor, findings.identity_instance, occurrences.title,
-                occurrences.summary, COALESCE(triage.status, 'open') AS triage_status,
-                triage.close_reason, triage.note,
-                COALESCE(triage.updated_at, source_scans.completed_at) AS updated_at,
+                occurrences.summary, codex_security_feedback_note(findings.id) AS note,
+                COALESCE(codex_security_feedback_updated_at(findings.id),
+                    source_scans.completed_at) AS updated_at,
                 source_scans.id AS source_scan_id,
                 source_scans.completed_at AS source_completed_at,
                 locations.relative_path, locations.start_line, locations.end_line, locations.role,
                 ROW_NUMBER() OVER (
                     PARTITION BY findings.id
-                    ORDER BY
-                        julianday(upper(COALESCE(triage.updated_at, source_scans.completed_at))) DESC,
+                    ORDER BY julianday(upper(COALESCE(codex_security_feedback_updated_at(findings.id),
+                            source_scans.completed_at))) DESC,
                         julianday(upper(source_scans.completed_at)) DESC,
                         source_scans.id DESC, occurrences.id DESC
                 ) AS decision_rank
             FROM finding_occurrences AS occurrences
             JOIN findings ON findings.id = occurrences.finding_id
             JOIN scans AS source_scans ON source_scans.id = occurrences.scan_id
-            LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
             JOIN finding_locations AS locations ON locations.id = (
                 SELECT candidate.id
                 FROM finding_locations AS candidate
@@ -52,13 +89,12 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             )
             WHERE source_scans.target_id = ?
                 AND source_scans.id != ?
-                AND source_scans.status = 'complete'
+                AND source_scans.id IN (SELECT value FROM json_each(?))
+                AND findings.id IN (SELECT value FROM json_each(?))
         )
         SELECT *
         FROM ranked_decisions
         WHERE decision_rank = 1
-            AND triage_status = 'closed'
-            AND close_reason = 'false_positive'
             AND note IS NOT NULL
             AND trim(note) != ''
         ORDER BY julianday(upper(updated_at)) DESC,
@@ -66,7 +102,12 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             source_scan_id DESC, finding_id DESC
         LIMIT 50
         """,
-        (scan["target_id"], scan["id"]),
+        (
+            scan["target_id"],
+            scan["id"],
+            json.dumps(sorted(source_ids)),
+            json.dumps(sorted(closed_decisions)),
+        ),
     )
     false_positives = []
     for row in rows:

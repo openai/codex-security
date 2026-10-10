@@ -414,7 +414,16 @@ test("matches sealed scan history end to end without merging related findings", 
         },
       ],
     });
-    const findings = await cli(["findings", "list"]);
+    const currentFindings = await cli(["findings", "list"]);
+    expect(currentFindings["findings"]).toEqual([
+      expect.objectContaining({ findingId: e.findingId, occurrenceCount: 4 }),
+    ]);
+    const findings = await workbench([
+      "list-global-findings",
+      "--repository",
+      repository,
+      "--include-resolved",
+    ]);
     expect(findings["findings"]).toHaveLength(2);
     expect(findings["findings"]).toEqual(
       expect.arrayContaining([

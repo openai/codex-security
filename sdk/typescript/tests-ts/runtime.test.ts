@@ -2012,6 +2012,67 @@ ${directNode ? "}" : ""}
     ]);
   });
 
+  test("keeps an explicitly selected staged plugin intact", async () => {
+    const root = await temporaryDirectory();
+    const source = await plugin(root);
+    const home = join(root, "home");
+    const marketplace = await createMarketplace(home, source);
+    const staged = join(marketplace, "plugins", "codex-security");
+    const helper = await readFile(join(staged, "scripts", "helper.py"));
+
+    const installed = await bootstrapPlugin(home, staged, {
+      codexCommand: { command: "/codex" },
+      runCodex: async () =>
+        JSON.stringify({
+          installedPath: join(home, "installed"),
+          version: "1.2.3",
+        }),
+    });
+
+    expect(installed.pluginRoot).toBe(await realpath(staged));
+    expect(await readFile(join(staged, "scripts", "helper.py"))).toEqual(
+      helper,
+    );
+  });
+
+  test.each([{ parent: [] }, { parent: ["plugins", "codex-security"] }])(
+    "rejects a nested plugin source before replacing the marketplace: %j",
+    async ({ parent }) => {
+      const root = await temporaryDirectory();
+      const source = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = await createMarketplace(home, source);
+      const nested = await plugin(join(marketplace, ...parent, "selected"));
+      const helper = join(nested, "scripts", "helper.py");
+      await writeFile(helper, "# selected plugin differs from staged source\n");
+      const original = await readFile(helper);
+      const calls: Array<readonly string[]> = [];
+
+      await expect(
+        bootstrapPlugin(home, nested, {
+          codexCommand: { command: "/codex" },
+          runCodex: async (_command, args) => {
+            calls.push(args);
+            return "";
+          },
+        }),
+      ).rejects.toThrow("Copy the selected plugin outside this directory");
+
+      expect(await readFile(helper)).toEqual(original);
+      expect(
+        await readFile(
+          join(
+            marketplace,
+            "plugins",
+            "codex-security",
+            "scripts",
+            "helper.py",
+          ),
+        ),
+      ).toEqual(await readFile(join(source, "scripts", "helper.py")));
+      expect(calls).toEqual([]);
+    },
+  );
   describe("installed plugin reuse", () => {
     async function fixture(legacy: false | "shell" | "node" = false) {
       const root = await temporaryDirectory();
@@ -2653,9 +2714,10 @@ ${directNode ? "}" : ""}
     "0.1.79",
     "0.1.92",
     "0.1.93",
+    BUNDLED_PLUGIN_VERSION,
     "0.1.94",
   ])(
-    "upgrades a cached %s plugin and restores with the SDK-owned helper",
+    "refreshes cached %s history and preserves SDK restoration",
     async (previousVersion) => {
       const root = await temporaryDirectory();
       const previous = await plugin(join(root, "previous"), previousVersion);
@@ -2670,6 +2732,12 @@ ${directNode ? "}" : ""}
       await copyFile(
         join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
         join(previous, "scripts", "workbench_target.py"),
+      );
+      const previousWorkbench =
+        "def require_finding_open(connection, occurrence_id):\n    return None\n";
+      await writeFile(
+        join(previous, "scripts", "workbench_db.py"),
+        previousWorkbench,
       );
       await writeFile(
         join(previous, "scripts", "workbench_scan_usage.py"),
@@ -2705,12 +2773,20 @@ ${directNode ? "}" : ""}
 
       const options = { codexCommand: command, environment };
       const stale = await bootstrapPlugin(home, previous, options);
+      expect(
+        await readFile(
+          join(stale.installedRoot, "scripts", "workbench_db.py"),
+          "utf8",
+        ),
+      ).toBe(previousWorkbench);
       const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
 
       expect(stale.version).toBe(previousVersion);
       expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-      expect(upgraded.version).not.toBe(stale.version);
-      expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
+      if (previousVersion !== BUNDLED_PLUGIN_VERSION) {
+        expect(upgraded.version).not.toBe(stale.version);
+        expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
+      }
       for (const pluginRoot of [
         join(home, "sdk-marketplace", "plugins", "codex-security"),
         upgraded.installedRoot,
@@ -2719,6 +2795,9 @@ ${directNode ? "}" : ""}
           "workbench_target.py",
           "finalize_scan_contract.py",
           "workbench_scan_history.py",
+          "workbench_db.py",
+          "workbench_finding_results.py",
+          "workbench_native_indexes.py",
           "workbench_scan_usage.py",
         ]) {
           expect(await readFile(join(pluginRoot, "scripts", script))).toEqual(

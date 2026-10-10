@@ -75,6 +75,7 @@ try {
     [runtimeBundle, "source"],
     [path.join(bundledPluginRoot, "mcp", "server.mjs"), "shipped"],
   ]) {
+    await testResolvedGlobalFindings(bundle, runtimeLabel);
     await testParentToolList(bundle);
     await testClaimedParentArtifactOperations(bundle, runtimeLabel);
     await testSemanticScanDraftCompletion(bundle, runtimeLabel);
@@ -1737,4 +1738,62 @@ function toolCaller(client: Client, ownerThread: string) {
       arguments: arguments_,
       ...(threadId == null ? {} : { _meta: { "openai/threadId": threadId } }),
     });
+}
+
+async function testResolvedGlobalFindings(
+  bundle: string,
+  runtimeLabel: string,
+) {
+  const { repoRoot, environment } = await createScanFixture(
+    `resolved-${runtimeLabel}`,
+  );
+  const testRoot = path.join(pluginRoot, "tests");
+  const occurrenceId = execFileSync(
+    process.env.PYTHON?.trim() || "python3",
+    [
+      "-c",
+      `import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workbench_test_support import create_cli_scan, run_workbench
+state, root, repository = map(Path, sys.argv[2:])
+scan = create_cli_scan(state, root, repository)
+occurrence = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]["occurrenceId"]
+run_workbench(state, "set-finding-triage", "--occurrence-id", occurrence, "--status", "closed", "--close-reason", "false_positive", "--note", "Synthetic closed history")
+create_cli_scan(state, root, repository, finding=False)
+print(occurrence)
+`,
+      testRoot,
+      environment.CODEX_SECURITY_STATE_DIR,
+      environment.CODEX_SECURITY_SCAN_ROOT,
+      repoRoot,
+    ],
+    { encoding: "utf8" },
+  ).trim();
+  const client = await startClient(bundle, environment);
+  try {
+    const closed = requireSuccessfulTool<{
+      findings: { occurrenceId: string; status: string }[];
+    }>(
+      await client.callTool({
+        name: "list_codex_security_global_findings",
+        arguments: { status: "closed" },
+      }),
+      `${runtimeLabel}: closed history`,
+    );
+    assert.deepEqual(
+      closed.findings.map((finding) => [finding.occurrenceId, finding.status]),
+      [[occurrenceId, "closed"]],
+    );
+    const open = requireSuccessfulTool<{ findings: unknown[] }>(
+      await client.callTool({
+        name: "list_codex_security_global_findings",
+        arguments: { status: "open" },
+      }),
+      `${runtimeLabel}: open history`,
+    );
+    assert.deepEqual(open.findings, []);
+  } finally {
+    await client.close();
+  }
 }
