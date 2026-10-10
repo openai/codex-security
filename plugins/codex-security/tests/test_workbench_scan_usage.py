@@ -255,6 +255,32 @@ def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
     )
 
 
+@pytest.mark.parametrize(
+    ("info", "coverage"),
+    [("missing", "partial"), ("null", "complete"), ("invalid", "partial"), ("valid", "complete")],
+)
+def test_completion_preserves_usage_record_warnings(
+    tmp_path: Path, info: str, coverage: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    event = _token_event(counted, 10, 5)
+    if info == "missing":
+        del event["payload"]["info"]
+    elif info == "null":
+        event["payload"]["info"] = None
+    elif info == "invalid":
+        event["payload"]["info"] = {}
+    parent = _rollout(tmp_path, "scan-parent", [event, _token_event(counted, 20, 10)])
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert usage["coverage"] == coverage
+    assert usage["totalTokens"] == 30
+    assert usage.get("warnings", []) == (["token_record_invalid"] if coverage == "partial" else [])
+
+
 @pytest.mark.parametrize("mode", ["standard", "diff"])
 def test_completion_counts_only_scan_owned_parent_and_descendants(
     tmp_path: Path,

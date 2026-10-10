@@ -1,3 +1,4 @@
+import stringWidth from "string-width";
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
@@ -14,6 +15,7 @@ const STARTED_AT = new Date(2026, 6, 29, 9, 41, 0).getTime();
 function fakeClock(now: () => number = () => STARTED_AT) {
   return {
     now,
+    queueMicrotask: (callback: () => void) => callback(),
     setInterval: () => ({}) as NodeJS.Timeout,
     clearInterval: () => {},
   };
@@ -55,6 +57,393 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test.each([
+    ["single line", () => "START" + "x".repeat(4 * 1024 * 1024) + "界END"],
+    [
+      "multiple lines",
+      () => "START\n" + "x".repeat(4 * 1024 * 1024) + "界\nEND",
+    ],
+    [
+      "ASCII prose",
+      () =>
+        "START " +
+        "ordinary tool output with small words ".repeat(50_000) +
+        " END",
+    ],
+    ["CJK", () => "START " + "界".repeat(500_000) + " END"],
+    [
+      "unterminated terminal controls",
+      () => "START" + "\u001B]".repeat(40_000) + " END",
+    ],
+    [
+      "Japanese prose",
+      () =>
+        "START " +
+        "日本語の出力です テスト結果を表示します ".repeat(50_000) +
+        " END",
+    ],
+    [
+      "distinct Japanese words",
+      () =>
+        "START " +
+        Array.from(
+          { length: 40_000 },
+          (_, index) => `日本語出力${index} 結果表示${index} `,
+        ).join("") +
+        " END",
+    ],
+  ] as const)(
+    "retains a large wrapped session result with %s",
+    (_name, output) => {
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(
+        { ...stderr.stream, columns: 88, rows: 24 },
+        { input },
+      );
+      dashboard.start();
+      input.emit("data", "d");
+      dashboard.recordDetails({
+        threadId: "synthetic-thread",
+        parentThreadId: null,
+        event: {
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            output: output(),
+          },
+        },
+      });
+      expect(lastFrame(stderr)).toContain("END");
+      dashboard.scroll(Number.MAX_SAFE_INTEGER);
+      expect(lastFrame(stderr)).toContain("START");
+      dashboard.scroll(-Number.MAX_SAFE_INTEGER);
+      expect(lastFrame(stderr)).toContain("END");
+      for (const line of lastFrame(stderr).split("\n")) {
+        expect(line.length).toBeLessThanOrEqual(88);
+      }
+      dashboard.stop();
+    },
+  );
+
+  test.each(
+    ["A\u0301", "A\uFE0F", "1\uFE0F\u20E3", "\u0600A", "👩‍💻"].flatMap(
+      (cluster) => [true, false].map((code) => [cluster, code] as const),
+    ),
+  )(
+    "keeps %s intact at ASCII wrapping boundaries with code=%p",
+    (cluster, code) => {
+      for (let padding = 0; padding < 40; padding++) {
+        const stderr = capture(true);
+        const dashboard = createDashboard({
+          ...stderr.stream,
+          columns: 40,
+          rows: 24,
+        });
+        dashboard.start();
+        dashboard.record({
+          id: "mixed-code",
+          kind: "message",
+          status: "completed",
+          description:
+            (code ? "```text\n" : "") +
+            "x".repeat(padding) +
+            cluster +
+            "yyy" +
+            (code ? "\n```" : ""),
+          paths: [],
+        });
+        expect(lastFrame(stderr)).toContain(cluster);
+        dashboard.stop();
+      }
+    },
+  );
+
+  test.each([
+    ["CSI", "MARK\u001B[31m界👩🏽‍💻\u001B[0mEND", "MARK界👩🏽‍💻END"],
+    [
+      "OSC with BEL",
+      "MARK\u001B]8;;https://example.com\u0007界👩🏽‍💻\u001B]8;;\u0007END",
+      "MARK界👩🏽‍💻END",
+    ],
+    ["OSC with ST", "MARK\u001B]0;title\u001B\\界👩🏽‍💻END", "MARK界👩🏽‍💻END"],
+    ["OSC with C1 ST", "MARK\u001B]0;title\u009C界👩🏽‍💻END", "MARK界👩🏽‍💻END"],
+    ["incomplete CSI", "MARK\u001B[", "MARK ["],
+    ["incomplete OSC", "MARK\u001B]!!! diagnostic", "MARK ]!!! diagnostic"],
+    [
+      "OSC interrupted by another escape",
+      "MARK\u001B]!!!before\u001B[31mafter\u001B[0m\u0007tailEND",
+      "MARK ]!!!beforeafter tailEND",
+    ],
+  ] as const)(
+    "retains visible text while escaping %s",
+    (_name, value, expected) => {
+      for (const view of ["prose", "code", "details"] as const) {
+        const stderr = capture(true);
+        const input = new DashboardTestInput();
+        const dashboard = createDashboard(
+          { ...stderr.stream, columns: 120, rows: 24 },
+          { input, color: false },
+        );
+        dashboard.start();
+        if (view === "details") {
+          input.emit("data", "d");
+          dashboard.recordDetails({
+            threadId: "synthetic-thread",
+            parentThreadId: null,
+            event: {
+              type: "response_item",
+              payload: { type: "function_call_output", output: value },
+            },
+          });
+        } else {
+          dashboard.record({
+            id: "escaped-text",
+            kind: "message",
+            status: "completed",
+            description:
+              view === "code" ? "```text\n" + value + "\n```" : value,
+            paths: [],
+          });
+        }
+        expect(lastFrame(stderr)).toContain(expected);
+        expect(stderr.text()).not.toContain("\u001B]");
+        expect(stderr.text()).not.toContain("\u001B[31m");
+        dashboard.stop();
+      }
+    },
+  );
+
+  test.each(["\t", "\u0007"])(
+    "wraps code after escaping terminal control %j",
+    (control) => {
+      const stderr = capture(true);
+      const dashboard = createDashboard({
+        ...stderr.stream,
+        columns: 40,
+        rows: 24,
+      });
+      dashboard.start();
+      dashboard.record({
+        id: "escaped-code",
+        kind: "message",
+        status: "completed",
+        description:
+          "```ts\n" + control.repeat(2) + "callWithLongName(value123)\n```",
+        paths: [],
+      });
+      const frame = lastFrame(stderr);
+      expect(frame.replace(/\s+/gu, "")).toContain(
+        "callWithLongName(value123)",
+      );
+      dashboard.stop();
+    },
+  );
+
+  test.each(["activity", "details"] as const)(
+    "coalesces %s replay frames while retaining event order and cancellation",
+    (view) => {
+      const input = new DashboardTestInput();
+      const pending: (() => void)[] = [];
+      let frame = "";
+      let frames = 0;
+      let interrupted = false;
+      const dashboard = createDashboard(
+        {
+          columns: 88,
+          rows: 24,
+          write: (text) => {
+            frame = text;
+            frames++;
+          },
+        },
+        {
+          input,
+          clock: {
+            ...fakeClock(),
+            queueMicrotask: (callback: () => void) => pending.push(callback),
+          },
+          onInterrupt: () => {
+            interrupted = true;
+          },
+        },
+      );
+      dashboard.start();
+      if (view === "details") input.emit("data", "d");
+      const initialFrames = frames;
+      for (let i = 0; i < 600; i++) {
+        if (view === "details")
+          dashboard.recordDetails({
+            threadId: "synthetic-thread",
+            parentThreadId: null,
+            event: {
+              type: "event_msg",
+              payload: { type: "agent_message", message: `Replay entry ${i}` },
+            },
+          });
+        else
+          dashboard.record({
+            id: `replay-${i}`,
+            kind: "message",
+            status: "completed",
+            description: `Replay entry ${i}`,
+            paths: [],
+          });
+      }
+      expect(frames).toBe(initialFrames);
+      expect(pending).toHaveLength(1);
+      input.emit("data", "\u0003");
+      expect(interrupted).toBe(true);
+      pending.shift()!();
+      expect(frames).toBe(initialFrames + 1);
+      expect(frame).toContain("Replay entry 599");
+      expect(frame.indexOf("Replay entry 598")).toBeLessThan(
+        frame.indexOf("Replay entry 599"),
+      );
+      dashboard.record({
+        id: "pending-at-stop",
+        kind: "message",
+        status: "completed",
+        description: "Pending at stop",
+        paths: [],
+      });
+      dashboard.stop();
+      const stoppedFrames = frames;
+      pending.shift()!();
+      expect(frames).toBe(stoppedFrames);
+    },
+  );
+
+  test("ignores Delete and function keys when filtering session details", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(stderr.stream, { input });
+    dashboard.start();
+    input.emit("data", "d");
+    for (const key of ["\u001B[3~", "\u001B[15~"]) {
+      input.emit("data", key);
+      expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+    }
+    input.emit("data", "3");
+    expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
+    dashboard.stop();
+  });
+
+  test("uses the full verification viewport", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 80, rows: 24 },
+      { presentation: "verification" },
+    );
+    dashboard.start();
+    expect(
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!).split(
+        "\n",
+      ),
+    ).toHaveLength(24);
+    dashboard.stop();
+  });
+
+  test("styles inline code without changing generated terminal escapes", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, { color: true });
+    dashboard.start();
+    dashboard.record({
+      id: "inline-ansi",
+      kind: "message",
+      status: "completed",
+      description: "The code is `[2m`.",
+      paths: [],
+    });
+    expect(lastFrame(stderr)).toContain("The code is [2m.");
+    expect(stderr.text()).toContain("The code is \u001B[2m[2m\u001B[22m");
+    expect(lastFrame(stderr)).not.toContain("\u001B");
+    dashboard.stop();
+  });
+
+  test.each([
+    ["activity", 16],
+    ["details", 25],
+  ] as const)("retains wide graphemes in narrow %s frames", (view, columns) => {
+    for (const cluster of ["界", "👩‍💻"]) {
+      for (const code of [false, true]) {
+        const input = new DashboardTestInput();
+        let frame = "";
+        const dashboard = createDashboard(
+          {
+            columns,
+            rows: 50,
+            write: (text) => {
+              frame = text;
+              return true;
+            },
+          },
+          { input },
+        );
+        const text = cluster.repeat(3);
+        dashboard.start();
+        if (view === "details") {
+          input.emit("data", "d");
+          dashboard.recordDetails({
+            threadId: "synthetic-thread",
+            parentThreadId: null,
+            worker: 1,
+            event: {
+              type: "response_item",
+              payload: {
+                type: "function_call_output",
+                output: code ? `\n${text}` : text,
+              },
+            },
+          });
+        } else {
+          dashboard.record({
+            id: "wide-text",
+            kind: "message",
+            status: "completed",
+            description: code ? `\`\`\`text\n${text}\n\`\`\`` : text,
+            paths: [],
+            worker: 1,
+          });
+        }
+        const clean = stripVTControlCharacters(frame);
+        expect(clean.split(cluster).length - 1).toBe(3);
+        for (const line of clean.split("\n")) {
+          expect(stringWidth(line)).toBeLessThanOrEqual(columns);
+        }
+        dashboard.stop();
+      }
+    }
+  });
+
+  test("wraps wide activity text to terminal columns without losing it", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard({
+      ...stderr.stream,
+      columns: 40,
+      rows: 24,
+    });
+    dashboard.start();
+    dashboard.record({
+      id: "wide-text",
+      kind: "message",
+      status: "completed",
+      description: "界".repeat(24),
+      paths: [],
+    });
+    const frame = lastFrame(stderr);
+    expect((frame.match(/界/g) ?? []).length).toBe(24);
+    for (const line of frame.split("\n")) {
+      expect(
+        Array.from(line).reduce(
+          (width, char) => width + (char === "界" ? 2 : 1),
+          0,
+        ),
+      ).toBeLessThanOrEqual(40);
+    }
+    dashboard.stop();
+  });
+
   test.each([
     ["unknown-model", false],
     ["gpt-5.6-cyber", true],
@@ -1936,3 +2325,50 @@ function failingDashboardOutput(output: string[]) {
     return true;
   };
 }
+
+test("aligns component columns by terminal width and retains trailing cost", async () => {
+  const stderr = capture(true);
+  const dashboard = createDashboard(
+    { ...stderr.stream, columns: 160, rows: 24 },
+    { presentation: "components", showCost: true },
+  );
+  const receipts: ComponentReceipt[] = [
+    "a".repeat(74),
+    "界".repeat(37),
+    "e\u0301".repeat(37),
+  ].map((name, index) => ({
+    id: String(index),
+    name,
+    paths: ["src"],
+    status: "pending",
+    outputDir: `/synthetic/results/${index}`,
+  }));
+  dashboard.start();
+  dashboard.setComponents(receipts);
+  for (const receipt of receipts)
+    dashboard.recordComponentEvent({
+      componentId: receipt.id,
+      type: "cost",
+      value: {
+        model: "synthetic-model",
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 1,
+        estimatedUsd: 1,
+        estimatedUsdRange: { min: 1, max: 1, context: "unknown" },
+      },
+    });
+  await Promise.resolve();
+  const frame = stripVTControlCharacters(
+    stderr.text().split("\u001B[H").at(-1)!,
+  );
+  const rows = frame.split("\n").filter((line) => line.includes("Queued"));
+  expect(rows).toHaveLength(3);
+  for (const row of rows) expect(row).toContain("$1.00");
+  expect(
+    new Set(rows.map((row) => stringWidth(row.slice(0, row.indexOf("$1.00")))))
+      .size,
+  ).toBe(1);
+  dashboard.stop();
+});

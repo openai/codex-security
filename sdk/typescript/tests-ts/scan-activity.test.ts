@@ -555,6 +555,23 @@ describe("scan activity", () => {
     }
   });
 
+  test("preserves a backtick run followed by a bare carriage return", () => {
+    const run = "`".repeat(16_000);
+    expect(
+      scanActivityFromEvent(
+        {
+          type: "item.completed",
+          item: {
+            id: "backtick-run",
+            type: "agent_message",
+            text: `${run}\rAfter the run.`,
+          },
+        },
+        "/synthetic/repository",
+      ),
+    ).toMatchObject({ description: `${run} After the run.` });
+  });
+
   test("removes internal progress markers from fenced assistant examples", () => {
     expect(
       scanActivityFromEvent(

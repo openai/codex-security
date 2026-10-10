@@ -2220,8 +2220,47 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
+  test("shows known dashboard tokens when the model has no price entry", async () => {
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    const deps = dependencies({ environment: { NO_COLOR: "1" } });
+    const createSecurity = deps.createSecurity;
+    deps.createSecurity = (config) => {
+      const client = createSecurity(config);
+      const run = client.run.bind(client);
+      client.run = async (repository, options) => {
+        options?.onUsage?.({
+          input_tokens: 100,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 10,
+          reasoning_output_tokens: 0,
+          total_tokens: 110,
+        });
+        return run(repository, options);
+      };
+      return client;
+    };
+    expect(
+      await runCli(
+        [
+          "scan",
+          "/synthetic/repository",
+          "--model",
+          "synthetic-unpriced-model",
+          "--show-cost",
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    const text = stripVTControlCharacters(stderr.text()).replace(/\s+/gu, " ");
+    expect(text).toContain(
+      "100 uncached input, 0 cache reads, 0 cache writes, 10 output, 110 total",
+    );
+    expect(text).toContain("unavailable (model pricing or usage missing)");
+  });
+
   test.each([false, true])(
-    "shows durable Deep progress without changing stdout or TUI layout (interactive=%j)",
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=%p)",
     async (interactive) => {
       const { stdout, stderr, runCli } = createCliTest(main, {
         stderr: interactive,

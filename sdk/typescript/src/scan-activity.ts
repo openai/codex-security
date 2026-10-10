@@ -279,7 +279,7 @@ function proseActivity(
 function prose(text: string, limit?: number): string {
   const normalized = text
     .split(
-      /(`{3,}[^\r\n]*(?:\r?\n[\s\S]*?(?:\r?\n[ \t]*`{3,}[ \t]*(?=\r?\n|$)|$)|$)|`[^`\r\n]+`)/gu,
+      /((?<!`)`{3,}[^`\r\n]*(?:\r?\n[\s\S]*?(?:\r?\n[ \t]*`{3,}[ \t]*(?=\r?\n|$)|$)|$)|`[^`\r\n]+`)/gu,
     )
     .reduce((result, part, index) => {
       if (index % 2 === 1) {

@@ -2,6 +2,8 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, expect, test, mock } from "bun:test";
+import { ScanCostTracker } from "../src/cost.js";
+import type { ScanTokenUsage } from "../src/index.js";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
 import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
@@ -1186,5 +1188,67 @@ test.each([
     ).toBe(2);
     expect(stderr.text()).toContain(message);
     expect(onRun).not.toHaveBeenCalled();
+  },
+);
+
+test.each([
+  { model: "gpt-5.6-sol", showCost: false },
+  { model: "gpt-5.6-sol", showCost: true },
+  { model: "synthetic-unpriced-model", showCost: false },
+  { model: "synthetic-unpriced-model", showCost: true },
+])(
+  "headless component usage is printed once for %p",
+  async ({ model, showCost }) => {
+    const input = await fixture({
+      output: { directory: "../component-results" },
+    });
+    await writeFile(
+      join(input.repository, "lib", "index.ts"),
+      "export const value = 1;\n",
+    );
+    const usage: ScanTokenUsage = {
+      input_tokens: 1250,
+      cached_input_tokens: 200,
+      cache_write_input_tokens: 0,
+      output_tokens: 30,
+      reasoning_output_tokens: 0,
+      total_tokens: 1280,
+    };
+    const { stderr, runCli } = createCliTest(main);
+    const deps = dependencies({ currentDirectory: input.root });
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
+        const tracker = new ScanCostTracker({
+          codexHome: input.root,
+          model,
+          onUsage: options?.onUsage,
+          onCost: options?.onCost,
+        });
+        tracker.start("synthetic-scan-thread");
+        await tracker.stop(usage);
+        return fakeResult([], "complete", null);
+      });
+    expect(
+      await runCli(
+        [
+          "scan-components",
+          input.repository,
+          "-c",
+          input.config,
+          "--component",
+          "lib",
+          "--headless",
+          "--json",
+          ...(showCost ? ["--show-cost"] : []),
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    expect(stderr.text().match(/Tokens:/g)).toHaveLength(1);
+    expect(stderr.text()).toContain("Tokens: 1,050 uncached input");
+    expect(stderr.text()).toContain("30 output");
+    expect(stderr.text().includes("Cost:")).toBe(
+      showCost && model === "gpt-5.6-sol",
+    );
   },
 );
