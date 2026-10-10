@@ -9129,6 +9129,18 @@ async function executeScan(
                 : undefined),
           };
         }
+        if (!arguments_.dryRun && !arguments_.mock && interactive) {
+          auth = await chooseInteractiveAuthentication(
+            {
+              auth,
+              provider: providerOptions.provider,
+              command: "scan",
+              signal: preparationAbortController.signal,
+            },
+            errorOutput,
+            dependencies,
+          );
+        }
       }
       patches = await runFindingPatches(
         selected,

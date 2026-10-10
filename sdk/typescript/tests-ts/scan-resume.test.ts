@@ -3345,9 +3345,20 @@ test.each([
   },
 );
 
-test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
+test.each([
+  "accept",
+  "choose-auth",
+  "cancel-auth",
+  "decline",
+  "cancel",
+  "empty",
+  "missing",
+] as const)(
   "sealed resume restores private execution settings only for selected patches (%s)",
   async (selection) => {
+    const chooseAuthentication =
+      selection === "choose-auth" || selection === "cancel-auth";
+    const patchStarts = selection === "accept" || selection === "choose-auth";
     const f = await interruptedScan("deep", false, {}, false, true, {
       findings: [
         semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
@@ -3361,7 +3372,9 @@ test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
       name: "Synthetic",
       wire_api: "responses",
       base_url: "https://provider.example.test/v1",
-      auth: { command: ["synthetic-credential-command"] },
+      ...(chooseAuthentication
+        ? { requires_openai_auth: true }
+        : { auth: { command: ["synthetic-credential-command"] } }),
       http_headers: { Authorization: "synthetic-private-patch-token" },
     };
     const profile = await createReplayProfile(home, {
@@ -3369,7 +3382,7 @@ test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
     });
     const recipe = {
       ...f.recipe,
-      auth: "api-key",
+      auth: selection === "accept" ? "api-key" : "auto",
       config: {
         ...f.recipe.config,
         model_provider: "synthetic",
@@ -3388,7 +3401,10 @@ test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
     ]);
     await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
     f.environment.CODEX_HOME = home;
-    if (selection !== "accept") await rm(profile.path);
+    Object.assign(f.environment, {
+      OPENAI_API_KEY: "synthetic-optional-patch-key",
+    });
+    if (!patchStarts && !chooseAuthentication) await rm(profile.path);
     const files = [
       "scan-manifest.json",
       "findings.json",
@@ -3402,6 +3418,9 @@ test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
     const stdout = capture(),
       stderr = capture(true);
     const patchConfigurations: unknown[] = [];
+    const patchAuthentication: unknown[] = [];
+    let authenticationChecks = 0;
+    let authenticationChoices = 0;
     let prompted = false;
     let runtimeStarts = 0;
     const code = await main(
@@ -3414,10 +3433,32 @@ test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
           currentDirectory: f.root,
           onCodex(_args, output) {
             patchConfigurations.push(output?.codexOverrides);
+            patchAuthentication.push(output?.auth);
             return 1;
           },
         }),
         runWorkbench: f.command,
+        hasStoredChatGPTSignIn: async () => {
+          authenticationChecks++;
+          expect(prompted).toBe(true);
+          expect(
+            (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+          ).toMatchObject({ progress: { status: "complete" } });
+          return true;
+        },
+        scanAuthenticationPrompt: {
+          isInteractive: () => true,
+          async select(_question, choices) {
+            authenticationChoices++;
+            expect(prompted).toBe(true);
+            if (selection === "cancel-auth")
+              throw Object.assign(
+                new Error("Synthetic authentication choice canceled"),
+                { name: "ExitPromptError" },
+              );
+            return choices.find(({ value }) => value === "chatgpt")!.value;
+          },
+        },
         confirmPatchReview: async () => {
           prompted = true;
           expect(
@@ -3458,8 +3499,13 @@ test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
     );
     expect(prompted, stderr.text()).toBe(true);
     expect(runtimeStarts).toBe(0);
-    expect(patchConfigurations).toHaveLength(selection === "accept" ? 1 : 0);
-    if (selection === "accept") {
+    expect(authenticationChecks).toBe(chooseAuthentication ? 1 : 0);
+    expect(authenticationChoices).toBe(chooseAuthentication ? 1 : 0);
+    expect(patchConfigurations).toHaveLength(patchStarts ? 1 : 0);
+    expect(patchAuthentication).toEqual(
+      patchStarts ? [selection === "choose-auth" ? "chatgpt" : "api-key"] : [],
+    );
+    if (patchStarts) {
       expect(patchConfigurations[0]).toMatchObject({
         model: recipe.config.model,
         model_reasoning_effort: "high",
@@ -3468,6 +3514,11 @@ test.each(["accept", "decline", "cancel", "empty", "missing"] as const)(
         model_provider: "synthetic",
         model_providers: { synthetic: provider },
       });
+    } else if (selection === "cancel-auth") {
+      expect(code).toBe(2);
+      expect(stderr.text()).toContain(
+        "Synthetic authentication choice canceled",
+      );
     } else if (selection === "missing") {
       expect(code).toBe(2);
       expect(stderr.text()).toContain("ENOENT");
