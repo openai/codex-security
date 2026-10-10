@@ -102,6 +102,31 @@ function ledger(f: Fixture): Row[] {
 afterEach(roots.cleanup);
 
 describe("built candidate normalizer", () => {
+  test.skipIf(process.platform === "win32")(
+    "retains the output error when temporary-file cleanup also fails",
+    () => {
+      const f = fixture();
+      const preload = join(f.root, "fail-filesystem.cjs");
+      write(
+        preload,
+        `
+const fs = require("node:fs");
+fs.renameSync = () => { throw new Error("Synthetic output rename failed"); };
+fs.unlinkSync = () => { throw new Error("Synthetic temporary unlink failed"); };
+require("node:module").syncBuiltinESMExports();
+`,
+      );
+      const result = run(f, [[candidate()]], [], {
+        ...process.env,
+        NODE_OPTIONS: `--require ${JSON.stringify(preload)}`,
+      });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("Synthetic output rename failed");
+      expect(result.stderr).toContain("Synthetic temporary unlink failed");
+      expect(existsSync(f.output)).toBe(false);
+    },
+  );
+
   test.skipIf(process.platform !== "linux")(
     "accepts many input paths through the packaged launcher",
     () => {

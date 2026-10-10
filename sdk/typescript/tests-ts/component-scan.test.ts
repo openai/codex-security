@@ -1784,6 +1784,12 @@ test("CLI rejects ambiguous component selection", async () => {
   }
 });
 
+test("explains the component selector requirement when neither is set", async () => {
+  const paths = await fixture();
+  await expect(scan(paths, { components: undefined })).rejects.toThrow(
+    "Choose exactly one",
+  );
+});
 (process.platform === "win32" ? test.skip : test)(
   "component inventory excludes checkout-local Git when planning a subdirectory",
   async () => {

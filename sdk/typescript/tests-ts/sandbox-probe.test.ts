@@ -1,6 +1,6 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, spyOn } from "bun:test";
 import { SandboxUnavailableError } from "../src/index.js";
 import { probeCodexSandbox } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
@@ -44,6 +44,31 @@ async function syntheticCodex(root: string, exitCode: number): Promise<string> {
 }
 
 describe("Codex sandbox probe", () => {
+  test.skipIf(process.platform === "win32")(
+    "reports its timeout without sandbox-denial advice",
+    async () => {
+      const timeout = spyOn(AbortSignal, "timeout").mockReturnValue(
+        AbortSignal.abort(
+          new DOMException("Synthetic timeout", "TimeoutError"),
+        ),
+      );
+      try {
+        const root = await temporaryDirectory();
+        const command = await syntheticCodex(root, 0);
+        const failure = await probeCodexSandbox({ command }, {}).then(
+          () => null,
+          (error: Error) => error,
+        );
+        expect(failure).toBeInstanceOf(SandboxUnavailableError);
+        expect(failure?.cause).toBeDefined();
+        expect(failure?.message).toContain("timed out");
+        expect(failure?.message).not.toContain("user namespaces");
+      } finally {
+        timeout.mockRestore();
+      }
+    },
+  );
+
   test.skipIf(process.platform === "win32")(
     "reports what the sandbox said and how to reproduce it",
     async () => {

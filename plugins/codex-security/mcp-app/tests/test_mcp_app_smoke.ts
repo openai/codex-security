@@ -1466,6 +1466,13 @@ try {
     code: "ENOENT",
   });
 
+  const dashQuery = await request(8999, "tools/call", {
+    name: "list_codex_security_scans",
+    arguments: { query: "--synthetic-query", limit: 50 },
+  });
+  assertNoError(dashQuery);
+  assert.deepEqual(dashQuery.result.structuredContent.scans, []);
+
   const findTool = (name: string) =>
     toolList.result.tools.find((tool: { name: string }) => tool.name === name);
 
@@ -2862,10 +2869,14 @@ try {
       occurrenceId,
       status: "closed",
       closeReason: "false_positive",
-      note: "The archive path is normalized before the write.",
+      note: "--synthetic triage note",
     },
   });
   assertNoError(closedFinding);
+  assert.equal(
+    closedFinding.result.structuredContent.scan.findings[0].triage.note,
+    "--synthetic triage note",
+  );
   assert.equal(
     closedFinding.result.structuredContent.scan.findings[0].triage.status,
     "closed",

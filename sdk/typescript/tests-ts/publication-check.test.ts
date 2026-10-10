@@ -431,19 +431,17 @@ describe("read-only publication preflight", () => {
     expect(inspectPublicationStore).not.toHaveBeenCalled();
   });
 
-  test("does not echo provider response data on an access failure", async () => {
+  test("preserves provider response details on an access failure", async () => {
     const key = "lin_api_SYNTHETIC_PRIVATE_KEY";
     const client = readClient([]);
     client.team = (() =>
       fail(`Provider response included ${key}`)) as ReadClient["team"];
-    await expect(
-      checkScanPublicationInternal(
-        "scan",
-        { ...OPTIONS, linearApiKey: key },
-        dependencies({ linearClient: () => client }),
-      ),
-    ).rejects.toThrow(
-      "Could not verify Linear team access. Check the API key and publication destination.",
+    const checking = checkScanPublicationInternal(
+      "scan",
+      { ...OPTIONS, linearApiKey: key },
+      dependencies({ linearClient: () => client }),
     );
+    await expect(checking).rejects.toThrow(`Provider response included ${key}`);
+    await expect(checking).rejects.toThrow(/API key.*publication destination/u);
   });
 });

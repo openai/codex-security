@@ -853,7 +853,7 @@ describe("multiscan", () => {
     const source = await repository(paths.root, "comma, quoted");
     await writeFile(
       paths.input,
-      `\uFEFF"id","repository","revision","scope","mode","prompt","notes"\r\n"payments","${source.path}","${source.revision}","src","deep","Focus on authentication, authorization.","contains ""quotes"""\r\n\r\n`,
+      `\uFEFF" id "," repository "," revision ","scope","mode","prompt","notes"\r\n"payments","${source.path}","${source.revision}","src","deep","Focus on authentication, authorization.","contains ""quotes"""\r\n\r\n`,
     );
 
     const summary = await runMultiscan(

@@ -123,10 +123,18 @@ const failureReasons: Record<string, string> = {
   "policy-turn-code": "Request blocked.",
   "policy-request-code": "Request blocked.",
   "policy-turn": "Request flagged for possible cybersecurity risk.",
+  "policy-accordance-turn":
+    "This request was refused in accordance with the safety policy.",
+  "policy-terse-turn": "Refused due to the safety policy",
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-causal-refusal-text":
+    "This request was refused because it violates the safety policy.",
+  "policy-refusal-text":
+    "This request was refused because of the safety policy.",
+  "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
   "policy-reported-error":
-    "Required review check could not be completed: Request refused due to cybersecurity policy violation.",
+    "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
   "server-error": "Provider temporarily unavailable",
@@ -138,6 +146,16 @@ const failureReasons: Record<string, string> = {
   "credential-error": "Authentication failed: Bearer synthetic-review-key",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
+  "required-source-error-policy-file":
+    "Required review check could not be completed: Connection refused while fetching content-policy.ts",
+  "required-source-error-upload-policy":
+    "Required review check could not be completed: Artifact upload was blocked by the content policy.",
+  "required-source-error-publication-policy":
+    "Required review check could not be completed: Artifact publication was refused due to the content policy.",
+  "required-source-error-publication-refusal":
+    "Required review check could not be completed: Artifact publication refusal due to the content policy.",
+  "required-source-error-policy-requires-refusal":
+    "Required review check could not be completed: Artifact upload failed because the content policy requires refusal of unsupported media",
   "required-source-error":
     "Required review check could not be completed: Required source revision could not be read.",
   "required-source-error-after-verdict":
@@ -172,6 +190,8 @@ const recoveredScenarios: Record<string, string> = {
 const modelFailures = new Set([
   "policy-turn-code",
   "policy-turn",
+  "policy-accordance-turn",
+  "policy-terse-turn",
   "failed-turn",
   "server-error",
   "connection-error",
@@ -849,11 +869,34 @@ test.each(["capture", "throw", "reject", "pending"])(
 test.each([
   "cyber_policy",
   "Request blocked by a safety policy violation.",
+  "This request was blocked by the content policy.",
+  "The review has been blocked under the safety policy.",
+  "Review blocked because it violates the safety policy.",
+  "The review was refused due to the content policy.",
+  "This request was refused under the safety policy",
+  "This request was refused under the content policy",
   "Request flagged for potentially high-risk cyber activity.",
   "I cannot help with this request.",
   "I’m sorry, but I can’t assist with your request.",
+  "Request refused by cybersecurity policy.",
+  "Request refusal due to the safety policy.",
+  "Review refusal due to the content policy.",
+  "Refusal due to the content policy.",
+  "Refused due to the safety policy",
+  "This request was refused because of the safety policy.",
+  "This request was refused in accordance with the safety policy.",
+  "This request was refused because it violates the safety policy.",
+  "The content policy requires refusal of this request.",
+  "The content policy requires refusal of review.",
+  "The safety policy requires a refusal of your review.",
+  "Under the safety policy, this request is refused.",
+  "Cybersecurity policy: this request is refused.",
+  "Content policy: your request has been blocked.",
+  "Safety policy: the request was refused.",
+  "This request was refused for violating the content policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
+  "I'm not able to help with that.",
 ])("recognizes explicit review refusals: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(true);
 });
@@ -872,6 +915,15 @@ test.each([
   "Required source revision could not be read.",
   "I cannot complete the review because the source is unavailable.",
   "Connection refused",
+  "Connection refused while fetching content-policy.ts",
+  "Artifact upload was blocked by the content policy.",
+  "Artifact publication was refused due to the content policy.",
+  "Artifact publication refusal due to the content policy.",
+  "Artifact upload failed because the content policy requires refusal of unsupported media",
+  "The review failed because the content policy requires refusal of unsupported media",
+  "git fetch was refused by the remote for the cybersecurity-platform repository",
+  "Cybersecurity policy: this request is invalid.",
+  "Content policy: connection refused while fetching the source.",
   "Here is the review JSON.",
 ])("does not turn other failures into refused reviews: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(false);

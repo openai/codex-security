@@ -689,3 +689,19 @@ class ThreatModelProjectionTest(unittest.TestCase):
         destination = self.scan_dir / "exports" / "threatmodel.md"
         FINALIZER.write_export_output(self.scan_dir, destination, "md", b"model")
         self.assertEqual(destination.read_bytes(), b"model")
+
+
+def test_null_threat_model_has_an_input_error_without_traceback() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(FINALIZER.__file__).with_name("threat_model_projection.py")),
+            "--input-json-stdin",
+        ],
+        input='{"threatModel": null}',
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "threatModel" in result.stderr
+    assert "Traceback" not in result.stderr

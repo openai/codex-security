@@ -904,6 +904,51 @@ The extraction root is not enforced.
         self.assertIn("JSON output path cannot overwrite a scan artifact", rejected.stderr)
         self.assertEqual(findings.read_bytes(), before)
 
+    def test_export_failure_names_the_missing_output_directory(self) -> None:
+        self.write_sealed_scan()
+        output = self.scan_dir.parent / "missing-output" / "findings.csv"
+        result = self.run_finalizer("--export-format", "csv", "--export-output", str(output))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output directory", result.stderr)
+        self.assertIn(str(output.parent), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_unwritable_export_preserves_the_filesystem_diagnostic(self) -> None:
+        self.write_sealed_scan()
+        output = self.scan_dir.parent / "findings.csv"
+        diagnostic = PermissionError(13, "Synthetic permission denied", str(output))
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "finalizer",
+                    "--scan-dir",
+                    str(self.scan_dir),
+                    "--export-format",
+                    "csv",
+                    "--export-output",
+                    str(output),
+                ],
+            ),
+            mock.patch.object(FINALIZER, "write_export_output", side_effect=diagnostic),
+            mock.patch.object(sys, "stderr", stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            FINALIZER.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(str(diagnostic), stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_malformed_remote_is_a_contract_error(self) -> None:
+        self.manifest["scan"]["target"]["remote"] = "https://[invalid"
+        self.write_scan()
+        result = self.run_finalizer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("remote", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_export_entrypoint_rejects_overwriting_a_sealed_reserved_export(self) -> None:
         for artifact_path in (
             "exports/findings.csv",

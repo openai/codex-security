@@ -508,7 +508,10 @@ export function normalizeCandidatesCommand(
           else unlinkSync(temporary);
         }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+          console.error(
+            `normalize_candidates: Could not remove temporary file: ${(error as Error).message}`,
+          );
       }
     }
     console.log(

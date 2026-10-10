@@ -1263,27 +1263,64 @@ process.stdout.write(JSON.stringify({
     expect(stderr.text()).toBe("");
   });
 
-  test("preserves skill failures and adds authentication advice without replacing details", () => {
-    for (const detail of [
-      "403 model access denied /synthetic/repository",
-      "429 tokens per minute sk-proj-SYNTHETIC_SECRET",
-      "models cache supports_reasoning_summaries /synthetic/home",
-      "ENOTFOUND /synthetic/repository",
-      "EACCES: permission denied, open /synthetic/output/report.json",
-      "Unsupported provider setting: synthetic_option",
-      "raw detail \u001b[31m\rnext\nline sk-proj-SYNTHETIC_SECRET C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end",
-    ])
-      expect(skillCommandFailure("validate", 7, detail)).toBe(detail);
-    const authentication = "401 sk-proj-SYNTHETIC_SECRET";
-    expect(skillCommandFailure("validate", 7, authentication)).toContain(
-      authentication,
-    );
-    expect(skillCommandFailure("validate", 7, authentication)).toContain(
-      "Authentication failed",
-    );
-    expect(skillCommandFailure("validate", 7, "")).toBe(
-      "validate failed with exit code 7.",
-    );
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "retains model permission advice from the %s child",
+    async (command) => {
+      const detail =
+        "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP";
+      const stdout = capture();
+      const stderr = capture();
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "The selected model is unavailable for the current credentials.",
+      );
+      expect(stderr.text()).toContain(detail);
+    },
+  );
+
+  test("preserves skill failure details alongside helpful advice", () => {
+    const cases = [
+      ["HTTP 401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
+      [
+        "403 model access denied /private/repository",
+        "selected model is unavailable",
+      ],
+      [
+        "You do not have permission to use this model",
+        "selected model is unavailable",
+      ],
+      [
+        "You do not have permissions to use the model",
+        "selected model is unavailable",
+      ],
+      ["429 tokens per minute sk-proj-SYNTHETIC_SECRET", "rate limited"],
+      [
+        "tokens per minute limit exceeded sk-proj-SYNTHETIC_SECRET",
+        "rate limited",
+      ],
+      ["tokens-per-minute limit exceeded", "rate limited"],
+      ["tokens_per_minute limit exceeded", "rate limited"],
+      [
+        "models cache supports_reasoning_summaries /private/home",
+        "model metadata",
+      ],
+      ["ENOTFOUND /private/repository", "could not connect"],
+      ["ECONNABORTED sk-proj-SYNTHETIC_SECRET", "could not connect"],
+      ["unknown sk-proj-SYNTHETIC_SECRET /private/repository", "exit code 7"],
+    ];
+    for (const [detail, expected] of cases) {
+      const message = skillCommandFailure("validate", 7, detail!);
+      expect(message).toContain(expected!);
+      expect(message).toContain(detail!);
+    }
   });
 
   test("escapes native validation launch failures at the CLI boundary", async () => {
@@ -1318,6 +1355,132 @@ process.stdout.write(JSON.stringify({
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  test.each([
+    "Failed after 1401 bytes",
+    "permission denied opening cache",
+    "permission denied opening model cache",
+    "line 1429 could not be parsed",
+    "count_tokens_per_minute_limit is undefined",
+    "token_expired_cache is undefined",
+    "ModelAccessDeniedCache is undefined",
+  ])("does not misclassify an operational skill failure: %s", (detail) => {
+    const message = skillCommandFailure("patch", 1, detail);
+    expect(message).toContain(detail);
+    expect(message).not.toContain("Authentication failed");
+    expect(message).not.toContain("selected model is unavailable");
+    expect(message).not.toContain("rate limited");
+  });
+
+  const diagnosticAdviceCases = [
+    ...(
+      [
+        ["invalid api key", "Authentication failed"],
+        ["token expired", "Authentication failed"],
+        ["model not found", "selected model is unavailable"],
+        ["model access denied", "selected model is unavailable"],
+        ["access denied to model", "selected model is unavailable"],
+        ["access to model denied", "selected model is unavailable"],
+        ["rate limit", "rate limited"],
+        ["rate limited", "rate limited"],
+        ["rate limit exceeded", "rate limited"],
+        ["tokens per minute", "rate limited"],
+        ["timed out", "could not connect"],
+        ["timeout error", "could not connect"],
+        ["network error", "could not connect"],
+        ["network timeout", "could not connect"],
+      ] as const
+    ).flatMap(([words, advice]) =>
+      [" ", "_", "-", "."].map((separator) => {
+        const code = words.replaceAll(" ", separator);
+        return [
+          words === "timed out" ? `request ${code}` : code,
+          advice,
+        ] as const;
+      }),
+    ),
+    ...(
+      [
+        ["401", "Authentication failed"],
+        ["403", "selected model is unavailable"],
+        ["429", "rate limited"],
+      ] as const
+    ).flatMap(([status, advice]) => [
+      ...[
+        `HTTP ${status}`,
+        `HTTP/1.1 ${status}`,
+        `HTTP code: ${status}`,
+        `HTTPError:${status}`,
+        `HTTP error code: ${status}`,
+        `status code ${status}`,
+        `status_code=${status}`,
+        `{"status":${status}}`,
+        `{"status":"${status}"}`,
+        `status code: "${status}"`,
+        `status='${status}'`,
+      ].map((detail) => [detail, advice] as const),
+      ...[
+        `parse failed on line ${status}`,
+        `parse failed on line "${status}"`,
+        `failed after ${status} bytes`,
+        `error code: ${status}`,
+        `${status} bytes read`,
+        status,
+      ].map((detail) => [detail, null] as const),
+    ]),
+    ["401 Unauthorized", "Authentication failed"],
+    ["403 Forbidden", "selected model is unavailable"],
+    ["429 Too Many Requests", "rate limited"],
+    ["ThrottlingException", "rate limited"],
+    ["ExpiredTokenException", "Authentication failed"],
+    ["HTTP 403 ExpiredTokenException", "Authentication failed"],
+    ["HTTP 401; parsed 429 bytes", "Authentication failed"],
+    ["HTTP request failed while parsing line 429", null],
+    ["permission denied opening /synthetic/403/cache", null],
+    ["401 sk-proj-SYNTHETIC_SECRET", null],
+    ["NetworkError", "could not connect"],
+    ["TimeoutError", "could not connect"],
+    ["RequestTimeout", "could not connect"],
+    ["ModelAccessDenied", "selected model is unavailable"],
+    ["accessDeniedToModel", "selected model is unavailable"],
+    ["accessToModelDenied", "selected model is unavailable"],
+  ] as const;
+
+  test.each(
+    (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      diagnosticAdviceCases.map(
+        ([detail, advice]) => [command, detail, advice] as const,
+      ),
+    ),
+  )(
+    "preserves diagnostic advice from %s for %s",
+    async (command, detail, advice) => {
+      const stdout = capture();
+      const stderr = capture();
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      if (advice === null) {
+        expect(stderr.text()).not.toContain("Authentication failed");
+        expect(stderr.text()).not.toContain("selected model is unavailable");
+        expect(stderr.text()).not.toContain("rate limited");
+      } else {
+        expect(stderr.text()).toContain(advice);
+      }
+      expect(stderr.text()).toContain(detail);
+    },
+  );
+
+  test("retains raw diagnostic lines until the terminal boundary", () => {
+    const detail = "raw detail \u001b[31m\rnext\nline café C1 \u009b2J";
+    expect(skillCommandFailure("validate", 7, detail)).toContain(detail);
   });
 
   test("keeps unknown credential failures neutral", () => {
@@ -1364,11 +1527,11 @@ process.stdout.write(JSON.stringify({
       {
         source:
           'process.stderr.write("/private/repository sk-proj-SYNTHETIC_SECRET\\n");' +
-          'process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"401 sk-proj-SYNTHETIC_SECRET"}})+"\\n");' +
+          'process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:"HTTP 401 sk-proj-SYNTHETIC_SECRET"}})+"\\n");' +
           "process.exitCode=7",
         status: 7,
         stdout: "",
-        stderr: "401 sk-proj-SYNTHETIC_SECRET",
+        stderr: "HTTP 401 sk-proj-SYNTHETIC_SECRET",
       },
       {
         source:
@@ -1418,6 +1581,59 @@ process.stdout.write(JSON.stringify({
       }
     }
   });
+
+  test.each(["turn.failed", "stderr"])(
+    "escapes C1 controls in child %s failures while preserving diagnostic text",
+    async (channel) => {
+      const controls = String.fromCharCode(
+        ...Array.from({ length: 33 }, (_, index) => 0x7f + index),
+      );
+      const prefix = "Synthetic failure token=SYNTHETIC_VALUE Café 🔒 ";
+      const suffix = " retained detail";
+      const detail = `${prefix}${controls}${suffix}`;
+      const source =
+        channel === "turn.failed"
+          ? `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`
+          : `process.stderr.write(${JSON.stringify(detail)});process.exitCode=7`;
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+          { PATH: process.env["PATH"] },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        `codex-security: validate failed with exit code 7.\n${prefix}${" ".repeat(33)}${suffix}\n`,
+      );
+    },
+  );
+
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "preserves token-per-minute advice from a %s child failure",
+    async (command) => {
+      const detail = "tokens per minute limit exceeded token=SYNTHETIC_VALUE";
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+          { PATH: process.env["PATH"] },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("Wait and retry.");
+      expect(stderr.text()).toContain(detail);
+    },
+  );
 
   test("runs patching in a saved app-server thread", async () => {
     const source = `
@@ -1643,7 +1859,7 @@ lines.on("line", (line) => {
       'const readline=require("node:readline");',
       "const lines=readline.createInterface({input:process.stdin});",
       "lines.once('line',()=>process.stdout.write(JSON.stringify({",
-      'id:1,error:{code:-1,message:"401 sk-proj-SYNTHETIC_SECRET /private/repository"}',
+      'id:1,error:{code:-1,message:"HTTP 401 sk-proj-SYNTHETIC_SECRET /private/repository"}',
       '})+"\\n"));',
     ].join("");
     const stdout = capture();
@@ -1668,7 +1884,7 @@ lines.on("line", (line) => {
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Authentication failed");
     expect(stderr.text()).toContain(
-      "401 sk-proj-SYNTHETIC_SECRET /private/repository",
+      "HTTP 401 sk-proj-SYNTHETIC_SECRET /private/repository",
     );
   });
 

@@ -72,7 +72,6 @@ from workbench_constants import (
     FINDING_REMEDIATION_BYTES,
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
-    FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
@@ -2660,7 +2659,7 @@ def scan_context(
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
-    limit = min(args.limit, FINDINGS_PAGE_MAX)
+    limit = args.limit
     rows = scan_history.finding_occurrence_rows(
         connection,
         scan["id"],
@@ -3488,4 +3487,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from None

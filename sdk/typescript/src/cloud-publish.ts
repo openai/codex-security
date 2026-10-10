@@ -221,11 +221,12 @@ async function publishCloudPayload(
       redirect: "error",
       signal,
     });
-  } catch {
+  } catch (error) {
     dependencies.signal?.throwIfAborted();
     // A lost response does not establish whether the server accepted the POST.
     throw new CodexSecurityError(
-      "Cloud publication was not confirmed. The request was not retried; check whether it was accepted before submitting again.",
+      `Cloud publication was not confirmed: ${errorMessage(error)}. The request was not retried; check whether it was accepted before submitting again.`,
+      { cause: error },
     );
   }
   if (!response.ok) {

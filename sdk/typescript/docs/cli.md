@@ -1484,7 +1484,9 @@ fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
 
 Use `--llms` for the command manifest, `scan --schema --format json` for its
 schema, and `completions bash|zsh|fish` for shell completions. Scan output supports
-`--format toon|json|yaml|jsonl` and `--full-output`.
+`--format toon|json|yaml|jsonl` and `--full-output`. The existing `--format`,
+`--filter-output`, `--token-limit`, and `--token-offset` options accept either
+`--option value` or `--option=value`.
 
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
 MCP exposes only read-only `info`, because the transport cannot cancel scans.

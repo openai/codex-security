@@ -274,7 +274,7 @@ def list_scans(
             values.extend((query, query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     paginated = args is not None and (args.limit is not None or args.offset != 0)
-    limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX) if paginated else None
+    limit = (args.limit or FINDINGS_PAGE_MAX) if paginated else None
     pagination = "LIMIT ? OFFSET ?" if paginated else ""
     if limit is not None:
         values.extend((limit + 1, args.offset))

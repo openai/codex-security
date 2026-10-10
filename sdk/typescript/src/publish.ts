@@ -657,7 +657,7 @@ export async function checkScanPublicationInternal(
     options.signal?.throwIfAborted();
     if (error instanceof ConfigurationError) throw error;
     throw new CodexSecurityError(
-      `Could not verify Linear ${step}. Check the API key and publication destination.`,
+      `Could not verify Linear ${step}: ${errorMessage(error)}. Check the API key and publication destination.`,
       { cause: error },
     );
   }

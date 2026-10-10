@@ -847,8 +847,7 @@ export function createCodexSecurityServer(): McpServer {
     async ({ targetPath }) => {
       const target = await runWorkbench([
         "inspect-target",
-        "--target-path",
-        targetPath,
+        `--target-path=${targetPath}`,
       ]);
       return scanActionResult(
         { target },
@@ -870,8 +869,7 @@ export function createCodexSecurityServer(): McpServer {
     async ({ targetPath, scope, mode, diffTarget }) => {
       const setup = await runWorkbench([
         "inspect-setup",
-        "--target-path",
-        targetPath,
+        `--target-path=${targetPath}`,
         `--scope=${scope}`,
         "--mode",
         mode,
@@ -909,8 +907,7 @@ export function createCodexSecurityServer(): McpServer {
             "save-workspace",
             "--workspace-id",
             sessionId,
-            "--target-path",
-            targetPath,
+            `--target-path=${targetPath}`,
             `--scope=${scope}`,
             "--mode",
             mode,
@@ -1882,8 +1879,7 @@ async function startPromptOnlyScan(
       "start-prompt-only-scan",
       "--thread-id",
       threadId,
-      "--target-path",
-      targetPath,
+      `--target-path=${targetPath}`,
       `--scope=${scope}`,
       "--mode",
       mode,
@@ -1914,8 +1910,7 @@ async function startHeadlessStandardScan(
       "start-headless-standard-scan",
       "--thread-id",
       threadId,
-      "--target-path",
-      input.targetPath,
+      `--target-path=${input.targetPath}`,
       `--scope=${input.scope ?? "."}`,
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
@@ -2232,8 +2227,10 @@ async function executeWorkbench(
       windowsHide: true,
       env: process.env,
       encoding: "utf8" as const,
-      // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
-      maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
+      // Local artifacts and accepted finding pages can exceed a fixed byte buffer.
+      maxBuffer: ["read-artifact", "list-findings"].includes(args[0] ?? "")
+        ? Infinity
+        : 4 * 1024 * 1024,
       timeout,
     },
   );

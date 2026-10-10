@@ -131,7 +131,7 @@ export async function runComponentScans(
   if (!Number.isSafeInteger(workers) || workers < 1)
     throw new Error("Component workers must be a positive integer.");
   if (Boolean(options.auto) === (options.components !== undefined))
-    throw new Error("Choose components or automatic planning, not both.");
+    throw new Error("Choose exactly one of components or automatic planning.");
   const auth = options.scanOptions?.auth;
   let environment = options.environment;
   if (auth !== undefined && auth !== "auto") {

@@ -1,5 +1,5 @@
 import { nodeCommand } from "./support/shell.js";
-import { chmod, writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -518,4 +518,21 @@ setInterval(() => {}, 1000);
     await expect(handle.wait()).resolves.toMatchObject({ success: false });
     expect(observeSucceeded).not.toHaveBeenCalled();
   });
+});
+
+test("retains the Codex configuration path and parsing error", async () => {
+  const root = join(
+    await temporaryDirectory(),
+    "configuration-\u009b-sk-proj-SYNTHETIC_SECRET",
+  );
+  await mkdir(root);
+  const path = join(root, "config.toml");
+  await writeFile(path, "invalid = [");
+  try {
+    await readCodexHomeConfig({ CODEX_HOME: root });
+    throw new Error("Expected invalid configuration to fail");
+  } catch (error) {
+    expect(String(error)).toContain(path);
+    expect(String(error)).toContain("Invalid TOML");
+  }
 });

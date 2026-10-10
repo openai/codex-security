@@ -507,6 +507,25 @@ describe("publish check", () => {
     expect(stdout.text().trim()).toBe("");
   });
 
+  test("escapes terminal controls in check failures while preserving diagnostic text", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.checkScanPublication = async () =>
+      fail(
+        "Linear check failed: \u001B[2Jrequest\rdenied\nkey=sk-synthetic-example",
+      );
+    expect(
+      await runCli(
+        ["publish", "check", "completed-scan", ...DESTINATION_OPTIONS],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toBe(
+      "codex-security: Linear check failed:  [2Jrequest denied\nkey=sk-synthetic-example\n",
+    );
+    expect(stdout.text().trim()).toBe("");
+  });
+
   test("waits for read-only publication cleanup on terminal signals", async () => {
     for (const command of [
       ["check"],

@@ -264,6 +264,24 @@ try {
     ["read-artifact", ...artifactArgs],
   );
   assert.deepEqual(Buffer.from(saved.content, "base64"), binary);
+  await assert.rejects(
+    executeWorkbench(process.env.PYTHON?.trim() || "python3", [
+      "read-artifact",
+      "--artifact-root",
+      artifactRoot,
+      "--artifact-path",
+      "missing.bin",
+    ]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error && "stderr" in error);
+      assert.match(
+        String(error.stderr),
+        /Saved artifact: expected a file inside the scan directory/,
+      );
+      assert.doesNotMatch(String(error.stderr), /Traceback/);
+      return true;
+    },
+  );
   const replacementTarget = path.join(root, "target-\ufffd");
   await mkdir(replacementTarget);
   for (const rawBytePath of [false, true]) {

@@ -1,6 +1,9 @@
 import { runNodePython } from "./support/python-probe.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
-import { createApiTestFixtures } from "./support/temporary-directories.js";
+import {
+  createApiTestFixtures,
+  removeTemporaryDirectory,
+} from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
@@ -2981,6 +2984,7 @@ ${directNode ? "}" : ""}
           stderr: "",
         });
       }
+      await removeTemporaryDirectory(root);
     },
   );
 

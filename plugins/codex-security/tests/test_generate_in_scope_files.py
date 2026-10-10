@@ -708,12 +708,15 @@ def test_diff_inventory_includes_bom_marked_utf16_text(tmp_path: Path, mode: str
     ]
 
 
-def test_invalid_diff_revision_preserves_previous_inventory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
+def test_invalid_diff_revision_preserves_previous_inventory(tmp_path: Path, mode: str) -> None:
     repository = make_repository(tmp_path)
     output = tmp_path / "in_scope_files.txt"
     output.write_text("previous.py\n", encoding="utf-8")
 
-    result = run_inventory(repository, ".", output, arguments=["--diff-base", "missing"])
+    result = run_inventory(
+        repository, ".", output, arguments=["--diff-base", "missing", "--diff-mode", mode]
+    )
 
     assert result.returncode == 2
     assert "could not resolve the selected Git changes" in result.stderr

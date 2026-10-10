@@ -1148,6 +1148,16 @@ describe("one-shot scan events", () => {
   });
 });
 
+test("preserves the reason a required scan artifact cannot be read", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const artifact = join(scanDir, "findings.json");
+  await rm(artifact);
+  await mkdir(artifact);
+  await expect(runEvents(scanDir, completedEvents())).rejects.toThrow(
+    "expected a regular non-symlink file",
+  );
+});
+
 test("missing required artifacts remain incomplete scans", async () => {
   const scanDir = await copyCompletedScan(await temporaryDirectory());
   await rm(join(scanDir, "report.md"));

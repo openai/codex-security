@@ -557,7 +557,7 @@ async function runCampaign(
           }
           requiresRecovery = error instanceof OutputDirectoryNotEmptyError;
           failure = requiresRecovery
-            ? `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts and checkout were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`
+            ? `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
@@ -1078,7 +1078,7 @@ function parseInventory(
   if (errors.length > 0) {
     throw new Error(`Multiscan CSV could not be parsed: ${errors[0]!.message}`);
   }
-  const headers = rows.shift();
+  const headers = rows.shift()?.map((header) => header.trim());
   if (
     headers === undefined ||
     !["id", "repository", "revision"].every((name) => headers.includes(name)) ||

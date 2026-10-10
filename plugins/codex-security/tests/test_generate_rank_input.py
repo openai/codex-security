@@ -847,3 +847,53 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
     run_repo_cli(command, repo, output, *arguments)
 
     assert {row["path"]: row["preview"] for row in read_jsonl(output)} == expected
+
+
+@pytest.mark.parametrize(
+    ("revision", "displayed"),
+    [
+        ("missing-synthetic-revision", "missing-synthetic-revision"),
+        ("missing-\u009b31m-synthetic", r"missing-\u009b31m-synthetic"),
+        ("missing-\u2028\u2029-synthetic", r"missing-\u2028\u2029-synthetic"),
+        ("missing-café-synthetic", "missing-café-synthetic"),
+    ],
+)
+def test_bad_diff_revision_keeps_git_diagnostic_without_traceback(
+    tmp_path: Path, revision: str, displayed: str
+) -> None:
+    initialize_repo(tmp_path)
+    (tmp_path / "app.py").write_text("print('synthetic')\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-m", "Synthetic baseline")
+    result = run_repo_cli(
+        "make-diff-rank-input",
+        tmp_path,
+        tmp_path / "rank.jsonl",
+        "--base",
+        revision,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert displayed in result.stderr
+    assert "\u009b" not in result.stderr
+    assert "\u2028" not in result.stderr
+    assert "\u2029" not in result.stderr
+    assert "unknown revision" in result.stderr or "bad revision" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_unavailable_git_reports_status_without_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_SECURITY_GIT", "")
+    result = run_repo_cli(
+        "make-diff-rank-input",
+        tmp_path,
+        tmp_path / "rank.jsonl",
+        "--base",
+        "HEAD",
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "127" in result.stderr
+    assert "Traceback" not in result.stderr

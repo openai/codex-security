@@ -17,6 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { syncBuiltinESMExports } from "node:module";
 import { mock } from "node:test";
 import { importSource } from "./import-module.ts";
@@ -113,6 +114,7 @@ try {
   await verifyReaderPreservesSharedPhaseRecords(scan);
   await verifyNormalizerFailuresPreserveOutput(scan);
   await verifyDiffInventoryAllowsDeletedFiles();
+  await verifyNormalizerDiagnostics(scan);
   await verifyEmptyReplacement(scan);
   await verifyWorkerContext();
   await verifyMalformedLedgerIsNotModified();
@@ -364,9 +366,8 @@ async function verifyNormalizerFailuresPreserveOutput(
     ),
     (error) =>
       error instanceof Error &&
-      /line range/u.test(error.message) &&
-      !error.message.includes(context.root) &&
-      !error.message.includes(context.repoRoot),
+      error.message ===
+        "discovery candidates: candidate input row 1: line range 9-9 exceeds src/routes.ts:3",
   );
   assert.equal(await readFile(destination, "utf8"), original);
 
@@ -851,4 +852,32 @@ function rawCandidate(overrides = {}) {
     evidence: "The request parameter is interpolated into the query",
     ...overrides,
   };
+}
+
+async function verifyNormalizerDiagnostics(context: ArtifactContext) {
+  const workerRoot = path.join(root, "diagnostic-worker");
+  await mkdir(workerRoot);
+  const detail = `Cannot normalize ${context.repoRoot}; unrelated services${context.repoRoot}/main.py`;
+  await writeFile(
+    path.join(workerRoot, "helpers.mjs"),
+    `throw new Error(${JSON.stringify(detail)});`,
+  );
+  const { recordCodexSecurityDiscoveryCandidates: record } = await importSource(
+    path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
+    {
+      define: {
+        "import.meta.url": JSON.stringify(
+          pathToFileURL(path.join(workerRoot, "server.mjs")).href,
+        ),
+      },
+    },
+  );
+  await assert.rejects(
+    record({ candidates: [rawCandidate()] }, context),
+    (error) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, detail);
+      return true;
+    },
+  );
 }
