@@ -119,6 +119,7 @@ def _indexed_findings(
     matched = json.dumps(sorted(matching_scan_ids))
     parents: dict[tuple[str, str], tuple[str, str]] = {}
     compatible_scan_pairs: dict[tuple[str, str], bool] = {}
+    checkout_relationships: dict[tuple[str, ...], bool] = {}
 
     def group(identity: tuple[str, str]) -> tuple[str, str]:
         while identity in parents:
@@ -159,7 +160,7 @@ def _indexed_findings(
                     for scan_id in pair
                 ]
                 compatible_scan_pairs[pair] = scan_history._same_registered_repository(
-                    connection, *scans
+                    connection, *scans, checkout_relationships=checkout_relationships
                 )
             if not compatible_scan_pairs[pair]:
                 continue

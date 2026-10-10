@@ -617,6 +617,70 @@ def test_cached_checkout_relationship_still_checks_each_scan_owner_and_epoch(
     )
 
 
+def test_matched_findings_reuse_checkout_probes_across_saved_scan_pairs(
+    workbench_api, indexed_collections, monkeypatch
+):
+    connection, targets = indexed_collections
+    scans = _linked_history_fixture(connection, targets)
+    history = workbench_api["scan_history"]
+    original_git = history.git_output
+    probes = []
+
+    def counted_git(target, *arguments):
+        probes.append((target, arguments))
+        return original_git(target, *arguments)
+
+    monkeypatch.setattr(history, "git_output", counted_git)
+    assert history._same_registered_repository(connection, *scans)
+    one_relationship_probes = len(probes)
+    assert one_relationship_probes > 0
+    occurrences = ["occurrence-0", "occurrence-1"]
+    for index in range(22):
+        scan = _copy_history_scan(connection, scans[index % 2], index)
+        scans.append(scan)
+        occurrence = dict(
+            connection.execute(
+                "SELECT * FROM finding_occurrences WHERE id = ?", (occurrences[index % 2],)
+            ).fetchone()
+        )
+        occurrence.update(id=f"copied-occurrence-{index}", scan_id=scan["id"])
+        connection.execute(
+            f"INSERT INTO finding_occurrences ({','.join(occurrence)}) "
+            f"VALUES ({','.join('?' for _ in occurrence)})",
+            tuple(occurrence.values()),
+        )
+        occurrences.append(occurrence["id"])
+    for index, before in enumerate(scans):
+        for after_index, after in enumerate(scans[index + 1 :], index + 1):
+            if before["target_id"] == after["target_id"]:
+                continue
+            connection.execute(
+                "INSERT INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
+                (before["id"], after["id"]),
+            )
+            connection.execute(
+                "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'same issue')",
+                (before["id"], after["id"], occurrences[index], occurrences[after_index]),
+            )
+    connection.create_function(
+        "codex_security_finding_group",
+        2,
+        lambda _occurrence, finding: f"finding:{finding}",
+        deterministic=True,
+    )
+    probes.clear()
+    (finding,) = list(
+        workbench_api["native_indexes"]._indexed_findings(
+            connection,
+            allowed_scan_ids={scan["id"] for scan in scans},
+            allow_cross_target_matches=True,
+        )
+    )
+    assert set(finding["known_scan_ids"]) == {scan["id"] for scan in scans}
+    assert finding["occurrence_count"] == len(scans)
+    assert len(probes) <= 2 * one_relationship_probes
+
+
 def test_indexed_history_expands_each_connected_target_group_once(
     workbench_api, indexed_collections, monkeypatch
 ):
