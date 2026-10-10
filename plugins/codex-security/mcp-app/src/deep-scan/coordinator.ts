@@ -14,6 +14,7 @@ import {
 } from "./artifact-validation.js";
 import {
   scanDraftInputSchema,
+  findingsWithinScope,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
@@ -307,6 +308,11 @@ export class DeepScanCoordinator {
           "Deep Scan aggregate does not match its authoritative scan identity.",
         );
       }
+      // Publish the current scope without rewriting accepted source artifacts.
+      draft.findings = findingsWithinScope(
+        draft.findings,
+        this.state.includePaths ?? [this.state.scope],
+      );
       await this.options.onComplete?.(
         draft,
         this.publicationAbortController.signal,

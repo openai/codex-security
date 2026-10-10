@@ -3121,12 +3121,14 @@ async function testResumedDiscoveryDeadlineUsesPersistedCreationTime(
 async function testResumedManifestPreservesCompletedReducer(
   includeUnstartedReducer = false,
   removeHistoricalPrompts = true,
+  includePaths?: string[],
 ) {
   const fixture = await fixtureRun({
     workers: 2,
     stopAfterNoNew: 2,
     maxDiscoveryRuns: 3,
   });
+  fixture.run.includePaths = includePaths;
   const store = new FakeStore(fixture.run);
   store.dedupCommitResponseGate = Promise.withResolvers<void>();
   const original = createCoordinator(
@@ -3134,6 +3136,7 @@ async function testResumedManifestPreservesCompletedReducer(
     store,
     new FakeExecutor({
       blockDiscoveryAfterCalls: 2,
+      discoveryCandidateId: includePaths ? "scope-candidate" : undefined,
     }),
     { run: store.run },
   );
@@ -3194,10 +3197,13 @@ async function testResumedManifestPreservesCompletedReducer(
   const persistedWorkers = structuredClone(store.run.persistedWorkers);
   const committedReducer = store.workers.get(store.dedupClaims[0].id)!;
   const committedResult = await readJson(committedReducer.resultManifestPath!);
+  if (includePaths) assert.ok(committedResult.findings.length > 0);
   if (removeHistoricalPrompts) await rm(committedReducer.promptPath);
   const replacementExecutor = new FakeExecutor();
+  const published: ScanDraftInput[] = [];
   const terminal = await runCoordinator(fixture, store, replacementExecutor, {
     run: store.run,
+    onComplete: async (draft) => void published.push(structuredClone(draft)),
   });
   assert.equal(terminal?.status, "succeeded");
   const manifest = await readJson(terminal.manifestPath);
@@ -3210,6 +3216,11 @@ async function testResumedManifestPreservesCompletedReducer(
     "accepted work needs no new worker launch",
   );
   assert.deepEqual(manifest.findings, committedResult.findings);
+  assert.equal(published.length, 1);
+  assert.deepEqual(
+    published[0].findings,
+    includePaths ? [] : committedResult.findings,
+  );
   assert.deepEqual(store.run.persistedDedupInputs, persistedInputs);
   assert.deepEqual(store.run.persistedWorkers, persistedWorkers);
   assert.deepEqual(
@@ -4251,6 +4262,10 @@ try {
   await testResumedManifestPreservesCompletedReducer(false, false);
   await testResumedManifestPreservesCompletedReducer();
   await testResumedManifestPreservesCompletedReducer(true);
+  await testResumedManifestPreservesCompletedReducer(false, true, [
+    "api",
+    "background jobs",
+  ]);
   await testResumeUsesHistoricalCandidateSnapshotForEachReducer();
   await testPersistedErrorLimitStopsBeforeRescheduling();
   await testPersistedReducerErrorLimitStopsBeforeRescheduling();

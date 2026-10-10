@@ -2274,6 +2274,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
+        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:

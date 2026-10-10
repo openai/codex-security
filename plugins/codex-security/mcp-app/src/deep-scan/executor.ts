@@ -59,6 +59,7 @@ export interface CodexSdkWorkerArtifactContext {
   repoRoot: string;
   scanId: string;
   scope?: string;
+  includePaths?: readonly string[];
   pythonCommand?: string;
 }
 
@@ -295,6 +296,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           CODEX_SECURITY_PLUGIN_ROOT: scan.pluginRoot,
           ...(scan.scope !== undefined
             ? { CODEX_SECURITY_SCOPE: scan.scope }
+            : {}),
+          ...(scan.includePaths !== undefined
+            ? {
+                CODEX_SECURITY_INCLUDE_PATHS_JSON: JSON.stringify(
+                  scan.includePaths,
+                ),
+              }
             : {}),
           ...(scan.pythonCommand !== undefined
             ? { CODEX_SECURITY_PYTHON_COMMAND: scan.pythonCommand }

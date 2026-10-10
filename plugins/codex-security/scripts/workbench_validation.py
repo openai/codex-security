@@ -10,7 +10,7 @@ import sqlite3
 import sys
 import uuid
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
@@ -60,12 +60,7 @@ def sqlite_busy(error: sqlite3.OperationalError) -> bool:
     return "locked" in str(error).lower() or "busy" in str(error).lower()
 
 
-def path_within_scope(path: str, scope: str) -> bool:
-    candidate = PurePosixPath(path)
-    requested = PurePosixPath(scope)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    return candidate.is_relative_to(requested)
+path_within_scope = finalizer.path_within_scope
 
 
 def require_close_note(close_reason: str | None, note: str | None) -> None:

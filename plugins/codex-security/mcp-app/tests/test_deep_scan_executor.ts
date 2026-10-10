@@ -1756,6 +1756,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
+              includePaths:
+                index % 2 === 0
+                  ? ["api", `background jobs ${index}`]
+                  : undefined,
               pythonCommand: `${helperPython}-${index} `,
             },
           }),
@@ -2012,6 +2016,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(invocation.python, python);
             assertConfigOverrides(invocation.argv, {
               "mcp_servers.cs_artifacts.command": process.execPath,
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
+                index % 2 === 0
+                  ? JSON.stringify(["api", `background jobs ${index}`])
+                  : undefined,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
               "mcp_servers.cs_artifacts.args.0": path.join(
                 fixture.root,
