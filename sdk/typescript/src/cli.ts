@@ -948,6 +948,7 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 
 interface ScanArguments extends ResolvedScanSettings {
   rerunInputIdentity?: JsonValue;
+  publicationOnly?: boolean;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
@@ -6516,6 +6517,7 @@ async function prepareScanArgumentsFromRecipe(
         );
   return {
     repository,
+    publicationOnly,
     inheritedPermissions:
       inheritedPermissions as ScanOptions["inheritedPermissions"],
     preserveProviderEnvironment: recipe["preserveProviderEnvironment"] === true,
@@ -8383,7 +8385,10 @@ async function executeScan(
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
     auth =
-      !arguments_.dryRun && !arguments_.mock && interactive
+      !arguments_.dryRun &&
+      !arguments_.mock &&
+      !arguments_.publicationOnly &&
+      interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
@@ -8408,14 +8413,15 @@ async function executeScan(
             : undefined),
       };
     }
-    selectedAuthentication = arguments_.mock
-      ? null
-      : scanAuthentication(
-          dependencies.environment,
-          auth,
-          provider,
-          hasCommandAuth(effectiveConfiguration),
-        );
+    selectedAuthentication =
+      arguments_.mock || arguments_.publicationOnly
+        ? null
+        : scanAuthentication(
+            dependencies.environment,
+            auth,
+            provider,
+            hasCommandAuth(effectiveConfiguration),
+          );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,

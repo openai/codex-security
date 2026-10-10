@@ -999,20 +999,69 @@ test("a reused client's sealed read uses its installed plugin after the source i
   expect(h.launches).toHaveLength(3);
 });
 
-test.each(["sdk", "native"] as const)(
-  "a sealed %s resume does not construct a model client or launch new work",
+test.each([
+  "sdk",
+  "native",
+  "native-missing-profile",
+  "native-missing-home",
+  "native-follow-up",
+  "native-wrong-claim",
+  "native-unsealed",
+] as const)(
+  "saved %s resume keeps publication independent from model credentials",
   async (surface) => {
-    const h = await fixture(undefined, surface === "native");
-    h.stopAfterSealing();
-    await using first = h.makeClient();
+    const privateReplay = surface !== "sdk" && surface !== "native";
+    const unsealed = surface === "native-unsealed";
+    const followUp = surface === "native-follow-up";
+    const wrongClaim = surface === "native-wrong-claim";
+    const h = await fixture(undefined, surface !== "sdk");
+    if (unsealed) h.stopBeforeSealing("deep");
+    else h.stopAfterSealing();
+    await using first = h.makeClient(
+      privateReplay
+        ? {
+            model_provider: "synthetic",
+            model_providers: {
+              synthetic: {
+                name: "Synthetic",
+                wire_api: "responses",
+                requires_openai_auth: true,
+                http_headers: {
+                  Authorization: "synthetic-private-native-token",
+                },
+              },
+            },
+          }
+        : {},
+    );
     await expect(
-      first.run(h.repository, { ...h.options, knowledgeBasePaths: undefined }),
+      first.run(h.repository, {
+        ...h.options,
+        knowledgeBasePaths: undefined,
+        ...(followUp
+          ? { postScanPrompt: "Synthetic requested follow-up" }
+          : {}),
+      }),
     ).rejects.toBeInstanceOf(ScanTransportClosedError);
     const parentId = [...h.records].find(
       ([, record]) => record.mode === "deep",
     )![0];
-    const findings = JSON.parse(
-      await readFile(join(h.outputDir, "findings.json"), "utf8"),
+    const findings = unsealed
+      ? undefined
+      : JSON.parse(await readFile(join(h.outputDir, "findings.json"), "utf8"));
+    const artifactNames = [
+      "artifacts/deep-scan/checkpoint.json",
+      ...(unsealed
+        ? []
+        : [
+            "scan-manifest.json",
+            "findings.json",
+            "coverage.json",
+            "report.md",
+          ]),
+    ];
+    const artifacts = await Promise.all(
+      artifactNames.map((name) => readFile(join(h.outputDir, name))),
     );
     const priorFinding = {
       findingId: "prior-open-issue",
@@ -1054,14 +1103,57 @@ test.each(["sdk", "native"] as const)(
           { ...parent.options, signal: undefined },
           ["get-scan", "--scan-id", parentId],
         );
+        if (privateReplay) {
+          const joined = await runWorkbench(
+            { ...parent.options, signal: undefined },
+            [
+              "begin-deep-scan",
+              "--scan-id",
+              parentId,
+              "--thread-id",
+              "native-owner",
+              "--claim-token",
+              h.options.registeredScan!.handoffClaimToken!,
+            ],
+          );
+          expect(joined["recipe"]).toEqual(parent.recipe);
+          const receipt = await runWorkbench(
+            { ...parent.options, signal: undefined },
+            [
+              "get-cli-scan-resume",
+              "--scan-id",
+              parentId,
+              "--claim-token",
+              h.options.registeredScan!.handoffClaimToken!,
+            ],
+          );
+          expect(typeof receipt["sealedProducerVersion"]).toBe(
+            unsealed ? "undefined" : "string",
+          );
+          const profile = parent.recipe["providerProfile"] as JsonObject;
+          expect(typeof profile["name"]).toBe("string");
+          expect(profile["home"]).toBe("ambient");
+          const path = join(h.home, `${profile["name"]}.config.toml`);
+          expect(await readFile(path, "utf8")).toContain(
+            "synthetic-private-native-token",
+          );
+          if (surface === "native-missing-home")
+            await rm(h.home, { recursive: true });
+          else await rm(path);
+        }
         const { prepareNativeScan } = await import(
           new URL(
             "../../../plugins/codex-security/mcp-app/src/native-scan.ts",
             import.meta.url,
           ).href
         );
-        const prepared = await prepareNativeScan({
-          scan: saved["scan"],
+        const preparation = prepareNativeScan({
+          scan: wrongClaim
+            ? {
+                ...(saved["scan"] as JsonObject),
+                handoffClaimToken: randomUUID(),
+              }
+            : saved["scan"],
           recipe: parent.recipe,
           threadId: "native-owner",
           pluginRoot,
@@ -1069,12 +1161,52 @@ test.each(["sdk", "native"] as const)(
           stateDirectory: join(h.root, "state"),
           parentSandbox: { filesystemDenies: [] },
         });
+        if (followUp || unsealed) {
+          await expect(preparation).rejects.toThrow("ENOENT");
+          expect(
+            (
+              await runWorkbench({ ...parent.options, signal: undefined }, [
+                "get-scan",
+                "--scan-id",
+                parentId,
+              ])
+            )["scan"],
+          ).toMatchObject({ progress: { status: "running" } });
+          expect(
+            await Promise.all(
+              artifactNames.map((name) => readFile(join(h.outputDir, name))),
+            ),
+          ).toEqual(artifacts);
+          expect(h.launches).toHaveLength(3);
+          return;
+        }
+        const prepared = await preparation;
         const resumed = prepared.client;
         try {
-          const restored = await resumed.run(h.repository, {
+          const pending = resumed.run(h.repository, {
             ...prepared.options,
             onWarning() {},
           });
+          if (wrongClaim) {
+            await expect(pending).rejects.toThrow("another continuation");
+            expect(
+              (
+                await runWorkbench({ ...parent.options, signal: undefined }, [
+                  "get-scan",
+                  "--scan-id",
+                  parentId,
+                ])
+              )["scan"],
+            ).toMatchObject({ progress: { status: "running" } });
+            expect(
+              await Promise.all(
+                artifactNames.map((name) => readFile(join(h.outputDir, name))),
+              ),
+            ).toEqual(artifacts);
+            expect(h.launches).toHaveLength(3);
+            return;
+          }
+          const restored = await pending;
           expect(restored.findings).toEqual(findings);
           const completed = await runWorkbench(
             { ...parent.options, signal: undefined },
@@ -1094,6 +1226,11 @@ test.each(["sdk", "native"] as const)(
       }
     }
     expect(h.launches).toHaveLength(3);
+    expect(
+      await Promise.all(
+        artifactNames.map((name) => readFile(join(h.outputDir, name))),
+      ),
+    ).toEqual(artifacts);
   },
 );
 

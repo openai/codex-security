@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import { restoreScanKnowledge } from "../../../../sdk/typescript/src/scan-inputs.js";
 import { isRecord } from "./record.js";
 import {
@@ -232,11 +233,18 @@ export async function prepareNativeScan(
         "config.toml",
       ),
   );
-  const config = await nativeScanConfiguration(
-    environment,
-    input,
-    deep.settings.subagents,
-  );
+  const publicationOnly =
+    recipe !== undefined &&
+    !options.postScanPrompt?.trim() &&
+    (await hasSealedScanArtifacts(input.scan.scanDir, signal));
+  // The SDK still validates the seal, owner and claim before publication.
+  const config = publicationOnly
+    ? (recipe.config ?? {})
+    : await nativeScanConfiguration(
+        environment,
+        input,
+        deep.settings.subagents,
+      );
   const security = config["codex_security"];
   if (
     recipe === undefined &&

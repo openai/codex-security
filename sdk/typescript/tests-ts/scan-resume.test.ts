@@ -2271,6 +2271,14 @@ test.each([
 );
 
 test.each([
+  {
+    bulk: false,
+    missingHome: false,
+    keepProfile: true,
+    interactive: true,
+    publicationOnly: true,
+  },
+  { bulk: false, missingHome: false, keepProfile: true, publicationOnly: true },
   { bulk: false, missingHome: true, publicationOnly: true },
   { bulk: true, missingHome: false, publicationOnly: true },
   {
@@ -2311,6 +2319,8 @@ test.each([
 ] as {
   bulk: boolean;
   missingHome: boolean;
+  keepProfile?: boolean;
+  interactive?: boolean;
   savedPrompt?: string;
   fallbackPrompt?: string;
   rerun?: boolean;
@@ -2321,6 +2331,8 @@ test.each([
   async ({
     bulk,
     missingHome,
+    keepProfile,
+    interactive,
     savedPrompt,
     fallbackPrompt,
     rerun,
@@ -2349,11 +2361,16 @@ test.each([
           name: "Synthetic",
           wire_api: "responses",
           http_headers: { Authorization: "synthetic-private-replay-token" },
+          auth: {
+            command: "synthetic-unused-auth",
+            args: ["synthetic-private-argument"],
+          },
         },
       },
     });
     const recipe = {
       ...f.recipe,
+      auth: interactive ? "auto" : "api-key",
       config: {
         ...(f.recipe.config as JsonObject),
         model_provider: "synthetic",
@@ -2393,7 +2410,7 @@ test.each([
     );
     f.environment.CODEX_HOME = home;
     if (missingHome) await rm(home, { recursive: true });
-    else await rm(profile.path);
+    else if (!keepProfile) await rm(profile.path);
     const promptFile = join(f.root, "post-scan.md");
     if (fallbackPrompt !== undefined)
       await writeFile(promptFile, fallbackPrompt);
@@ -2408,6 +2425,11 @@ test.each([
       await writeFile(instructionFile, "Keep the original scan instructions.");
     const stdout = capture(),
       stderr = capture();
+    if (interactive) {
+      Object.assign(stderr.stream, { isTTY: true });
+      f.environment.OPENAI_API_KEY = "synthetic-unused-key";
+    }
+    let authenticationChecks = 0;
     const requests: (string | undefined)[] = [];
     let runtimeStarts = 0;
     const code = await main(
@@ -2438,6 +2460,17 @@ test.each([
           currentDirectory: f.root,
         }),
         runWorkbench: f.command,
+        hasStoredChatGPTSignIn: async () => {
+          authenticationChecks++;
+          throw new Error("Publication must not inspect stored authentication");
+        },
+        scanAuthenticationPrompt: {
+          isInteractive: () => true,
+          select: async () => {
+            authenticationChecks++;
+            throw new Error("Publication must not request authentication");
+          },
+        },
         createSecurity(config) {
           const client = new TestClient(
             { ...config, pluginPath: PLUGIN_ROOT, pythonPath: f.python },
@@ -2469,6 +2502,7 @@ test.each([
     );
     expect(code, stderr.text()).toBe(2);
     expect(runtimeStarts).toBe(0);
+    expect(authenticationChecks).toBe(0);
     expect(requests).toEqual(publicationOnly ? [f.scanId] : []);
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],

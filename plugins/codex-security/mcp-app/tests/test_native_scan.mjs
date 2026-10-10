@@ -821,7 +821,8 @@ test("native preparation excludes scan output and knowledge sources from executa
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
   ]);
   try {
-    for (const directory of [repository, scanDir, documents, external]) {
+    await mkdir(scanDir, { mode: 0o700 });
+    for (const directory of [repository, documents, external]) {
       await mkdir(directory, { recursive: true });
     }
     await mkdir(join(knowledgeRoot, ".git"));
@@ -3039,7 +3040,7 @@ test("native rejoin restores bound knowledge without overwriting its snapshot", 
   const document = join(root, "architecture.md");
   const scanDir = join(root, "scan");
   const home = join(root, "home");
-  await mkdir(scanDir);
+  await mkdir(scanDir, { mode: 0o700 });
   await mkdir(home);
   await writeFile(document, "Original synthetic architecture.\n");
   const restoreEnvironment = captureEnvironment([
