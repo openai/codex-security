@@ -2067,12 +2067,15 @@ export async function main(
                     dependencies.runWorkbench,
                     target["targetId"] as string,
                   );
-            return { repository, findings: findings ?? [] };
+            return {
+              repository: requestedRepository,
+              findings: findings ?? [],
+            };
           },
         ),
         "findings",
         format,
-        { repository },
+        { repository: requestedRepository },
       );
     },
   });
