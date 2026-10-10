@@ -3338,10 +3338,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
-    if args.command == "inspect-linear-publication":
-        result = publication.inspect_linear_publication(
-            _WORKBENCH_PUBLICATION_CONTEXT, read_json_object(Path(args.input_file))
-        )
+    if args.command == "finding-issues":
+        result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
@@ -3394,21 +3392,10 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "attach-scan-continuation-thread": partial(
                 handoff.attach_scan_continuation_thread, command_context
             ),
-            "prepare-linear-publication": partial(
-                publication.prepare_linear_publication, _WORKBENCH_PUBLICATION_CONTEXT
-            ),
-            "record-linear-publications": partial(
-                publication.record_linear_publications, _WORKBENCH_PUBLICATION_CONTEXT
-            ),
             "export-findings": partial(publication.export_findings, _WORKBENCH_PUBLICATION_CONTEXT),
         }
         if handler := handlers.get(args.command):
-            payload = (
-                read_json_object(Path(args.input_file))
-                if args.command in {"prepare-linear-publication", "record-linear-publications"}
-                else args
-            )
-            result = handler(connection, payload)
+            result = handler(connection, args)
         elif args.command == "get-workspace":
             result = workspace_state(
                 connection,

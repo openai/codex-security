@@ -23,6 +23,7 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
+import { registerFindingIssueTools } from "./src/server/finding-issue-tools.js";
 import {
   DeepScanCoordinatorRegistry,
   AsyncLock,
@@ -1813,6 +1814,7 @@ export function createCodexSecurityServer(): McpServer {
       ),
   );
 
+  registerFindingIssueTools(server, runWorkbench);
   registerCompactArtifactTools(server, {
     runWorkbench,
     pluginRoot: PLUGIN_ROOT,
@@ -2200,6 +2202,7 @@ async function executeWorkbench(
     "complete-scan",
     "export-findings",
     "finish-deep-scan",
+    "finding-issues",
     "get-scan",
     "get-deep-scan",
     "get-workspace",
@@ -2232,8 +2235,10 @@ async function executeWorkbench(
       windowsHide: true,
       env: process.env,
       encoding: "utf8" as const,
-      // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
-      maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
+      // Preserve complete artifact bytes and issue receipt diagnostics/history.
+      maxBuffer: ["read-artifact", "finding-issues"].includes(args[0] ?? "")
+        ? Infinity
+        : 4 * 1024 * 1024,
       timeout,
     },
   );

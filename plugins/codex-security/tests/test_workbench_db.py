@@ -26,6 +26,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
+    load_script,
     mark_handoff_delivered,
     mark_remediation_delivered,
     request_remediation,
@@ -77,7 +78,7 @@ EXPECTED_TABLES = {
     "local_finding_embeddings",
     "finding_locations",
     "finding_occurrences",
-    "finding_publications",
+    "finding_issue_receipts",
     "finding_remediation_attempts",
     "finding_repositories",
     "finding_triage",
@@ -913,7 +914,9 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            len(load_script("workbench_schema").MIGRATIONS),
+        )
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 

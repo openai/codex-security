@@ -57,11 +57,6 @@ export interface PreparedScanPublication {
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
-  /** Complete sealed membership, retained when only some findings become issues. */
-  sourceFindings?: Pick<
-    PreparedPublicationIssue,
-    "findingId" | "occurrenceId"
-  >[];
 }
 
 export function linearPublicationArguments(
@@ -142,13 +137,6 @@ export async function prepareScanPublication(
   return {
     scanId,
     scanDirectory: canonicalScanDirectory,
-    ...(classification === undefined && options.findingIds === undefined
-      ? {}
-      : {
-          sourceFindings: contract.findings.findings.map(
-            ({ findingId, occurrenceId }) => ({ findingId, occurrenceId }),
-          ),
-        }),
     destination: {
       type: options.destination,
       teamId: options.teamId,

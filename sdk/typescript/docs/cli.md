@@ -926,10 +926,16 @@ creation; connected-app access is reported as `not-checked`.
 
 Each finding becomes an issue with severity, source, evidence, and remediation.
 Choose a destination authorized to receive that content. Local history records
-successful issue IDs separately from sealed artifacts.
+successful issue IDs separately from sealed artifacts. The CLI and the plugin's
+finding-tracking workflow share these records when using the same Codex Security
+state directory. Accepted writes remain recorded even if a later issue read fails.
+The shared-history migration preserves existing Linear receipts and replaces their
+old table. Upgrade CLI and plugin installations together when they share state;
+older publishers cannot write to the migrated database.
 
 Republishing creates duplicates unless `--skip-existing` finds a recorded success
-for that occurrence, team, and project. It does not check remote issues or cover
+for that occurrence, team, and project, including issues created or reused through
+the plugin. It does not check remote issues or cover
 unrecorded/concurrent publication. After interruption, inspect the handoff,
 evidence, and destination before retrying.
 

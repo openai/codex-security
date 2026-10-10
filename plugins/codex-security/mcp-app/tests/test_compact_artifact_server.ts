@@ -1201,6 +1201,8 @@ async function testParentToolList(bundle: string) {
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
       "get_codex_security_completed_scan",
+      "get_codex_security_finding_issues",
+      "record_codex_security_finding_issues",
       "complete_codex_security_scan",
     ]) {
       assert.equal(names.has(name), true, `Missing parent MCP tool ${name}.`);
