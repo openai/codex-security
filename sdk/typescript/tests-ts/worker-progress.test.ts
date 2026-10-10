@@ -7,6 +7,10 @@ import {
 function commandEvent(
   command: string,
   output: string,
+  metadata: { exit_code?: number; status?: string } = {
+    exit_code: 0,
+    status: "completed",
+  },
 ): Record<string, unknown> {
   return {
     type: "item.completed",
@@ -15,8 +19,7 @@ function commandEvent(
       type: "command_execution",
       command,
       aggregated_output: output,
-      exit_code: 0,
-      status: "completed",
+      ...metadata,
     },
   };
 }
@@ -106,6 +109,73 @@ describe("worker progress events", () => {
     expect(preflight([delegated, capacity, capacity])).toBeNull();
     expect(preflight([{ ...delegated, status: "invalid" }])).toBeNull();
     expect(preflight([])).toBeNull();
+  });
+
+  test("rejects failed commands even when their output claims preflight success", () => {
+    const output = JSON.stringify({
+      profile: "security_scan",
+      status: "ready",
+      results: [
+        { capability: "delegated_workers", status: "pass" },
+        { capability: "usable_worker_slots_6", status: "pass", actual: 8 },
+      ],
+    });
+    expect(
+      workerStatusFromEvent(
+        commandEvent("python3 /plugin/scripts/config_preflight.py", output, {
+          status: "failed",
+          exit_code: 2,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("reconciles preflight payload status with its exit code", () => {
+    const results = [
+      { capability: "delegated_workers", status: "pass" },
+      { capability: "usable_worker_slots_6", status: "pass", actual: 8 },
+    ];
+    const preflight = (status: string, exit_code: number) =>
+      workerStatusFromEvent(
+        commandEvent(
+          "python3 /plugin/scripts/config_preflight.py",
+          JSON.stringify({ profile: "security_scan", status, results }),
+          { status: "completed", exit_code },
+        ),
+      );
+    expect(preflight("ready", 0)).toMatchObject({
+      kind: "preflight",
+      delegation: "available",
+      configuredSlots: 8,
+    });
+    expect(preflight("blocked", 1)).toMatchObject({ kind: "preflight" });
+    expect(preflight("incomplete", 2)).toMatchObject({ kind: "preflight" });
+    expect(preflight("ready", 1)).toBeNull();
+    expect(preflight("blocked", 0)).toBeNull();
+    expect(preflight("incomplete", 0)).toBeNull();
+  });
+
+  test("preserves legacy preflight payloads only for successful commands", () => {
+    const output = JSON.stringify({
+      profile: "security_scan",
+      results: [{ capability: "delegated_workers", status: "pass" }],
+    });
+    expect(
+      workerStatusFromEvent(
+        commandEvent("python3 /plugin/scripts/config_preflight.py", output, {
+          status: "completed",
+          exit_code: 0,
+        }),
+      ),
+    ).toMatchObject({ kind: "preflight", delegation: "available" });
+    expect(
+      workerStatusFromEvent(
+        commandEvent("python3 /plugin/scripts/config_preflight.py", output, {
+          status: "completed",
+          exit_code: 2,
+        }),
+      ),
+    ).toBeNull();
   });
 
   test("reads configured worker capacity from a completed preflight", () => {
