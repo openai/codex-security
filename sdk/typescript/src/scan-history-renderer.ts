@@ -271,6 +271,11 @@ export function renderScanHistory(
       `  ${strong(clean(basename(result["targetPath"] as string)))}  ${accent("·")}  ${clean(result["scanId"])}`,
       `  ${paint(status === "complete" ? "✓ FINISHED" : `● ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
+    if (typeof result["startedAt"] === "string") {
+      lines.push(`  ${strong("STARTED")}  ${clean(result["startedAt"])}`);
+    } else if (typeof result["updatedAt"] === "string") {
+      lines.push(`  ${strong("UPDATED")}  ${clean(result["updatedAt"])}`);
+    }
     const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
     if (canonicalCoverage) {
       wrap(
