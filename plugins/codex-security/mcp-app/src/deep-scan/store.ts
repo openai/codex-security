@@ -598,6 +598,8 @@ export function isTransientPersistenceError(error: unknown): boolean {
   }
 
   for (const record of persistenceErrorRecords(error)) {
+    // A committed workbench mutation can lose or truncate its JSON stdout.
+    if (record.name === "SyntaxError") return true;
     if (
       typeof record.code === "string" &&
       /^(?:SQLITE_BUSY(?:_[A-Z]+)?|SQLITE_LOCKED(?:_[A-Z]+)?|SQLITE_IOERR(?:_[A-Z]+)?|EAGAIN|EBUSY|EINTR|ETIMEDOUT|ETIME)$/i.test(

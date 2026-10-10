@@ -44,23 +44,8 @@ def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
     ]
 
 
-def timestamp_key(value: str) -> tuple[datetime, str]:
-    """Compare accepted timestamps without rounding fractions or rewriting text."""
-    utc = value[-1] in "Zz"
-    whole_second = datetime.fromisoformat(value[:19] + ("+00:00" if utc else value[-6:]))
-    fraction = value[20 : -1 if utc else -6].rstrip("0") if value[19:20] == "." else ""
-    return whole_second, fraction
-
-
-def compare_timestamps(left: str, right: str) -> int:
-    left_key, right_key = timestamp_key(left), timestamp_key(right)
-    return (left_key > right_key) - (left_key < right_key)
-
-
-def register_timestamp_collation(connection: sqlite3.Connection) -> None:
-    name = "codex_security_timestamp"
-    if not any(row[1].lower() == name for row in connection.execute("PRAGMA collation_list")):
-        connection.create_collation(name, compare_timestamps)
+def timestamp_key(value: str) -> datetime:
+    return finalizer.parse_timestamp(value)
 
 
 def require_uuid(value: str, label: str) -> str:

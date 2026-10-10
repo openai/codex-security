@@ -215,6 +215,10 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
+    const repository =
+      this.#options.onActivity === undefined
+        ? undefined
+        : this.#options.repository;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
@@ -225,7 +229,7 @@ export class ScanCostTracker {
         this.#sessions.set(path, session);
       }
       try {
-        await readSessionUsage(path, session, this.#options.repository);
+        await readSessionUsage(path, session, repository);
       } catch (error) {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
@@ -288,7 +292,7 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage();
         session.events = [];
-        await readSessionUsage(path, session, this.#options.repository);
+        await readSessionUsage(path, session, repository);
         this.#sessions.set(path, session);
       }
       let worker: number | undefined;

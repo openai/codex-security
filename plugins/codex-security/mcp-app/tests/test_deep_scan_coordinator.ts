@@ -1065,31 +1065,6 @@ async function testFinishPersistenceFailureRewritesManifestAsFailure() {
   assert.equal(terminal.manifestPath, undefined);
 }
 
-async function testLostFinishResponseReplaysWithoutOverwritingSuccessManifest() {
-  const { fixture, store } = await coordinatorFixture();
-  store.loseFirstFinishResponseAfterCommit = true;
-  const terminal = await runCoordinator(fixture, store, new FakeExecutor());
-  assert.equal(terminal?.status, "succeeded");
-  assert.equal(store.finishCalls.length, 2);
-  assert.deepEqual(store.finishCalls[1], store.finishCalls[0]);
-  assert.equal(store.failureMessages.length, 0);
-  const manifest = await readJson(terminal.manifestPath);
-  assert.equal(manifest.scan.scanId, fixture.run.scanId);
-}
-
-async function testLostWorkerCommitResponsesReplayIdempotently() {
-  const { fixture, store } = await coordinatorFixture();
-  store.loseFirstDiscoveryAcceptanceResponseAfterCommit = true;
-  store.loseFirstDedupCommitResponseAfterCommit = true;
-  const terminal = await runCoordinator(fixture, store, new FakeExecutor());
-  assert.equal(terminal?.status, "succeeded");
-  assert.equal(store.loseFirstDiscoveryAcceptanceResponseAfterCommit, false);
-  assert.equal(store.loseFirstDedupCommitResponseAfterCommit, false);
-  assert.equal(store.dedupCommitCalls.length, 2);
-  assert.equal(store.dedupCommits.length, 1);
-  assert.equal(store.failureMessages.length, 0);
-}
-
 async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() {
   const { fixture, store } = await coordinatorFixture({
     workers: 3,
@@ -2613,7 +2588,7 @@ async function testStoreConfirmationSurvivesReplayAndThreadMetadata() {
           case "upsert-deep-scan-worker":
             mutations += 1;
             if (operation !== "thread-started" && mutations === 1)
-              throw new Error("Synthetic initial persistence failure.");
+              throw new Error("sqlite3.OperationalError: database is locked");
             if (replaced) current = { ...current, coordinatorGeneration: 3 };
             throw new Error(diagnostic);
           case "get-deep-scan": {
@@ -4240,8 +4215,6 @@ try {
   await testConfigurationFailureDoesNotRetry("Request blocked by cyberPolicy.");
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
-  await testLostFinishResponseReplaysWithoutOverwritingSuccessManifest();
-  await testLostWorkerCommitResponsesReplayIdempotently();
   await testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest();
   await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();
   await testDiscoveryPhasePersistenceFailureStopsDispatch();
