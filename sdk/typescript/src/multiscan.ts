@@ -312,6 +312,14 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
+      if (receipt.status !== "failed") {
+        // Completed tasks do not enter a worker, so retry any checkout cleanup
+        // that may have failed after their receipt was recorded.
+        await rm(join(output, "checkouts", task.id), {
+          recursive: true,
+          force: true,
+        }).catch(() => undefined);
+      }
       if (receipt.status !== "failed" && receipt.warnings?.length) {
         warnings.push({ repository: task.id, warnings: receipt.warnings });
         for (const warning of receipt.warnings) {
@@ -398,6 +406,7 @@ async function runCampaign(
         let protectedRoot = join(output, "checkouts", task.id);
         let attemptedResume = false;
         let failure: string | undefined;
+        let cleanupFailure: string | undefined;
         let warning: string | undefined;
         const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
@@ -561,9 +570,21 @@ async function runCampaign(
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
-            await rm(checkout, { recursive: true, force: true });
+            cleanupFailure = await rm(checkout, {
+              recursive: true,
+              force: true,
+            }).then(
+              () => undefined,
+              (error: unknown) =>
+                `Multiscan checkout cleanup failed: ${errorMessage(error)}`,
+            );
           }
         }
+        const reportedErrors = [failure, cleanupFailure].filter(
+          (message): message is string => message !== undefined,
+        );
+        const reportedError =
+          reportedErrors.length === 0 ? undefined : reportedErrors.join("; ");
         const status =
           failure !== undefined
             ? "failed"
@@ -586,7 +607,7 @@ async function runCampaign(
             ...(threatModelPath === null ? {} : { threatModelPath }),
             ...(coverage === undefined ? {} : { coverage }),
             ...(cost === null ? {} : { cost }),
-            ...(failure === undefined ? {} : { error: failure }),
+            ...(reportedError === undefined ? {} : { error: reportedError }),
             ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
             ...(warning === undefined ? {} : { warning }),
             ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
@@ -604,7 +625,7 @@ async function runCampaign(
           repository: task.id,
           attempt,
           status,
-          ...(failure === undefined ? {} : { error: failure }),
+          ...(reportedError === undefined ? {} : { error: reportedError }),
           ...(warning === undefined ? {} : { warning }),
         });
         if (failure === undefined) {
