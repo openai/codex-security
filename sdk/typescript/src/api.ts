@@ -247,6 +247,7 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
+  requirePrivateCredentialHome,
   expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
@@ -4053,6 +4054,10 @@ export class CodexSecurity {
       bootstrapWorkspace = await createIsolatedHome(
         temporaryRoot,
         validateLocation,
+      );
+      await requirePrivateCredentialHome(
+        await lstat(bootstrapWorkspace),
+        bootstrapWorkspace,
       );
       const pluginRoot = await resolvePluginPath(
         this.config.pluginPath,

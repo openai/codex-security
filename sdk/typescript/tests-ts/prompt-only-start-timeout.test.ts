@@ -12,13 +12,18 @@ test("gives prompt-only scan startup the five-minute scan timeout", async () => 
   const execFileHelper = /\b(execFileAsync\d*)\(/u.exec(source ?? "")?.[1];
   expect(execFileHelper).toBeDefined();
 
+  const timeoutSource =
+    /function workbenchCommandTimeout\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
+      runtime,
+    )?.[0];
+  expect(timeoutSource).toBeDefined();
   const executeWorkbench = new Function(
     execFileHelper!,
     "workbenchScriptPath",
     "WORKBENCH_PYTHON",
     "PLUGIN_ROOT",
     "isRecord",
-    `${source}\nreturn executeWorkbench;`,
+    `${timeoutSource}\n${source}\nreturn executeWorkbench;`,
   )(
     (_command: string, _args: string[], options: { timeout: number }) =>
       Object.assign(

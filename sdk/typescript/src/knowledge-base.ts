@@ -281,6 +281,7 @@ async function extractPdf(
       for (let number = 1; number <= document.numPages; number++) {
         signal?.throwIfAborted();
         const content = await (await document.getPage(number)).getTextContent();
+        signal?.throwIfAborted();
         pages.push(
           content.items
             .map((item) => ("str" in item ? item.str : ""))
@@ -321,7 +322,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     return decodeXml(
       xml
         .replace(/<\/(?:\w+:)?p\s*>/gu, "\n")
-        .replace(/<(?:\w+:)?tab\b[^>]*\/>/gu, "\t")
+        .replace(/<(?:\w+:)?(?:br|cr)\b[^>]*>/gu, "\n")
+        .replace(/<(?:\w+:)?tab\b[^>]*>/gu, "\t")
         .replace(/<[^>]+>/gu, ""),
     );
   } catch (error) {

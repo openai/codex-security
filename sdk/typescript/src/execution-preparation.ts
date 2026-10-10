@@ -1,5 +1,5 @@
 import { codexSecurityRequestMetadata } from "./request-metadata.js";
-import { mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -51,6 +51,7 @@ import {
   pluginExecutionEnvironment,
   cleanupSdkDirectory,
   createIsolatedHome,
+  requirePrivateCredentialHome,
   createMarketplace,
   MARKETPLACE_NAME,
   PLUGIN_NAME,
@@ -537,6 +538,10 @@ export async function prepareAmbientRuntime(
   const codexHome = await realpath(requestedHome);
   const bootstrapWorkspace = await createIsolatedHome();
   try {
+    await requirePrivateCredentialHome(
+      await lstat(bootstrapWorkspace),
+      bootstrapWorkspace,
+    );
     const marketplaceRoot = await createMarketplace(
       bootstrapWorkspace,
       execution.pluginRoot,
