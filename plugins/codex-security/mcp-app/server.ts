@@ -27,7 +27,10 @@ import {
   DeepScanCoordinatorRegistry,
   AsyncLock,
 } from "./src/deep-scan/registry.js";
-import { captureDeepScanExecutionSettings } from "./src/deep-scan/recovery-settings.js";
+import {
+  beginDeepScanWithCapturedSettings,
+  captureDeepScanExecutionSettings,
+} from "./src/deep-scan/recovery-settings.js";
 import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
@@ -1006,23 +1009,27 @@ export function createCodexSecurityServer(): McpServer {
         .run(async () => {
           // A joining observer does not need a usable current home. A new run,
           // however, must save its original settings before creation can commit.
-          const executionSettings = await captureDeepScanExecutionSettings(
-            modelSettings,
-            parentSandbox,
-            process.env,
-            { threadId, startedAt: new Date().toISOString() },
-          ).catch(() => null);
-          const begun = await deepScanStore.begin({
-            executionSettings,
-            scanId,
-            targetPath,
-            scope: hasTarget ? (scope ?? ".") : undefined,
-            userContext: normalizedUserContext,
-            handoffClaimToken,
-            threadId,
-            ...modelSettings,
-            scanRoot: await scanRoot(),
-          });
+          const begun = await beginDeepScanWithCapturedSettings(
+            () =>
+              captureDeepScanExecutionSettings(
+                modelSettings,
+                parentSandbox,
+                process.env,
+                { threadId, startedAt: new Date().toISOString() },
+              ),
+            async (executionSettings) =>
+              deepScanStore.begin({
+                executionSettings,
+                scanId,
+                targetPath,
+                scope: hasTarget ? (scope ?? ".") : undefined,
+                userContext: normalizedUserContext,
+                handoffClaimToken,
+                threadId,
+                ...modelSettings,
+                scanRoot: await scanRoot(),
+              }),
+          );
           if (handoffClaimToken) {
             authenticatedArtifactClaims.set(begun.scanId, {
               claimToken: handoffClaimToken,

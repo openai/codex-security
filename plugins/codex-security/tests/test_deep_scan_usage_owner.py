@@ -138,10 +138,13 @@ def test_migrated_owner_accounting_survives_first_worker_attempt(
     )["deepScan"]
     database = state / "workbench.sqlite3"
     if migrated:
-        # Migration 51 adds a nullable owner to pre-existing runs, without an original turn binding.
+        # The usage-owner migration adds a nullable owner without an original turn binding.
         with sqlite3.connect(database) as connection:
             connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN usage_owner_json")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 51")
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE name = ?",
+                ("bind original deep scan parent usage turn",),
+            )
         run_workbench(
             state,
             "get-deep-scan",

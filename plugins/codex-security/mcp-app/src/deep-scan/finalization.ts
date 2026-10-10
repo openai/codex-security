@@ -142,6 +142,7 @@ export async function resumeSelectedDeepScan(input: {
           {
             requireRunning: true,
             requireClaim: true,
+            requireCurrentTarget: false,
             handoffClaimToken: input.handoffClaimToken,
             pluginRoot: input.pluginRoot,
           },

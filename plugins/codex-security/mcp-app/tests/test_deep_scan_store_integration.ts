@@ -9,7 +9,10 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
-import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type {
+  DeepScanPublication,
+  ScanDraftInput,
+} from "../src/artifact-scan-draft.js";
 import {
   DeepScanCoordinator,
   FakeExecutor,
@@ -22,11 +25,13 @@ const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const {
   WorkbenchDeepScanStore,
   createScanArtifactContext,
+  captureDeepScanExecutionSettings,
   recordCodexSecurityScanDraftViaWorkbench,
 } = await importModule({
   stdin: {
     contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
 export { createScanArtifactContext } from "./src/artifact-context.ts";
+export { captureDeepScanExecutionSettings } from "./src/deep-scan/recovery-settings.ts";
 export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";`,
     resolveDir: mcpAppRoot,
   },
@@ -55,44 +60,63 @@ async function testCoordinatorCommitResponseRecovery(
   const attempts = new Map<string, string[][]>();
   let failureWrites = 0;
   let committedManifest: string | undefined;
-  const store = new WorkbenchDeepScanStore(async (args: string[]) => {
-    const result = await runWorkbench(args);
-    if (args[0] === "fail-deep-scan") failureWrites += 1;
-    if (args[0] === "finish-deep-scan") {
-      committedManifest ??= await readFile(
-        args[args.indexOf("--manifest-path") + 1],
-        "utf8",
+  const store = new WorkbenchDeepScanStore(
+    async (
+      args: string[],
+      input?: string,
+      selectFinalization = false,
+      withExecutionSettings = false,
+      signal?: AbortSignal,
+      releaseCoordinator = false,
+    ) => {
+      const result = await runWorkbench(
+        args,
+        input,
+        selectFinalization,
+        withExecutionSettings,
+        signal,
+        releaseCoordinator,
       );
-    }
-    if (
-      args[0] !== "commit-deep-scan-dedup" &&
-      args[0] !== "finish-deep-scan" &&
-      !(
-        args[0] === "upsert-deep-scan-worker" &&
-        args[args.indexOf("--kind") + 1] === "discovery" &&
-        args[args.indexOf("--status") + 1] === "succeeded"
+      // Selection commits before a parent manifest exists. This case injects lost
+      // replies after reducer acceptance and final publication, not selection.
+      if (selectFinalization) return result;
+      if (args[0] === "fail-deep-scan") failureWrites += 1;
+      if (args[0] === "finish-deep-scan") {
+        committedManifest ??= await readFile(
+          args[args.indexOf("--manifest-path") + 1],
+          "utf8",
+        );
+      }
+      if (
+        args[0] !== "commit-deep-scan-dedup" &&
+        args[0] !== "finish-deep-scan" &&
+        !(
+          args[0] === "upsert-deep-scan-worker" &&
+          args[args.indexOf("--kind") + 1] === "discovery" &&
+          args[args.indexOf("--status") + 1] === "succeeded"
+        )
       )
-    )
+        return result;
+      const calls = attempts.get(args[0]) ?? [];
+      calls.push([...args]);
+      attempts.set(args[0], calls);
+      if (
+        args[0] === "commit-deep-scan-dedup" &&
+        (calls.length === 1 || exhaustCommitRetries)
+      ) {
+        throw Object.assign(
+          new Error("workbench response timed out after commit"),
+          {
+            code: "ETIMEDOUT",
+          },
+        );
+      }
+      // Reproduce truncated stdout after the actual SQLite mutation committed.
+      if (calls.length === 1 || args[0] === exhaustOperation)
+        return JSON.parse('{"deepScan":');
       return result;
-    const calls = attempts.get(args[0]) ?? [];
-    calls.push([...args]);
-    attempts.set(args[0], calls);
-    if (
-      args[0] === "commit-deep-scan-dedup" &&
-      (calls.length === 1 || exhaustCommitRetries)
-    ) {
-      throw Object.assign(
-        new Error("workbench response timed out after commit"),
-        {
-          code: "ETIMEDOUT",
-        },
-      );
-    }
-    // Reproduce truncated stdout after the actual SQLite mutation committed.
-    if (calls.length === 1 || args[0] === exhaustOperation)
-      return JSON.parse('{"deepScan":');
-    return result;
-  });
+    },
+  );
   try {
     await mkdir(path.join(environment.CODEX_HOME, "codex-security"), {
       recursive: true,
@@ -103,6 +127,11 @@ async function testCoordinatorCommitResponseRecovery(
     );
     const threadId = "commit-response-owner";
     const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       threadId,
       scanRoot: path.join(fixtureRoot, "scans"),
@@ -118,7 +147,11 @@ async function testCoordinatorCommitResponseRecovery(
       threadId,
       executor: new FakeExecutor(),
       heartbeatIntervalMs: 60_000,
-      onComplete: async (draft: ScanDraftInput, signal: AbortSignal) => {
+      onComplete: async (
+        draft: ScanDraftInput,
+        signal: AbortSignal,
+        publication: DeepScanPublication,
+      ) => {
         const context = await createScanArtifactContext(
           run.scanId,
           runWorkbench,
@@ -132,6 +165,7 @@ async function testCoordinatorCommitResponseRecovery(
           draft,
           runWorkbench,
           signal,
+          publication,
         );
       },
     });
@@ -204,12 +238,37 @@ async function createWorkbenchFixture(prefix: string) {
 
 function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
   const python = process.env.PYTHON?.trim() || "python3";
-  return async (args: string[]) => {
-    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
+  return async (
+    args: string[],
+    input?: string,
+    selectFinalization = false,
+    withExecutionSettings = false,
+    signal?: AbortSignal,
+    releaseCoordinator = false,
+  ) => {
+    const invocation = releaseCoordinator
+      ? "release_coordinator=True"
+      : selectFinalization
+        ? "select_finalization=True"
+        : withExecutionSettings
+          ? "with_execution_settings=True"
+          : undefined;
+    const pythonArgs = invocation
+      ? [
+          "-c",
+          `import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](${invocation})`,
+          workbenchPath,
+          ...args,
+        ]
+      : [workbenchPath, ...args];
+    const execution = execFileAsync(python, pythonArgs, {
       cwd: pluginRoot,
       env: environment,
+      signal,
       ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
     });
+    execution.child.stdin?.end(input);
+    const { stdout } = await execution;
     return JSON.parse(stdout);
   };
 }
@@ -221,6 +280,11 @@ async function testFreeformFailureMessagesAgainstRealWorkbench() {
   const store = new WorkbenchDeepScanStore(createWorkbenchRunner(environment));
   try {
     const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       threadId: "error-owner",
       scanRoot: path.join(fixtureRoot, "scans"),
@@ -255,6 +319,11 @@ async function testRecoveredPublicationRejectsLateFailure() {
   try {
     const store = new WorkbenchDeepScanStore(runWorkbench);
     const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       scope: ".",
       threadId: "publication-failure-owner",
@@ -324,6 +393,11 @@ async function testNoopStoppedRefreshRetainsPublicationFailure() {
   try {
     const store = new WorkbenchDeepScanStore(runWorkbench);
     const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       scope: ".",
       threadId: "noop-publication-owner",
@@ -393,6 +467,11 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
   };
   try {
     const run = await new WorkbenchDeepScanStore(rawRunWorkbench).begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       scope: ".",
       threadId: "concurrent-draft-owner",
@@ -450,6 +529,11 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
   const runWorkbench = createWorkbenchRunner(environment);
   try {
     const run = await new WorkbenchDeepScanStore(runWorkbench).begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       scope: ".",
       threadId: "checkpoint-owner",
@@ -523,18 +607,23 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
   const python = process.env.PYTHON?.trim() || "python3";
   const finishCalls: string[][] = [];
   const executeWorkbench = createWorkbenchRunner(environment);
-  const runWorkbench = mock.fn(async (args: string[]) => {
-    const result = await executeWorkbench(args);
-    if (args[0] === "finish-deep-scan") {
-      finishCalls.push([...args]);
-      if (finishCalls.length === 1)
-        throw Object.assign(
-          new Error("Synthetic lost committed finish response"),
-          { code: "ETIMEDOUT" },
-        );
-    }
-    return result;
-  });
+  const runWorkbench = mock.fn(
+    async (
+      args: string[],
+      ...rest: [string?, boolean?, boolean?, AbortSignal?, boolean?]
+    ) => {
+      const result = await executeWorkbench(args, ...rest);
+      if (args[0] === "finish-deep-scan") {
+        finishCalls.push([...args]);
+        if (finishCalls.length === 1)
+          throw Object.assign(
+            new Error("Synthetic lost committed finish response"),
+            { code: "ETIMEDOUT" },
+          );
+      }
+      return result;
+    },
+  );
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
   try {
@@ -551,6 +640,11 @@ max_time_hours = 2.5
     );
 
     const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       scope: ".",
       threadId,
@@ -565,6 +659,11 @@ max_time_hours = 2.5
     assert.equal(owned.run.coordinatorGeneration, 2);
     const observer = new WorkbenchDeepScanStore(runWorkbench);
     const joined = await observer.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       scanId: run.scanId,
       threadId,
       scanRoot,
@@ -764,6 +863,11 @@ connection.rollback()`,
     assert.equal(finished.manifestPath, manifestPath);
 
     const continued = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       scope: ".",
       threadId: "deep-scan-store-continuation-thread",
@@ -821,6 +925,11 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
     );
 
     const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       scope: ".",
       threadId,

@@ -4,6 +4,7 @@ import { scanPreflightCodexConfig } from "./preflight-config.js";
 import { captureOriginalReasoningSummary } from "./reasoning-summary.js";
 export { scanPreflightCodexConfig } from "./preflight-config.js";
 import { resumeSelectedDeepScan } from "./deep-scan-finalization.js";
+import { recoverSelectedScanStartup } from "./selected-scan-recovery.js";
 import {
   auditEvidence,
   runAcceptedAudit,
@@ -145,6 +146,7 @@ import {
   CodexSecurityError,
   ConfigurationError,
   IncompleteScanError,
+  InvalidTargetError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   errorMessage,
@@ -1263,6 +1265,58 @@ export class CodexSecurity {
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    let recoveryTarget: NormalizedTarget | undefined;
+    const recoverStartup = async (
+      startupError: unknown,
+    ): Promise<ScanResult> => {
+      const recovered = await recoverSelectedScanStartup({
+        repository,
+        normalizedTarget: recoveryTarget,
+        options,
+        config: this.config,
+        environment: this.#dependencies.environment,
+        signal,
+        startupError,
+        workbench,
+        python: this.#dependencies.resolvePluginPython ?? resolvePluginPython,
+        warn: notifyObserver(options, "onWarning"),
+        registered: (scan, command, threadId) => {
+          activeScan = { id: scan.scanId, options: command, mode: "deep" };
+          observedScanThreadId = threadId;
+          selectedDeepFinalization = true;
+          scanDir = scan.scanDir;
+          notifyObserver(options, "onOutputDirReady")(scan.scanDir);
+          notifyObserver(options, "onScanRegistered")(scan);
+        },
+        cost: (cost) =>
+          notifyObserver(options, "onCost")(cost, options.maxCostUsd),
+        collect: async (context) =>
+          collectResult(
+            {
+              ...context.turnResult,
+              finalResponse: (
+                await readScanFile(
+                  context.scanDir,
+                  "report.md",
+                  "report.md",
+                  signal,
+                )
+              ).toString("utf8"),
+            },
+            context.threadId,
+            context.scanDir,
+            context.pluginRoot,
+            context.expectation,
+            signal,
+            true,
+            context.python,
+            context.expectation.repository,
+          ),
+      });
+      if (recovered === null) throw startupError;
+      activeScan = null;
+      return recovered;
+    };
     const recoverCompletedScan = async (
       commandOptions: WorkbenchCommandOptions,
       scanId: string,
@@ -1289,16 +1343,26 @@ export class CodexSecurity {
 
       // Workflows reuse the prepared prompts and deep settings, but validate the
       // output only when starting new work; a completed workflow may already own it.
-      const inputs =
-        preparedInputs === undefined
-          ? await this.#prepareLocalInputs(repository, options, signal)
-          : {
-              ...preparedInputs,
-              outputDir: await prepareScanOutputDir(
-                options,
-                preparedInputs.protectedRoots,
-              ),
-            };
+      let inputs: LocalScanInputs;
+      try {
+        inputs =
+          preparedInputs === undefined
+            ? await this.#prepareLocalInputs(repository, options, signal)
+            : {
+                ...preparedInputs,
+                outputDir: await prepareScanOutputDir(
+                  options,
+                  preparedInputs.protectedRoots,
+                ),
+              };
+      } catch (error) {
+        if (
+          options.resumeScanId !== undefined &&
+          error instanceof InvalidTargetError
+        )
+          return await recoverStartup(error);
+        throw error;
+      }
       const {
         repository: repo,
         target: normalized,
@@ -1309,6 +1373,7 @@ export class CodexSecurity {
         deepScanConfiguration,
         prompts,
       } = inputs;
+      recoveryTarget = normalized;
       options = { ...options, ...prompts };
       checkOpen();
       let temporaryRoot: string | undefined;
@@ -1332,13 +1397,20 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const session = await this.#prepareSession(
-        { protectedRoot },
-        options,
-        signal,
-        temporaryRoot,
-        mode === "deep",
-      );
+      let session: PreparedSession;
+      try {
+        session = await this.#prepareSession(
+          { protectedRoot },
+          options,
+          signal,
+          temporaryRoot,
+          mode === "deep",
+        );
+      } catch (error) {
+        if (options.resumeScanId !== undefined)
+          return await recoverStartup(error);
+        throw error;
+      }
       const {
         runtime,
         runtimeHome,
@@ -1809,8 +1881,10 @@ export class CodexSecurity {
           savedSession === null ||
           savedSession.workingDirectory !== scanDir
         ) {
-          throw new CodexSecurityError(
-            `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+          return await recoverStartup(
+            new CodexSecurityError(
+              `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+            ),
           );
         }
         if (typeof registration["sealedProducerVersion"] === "string") {
@@ -1862,6 +1936,8 @@ export class CodexSecurity {
       }
       const targetRevision =
         registeredRevision === "unversioned" ? null : registeredRevision;
+      if (registration["selectedFinalization"] === true)
+        expectation.repositoryRevision = targetRevision;
       const registeredFileCount = registration["scopeFileCount"];
       scopeFileCount =
         typeof registeredFileCount === "number" &&

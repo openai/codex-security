@@ -10,6 +10,11 @@ import pytest
 @pytest.mark.parametrize("upgrade", [False, True], ids=["fresh", "upgrade"])
 def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, upgrade):
     migrations = workbench_api["MIGRATIONS"]
+    checkpoint_version = next(
+        version
+        for version, name, _ in migrations
+        if name == "freeze stopped scan checkpoint selections"
+    )
     timestamp = "2026-07-01T00:00:00Z"
 
     def migrate(connection, selected):
@@ -22,7 +27,9 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, up
         connection.execute("PRAGMA foreign_keys = ON")
         migrate(
             connection,
-            tuple(item for item in migrations if item[0] != 50) if upgrade else migrations,
+            tuple(item for item in migrations if item[0] != checkpoint_version)
+            if upgrade
+            else migrations,
         )
         connection.execute(
             "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
@@ -76,7 +83,8 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, up
         assert [
             tuple(row)
             for row in connection.execute(
-                "SELECT version, name FROM schema_migrations WHERE version = 50"
+                "SELECT version, name FROM schema_migrations WHERE version = ?",
+                (checkpoint_version,),
             )
-        ] == [(50, "freeze stopped scan checkpoint selections")]
+        ] == [(checkpoint_version, "freeze stopped scan checkpoint selections")]
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

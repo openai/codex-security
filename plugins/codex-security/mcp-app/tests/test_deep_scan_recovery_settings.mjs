@@ -24,6 +24,7 @@ const bundle = await build({
   write: false,
 });
 const {
+  beginDeepScanWithCapturedSettings: beginWithCapturedSettings,
   captureDeepScanExecutionSettings: captureSettings,
   restoredDeepScanWorkerSettings: restoreSettings,
   loadDeepScanExecutionSettings: loadSettings,
@@ -41,6 +42,58 @@ try {
     reasoningSummary: "detailed",
     serviceTier: "fast",
   };
+  for (const source of ["missing", "invalid"]) {
+    const config = join(root, `${source}.toml`);
+    if (source === "invalid") await writeFile(config, "model = [");
+    let captureFailure;
+    const capture = async () => {
+      try {
+        return await captureSettings(
+          {},
+          { filesystemDenies: [] },
+          { CODEX_HOME: root, CODEX_SECURITY_CONFIG_PATH: config },
+        );
+      } catch (error) {
+        captureFailure = error;
+        throw error;
+      }
+    };
+    const startFailure = new Error(
+      "New runs require original execution settings.",
+    );
+    await assert.rejects(
+      beginWithCapturedSettings(capture, async (captured) => {
+        assert.equal(captured, null);
+        throw startFailure;
+      }),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(error.errors, [startFailure, captureFailure]);
+        assert.ok(error.message.includes(startFailure.message));
+        assert.ok(error.message.includes(captureFailure.message));
+        return true;
+      },
+    );
+    const existing = { scanId: "existing-scan", status: "running" };
+    assert.equal(
+      await beginWithCapturedSettings(capture, async (captured) => {
+        assert.equal(captured, null);
+        return existing;
+      }),
+      existing,
+    );
+  }
+  const unrelatedFailure = new Error("Synthetic workbench failure.");
+  await assert.rejects(
+    beginWithCapturedSettings(
+      async () => settings,
+      async (captured) => {
+        assert.equal(captured, settings);
+        throw unrelatedFailure;
+      },
+    ),
+    (error) => error === unrelatedFailure,
+  );
   const globSandbox = (depth) => ({
     filesystemDenies: ["/fixture/**/*.secret"],
     ...(depth === undefined ? {} : { globScanMaxDepth: depth }),

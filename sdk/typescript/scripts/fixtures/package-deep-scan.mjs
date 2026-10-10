@@ -59,8 +59,10 @@ try {
       ? "package-codex.exe"
       : "package-deep-codex.mjs",
   );
-  if (process.platform === "win32")
+  if (process.platform === "win32") {
     await copyFile(process.execPath, executable);
+    await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
+  }
   await chmod(executable, 0o700);
 
   await runInstalledSdk(installedPlugin, executable);
@@ -369,9 +371,11 @@ async function runInstalledSdk(pluginRoot, executable) {
     await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
   const owner = "package-sdk-owner";
+  f.env.PACKAGE_DEEP_PARENT_THREAD = owner;
   const postScanPrompt = "Explain the completed synthetic scan.";
   const prompts = [];
   let threadCount = 0;
+  let resumedThreads = 0;
   let manifestBeforeFollowUp;
   let scanId;
   const client = new sdk.CodexSecurity(
@@ -391,60 +395,45 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
-      // Replace only the parent model's tool choice. The installed SDK registers
-      // and finalizes the scan; the packaged MCP runs the real Deep lifecycle.
-      createCodex({ env, apiKey }) {
+      // The native control session starts the real packaged engine. Only the
+      // post-scan model response is synthetic, after authoritative completion.
+      createCodex({ env }) {
         return {
           startThread() {
             threadCount += 1;
             return {
-              id: owner,
+              id: null,
+              async runStreamed() {
+                throw new Error(
+                  "The direct Deep Scan must not start a parent model turn.",
+                );
+              },
+            };
+          },
+          resumeThread(threadId) {
+            assert.equal(threadId, owner);
+            resumedThreads += 1;
+            return {
+              id: threadId,
               async runStreamed(prompt) {
                 prompts.push(prompt);
+                assert.equal(prompt, postScanPrompt);
+                manifestBeforeFollowUp = await readFile(
+                  join(env.CODEX_SECURITY_SCAN_DIR, "scan-manifest.json"),
+                  "utf8",
+                );
+                const completed = JSON.parse(manifestBeforeFollowUp);
+                assert.equal(completed.scan.status, "completed");
+                assert.ok(completed.scan.sealedAt);
                 return {
                   events: (async function* () {
                     yield { type: "thread.started", thread_id: owner };
-                    if (prompts.length > 1) {
-                      assert.equal(prompt, postScanPrompt);
-                      manifestBeforeFollowUp = await readFile(
-                        join(env.CODEX_SECURITY_SCAN_DIR, "scan-manifest.json"),
-                        "utf8",
-                      );
-                      const completed = JSON.parse(manifestBeforeFollowUp);
-                      assert.equal(completed.scan.status, "completed");
-                      assert.ok(completed.scan.sealedAt);
-                      yield {
-                        type: "turn.completed",
-                        usage: {
-                          input_tokens: 100_000,
-                          cached_input_tokens: 0,
-                          output_tokens: 100_000,
-                        },
-                      };
-                      return;
-                    }
-                    scanId = env.CODEX_SECURITY_SCAN_ID;
-                    // The pinned SDK maps its apiKey option to this child variable.
-                    const rpc = await server(f, {
-                      ...env,
-                      ...(apiKey ? { CODEX_API_KEY: apiKey } : {}),
-                    });
-                    try {
-                      const result = await rpc.call(
-                        "start_codex_security_deep_scan",
-                        { scanId },
-                        metadata(f, owner),
-                      );
-                      await assertDraft(result.manifestPath);
-                    } finally {
-                      await rpc.close();
-                    }
                     yield {
                       type: "turn.completed",
                       usage: {
-                        input_tokens: 1,
+                        input_tokens: 100_000,
                         cached_input_tokens: 0,
-                        output_tokens: 1,
+                        output_tokens: 100_000,
                       },
                     };
                   })(),
@@ -459,6 +448,9 @@ async function runInstalledSdk(pluginRoot, executable) {
   try {
     const result = await client.run(f.target, {
       mode: "deep",
+      onScanRegistered: (scan) => {
+        scanId = scan.scanId;
+      },
       auth: "api-key",
       workers: 1,
       subagents: 0,
@@ -468,8 +460,8 @@ async function runInstalledSdk(pluginRoot, executable) {
       outputDir: join(f.directory, "output"),
     });
     assert.equal(threadCount, 1);
-    assert.equal(prompts.length, 2);
-    assert.equal(prompts[1], postScanPrompt);
+    assert.equal(resumedThreads, 1);
+    assert.deepEqual(prompts, [postScanPrompt]);
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
     assert.ok(result.manifest.scan.sealedAt);
@@ -489,7 +481,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     await client.close();
   }
   await assertSavedState(f, scanId, owner);
-  await assertExecutions(f, scanId, 4);
+  await assertExecutions(f, scanId, 5);
 }
 
 async function assertSavedState(f, scanId, owner) {

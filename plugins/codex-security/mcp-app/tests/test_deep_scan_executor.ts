@@ -1,4 +1,3 @@
-import { rm } from "node:fs/promises";
 import { testWorkerCancellation } from "./deep_scan_cancellation_cases.ts";
 import { testHome } from "./deep_scan_home_case.ts";
 import { testReconstructedWorkers } from "./deep_scan_reconstructed_cases.ts";

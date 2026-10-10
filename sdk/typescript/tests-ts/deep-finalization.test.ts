@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
@@ -114,6 +114,12 @@ const outcomes = [
   "completed-owner-suffix",
   "completed-owner-explicit",
   "restart",
+  "restart-missing-logs",
+  "restart-deleted-target",
+  "restart-changed-target",
+  "restart-corrupt-selection",
+  "restart-unavailable-runtime",
+  "restart-canceled-runtime",
   "canceled-before-publication",
   "canceled-during-publication",
   "canceled-during-resumed-publication",
@@ -139,6 +145,17 @@ const cases: {
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
   { outcome: "restart", statusReadFault: true },
+  { outcome: "restart-unavailable-runtime", initialResumeUsage: true },
+  {
+    outcome: "restart-unavailable-runtime",
+    initialResumeUsage: true,
+    unpricedUsage: true,
+  },
+  {
+    outcome: "restart-unavailable-runtime",
+    initialResumeUsage: true,
+    budgetCompletionFault: "lost",
+  },
   ...(
     [
       "budget-during-publication",
@@ -198,7 +215,11 @@ for (const {
   statusReadFault,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
-  const restart = outcome === "restart" || resumedStop;
+  const restart = outcome.startsWith("restart") || resumedStop;
+  const unavailableStartup =
+    outcome.startsWith("restart-") && outcome !== "restart-changed-target";
+  const recoveryBudget =
+    outcome === "restart-unavailable-runtime" && initialResumeUsage === true;
   const closed = outcome.startsWith("closed-");
   const budgeted = outcome.startsWith("budget-");
   const canceledFollowUp = outcome.endsWith("followup-canceled");
@@ -211,12 +232,14 @@ for (const {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scanDir = join(root, "scan");
-    const codexHome = join(root, "codex-home");
     const stateDir = join(root, "state");
+    const codexHome = unavailableStartup
+      ? join(stateDir, "codex-home")
+      : join(root, "codex-home");
     await Promise.all([
       mkdir(repository),
       mkdir(scanDir, { mode: 0o700 }),
-      mkdir(codexHome),
+      mkdir(codexHome, { recursive: true }),
     ]);
     await writeFile(join(repository, "extract.py"), "# Synthetic source\n");
     const environment = {
@@ -320,6 +343,8 @@ for (const {
             : ""),
       );
     let closePromise: Promise<void> | undefined;
+    let resumedStartup = false;
+    const warnings: string[] = [];
     const makeClient = () =>
       new TestClient(
         {},
@@ -327,6 +352,8 @@ for (const {
           environment,
           prepareScanArtifactRestorer,
           prepareRuntime: async () => {
+            if (resumedStartup && outcome.endsWith("runtime"))
+              throw new Error("Synthetic original runtime unavailable");
             const runtime = preparedRuntime(codexHome);
             const manifest = JSON.parse(
               await readFile(
@@ -452,7 +479,8 @@ for (const {
             if (
               args[0] === "write-scan-draft" &&
               (outcome === "canceled-during-publication" ||
-                outcome === "canceled-during-resumed-publication")
+                outcome === "canceled-during-resumed-publication" ||
+                outcome === "restart-canceled-runtime")
             ) {
               const published = await runWorkbench(options, [
                 "get-deep-scan",
@@ -710,7 +738,7 @@ for (const {
           client.run(repository, {
             mode: "deep",
             postScanPrompt: resumedStop ? undefined : followUp,
-            ...(budgeted ? { maxCostUsd: 0.004 } : {}),
+            ...(budgeted || recoveryBudget ? { maxCostUsd: 0.004 } : {}),
           }),
         ).rejects.toThrow(
           statusReadFault
@@ -730,6 +758,21 @@ for (const {
         });
         expect(commands).not.toContain("fail-scan");
         await client.close();
+        if (outcome === "restart-deleted-target")
+          await rm(repository, { recursive: true });
+        if (
+          outcome === "restart-missing-logs" ||
+          outcome === "restart-corrupt-selection"
+        )
+          await rm(usagePath);
+        if (outcome === "restart-changed-target")
+          await writeFile(
+            join(repository, "extract.py"),
+            "# Changed after selection\n",
+          );
+        if (outcome === "restart-corrupt-selection")
+          await appendFile(selectedPath, "\n");
+        resumedStartup = true;
         client = makeClient();
         if (initialResumeUsage) await recordBudgetUsage();
       }
@@ -1010,14 +1053,68 @@ for (const {
         });
         return;
       }
+      if (outcome === "restart-canceled-runtime") {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+            signal: cancellation.signal,
+          }),
+        ).rejects.toBeInstanceOf(ScanInterruptedError);
+        const stopped = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-scan", "--scan-id", scanId],
+        );
+        expect(stopped["scan"]).toMatchObject({
+          progress: { status: "canceled" },
+        });
+        expect(
+          commands.filter((command) => command === "cancel-scan"),
+        ).toHaveLength(1);
+        expect(commands).not.toContain("fail-scan");
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        return;
+      }
+      if (outcome === "restart-corrupt-selection") {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+          }),
+        ).rejects.toThrow("changed after acceptance");
+        const pending = await runWorkbench(workbenchOptions!, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(pending["scan"]).toMatchObject({
+          progress: { status: "running" },
+        });
+        expect(commands).not.toContain("complete-scan");
+        expect(commands).not.toContain("fail-scan");
+        expect(modelInputs.filter((input) => input !== followUp)).toHaveLength(
+          1,
+        );
+        return;
+      }
       const result = await client.run(repository, {
         mode: "deep",
+        ...(recoveryBudget ? { maxCostUsd: 0.004 } : {}),
+        onWarning: (warning) => warnings.push(warning),
         signal: cancellation.signal,
         postScanPrompt:
           outcome === "published-before-cancellation" ? undefined : followUp,
         ...(restart ? { resumeScanId: scanId, outputDir: scanDir } : {}),
       });
       expect(result.threadId).toBe(threadId);
+      if (recoveryBudget)
+        expect(commands).toContain("complete-budget-exhausted-scan");
+      if (outcome === "restart-changed-target")
+        expect(
+          warnings.some((warning) => /changed|revision/.test(warning)),
+        ).toBe(true);
       if (outcome === "lost-completion-response") {
         expect(
           commands.filter((command) => command === "complete-scan"),
@@ -1027,6 +1124,10 @@ for (const {
         expect(nativeOwnerStatus).toBe("running");
         expect(result.cost?.inputTokens).toBe(2_500);
         expect(result.cost?.outputTokens).toBe(60);
+      } else if (recoveryBudget && !unpricedUsage) {
+        expect(result.cost?.inputTokens).toBe(1_250);
+        expect(result.cost?.outputTokens).toBe(30);
+        expect(result.cost?.estimatedUsd).toBeGreaterThan(0.004);
       } else {
         // The synthetic accepted workers have no native usage receipts.
         expect(result.cost).toBeNull();
@@ -1038,8 +1139,25 @@ for (const {
       // postScanPrompt retains its existing behavior on each caller invocation.
       expect(modelInputs.filter((input) => input !== followUp).length).toBe(1);
       expect(modelInputs.filter((input) => input === followUp).length).toBe(
-        outcome === "published-before-cancellation" ? 0 : restart ? 2 : 1,
+        outcome === "published-before-cancellation"
+          ? 0
+          : unavailableStartup
+            ? 1
+            : restart
+              ? 2
+              : 1,
       );
+      if (unavailableStartup) {
+        expect(
+          warnings.some((warning) =>
+            warning.includes("Could not run post-scan instructions"),
+          ),
+        ).toBe(true);
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        expect(result.turnResult.finalResponse).toContain(
+          "Validate the resolved destination",
+        );
+      }
       const completed = await runWorkbench(
         { ...workbenchOptions!, signal: undefined },
         ["get-scan", "--scan-id", scanId],

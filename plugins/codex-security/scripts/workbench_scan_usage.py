@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
@@ -729,6 +730,7 @@ def _read_rollout_usage(
     warnings: set[str] = set()
     previous = _empty_token_usage()
     boundary_reached = False
+    session_started_at: datetime | None = None
     usage_observed = False
     current_turn_id: str | None = None
     current_model: str | None = None
@@ -764,6 +766,7 @@ def _read_rollout_usage(
                 if event.get("type") != "session_meta" or not isinstance(payload, dict):
                     warnings.add("thread_identity_mismatch")
                     return total, warnings
+                session_started_at = _timestamp(payload.get("timestamp"))
                 recorded_id = payload.get("id") or payload.get("session_id")
                 if recorded_id != session.thread_id:
                     warnings.add("thread_identity_mismatch")
@@ -787,7 +790,7 @@ def _read_rollout_usage(
             ):
                 current_turn_id = payload.get("turn_id")
             if not boundary_reached:
-                if _is_owned_task_start(session.thread_id, event, payload):
+                if _is_owned_task_start(session.thread_id, event, payload, session_started_at):
                     task_started_at = _timestamp(event.get("timestamp"))
                     if task_started_at is None:
                         warnings.add("thread_ownership_unavailable")
@@ -929,6 +932,7 @@ def _is_owned_task_start(
     thread_id: str,
     event: Mapping[str, Any],
     payload: Mapping[str, Any],
+    session_started_at: datetime | None,
 ) -> bool:
     if event.get("type") != "event_msg" or payload.get("type") != "task_started":
         return False
@@ -939,7 +943,12 @@ def _is_owned_task_start(
     thread_order = _uuid7_order(thread_id)
     turn_order = _uuid7_order(turn_id)
     if thread_order is None:
-        return True
+        task_started_at = payload.get("started_at")
+        return (
+            type(task_started_at) in {int, float}
+            and session_started_at is not None
+            and task_started_at >= math.floor(session_started_at.timestamp())
+        )
     return turn_order is not None and turn_order >= thread_order
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -868,3 +869,42 @@ raise AssertionError("budget selection did not commit")
             completed = workbench_api["complete_budget_exhausted_scan"](connection, args)
             assert completed["scan"]["scanId"] == scan.scan_id
             assert connection.execute("SELECT status FROM scans").fetchone()[0] == "complete"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize("drift", ["edited", "moved", "deleted"])
+def test_selected_resume_retains_saved_scope_when_checkout_changes(
+    workbench_api, workbench_db, publication_scan, selected, drift
+):
+    scan = publication_scan(scope="subdir")
+    thread_id = "a23e657b-c14c-4da7-bd20-baa9e7579390"
+    workbench_api["set_scan_thread"](
+        workbench_db, Namespace(scan_id=scan.scan_id, thread_id=thread_id)
+    )
+    if selected:
+        _, accepted, _ = accept_reducer(workbench_db, scan)
+        saved_selection(workbench_db, scan, accepted)
+    saved_scan = workbench_api["require_scan"](workbench_db, scan.scan_id)
+    repository = Path(saved_scan["target_path"])
+    if drift == "edited":
+        (repository / "subdir" / "extract.py").write_text("# Changed after selection\n")
+    elif drift == "moved":
+        repository.rename(repository.with_name("moved"))
+    else:
+        shutil.rmtree(repository)
+    args = (
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        saved_scan,
+        workbench_api["require_workspace"](workbench_db, saved_scan["workspace_id"]),
+    )
+    if not selected:
+        with pytest.raises(SystemExit, match="Cannot resume"):
+            workbench_api["scan_history"].cli_scan_resume(*args)
+        return
+    resumed = workbench_api["scan_history"].cli_scan_resume(*args)
+    assert resumed["selectedFinalization"] is True
+    assert resumed["threadId"] == thread_id
+    assert resumed["recipe"]["repository"] == str(repository)
+    assert resumed["recipe"]["target"] == {"kind": "paths", "paths": ["subdir"]}
+    assert resumed["targetRevision"] == saved_scan["target_revision"]

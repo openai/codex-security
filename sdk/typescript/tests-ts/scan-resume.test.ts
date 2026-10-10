@@ -1154,6 +1154,65 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
   ).toMatchObject({ knowledgeBasePaths: [document] });
 });
 
+test.each([false, true])(
+  "CLI restores selected finalization without current inputs or session logs (bulk: %p)",
+  async (bulk) => {
+    const f = await interruptedScan("deep", bulk, {
+      postScanPrompt: "Keep the saved follow-up behavior.",
+    });
+    await rm(f.sessionPath);
+    await rm(f.repository, { recursive: true });
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const calls: { repository: string; options: ScanOptions }[] = [];
+    const deps = dependencies({
+      environment: f.environment,
+      currentDirectory: f.root,
+      onTurn(repository, options) {
+        calls.push({ repository, options });
+      },
+    });
+    const code = await runCli(
+      bulk
+        ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
+        : ["scans", "resume", f.scanId, "--json"],
+      {
+        ...deps,
+        runWorkbench: async (args, input) =>
+          args[0] === "get-cli-scan-resume"
+            ? {
+                ...f.registration,
+                scanId: f.scanId,
+                scanDir: f.scanDir,
+                threadId: f.threadId,
+                selectedFinalization: true,
+                userContext: null,
+                recipe: { ...f.recipe, validationMode: "custom" },
+              }
+            : f.command(args, input),
+      },
+    );
+    expect(code, stderr.text()).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      repository: f.repository,
+      options: {
+        resumeScanId: f.scanId,
+        outputDir: f.scanDir,
+        postScanPrompt: "Keep the saved follow-up behavior.",
+      },
+    });
+    expect(calls[0]!.options.scanPrompt).toBeUndefined();
+    expect(calls[0]!.options.validationPrompt).toBeUndefined();
+    if (bulk) {
+      const result = JSON.parse(stdout.text());
+      const receipts = await readJsonLines(result.resultsPath);
+      expect(receipts).toHaveLength(2);
+      expect(receipts[1]).toMatchObject({ attempt: 1, outputDir: f.scanDir });
+      expect(stderr.text()).not.toContain("starting a new one");
+    }
+  },
+);
+
 test("missing session logs do not create another session or fail the original scan", async () => {
   const f = await interruptedScan();
   await rm(f.sessionPath);

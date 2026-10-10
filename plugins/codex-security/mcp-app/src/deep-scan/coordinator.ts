@@ -509,7 +509,35 @@ export class DeepScanCoordinator {
       publish: async (...args) => {
         await this.options.onComplete?.(...args);
       },
-      finish: (input) => this.options.store.finish(input),
+      finish: async (input) => {
+        try {
+          return await this.options.store.finish(input);
+        } catch (error) {
+          // The terminal mutation may commit even when every retry loses its
+          // response. Recover our committed run so parent finalization still runs.
+          const current = this.options.threadId
+            ? await this.options.store
+                .get(this.state.scanId, this.options.threadId)
+                .catch(() => undefined)
+            : undefined;
+          if (
+            !this.publicationAbortController.signal.aborted &&
+            current?.status === "succeeded" &&
+            current.coordinatorGeneration ===
+              this.state.coordinatorGeneration &&
+            current.finalizationInput?.resultPath ===
+              this.state.finalizationInput?.resultPath &&
+            current.finalizationInput?.resultSha256 ===
+              this.state.finalizationInput?.resultSha256 &&
+            current.finalizationInput?.selectedAt ===
+              this.state.finalizationInput?.selectedAt &&
+            current.manifestPath === input.manifestPath &&
+            current.terminalReason === input.reason
+          )
+            return current;
+          throw error;
+        }
+      },
     });
     if (this.canceled || this.externallyFailed) return;
     this.parentPublicationPending = true;

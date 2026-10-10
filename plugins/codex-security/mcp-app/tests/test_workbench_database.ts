@@ -796,8 +796,8 @@ test("original Deep history preserves saved inputs and applies local embedding m
   applyMigrations(database);
 
   assert.deepEqual(
-    database.prepare("SELECT * FROM deep_scan_runs").get(),
-    original,
+    { ...database.prepare("SELECT * FROM deep_scan_runs").get() },
+    { ...original, discovery_user_context_json: null },
   );
   assert.deepEqual(
     database.prepare("SELECT * FROM local_finding_embeddings").all(),

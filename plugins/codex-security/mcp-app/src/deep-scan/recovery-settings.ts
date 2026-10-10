@@ -43,6 +43,29 @@ export interface DeepScanExecutionSettingsSnapshot {
   settings: DeepScanExecutionSettings;
 }
 
+/** Existing runs can be joined without capturing a usable current runtime. */
+export async function beginDeepScanWithCapturedSettings<T>(
+  capture: () => Promise<DeepScanExecutionSettings>,
+  begin: (settings: DeepScanExecutionSettings | null) => Promise<T>,
+): Promise<T> {
+  let captureError: unknown;
+  const settings = await capture().catch((error: unknown) => {
+    captureError = error;
+    return null;
+  });
+  try {
+    return await begin(settings);
+  } catch (error) {
+    if (settings !== null) throw error;
+    const detail = (failure: unknown) =>
+      failure instanceof Error ? failure.message : String(failure);
+    throw new AggregateError(
+      [error, captureError],
+      `${detail(error)} Original execution settings could not be captured: ${detail(captureError)}`,
+    );
+  }
+}
+
 export async function captureDeepScanExecutionSettings(
   original: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner">,
   parentSandbox: DeepWorkerParentSandbox,

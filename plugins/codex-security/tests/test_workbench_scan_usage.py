@@ -168,17 +168,34 @@ def _rollout(
     source: Any = "cli"
     if parent_thread_id is not None:
         source = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+    own_started_at = (
+        task_started_at.isoformat().replace("+00:00", "Z")
+        if task_started_at is not None
+        else next((item["timestamp"] for item in events if "timestamp" in item), None)
+    )
     records: list[dict[str, Any]] = [
         {
             "type": "session_meta",
-            "payload": {"id": recorded_thread_id or thread_id, "source": source},
+            "payload": {
+                "id": recorded_thread_id or thread_id,
+                "source": source,
+                "timestamp": own_started_at,
+            },
         },
         *(copied_events or []),
     ]
     if parent_thread_id is not None and include_task_start:
         event: dict[str, Any] = {
             "type": "event_msg",
-            "payload": {"type": "task_started", "turn_id": f"turn-{thread_id}"},
+            "payload": {
+                "type": "task_started",
+                "turn_id": f"turn-{thread_id}",
+                "started_at": int(
+                    datetime.fromisoformat(own_started_at.replace("Z", "+00:00")).timestamp()
+                )
+                if own_started_at is not None
+                else None,
+            },
         }
         if include_task_start_timestamp:
             event["timestamp"] = (
@@ -1484,3 +1501,64 @@ def test_owned_legacy_model_survives_unrelated_first_receipt(
     assert counts == _counts(1000, 0, 10)
     assert warnings == set()
     assert models == {"gpt-5.6-sol": _counts(1000, 0, 10)}
+
+
+@pytest.mark.parametrize("thread_id", ["legacy-worker", "12345678-1234-4234-8234-123456789abc"])
+def test_legacy_worker_usage_excludes_replayed_parent_turns(
+    tmp_path: Path, workbench_api, thread_id: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    created = start + timedelta(seconds=10, microseconds=500_000)
+    rollout = _rollout(
+        tmp_path,
+        thread_id,
+        [_token_event(created + timedelta(seconds=1), 130, 13)],
+        parent_thread_id="parent",
+        task_started_at=created,
+        copied_events=[
+            _event(
+                created,
+                "event_msg",
+                {
+                    "type": "task_started",
+                    "turn_id": "parent-turn",
+                    "started_at": int(start.timestamp()),
+                },
+            ),
+            _token_event(created, 100, 10),
+        ],
+    )
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession(thread_id, "parent", rollout), started_at=start, completed_at=None
+    )
+    assert total == _counts(30, 0, 3)
+    assert warnings == set()
+
+
+@pytest.mark.parametrize(
+    "missing", ["session timestamp", "task started_at", "boolean task started_at"]
+)
+def test_legacy_worker_usage_requires_turn_ownership_timestamps(
+    tmp_path: Path, workbench_api, missing: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    rollout = _rollout(
+        tmp_path, "legacy-worker", [_token_event(start, 100, 10)], parent_thread_id="parent"
+    )
+    records = [json.loads(line) for line in rollout.read_text().splitlines()]
+    if missing == "session timestamp":
+        records[0]["payload"].pop("timestamp")
+    elif missing == "task started_at":
+        records[1]["payload"].pop("started_at")
+    else:
+        records[1]["payload"]["started_at"] = True
+    rollout.write_text("".join(json.dumps(record) + "\n" for record in records))
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("legacy-worker", "parent", rollout),
+        started_at=start,
+        completed_at=None,
+    )
+    assert total == _counts(0, 0, 0)
+    assert warnings == {"thread_ownership_unavailable"}
