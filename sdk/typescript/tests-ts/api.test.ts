@@ -8975,7 +8975,7 @@ describe("incoming native runtime integration", () => {
             expect(children).toHaveLength(2);
             expect(children[1].prompt).toContain(postScanPrompt);
             expect(children[1].args).not.toContain("resume");
-            expect(children[1].prompt).toContain(scanDir);
+            expect(children[1].prompt).toContain(JSON.stringify(scanDir));
             expect(
               children[1].args[children[1].args.indexOf("--cd") + 1],
             ).toContain(join(scanDir, "artifacts", "follow-up"));
