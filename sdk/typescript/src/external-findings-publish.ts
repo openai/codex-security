@@ -329,16 +329,6 @@ export async function prepareExternalPublication(
         : "The destination repository is not available to this Cloud account. Copy its repository URL or ID from Codex Security Cloud and check that you are signed into the intended account.",
     );
   const destination = destinations[0]!;
-  for (const finding of parsed.findings) {
-    const sourceRepository = finding.evidence.details?.repository;
-    if (
-      sourceRepository &&
-      repositoryUrl(sourceRepository.url) !== repositoryUrl(destination.url)
-    )
-      throw new CodexSecurityError(
-        `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository.url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
-      );
-  }
   const source = { provider: options.provider, source_key: options.sourceKey };
   const state = join(
     codexSecurityStateDirectory(environment),
@@ -419,6 +409,16 @@ export async function prepareExternalPublication(
   }
   let requests = saved?.requests;
   if (!requests) {
+    for (const finding of parsed.findings) {
+      const sourceRepository = finding.evidence.details?.repository;
+      if (
+        sourceRepository &&
+        repositoryUrl(sourceRepository.url) !== repositoryUrl(destination.url)
+      )
+        throw new CodexSecurityError(
+          `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository.url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+        );
+    }
     let preparedCount = 0;
     progress({
       phase: "preparing",

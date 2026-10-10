@@ -8,12 +8,14 @@ import { main } from "../src/cli.js";
 import { prepareExternalPublication } from "../src/external-findings-publish.js";
 import { validateExternalEvidence } from "../src/external-import-contract.js";
 import type {
+  ExternalFindingEvidence,
   FindingImportRequest,
   SourceReport,
 } from "../src/external-import-models.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import roundtripFixtures from "./fixtures/wiz-details-roundtrip.json" with { type: "json" };
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -463,6 +465,10 @@ async function cloudFixture(payload: unknown) {
   const posts: FindingImportRequest[] = [];
   const calls: string[] = [];
   const reports = new Map<string, SourceReport>();
+  const state: {
+    failReadback: boolean;
+    readbackDetails?: ExternalFindingEvidence["details"];
+  } = { failReadback: false };
   const transport = async (
     url: string,
     init: RequestInit,
@@ -492,12 +498,24 @@ async function cloudFixture(payload: unknown) {
         : [];
       return json({ data: summaries, has_more: false, next: null });
     }
-    if (target.pathname.includes("/source_reports/"))
-      return json(
-        [...reports.values()].find(
-          (report) => report.id === target.pathname.split("/").at(-1),
-        ),
+    if (target.pathname.includes("/source_reports/")) {
+      if (state.failReadback)
+        return new Response(
+          JSON.stringify({ error: { message: "Readback unavailable" } }),
+          { status: 503 },
+        );
+      const report = [...reports.values()].find(
+        (item) => item.id === target.pathname.split("/").at(-1),
       );
+      return json(
+        report && state.readbackDetails
+          ? {
+              ...report,
+              evidence: { ...report.evidence, details: state.readbackDetails },
+            }
+          : report,
+      );
+    }
     if (
       target.pathname.endsWith("/finding_imports") &&
       init.method === "POST"
@@ -581,6 +599,8 @@ async function cloudFixture(payload: unknown) {
     posts,
     calls,
     reports,
+    state,
+    destination,
     options,
     command,
     environment,
@@ -648,3 +668,55 @@ test("a wrong source repository stops raw and normalized imports before source l
     await readdir(join(f.root, "state")).catch(() => undefined),
   ).toBeUndefined();
 });
+
+test("saved typed requests resume by repository ID after a repository rename", async () => {
+  const f = await cloudFixture(envelope("sastFindings", [sast]));
+  const options = { ...f.options, repository: f.destination.id };
+  f.state.failReadback = true;
+  await expect(
+    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+  ).rejects.toThrow("Readback unavailable");
+  expect(f.posts).toHaveLength(1);
+  f.destination.url = "https://github.com/example/renamed";
+  f.state.failReadback = false;
+  const resumed = await prepareExternalPublication(f.file, options, f.deps);
+  expect(resumed.preview.resumed).toBe(true);
+  expect(resumed.preview.destination.url).toBe(f.destination.url);
+  expect((await resumed.publish()).verified).toBe(1);
+  expect(f.posts).toHaveLength(1);
+  expect(
+    f.reports.get("sast:occurrence-1")!.evidence.details!.repository.url,
+  ).toBe(repositoryUrl);
+});
+
+// Expected details were serialized by the canonical Cloud validation model.
+// Keep that readback independent of the CLI validator so nullable defaults cannot
+// be hidden by a transport that merely echoes the submitted evidence.
+for (const golden of roundtripFixtures) {
+  test(`sparse ${golden.name} evidence matches canonical Cloud readback`, async () => {
+    const evidence = {
+      title: "Synthetic normalized finding",
+      severity: "high",
+      details: golden.input,
+      source_data: { id: golden.name, details: null },
+    };
+    const f = await cloudFixture([
+      { source_finding_id: golden.name, evidence },
+    ]);
+    f.state.readbackDetails = structuredClone(golden.expected) as NonNullable<
+      ExternalFindingEvidence["details"]
+    >;
+    const prepared = await prepareExternalPublication(
+      f.file,
+      f.options,
+      f.deps,
+    );
+    expect(prepared.preview.findings[0]!.evidence.details).toEqual(
+      f.state.readbackDetails,
+    );
+    expect((await prepared.publish()).verified).toBe(1);
+    expect(f.posts[0]!.items[0]!.evidence.source_data).toEqual(
+      evidence.source_data,
+    );
+  });
+}

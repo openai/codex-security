@@ -62,7 +62,7 @@ export type RemediationInstructions = string | null;
 export type EndLine = number | null;
 export type Snippet = string | null;
 export type Type = string | null;
-export type Confidence = string | null;
+export type SecretScannerConfidence = string | null;
 export type ValidationStatus = string | null;
 export type IsEncrypted = boolean | null;
 export type IsManaged = boolean | null;
@@ -245,7 +245,7 @@ export interface ImportedCodeContext {
 }
 export interface ImportedSecretDetails {
   type?: Type;
-  confidence?: Confidence;
+  confidence?: SecretScannerConfidence;
   validation_status?: ValidationStatus;
   is_encrypted?: IsEncrypted;
   is_managed?: IsManaged;

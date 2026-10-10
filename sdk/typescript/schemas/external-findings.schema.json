@@ -1011,7 +1011,7 @@
             }
           ],
           "default": null,
-          "title": "Confidence"
+          "title": "Secret scanner confidence"
         },
         "validation_status": {
           "anyOf": [

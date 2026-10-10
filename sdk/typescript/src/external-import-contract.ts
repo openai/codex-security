@@ -63,30 +63,75 @@ function validateModelStrings(input: unknown): void {
   }
 }
 
+type ModelSchema = {
+  $ref?: string;
+  anyOf?: ModelSchema[];
+  properties?: Record<string, ModelSchema>;
+  [key: string]: unknown;
+};
+const modelSchemas: Record<string, ModelSchema> = schema.$defs;
+const detailValidators = new Map<string, ReturnType<typeof ajv.compile>>();
+
+/** AJV does not apply defaults through nullable anyOf references. Validate the
+ * present detail objects directly against their generated model definitions so
+ * sparse normalized inputs match the backend's serialized evidence. */
+function materializeDetailDefaults(
+  value: unknown,
+  fieldSchema: ModelSchema,
+): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return;
+  const reference =
+    fieldSchema.$ref ?? fieldSchema.anyOf?.find((branch) => branch.$ref)?.$ref;
+  if (!reference) return;
+  const name = reference.split("/").at(-1)!;
+  const definition = modelSchemas[name]!;
+  let check = detailValidators.get(reference);
+  if (!check) {
+    check = ajv.compile({ $defs: schema.$defs, $ref: reference });
+    detailValidators.set(reference, check);
+  }
+  if (!check(value))
+    throw new Error(`${name}: ${ajv.errorsText(check.errors)}`);
+  for (const [field, childSchema] of Object.entries(
+    definition.properties ?? {},
+  ))
+    materializeDetailDefaults(
+      (value as Record<string, unknown>)[field],
+      childSchema,
+    );
+}
+
+function normalizeEvidenceDetails(value: unknown): void {
+  if (value !== null && typeof value === "object") {
+    const fields = value as Record<string, unknown>;
+    // Only this new wrapper is omitted for null; retain every legacy default.
+    if (fields["details"] === null) delete fields["details"];
+    else
+      materializeDetailDefaults(
+        fields["details"],
+        modelSchemas["ImportedFindingEvidence"]!.properties!["details"]!,
+      );
+  }
+}
+
 function validator<T>(name: keyof typeof schema.$defs) {
   const check = ajv.compile<T>({
     $defs: schema.$defs,
     $ref: `#/$defs/${name}`,
   });
   return (input: unknown): T => {
-    // The backend omits a null details wrapper while retaining all legacy
-    // defaults. Match that wire representation for saved requests and readback.
-    const omitNullDetails = (value: unknown): void => {
-      if (value !== null && typeof value === "object") {
-        const fields = value as Record<string, unknown>;
-        if (fields["details"] === null) delete fields["details"];
-      }
-    };
-    if (name === "ImportedFindingEvidence") omitNullDetails(input);
+    if (name === "ImportedFindingEvidence") normalizeEvidenceDetails(input);
     else if (input && typeof input === "object") {
       if (name === "SourceReport" && "evidence" in input)
-        omitNullDetails(input.evidence);
+        normalizeEvidenceDetails(input.evidence);
       if (
         name === "FindingImportRequest" &&
         "items" in input &&
         Array.isArray(input.items)
       )
-        for (const item of input.items) omitNullDetails(item?.evidence);
+        for (const item of input.items)
+          normalizeEvidenceDetails(item?.evidence);
     }
     if (!check(input))
       throw new Error(`${name}: ${ajv.errorsText(check.errors)}`);
