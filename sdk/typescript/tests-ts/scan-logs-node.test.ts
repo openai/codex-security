@@ -106,12 +106,13 @@ for (const directory of ["sessions", "archived_sessions"]) {
     await mkdir(join(original, "child"), { recursive: true });
     await mkdir(join(original, directory));
     const link = join(current, "original-home-link");
+    const windows = process.platform === "win32";
     await symlink(
-      join(original, "child"),
+      windows ? original : join(original, "child"),
       link,
-      process.platform === "win32" ? "junction" : "dir",
+      windows ? "junction" : "dir",
     );
-    const recorded = `${link}${sep}..`;
+    const recorded = windows ? link : `${link}${sep}..`;
     const timestamp = "2026-08-11T12:01:00.000Z";
     const event = {
       type: "response_item",
@@ -147,6 +148,8 @@ for (const directory of ["sessions", "archived_sessions"]) {
       "--eval",
       `
       import assert from "node:assert/strict";
+      import { realpath } from "node:fs/promises";
+      assert.equal(await realpath(${JSON.stringify(recorded)}), await realpath(${JSON.stringify(original)}));
       const { readSavedScanLogs } = await import(${JSON.stringify(pathToFileURL(modulePath).href)});
       const attribution = { formatVersion: 1, workerCodexHome: ${JSON.stringify(recorded)}, executionThreadIds: [],
         owner: { threadId: "owner", turnId: "scan-turn", startedAt: ${JSON.stringify(timestamp)} },
