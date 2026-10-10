@@ -43,7 +43,6 @@ import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
-import workbench_severity as severity
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -3339,10 +3338,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
-    if args.command == "read-severity-classification":
-        result = severity.read_classification(database_path(), args.scan_id)
-        print(json.dumps(result, allow_nan=False, sort_keys=True))
-        return
     if args.command == "inspect-linear-publication":
         result = publication.inspect_linear_publication(
             _WORKBENCH_PUBLICATION_CONTEXT, read_json_object(Path(args.input_file))
@@ -3483,8 +3478,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             )
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
-        elif args.command == "severity-classification":
-            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "local-dedupe":
             result = local_dedupe(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
