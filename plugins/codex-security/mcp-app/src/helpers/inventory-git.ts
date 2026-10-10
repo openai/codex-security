@@ -55,7 +55,15 @@ const repositoryEnvironment = [
   "GIT_WORK_TREE",
 ];
 
-function trustedTool(name: "git" | "rg", target: string): string | undefined {
+function rawToolValue(value: string): boolean {
+  return (windows ? /[\ud800-\udfff]/u : /[\udc80-\udcff]/u).test(value);
+}
+
+function* trustedTools(
+  name: "git" | "rg",
+  target: string,
+  rawWindowsLookup = false,
+): Generator<string> {
   let protectedRoot = canonical(target);
   for (const ancestor of ancestors(protectedRoot))
     if (exists(append(ancestor, ".git"))) protectedRoot = ancestor;
@@ -66,16 +74,35 @@ function trustedTool(name: "git" | "rg", target: string): string | undefined {
     throw new Error(
       "CODEX_SECURITY_GIT must name an absolute trusted executable.",
     );
+  const searchPath =
+    environmentValue("PATH") ?? (windows ? ".;C:\\bin" : "/usr/bin:/bin");
+  const directories =
+    windows && name === "rg"
+      ? windowsToolPaths(searchPath)
+      : searchPath.split(delimiter);
   const candidates =
     configured !== undefined
       ? [configured]
-      : (environmentValue("PATH") ?? (windows ? ".;C:\\bin" : "/usr/bin:/bin"))
-          .split(delimiter)
-          .flatMap((entry) =>
-            (windows ? [`${name}.exe`, `${name}.com`] : [name]).map((name) =>
-              append(windows ? entry.replace(/^"|"$/gu, "") : entry, name),
-            ),
-          );
+      : directories.flatMap((entry) => {
+          const directory =
+            windows && name === "git" ? entry.replace(/^"|"$/gu, "") : entry;
+          let nativeWindowsLookup = rawWindowsLookup;
+          if (windows && name === "rg") {
+            try {
+              nativeWindowsLookup ||= rawToolValue(
+                canonical(resolve(target, directory)),
+              );
+            } catch {
+              return [];
+            }
+          }
+          const names = windows
+            ? name === "rg" && !nativeWindowsLookup
+              ? ["rg.com", "rg.exe"]
+              : [`${name}.exe`, `${name}.com`]
+            : [name];
+          return names.map((name) => append(directory, name));
+        });
   for (const selected of candidates) {
     const candidate =
       name === "rg" &&
@@ -114,9 +141,26 @@ function trustedTool(name: "git" | "rg", target: string): string | undefined {
         );
       continue;
     }
-    return invocation;
+    yield invocation;
   }
-  return undefined;
+}
+
+function windowsToolPaths(searchPath: string): string[] {
+  const paths: string[] = [];
+  for (let start = 0; start < searchPath.length;) {
+    let end = start;
+    const quote = searchPath[start];
+    if (quote === '"' || quote === "'") {
+      end = searchPath.indexOf(quote, start + 1);
+      if (end < 0) end = searchPath.length;
+    }
+    end = searchPath.indexOf(";", end);
+    if (end < 0) end = searchPath.length;
+    const entry = searchPath.slice(start, end).replace(/^["']|["']$/gu, "");
+    if (entry) paths.push(entry);
+    start = end + 1;
+  }
+  return paths;
 }
 
 function spawnTool(
@@ -127,11 +171,12 @@ function spawnTool(
     stdio: ["ignore" | "pipe", "pipe", "pipe"];
   },
   inheritedEnvironment: Record<string, string>,
+  onMissingExecutable?: () => void,
 ) {
-  const raw = (value: string) =>
-    (windows ? /[\ud800-\udfff]/u : /[\udc80-\udcff]/u).test(value);
   const environment = Object.fromEntries(
-    Object.entries(inheritedEnvironment).filter(([, value]) => raw(value)),
+    Object.entries(inheritedEnvironment).filter(([, value]) =>
+      rawToolValue(value),
+    ),
   );
   const values = [
     command,
@@ -139,7 +184,7 @@ function spawnTool(
     ...(typeof options.cwd === "string" ? [options.cwd] : []),
     ...Object.values(environment),
   ];
-  if (!values.some(raw)) return spawn(command, args, options);
+  if (!values.some(rawToolValue)) return spawn(command, args, options);
   if (windows) {
     const binary = createRequire(import.meta.url).resolve(
       `./native/${nativeTarget}/windows.node`,
@@ -169,9 +214,22 @@ function spawnTool(
     ...(typeof options.cwd === "string"
       ? [assign(options.cwd), 'cd -P -- "$value" || exit']
       : []),
+    // An EXIT trap survives a failed exec but disappears after a successful one.
+    // Only the ripgrep PATH search uses this pipe; a launched wrapper may itself
+    // exit 127, and its status and stderr must remain the command's result.
+    ...(onMissingExecutable
+      ? ["trap 'if [ \"$?\" -eq 127 ]; then printf . >&3; fi' 0"]
+      : []),
     'exec "$@"',
   ].join("\n");
-  return spawn("/bin/sh", ["-c", script], { ...options, cwd: undefined });
+  const child = spawn("/bin/sh", ["-c", script], {
+    ...options,
+    cwd: undefined,
+    ...(onMissingExecutable ? { stdio: [...options.stdio, "pipe"] } : {}),
+  });
+  if (onMissingExecutable)
+    child.stdio[3]!.on("data", () => onMissingExecutable());
+  return child;
 }
 
 function inheritedToolPaths(additional: string[] = []): Record<string, string> {
@@ -204,7 +262,7 @@ function inheritedToolPaths(additional: string[] = []): Record<string, string> {
 }
 
 function gitProcess(repo: string, args: string[]) {
-  const command = trustedTool("git", repo);
+  const [command] = trustedTools("git", repo);
   if (!command) return undefined;
   const env: NodeJS.ProcessEnv = { ...process.env };
   const inherited = inheritedToolPaths();
@@ -234,10 +292,48 @@ export async function runRipgrep(
   args: string[],
   repo: string,
 ): Promise<ToolResult> {
-  const command = trustedTool("rg", repo);
-  if (!command)
-    throw Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" });
-  return runTool(command, args, repo);
+  let lookupError: unknown;
+  let lookupResult: ToolResult | undefined;
+  const inherited = inheritedToolPaths([
+    "RIPGREP_CONFIG_PATH",
+    "CODEX_SECURITY_GIT",
+  ]);
+  const rawWindowsLookup = [repo, ...args, ...Object.values(inherited)].some(
+    rawToolValue,
+  );
+  for (const command of trustedTools("rg", repo, rawWindowsLookup)) {
+    try {
+      let missingExecutable = false;
+      const child = spawnTool(
+        command,
+        args,
+        { cwd: repo, stdio: ["ignore", "pipe", "pipe"] },
+        inherited,
+        () => {
+          missingExecutable = true;
+        },
+      );
+      const result = await collect(child);
+      if (!missingExecutable) return result;
+      lookupResult = result;
+      lookupError = undefined;
+    } catch (error) {
+      if (
+        windows ||
+        !["ENOENT", "ENOTDIR"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        )
+      )
+        throw error;
+      lookupError = error;
+      lookupResult = undefined;
+    }
+  }
+  if (lookupResult) return lookupResult;
+  throw (
+    lookupError ??
+    Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" })
+  );
 }
 
 export async function runTool(

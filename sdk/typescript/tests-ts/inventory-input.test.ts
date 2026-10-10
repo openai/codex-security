@@ -310,6 +310,150 @@ for (const command of [
   }
 }
 
+function runPathInventory(
+  f: ReturnType<typeof fixture>,
+  command: string,
+  env: NodeJS.ProcessEnv,
+  rawHome = false,
+) {
+  const scopes = join(f.root, "scopes.json");
+  writeFileSync(scopes, '["scope"]');
+  const args =
+    command === "generate-in-scope-files"
+      ? ["--scope", "scope"]
+      : ["--scopes-file", scopes];
+  if (!rawHome) return f.run(command, args, env);
+  return spawnSync(
+    "/bin/sh",
+    [
+      "-c",
+      'HOME=$(printf "%s/\\377" "$1"); export HOME; shift; exec "$@"',
+      "inventory-raw-home",
+      f.root,
+      node,
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+      command,
+      "--repo",
+      f.repo,
+      "--out",
+      f.out,
+      ...args,
+    ],
+    { env, encoding: "utf8" },
+  );
+}
+
+for (const command of [
+  "generate-in-scope-files",
+  "make-repo-scope-input",
+  "make-repo-rank-input",
+]) {
+  for (const rawHome of [false, true]) {
+    test.skipIf(process.platform === "win32")(
+      `${command} continues PATH lookup after a missing ripgrep interpreter${rawHome ? " with raw HOME" : ""}`,
+      () => {
+        const f = fixture();
+        f.write("scope/visible.py");
+        const env = { ...f.toolEnvironment };
+        const first = join(f.root, "first");
+        mkdirSync(first);
+        writeFileSync(
+          join(first, "rg"),
+          `#!${join(f.root, "missing-interpreter")}\n`,
+          { mode: 0o700 },
+        );
+        env["PATH"] = `${first}${delimiter}${env["PATH"] ?? ""}`;
+        env["CODEX_SECURITY_GIT"] = "";
+        const result = runPathInventory(f, command, env, rawHome);
+        expect(result.status, result.stderr).toBe(0);
+        const output = readFileSync(f.out, "utf8");
+        expect(
+          command === "generate-in-scope-files"
+            ? output.trim()
+            : JSON.parse(output).path,
+        ).toBe("scope/visible.py");
+      },
+    );
+  }
+  for (const lookup of [
+    "double-quoted semicolon",
+    "single-quoted semicolon",
+    "extension precedence",
+  ] as const) {
+    for (const bridge of lookup === "single-quoted semicolon"
+      ? [false]
+      : [false, true]) {
+      test.skipIf(process.platform !== "win32")(
+        `${command} retains Windows ${lookup} lookup${bridge ? " through the UTF-16 bridge" : ""}`,
+        () => {
+          const f = fixture();
+          f.write("scope/visible.py");
+          const env = { ...f.toolEnvironment };
+          const pathKey =
+            Object.keys(env).find((key) => key.toUpperCase() === "PATH") ??
+            "PATH";
+          const executable = Bun.which("rg", { PATH: env[pathKey] });
+          expect(executable).not.toBeNull();
+          const quoted = lookup !== "extension precedence";
+          const tools = join(f.root, quoted ? "tools;version" : "tools");
+          mkdirSync(tools);
+          // Ordinary Node lookup prefers COM; the existing raw bridge prefers EXE.
+          const extension = !quoted && !bridge ? "com" : "exe";
+          copyFileSync(executable!, join(tools, `rg.${extension}`));
+          if (!quoted)
+            copyFileSync(
+              node,
+              join(tools, `rg.${extension === "com" ? "exe" : "com"}`),
+            );
+          const quote = lookup === "single-quoted semicolon" ? "'" : '"';
+          env[pathKey] = quoted ? `${quote}${tools}${quote}` : tools;
+          if (bridge) env["HOME"] = join(f.root, "home-\ud800");
+          env["CODEX_SECURITY_GIT"] = "";
+          const result = runPathInventory(f, command, env);
+          expect(result.status, result.stderr).toBe(0);
+          const output = readFileSync(f.out, "utf8");
+          expect(
+            command === "generate-in-scope-files"
+              ? output.trim()
+              : JSON.parse(output).path,
+          ).toBe("scope/visible.py");
+        },
+      );
+    }
+  }
+}
+
+for (const rawHome of [false, true]) {
+  test.skipIf(process.platform === "win32")(
+    `inventory preserves a launched ripgrep wrapper's exit127${rawHome ? " with raw HOME" : ""}`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      const first = join(f.root, "first");
+      mkdirSync(first);
+      writeFileSync(
+        join(first, "rg"),
+        '#!/bin/sh\nprintf "synthetic tool failure\\n" >&2\nexit 127\n',
+        { mode: 0o700 },
+      );
+      writeFileSync(f.out, "previous\n");
+      const result = runPathInventory(
+        f,
+        "generate-in-scope-files",
+        {
+          ...f.toolEnvironment,
+          PATH: `${first}${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
+          CODEX_SECURITY_GIT: "",
+        },
+        rawHome,
+      );
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("synthetic tool failure");
+      expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+    },
+  );
+}
+
 for (const scope of [".", "src", "./src", "src/résumé.py"]) {
   test(`path inventory preserves ripgrep spelling and byte order for ${scope}`, () => {
     const f = fixture();
