@@ -1139,3 +1139,196 @@ for (const kind of ["sast", "secret", "iac"] as const) {
     },
   );
 }
+
+// Synthetic nodes follow Wiz's documented VersionControlResources platform field.
+const enterpriseUrl = "https://github.example.test/example/project";
+function inventoryNode(platform: string | undefined, url = enterpriseUrl) {
+  return {
+    id: "wiz-inventory-node",
+    type: "REPOSITORY_BRANCH",
+    platform,
+    repository: { id: repository.id, url },
+  };
+}
+
+for (const kind of ["sast", "secret", "iac"] as const) {
+  test.each([false, true])(
+    kind +
+      " GITHUB inventory maps custom-host URLs and branches (supplied URL: %j)",
+    async (withSourceUrl) => {
+      const sourceUrl = "https://GITHUB.EXAMPLE.TEST/Example/PROJECT.git/";
+      const sourceRepository = {
+        id: repository.id,
+        ...(withSourceUrl ? { url: sourceUrl } : {}),
+      };
+      const branch = {
+        id: "wiz-branch",
+        name: "EXAMPLE/PROJECT/Feature/Parser/More",
+      };
+      const record =
+        kind === "secret"
+          ? {
+              ...secret,
+              resource: {
+                ...secret.resource,
+                name: branch.name,
+                typedProperties: { repository: sourceRepository },
+              },
+            }
+          : {
+              ...(kind === "sast" ? sast : iac),
+              repository: sourceRepository,
+              [kind === "sast" ? "repositoryBranch" : "branch"]: branch,
+            };
+      const root = {
+        sast: "sastFindings",
+        secret: "secretInstances",
+        iac: "iacFindings",
+      }[kind];
+      const f = await cloudFixture({
+        data: {
+          [root]: { nodes: [record] },
+          versionControlResources: {
+            nodes: [
+              {
+                ...inventoryNode("GITHUB"),
+                type: withSourceUrl ? "REPOSITORY_BRANCH" : "CI_WORKFLOW",
+              },
+            ],
+          },
+        },
+      });
+      f.destination.url = enterpriseUrl;
+      const publication = await prepareExternalPublication(
+        f.file,
+        { ...f.options, repository: f.destination.id },
+        f.deps,
+      );
+      expect((await publication.publish()).verified).toBe(1);
+      const evidence = f.posts[0]!.items[0]!.evidence;
+      expect(evidence.branch).toBe("Feature/Parser/More");
+      expect(evidence.details!.repository).toEqual({
+        id: repository.id,
+        name: null,
+        url: withSourceUrl ? sourceUrl : enterpriseUrl,
+      });
+      expect(evidence.source_data).toEqual(record);
+    },
+  );
+}
+
+test.each(["GITLAB", "github"])(
+  "inventory platform %s does not imply GitHub custom-host matching",
+  async (platform) => {
+    const record = {
+      ...sast,
+      repository: {
+        ...repository,
+        url: "https://github.example.test/Example/Project",
+      },
+    };
+    const parsed = await parse({
+      data: {
+        sastFindings: { nodes: [record] },
+        versionControlResources: { nodes: [inventoryNode(platform)] },
+      },
+    });
+    expect(parsed.findings).toEqual([]);
+    expect(parsed.excluded[0]!.reason).toContain("conflicting repository URLs");
+  },
+);
+
+test.each([0, 1, 2])(
+  "GITHUB inventory duplicate matching is independent of hint position %j",
+  async (githubPosition) => {
+    const urls = [
+      "https://github.example.test/Example/Project.git/",
+      "https://github.example.test/EXAMPLE/PROJECT",
+      enterpriseUrl,
+    ];
+    const nodes = urls.map((url, index) =>
+      inventoryNode(index === githubPosition ? "GITHUB" : undefined, url),
+    );
+    const record = {
+      ...sast,
+      repository: { id: repository.id },
+      repositoryBranch: {
+        id: "wiz-branch",
+        name: "EXAMPLE/PROJECT/Feature/Parser",
+      },
+    };
+    const parsed = await parse({
+      data: {
+        sastFindings: { nodes: [record] },
+        versionControlResources: { nodes },
+      },
+    });
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.findings[0]!.evidence.branch).toBe("Feature/Parser");
+    expect(parsed.findings[0]!.evidence.details!.repository).toEqual({
+      id: repository.id,
+      name: null,
+      url: enterpriseUrl,
+    });
+    expect(parsed.findings[0]!.evidence.source_data).toEqual(record);
+  },
+);
+
+test.each([
+  ["GITHUB", "GITLAB"],
+  ["GITLAB", "GITHUB"],
+])("inventory platform conflicts reject %s before %s", async (first, last) => {
+  await expect(
+    parse({
+      data: {
+        sastFindings: { nodes: [sast] },
+        versionControlResources: {
+          nodes: [first, undefined, last].map((platform) =>
+            inventoryNode(platform),
+          ),
+        },
+      },
+    }),
+  ).rejects.toThrow("conflicting platforms");
+});
+
+test.each([undefined, "GITLAB"])(
+  "inventory duplicate URLs stay strict without GITHUB provenance: %j",
+  async (platform) => {
+    await expect(
+      parse({
+        data: {
+          sastFindings: { nodes: [sast] },
+          versionControlResources: {
+            nodes: [
+              inventoryNode(
+                platform,
+                "https://github.example.test/Example/Project",
+              ),
+              inventoryNode(platform),
+            ],
+          },
+        },
+      }),
+    ).rejects.toThrow("conflicting URLs");
+  },
+);
+
+test("GITHUB inventory provenance does not permit a different repository URL", async () => {
+  await expect(
+    parse({
+      data: {
+        sastFindings: { nodes: [sast] },
+        versionControlResources: {
+          nodes: [
+            inventoryNode("GITHUB"),
+            inventoryNode(
+              "GITHUB",
+              "https://github.example.test/example/other",
+            ),
+          ],
+        },
+      },
+    }),
+  ).rejects.toThrow("conflicting URLs");
+});
