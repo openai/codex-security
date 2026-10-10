@@ -88,6 +88,7 @@ import {
   type DeepScanProgress,
 } from "./deep-progress.js";
 import { findScanSession } from "./scan-logs.js";
+import { runDeepScan, supportsDirectDeepScan } from "./deep-scan.js";
 import {
   deepScanOptions,
   resolveDeepScanConfig,
@@ -492,6 +493,8 @@ interface ClientDependencies {
   probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
+  runDeepScan?: typeof runDeepScan;
+  supportsDirectDeepScan?: typeof supportsDirectDeepScan;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -1458,6 +1461,20 @@ export class CodexSecurity {
         );
       }
       const skillName = skillNameFor(normalized, mode);
+      // Native no-turn resume retains saved permissions; exec refreshes them.
+      // Keep the parent for its ChatGPT advisory and configured Node launcher.
+      const directDeepScan =
+        mode === "deep" &&
+        options.resumeScanId === undefined &&
+        environmentValue(runtime.environment, "CODEX_MCP_NODE_PATH") ===
+          undefined &&
+        (modelProvider === "amazon-bedrock" ||
+          authentication.method === "api_key" ||
+          (authentication.method === "stored_credentials" &&
+            authentication.credentialType === "api_key")) &&
+        (await (
+          this.#dependencies.supportsDirectDeepScan ?? supportsDirectDeepScan
+        )(runtime.plugin.pluginRoot));
       const discoveryPrompt =
         options.validationPrompt === undefined
           ? undefined
@@ -1961,13 +1978,14 @@ export class CodexSecurity {
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
       };
-      const { codex, environment } = await this.#createSessionCodex(
-        session,
-        "scan",
-        runtimePaths,
-        options.auth,
-        git,
-      );
+      const { codex, environment, codexOptions } =
+        await this.#createSessionCodex(
+          session,
+          "scan",
+          runtimePaths,
+          options.auth,
+          git,
+        );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
@@ -2009,7 +2027,19 @@ export class CodexSecurity {
       if (postScanPrompt?.trim()) {
         runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
       }
-      const { events } = await thread.runStreamed(prompt, turnOptions);
+      const events = directDeepScan
+        ? (this.#dependencies.runDeepScan ?? runDeepScan)({
+            codexOptions,
+            preflightCommand:
+              await this.#providerPreflightCommand(effectiveConfig),
+            pluginRoot: runtime.plugin.pluginRoot,
+            repository: repo,
+            scanDir,
+            scanId,
+            prompt,
+            signal,
+          })
+        : (await thread.runStreamed(prompt, turnOptions)).events;
       checkOpen();
 
       let result = await runScanEvents({
@@ -2026,12 +2056,23 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
+          if (resumeThreadId !== undefined && threadId !== resumeThreadId) {
+            throw new CodexSecurityError(
+              "Codex did not resume the original scan session.",
+            );
+          }
+          if (directDeepScan && postScanPrompt?.trim()) {
+            runPostScan = () => {
+              if (codex.resumeThread === undefined)
+                throw new CodexSecurityError(
+                  "The configured Codex client does not support resuming sessions.",
+                );
+              return codex
+                .resumeThread(threadId, threadOptions)
+                .runStreamed(postScanPrompt, turnOptions);
+            };
+          }
           if (resumeThreadId !== undefined) {
-            if (threadId !== resumeThreadId) {
-              throw new CodexSecurityError(
-                "Codex did not resume the original scan session.",
-              );
-            }
             return;
           }
           if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
@@ -2190,6 +2231,17 @@ export class CodexSecurity {
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
       activeScan = null;
+      if (directDeepScan) {
+        result = new ScanResult({
+          ...result,
+          turnResult: {
+            ...result.turnResult,
+            finalResponse: (
+              await readScanFile(scanDir, "report.md", "report.md", signal)
+            ).toString("utf8"),
+          },
+        });
+      }
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         const targetWarnings = new Set([
@@ -2740,7 +2792,11 @@ export class CodexSecurity {
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
-  ): Promise<{ codex: CodexClientLike; environment: ProcessEnvironment }> {
+  ): Promise<{
+    codex: CodexClientLike;
+    environment: ProcessEnvironment;
+    codexOptions: CodexOptions & { nativeProfile?: string };
+  }> {
     const {
       runtime,
       runtimeHome,
@@ -2820,7 +2876,7 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
-    const codex = await this.#dependencies.createCodex({
+    const codexOptions: CodexOptions & { nativeProfile?: string } = {
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
@@ -2845,8 +2901,9 @@ export class CodexSecurity {
           ),
         },
       },
-    });
-    return { codex, environment };
+    };
+    const codex = await this.#dependencies.createCodex(codexOptions);
+    return { codex, environment, codexOptions };
   }
 
   async #prepareSession(
