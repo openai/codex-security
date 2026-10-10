@@ -41,7 +41,7 @@ import {
   directoryPaths,
   encodeGitPath,
   git,
-  runTool,
+  runRipgrep,
 } from "./inventory-git";
 import { PREVIEW_BYTES, previewForBytes, sampleFile } from "./source-preview";
 
@@ -119,8 +119,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
   if (indexed !== undefined) return indexed;
   let result;
   try {
-    result = await runTool(
-      "rg",
+    result = await runRipgrep(
       [
         "--files",
         "--hidden",
@@ -279,8 +278,7 @@ export async function generateInventory(
     const requested = isAbsolute(expandHome(scope, home))
       ? inside(repo, absolute)
       : scope;
-    const result = await runTool(
-      "rg",
+    const result = await runRipgrep(
       [
         "--files",
         "--null",

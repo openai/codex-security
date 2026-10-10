@@ -55,11 +55,12 @@ const repositoryEnvironment = [
   "GIT_WORK_TREE",
 ];
 
-function trustedGit(target: string): string | undefined {
+function trustedTool(name: "git" | "rg", target: string): string | undefined {
   let protectedRoot = canonical(target);
   for (const ancestor of ancestors(protectedRoot))
     if (exists(append(ancestor, ".git"))) protectedRoot = ancestor;
-  const configured = environmentValue("CODEX_SECURITY_GIT");
+  const configured =
+    name === "git" ? environmentValue("CODEX_SECURITY_GIT") : undefined;
   if (configured === "") return undefined;
   if (configured !== undefined && !isAbsolute(configured))
     throw new Error(
@@ -71,7 +72,7 @@ function trustedGit(target: string): string | undefined {
       : (environmentValue("PATH") ?? (windows ? ".;C:\\bin" : "/usr/bin:/bin"))
           .split(delimiter)
           .flatMap((entry) =>
-            (windows ? ["git.exe", "git.com"] : ["git"]).map((name) =>
+            (windows ? [`${name}.exe`, `${name}.com`] : [name]).map((name) =>
               append(windows ? entry.replace(/^"|"$/gu, "") : entry, name),
             ),
           );
@@ -196,7 +197,7 @@ function inheritedToolPaths(additional: string[] = []): Record<string, string> {
 }
 
 function gitProcess(repo: string, args: string[]) {
-  const command = trustedGit(repo);
+  const command = trustedTool("git", repo);
   if (!command) return undefined;
   const env: NodeJS.ProcessEnv = { ...process.env };
   const inherited = inheritedToolPaths();
@@ -220,6 +221,16 @@ function gitProcess(repo: string, args: string[]) {
     { env, stdio: ["pipe", "pipe", "pipe"] },
     inherited,
   ) as ChildProcessWithoutNullStreams;
+}
+
+export async function runRipgrep(
+  args: string[],
+  repo: string,
+): Promise<ToolResult> {
+  const command = trustedTool("rg", repo);
+  if (!command)
+    throw Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" });
+  return runTool(command, args, repo);
 }
 
 export async function runTool(
@@ -456,7 +467,7 @@ export async function blobSamples(
   names: string[],
 ): Promise<([Buffer, boolean] | undefined)[]> {
   if (!names.length) return [];
-  const child = gitProcess(repo, ["cat-file", "--batch", "-Z"]);
+  const child = gitProcess(repo, ["cat-file", "--batch", "-z"]);
   if (!child) return names.map(() => undefined);
   const completion = new Promise<number>((resolve, reject) => {
     child.once("error", reject);
@@ -474,7 +485,7 @@ export async function blobSamples(
       pending = Buffer.concat([pending, chunk as Buffer]);
       while (pending.length) {
         if (remaining === undefined) {
-          const end = pending.indexOf(0);
+          const end = pending.indexOf(0x0a);
           if (end < 0) break;
           const header = pending.subarray(0, end).toString("utf8").split(" ");
           pending = pending.subarray(end + 1);
@@ -494,7 +505,7 @@ export async function blobSamples(
           if (remaining) break;
         }
         if (!pending.length) break;
-        if (pending[0] !== 0) throw new Error("Invalid Git blob framing");
+        if (pending[0] !== 0x0a) throw new Error("Invalid Git blob framing");
         pending = pending.subarray(1);
         result.push(sampler.finish());
         remaining = undefined;

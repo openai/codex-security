@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -11,7 +12,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, parse, relative, sep } from "node:path";
+import { delimiter, dirname, join, parse, relative, sep } from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { nodeCommand } from "./support/shell.js";
 import { git } from "./git-fixture.js";
@@ -93,6 +94,154 @@ function fixture() {
     commit,
     toolEnvironment,
   };
+}
+
+test("revision previews retain blobs with Git's input-only NUL batch protocol", () => {
+  const f = fixture();
+  f.write("deleted.py", "deleted source\n");
+  f.write("changed.py", "old source\n");
+  const base = f.commit();
+  rmSync(join(f.repo, "deleted.py"));
+  f.write("changed.py", "new source\n");
+  f.write("empty.py", "");
+  f.write("binary", Buffer.from([0, 1, 2]));
+  f.commit();
+  const preload = join(f.root, "old-git.cjs");
+  const calls = join(f.root, "batch-arguments.jsonl");
+  writeFileSync(
+    preload,
+    `
+const cp = require("node:child_process");
+const spawn = cp.spawn;
+cp.spawn = (command, args, options) => {
+  if (args.includes("cat-file")) {
+    require("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + "\\n");
+    args = args.map(arg => arg === "-Z" ? "--unsupported-batch-zero" : arg);
+  }
+  return spawn(command, args, options);
+};
+require("node:module").syncBuiltinESMExports();
+`,
+  );
+  const result = f.run(
+    "make-diff-rank-input",
+    ["--base", base, "--mode", "revisions"],
+    {
+      ...f.toolEnvironment,
+      NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
+    },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  const rows = readFileSync(f.out, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(rows.find((row) => row.path === "deleted.py")?.preview).toBe("");
+  expect(rows.find((row) => row.path === "changed.py")?.preview).toBe(
+    "new source",
+  );
+  expect(rows.find((row) => row.path === "empty.py")?.preview).toBe("");
+  expect(rows.some((row) => row.path === "binary")).toBe(false);
+  const batches = readFileSync(calls, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(batches.length).toBeGreaterThan(0);
+  for (const args of batches) {
+    expect(args).toContain("-z");
+    expect(args).not.toContain("-Z");
+  }
+});
+
+for (const command of [
+  "generate-in-scope-files",
+  "make-repo-scope-input",
+  "make-repo-rank-input",
+]) {
+  for (const rawWindowsHome of [false, true]) {
+    test.skipIf(rawWindowsHome && process.platform !== "win32")(
+      `${command} selects trusted ripgrep outside the repository${rawWindowsHome ? " through the UTF-16 bridge" : ""}`,
+      () => {
+        const f = fixture();
+        f.write("scope/visible.py");
+        const hostile = join(
+          f.repo,
+          process.platform === "win32" ? "rg.exe" : "rg",
+        );
+        const marker = join(f.root, "repository-tool-ran");
+        if (process.platform === "win32") copyFileSync(node, hostile);
+        else
+          writeFileSync(
+            hostile,
+            `#!/bin/sh\nprintf executed > '${marker.replaceAll("'", "'\\''")}'\nexit 23\n`,
+            { mode: 0o700 },
+          );
+        const scopes = join(f.root, "scopes.json");
+        writeFileSync(scopes, '["scope"]');
+        const preload = join(f.root, "tool-launch.cjs");
+        const calls = join(f.root, "tool-launch.jsonl");
+        writeFileSync(
+          preload,
+          `
+const cp = require("node:child_process");
+const spawn = cp.spawn;
+const record = command => {
+  if (/(^|[\\\\/])rg(?:\\.exe|\\.com)?$/i.test(command))
+    require("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(command) + "\\n");
+};
+cp.spawn = (command, args, options) => {
+  record(command);
+  const child = spawn(command, args, options);
+  if (child.send) {
+    const send = child.send.bind(child);
+    child.send = (payload, ...rest) => {
+      if (payload.executable) record(Buffer.from(payload.executable, "base64").toString("utf16le"));
+      return send(payload, ...rest);
+    };
+  }
+  return child;
+};
+require("node:module").syncBuiltinESMExports();
+`,
+        );
+        const env = { ...f.toolEnvironment };
+        const pathKey =
+          Object.keys(env).find((key) => key.toUpperCase() === "PATH") ??
+          "PATH";
+        // The bridge case also checks Windows' implicit current-directory lookup.
+        if (!rawWindowsHome)
+          env[pathKey] = `${f.repo}${delimiter}${env[pathKey] ?? ""}`;
+        if (rawWindowsHome) env["HOME"] = join(f.root, "home-\ud800");
+        env["CODEX_SECURITY_GIT"] = "";
+        env["NODE_OPTIONS"] =
+          `${env["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`;
+        const result = f.run(
+          command,
+          command === "generate-in-scope-files"
+            ? ["--scope", "scope"]
+            : ["--scopes-file", scopes],
+          env,
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const contents = readFileSync(f.out, "utf8");
+        expect(
+          command === "generate-in-scope-files"
+            ? contents.trim()
+            : JSON.parse(contents).path,
+        ).toBe("scope/visible.py");
+        const launched = readFileSync(calls, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(launched.length).toBeGreaterThan(0);
+        for (const executable of launched) {
+          expect(parse(executable).root).not.toBe("");
+          expect(executable).not.toBe(hostile);
+        }
+        expect(readdirSync(f.root)).not.toContain("repository-tool-ran");
+      },
+    );
+  }
 }
 
 for (const scope of [".", "src", "./src", "src/résumé.py"]) {
