@@ -2542,8 +2542,12 @@ test("native saved scans retain settings, auth environment, permissions and iden
     });
     const ownedDirectory = join(root, "owned-scan");
     await mkdir(ownedDirectory, { mode: 0o700 });
-    const nativePlugin = fileURLToPath(
-      new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url),
+    const nativePlugin = join(root, "native-plugin");
+    await mkdir(join(nativePlugin, "mcp"), { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("../../native/dist/", import.meta.url)),
+      join(nativePlugin, "mcp", "native"),
+      process.platform === "win32" ? "junction" : "dir",
     );
     const releaseOwner = await acquireScanExecution(
       root,

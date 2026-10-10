@@ -204,7 +204,9 @@ test("the SDK launches long Windows paths with the native namespace prefix", asy
 });
 
 test("the SDK executable override preserves bundled tools at the child boundary", async (t) => {
-  const directory = await temporaryDirectory("eval-tools-test-", true);
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), "eval-tools-test-")),
+  );
   t.after(() => rm(directory, { recursive: true, force: true }));
   const executable = join(directory, "bin", "codex");
   const tools = join(directory, "codex-path");
@@ -908,9 +910,9 @@ test(
     import { mkdtemp, realpath } from "node:fs/promises";
     import { tmpdir } from "node:os";
     import { join } from "node:path";
-    import { withEvalState } from ${JSON.stringify(runtimeUrl)};
+    import { createEvalHome, withEvalState } from ${JSON.stringify(runtimeUrl)};
     import { gradeResult } from ${JSON.stringify(new URL("./grade.mts", import.meta.url).href)};
-    await withEvalState(async () => await mkdtemp(join(tmpdir(), "home-")), join(tmpdir(), "missing-synthetic-home"), async ({root}) => {
+    await withEvalState(() => createEvalHome(async () => await mkdtemp(join(tmpdir(), "home-")), join(tmpdir(), "missing-synthetic-home")), async ({root}) => {
       assert.equal(root, await realpath(root));
       const result = { findings: [], coverage: { completeness: "complete", explicitExclusions: [{ pattern: await realpath(root) }] } };
       const grade = gradeResult(result, { positives: [], files: { "fixture.txt": "synthetic" } }, root);
