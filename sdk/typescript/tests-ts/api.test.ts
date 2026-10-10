@@ -17,7 +17,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
-import { createHash, hash } from "node:crypto";
+import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -947,12 +947,15 @@ describe("CodexSecurity orchestration", () => {
       pythonPath: "/definitely/missing/python",
     });
     const onScanStarted = mock();
+    const onScanRegistered = mock();
     await expect(
       client.run("/definitely/missing/repository", {
         onScanStarted,
+        onScanRegistered,
       }),
     ).rejects.toBeInstanceOf(InvalidTargetError);
     expect(onScanStarted).not.toHaveBeenCalled();
+    expect(onScanRegistered).not.toHaveBeenCalled();
     await client.close();
   });
 
@@ -1876,6 +1879,14 @@ describe("CodexSecurity orchestration", () => {
         if (typeof instructionsFile === "string") {
           await writeFile(join(scanDir, instructionsFile), instructions);
         }
+        const authentication: Record<string, string> =
+          index === 0
+            ? {}
+            : {
+                cli_auth_credentials_store: index % 2 ? "file" : "ephemeral",
+                forced_login_method: index % 2 ? "api" : "chatgpt",
+                forced_chatgpt_workspace_id: `synthetic-workspace-${index}`,
+              };
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -1883,6 +1894,7 @@ describe("CodexSecurity orchestration", () => {
               model: "openai.gpt-5.6-luna",
               model_provider: "amazon-bedrock",
               ...overrides,
+              ...authentication,
             },
           },
           {
@@ -1945,6 +1957,16 @@ describe("CodexSecurity orchestration", () => {
                     windows,
                   );
                   expect(options.config?.["windows"]).toEqual(windows);
+                  for (const key of [
+                    "cli_auth_credentials_store",
+                    "forced_login_method",
+                    "forced_chatgpt_workspace_id",
+                  ] as const) {
+                    const expected = (authentication[key] ??
+                      DEFAULT_CODEX_CONFIG[key]) as string | undefined;
+                    expect(workerConfig[key]).toEqual(expected);
+                    expect(options.config?.[key]).toEqual(expected);
+                  }
                   for (const key of [
                     "model_context_window",
                     "model_auto_compact_token_limit",
@@ -2046,26 +2068,52 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("isolates authentication observer failures from scan startup", async () => {
+  test.each(["onAuthentication", "onScanRegistered"] as const)(
+    "isolates %s observer failures from scan startup",
+    async (observer) => {
+      const { root, repository, codexHome } = await runtimeDirectories();
+      const observerErrors: Array<[ScanObserverName, string]> = [];
+      const client = TestClient.withDependencies({
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: codexFactory(scanDidNotStart),
+      });
+
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "scan"),
+          [observer]: () => fail("observer exploded"),
+          onObserverError: collectObserverErrors(observerErrors),
+        }),
+      ).rejects.toThrow("scan did not start");
+      expect(observerErrors).toEqual([[observer, "observer exploded"]]);
+      await client.close();
+    },
+  );
+
+  test("does not announce a scan when its output directory registration fails", async () => {
     const { root, repository, codexHome } = await runtimeDirectories();
-    const observerErrors: Array<[ScanObserverName, string]> = [];
+    const onOutputDirReady = mock();
+    const onScanRegistered = mock();
     const client = TestClient.withDependencies({
       prepareRuntime: async () => preparedRuntime(codexHome),
       resolvePluginPython: async () => "/managed/python",
       repositoryRevision: async () => null,
+      runWorkbench: async () => {
+        throw new Error("Output directory already registered");
+      },
       createCodex: codexFactory(scanDidNotStart),
     });
-
     await expect(
       client.run(repository, {
         outputDir: join(root, "scan"),
-        onAuthentication: () => fail("authentication observer exploded"),
-        onObserverError: collectObserverErrors(observerErrors),
+        onOutputDirReady,
+        onScanRegistered,
       }),
-    ).rejects.toThrow("scan did not start");
-    expect(observerErrors).toEqual([
-      ["onAuthentication", "authentication observer exploded"],
-    ]);
+    ).rejects.toThrow("Output directory already registered");
+    expect(onOutputDirReady).toHaveBeenCalled();
+    expect(onScanRegistered).not.toHaveBeenCalled();
     await client.close();
   });
 
@@ -7733,7 +7781,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     ["deep", false, true],
     ["deep", true, true],
   ] as const)(
-    "isolates concurrent managed %s sessions at the Codex child boundary (capture=%s, program=%s)",
+    "isolates concurrent managed %s sessions at the Codex child boundary (capture=%p, program=%p)",
     async (mode, captureSummary, selectedProgram) => {
       const clients: TestClient[] = [];
       try {
@@ -7842,9 +7890,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                               manifest.scan.artifacts.find(
                                 (artifact: { path: string }) =>
                                   artifact.path === "coverage.json",
-                              ).sha256 = createHash("sha256")
-                                .update(coverageBytes)
-                                .digest("hex");
+                              ).sha256 = hash("sha256", coverageBytes);
                               await writeFile(
                                 manifestPath,
                                 JSON.stringify(manifest),

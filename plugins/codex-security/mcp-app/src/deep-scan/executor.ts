@@ -13,16 +13,15 @@ import {
   dirname,
   isAbsolute,
   join,
+  parse,
   resolve,
   sep,
   win32,
 } from "node:path";
-import {
-  createCodexClient,
-  readCodexSessionTurn,
-} from "../../../../../sdk/typescript/src/codex-session.js";
+import { createCodexClient } from "../../../../../sdk/typescript/src/codex-session.js";
 import type { CodexOptions } from "@openai/codex-sdk";
 import type { CyberAccessProgram, ThreadEvent } from "@openai/codex-sdk";
+import { readCodexSessionTurn } from "../../../scripts/codex_session.mjs";
 import { parse as parseToml } from "smol-toml";
 import {
   createCodexProfileClient,
@@ -460,21 +459,35 @@ function workerSubagentConfig(
 }
 
 function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+  const filesystem = new Map<string, string | Record<string, string>>([
+    [":root", "read"],
+    ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
+  ]);
+  for (const literal of sandbox.literalFilesystemDenies ?? []) {
+    if (sandbox.filesystemDenies.includes(literal)) {
+      const root = parse(literal).root;
+      const scope = filesystem.get(root);
+      filesystem.set(root, {
+        ...(typeof scope === "object"
+          ? scope
+          : scope === undefined
+            ? {}
+            : { ".": scope }),
+        [literal.slice(root.length)]: "deny",
+      });
+    }
+    filesystem.set(literal, { ".": "deny" });
+  }
   return {
     extends: ":read-only",
     // Object.fromEntries preserves literal keys such as "__proto__" without
     // letting a denied path mutate the serializer object prototype.
-    filesystem: Object.fromEntries([
-      [":root", "read"],
-      ...Array.from(sandbox.filesystemDenies, (key) => [key, "deny"]),
-      ...Array.from(sandbox.literalFilesystemDenies ?? [], (key) => [
-        key,
-        { ".": "deny" },
-      ]),
+    filesystem: {
+      ...Object.fromEntries(filesystem),
       ...(sandbox.globScanMaxDepth === undefined
-        ? []
-        : [["glob_scan_max_depth", sandbox.globScanMaxDepth]]),
-    ]),
+        ? {}
+        : { glob_scan_max_depth: sandbox.globScanMaxDepth }),
+    },
     network: { enabled: false },
   };
 }

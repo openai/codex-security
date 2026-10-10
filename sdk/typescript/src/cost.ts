@@ -166,7 +166,10 @@ export class ScanCostTracker {
   #expectedFilesTotal: number | undefined;
   #attribution: ScanExecutionAttribution | null = null;
   #readAttribution:
-    (() => Promise<ScanExecutionAttribution | null | undefined>) | undefined;
+    | ((
+        force?: boolean,
+      ) => Promise<ScanExecutionAttribution | null | undefined>)
+    | undefined;
 
   public constructor(options: ScanCostTrackerOptions) {
     this.#options = options;
@@ -178,7 +181,9 @@ export class ScanCostTracker {
   }
 
   public setAttributionReader(
-    reader: () => Promise<ScanExecutionAttribution | null | undefined>,
+    reader: (
+      force?: boolean,
+    ) => Promise<ScanExecutionAttribution | null | undefined>,
   ): void {
     this.#readAttribution = reader;
   }
@@ -237,8 +242,12 @@ export class ScanCostTracker {
   }
 
   public async refresh(): Promise<ScanCostSnapshot> {
+    return this.#refresh(false);
+  }
+
+  async #refresh(forceAttribution: boolean): Promise<ScanCostSnapshot> {
     const update = this.#pending.then(async () => {
-      await this.#readSessions();
+      await this.#readSessions(forceAttribution);
     });
     this.#pending = update.catch(() => {});
     await update;
@@ -250,7 +259,7 @@ export class ScanCostTracker {
     this.#timer = null;
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     try {
-      await this.refresh();
+      await this.#refresh(true);
     } finally {
       this.#observingWorkers = false;
     }
@@ -266,7 +275,7 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
-  async #readSessions(): Promise<void> {
+  async #readSessions(forceAttribution: boolean): Promise<void> {
     if (this.#threadId === null) return;
     const repository =
       this.#options.onActivity === undefined
@@ -274,7 +283,7 @@ export class ScanCostTracker {
         : this.#options.repository;
     let recordedAttribution = this.#attribution;
     if (this.#readAttribution) {
-      const record = await this.#readAttribution();
+      const record = await this.#readAttribution(forceAttribution);
       recordedAttribution = record ?? null;
       const attribution = record == null || record.legacy ? null : record;
       if (

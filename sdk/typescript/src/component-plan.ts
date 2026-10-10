@@ -1,8 +1,6 @@
-import { execFile as execFileCallback } from "node:child_process";
 import { lstat, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { promisify } from "node:util";
 import { z } from "incur";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
@@ -14,13 +12,12 @@ import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import {
   nullIfMissingFile,
   enclosingGitWorktreeRoot,
+  gitOutput,
   normalizeRepository,
   normalizeTarget,
   validatedGitEnvironment,
 } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
 
-const execFile = promisify(execFileCallback);
 /** @internal */
 export const componentPlanSchema = z.strictObject({
   components: z
@@ -270,16 +267,15 @@ async function inventoryFiles(
 ): Promise<string[]> {
   signal?.throwIfAborted();
   const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  if (await enclosingGitWorktreeRoot(repository, signal)) {
+  if (
+    await enclosingGitWorktreeRoot(repository, signal, {
+      requireIfPresent: true,
+    })
+  ) {
     validatedGitEnvironment();
-    const git = await resolveTrustedExecutable("git", process.env, repository);
-    if (git === null)
-      throw new Error("Git is required to inventory this repository.");
-    const { stdout } = await execFile(
-      git.executable,
+    const stdout = await gitOutput(
+      repository,
       [
-        "-C",
-        repository,
         "ls-files",
         "--cached",
         "--others",
@@ -289,7 +285,10 @@ async function inventoryFiles(
         "--",
         ".",
       ],
-      { env: git.environment, signal, maxBuffer: Infinity, encoding: "buffer" },
+      signal,
+      undefined,
+      undefined,
+      "buffer",
     );
     const files: string[] = [];
     for (const path of stdout.toString("latin1").split("\0").filter(Boolean)) {

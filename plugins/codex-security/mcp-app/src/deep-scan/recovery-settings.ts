@@ -125,7 +125,7 @@ async function originalParentSettings(
       scanId: parent.threadId,
       threadId: parent.threadId,
       executionThreadIds: [],
-      codexHome,
+      codexHome: await fs.realpath(codexHome),
       allowMissingRoot: true,
     });
     const settings: Partial<DeepScanExecutionSettings> = {};

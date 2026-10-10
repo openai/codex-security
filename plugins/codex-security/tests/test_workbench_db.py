@@ -61,10 +61,6 @@ DIRECTORY_CHANGED_WARNING = (
     "Directory contents changed while the scan was running; "
     "results were saved for the original snapshot."
 )
-TARGET_UNAVAILABLE_WARNING = (
-    "The scan target became unavailable while the scan was running; "
-    "results were saved for the original revision or snapshot."
-)
 GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
@@ -881,8 +877,11 @@ def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: P
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["warnings"] == [TARGET_UNAVAILABLE_WARNING]
-    assert completed["targetWarnings"] == [TARGET_UNAVAILABLE_WARNING]
+    warnings = completed["scan"]["warnings"]
+    assert len(warnings) == 1
+    assert "selected checkout is no longer accessible" in warnings[0]
+    assert "results were saved" in warnings[0]
+    assert completed["targetWarnings"] == warnings
     assert completed["scan"]["findingCount"] == 1
     assert completed["scan"]["remediationAvailable"] is False
     assert (scan_dir / "report.md").is_file()

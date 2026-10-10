@@ -1,4 +1,5 @@
 import { rm } from "node:fs/promises";
+import { testWorkerCancellation } from "./deep_scan_cancellation_cases.ts";
 import { testHome } from "./deep_scan_home_case.ts";
 import { testReconstructedWorkers } from "./deep_scan_reconstructed_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
@@ -96,8 +97,11 @@ const trustedParentSandboxWithDenials = Object.freeze({
     "/repo/.env",
     "/repo/**/.secret",
     "/repo/**/*.pem",
+    "/repo/temp[1]",
+    "/repo/secret[1]",
     "/repo/.env",
   ],
+  literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
   globScanMaxDepth: 3,
 });
 const emptyWorkerPermissionProfile = {
@@ -114,6 +118,9 @@ const deniedWorkerPermissionProfile = {
     "/repo/.env": "deny",
     "/repo/**/.secret": "deny",
     "/repo/**/*.pem": "deny",
+    "/repo/temp[1]": { ".": "deny" },
+    "/repo/secret[1]": { ".": "deny" },
+    "/": { "repo/temp[1]": "deny", "repo/secret[1]": "deny" },
     glob_scan_max_depth: 3,
   },
   network: { enabled: false },
@@ -122,6 +129,13 @@ const deniedWorkerPermissionProfile = {
 try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
+  await testWorkerCancellation({
+    CodexSdkWorkerExecutor,
+    fakeCodexFixture,
+    trustedParentSandbox,
+    restoreEnv,
+  });
+  await testNullUsageCompletion();
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
@@ -153,6 +167,7 @@ try {
       CodexSdkWorkerExecutor,
       captureDeepScanExecutionSettings,
       restoredDeepScanWorkerSettings,
+      loadDeepScanExecutionSettings,
       withWorkerFixture,
       trustedParentSandbox,
     );
@@ -161,7 +176,6 @@ try {
     await testArtifactServerUsesExtendedStartupTimeout();
     await testReducerCoveragePersistenceBinding();
     await testWorkerProviderSelection();
-    await testNullUsageCompletion();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
     await testRetryNotificationDoesNotInterruptTurn();
@@ -1567,7 +1581,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
             ],
-            literalFilesystemDenies: [deepPath, codexHome],
+            literalFilesystemDenies: [
+              ...trustedParentSandboxWithDenials.literalFilesystemDenies,
+              deepPath,
+              codexHome,
+            ],
             globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
           };
           const provider = index === 0 ? undefined : "synthetic.gateway";
@@ -1624,6 +1642,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                       fixture.root,
                       `native-state-${index}`,
                     ),
+                  },
+            authentication:
+              index === 0
+                ? {}
+                : {
+                    cli_auth_credentials_store:
+                      index % 2 ? "file" : "ephemeral",
+                    forced_login_method: index % 2 ? "api" : "chatgpt",
+                    forced_chatgpt_workspace_id: `synthetic-workspace-${index}`,
                   },
             endpoint,
             serviceTier,
@@ -1698,6 +1725,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               entry.deepPath,
               stringifyToml({
                 worker_runtime: {
+                  ...entry.authentication,
                   ...entry.workerTelemetry,
                   ...(entry.endpoint === undefined
                     ? {}
@@ -1940,6 +1968,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
             assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
             assertConfigOverrides(invocation.argv, {
+              ...workerConfigurations[index].authentication,
               openai_base_url: workerConfigurations[index].endpoint,
               model_reasoning_summary: expected,
               service_tier: workerConfigurations[index].serviceTier,
@@ -3293,7 +3322,7 @@ async function runFixtureWorker(
 export async function fakeCodexFixture(
   preflightProfile: {
     extends: string;
-    filesystem: Record<string, string | number>;
+    filesystem: Record<string, string | number | Record<string, string>>;
     network: { enabled: boolean };
   } = emptyWorkerPermissionProfile,
   preflightAllowed = true,
@@ -3405,6 +3434,7 @@ const permissionProfileFallbackWarning = 'Configured value for \`permission_prof
 if (stdin.includes('PERMISSION_PROFILE_FALLBACK_ITEM')) console.log(JSON.stringify({ type: 'item.completed', item: { id: 'warning-1', type: 'error', message: permissionProfileFallbackWarning } }));
 if (stdin.includes('PERMISSION_PROFILE_FALLBACK_EVENT')) console.log(JSON.stringify({ type: 'error', message: permissionProfileFallbackWarning }));
 if (stdin.includes('BLOCK_AFTER_START')) await new Promise(() => {});
+if (stdin.includes('FAIL_THEN_HANG')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'fixture worker failed' } })); setInterval(() => {}, 1_000); await new Promise(() => {}); }
 if (stdin.includes('RATE_LIMIT_CYBER_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: '429 Too Many Requests: Request blocked by cyberPolicy.' } })); process.exit(0); }
 if (stdin.includes('CYBER_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'Request blocked by cyberPolicy.' } })); process.exit(0); }
 if (stdin.includes('SAFETY_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'Request blocked by a safety policy violation.' } })); process.exit(0); }
@@ -3531,11 +3561,26 @@ async function testWorkerProviderSelection() {
 async function testNullUsageCompletion() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[] = [],
+    options: SpawnOptions = {},
+  ) =>
+    originalSpawn(
+      command,
+      command === process.execPath ||
+        command === path.toNamespacedPath(process.execPath)
+        ? [fixture.executablePath, ...args]
+        : args,
+      options,
+    )) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  process.env.CODEX_CLI_PATH = process.execPath;
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     await writeFile(promptPath, "NULL_USAGE\n");
-    for (const kind of ["discovery", "dedup"]) {
+    for (const kind of ["discovery", "dedup"] as const) {
       for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
         const result = await new CodexSdkWorkerExecutor({
           parentSandbox: trustedParentSandbox,
@@ -3552,6 +3597,8 @@ async function testNullUsageCompletion() {
       }
     }
   } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }
 }

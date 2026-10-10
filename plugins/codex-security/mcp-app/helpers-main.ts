@@ -70,6 +70,10 @@ function runHelper(): void {
       "Usage: store-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.groups containing arrays of finding IDs.",
     "list-dedupe-groups":
       "Usage: list-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.findingId.",
+    "severity-classification":
+      "Usage: severity-classification\nReads a JSON object from stdin with an absolute stateDirectory and payload describing the begin or save action.",
+    "read-severity-classification":
+      "Usage: read-severity-classification --scan-id <id>\nReads a JSON object from stdin with an absolute stateDirectory. Reads saved assessments without updating the database.",
   };
   if (!isMainThread) {
     parentPort!.postMessage(normalizeCandidateBatch(workerData));
@@ -102,7 +106,12 @@ function runHelper(): void {
     void (async () => {
       const { values } = parseArgs({
         args,
-        options: { help: { type: "boolean", short: "h" } },
+        options: {
+          help: { type: "boolean", short: "h" },
+          ...(command === "read-severity-classification"
+            ? { "scan-id": { type: "string" as const } }
+            : {}),
+        },
       });
       if (values.help) {
         console.log(workbenchUsage[command]);
@@ -113,8 +122,12 @@ function runHelper(): void {
         const { databaseInfo } = await import("./src/workbench/database");
         result = await databaseInfo(JSON.parse(decodeUtf8(readFileSync(0))));
       } else {
-        const { findingsCommand } = await import("./src/workbench/commands");
-        result = await findingsCommand(command, decodeUtf8(readFileSync(0)));
+        const { workbenchCommand } = await import("./src/workbench/commands");
+        result = await workbenchCommand(
+          command,
+          decodeUtf8(readFileSync(0)),
+          values["scan-id"] as string | undefined,
+        );
       }
       console.log(
         stringifyJson(result, 0).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>

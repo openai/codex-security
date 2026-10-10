@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { jsonLines } from "./support/json.js";
 import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
@@ -28,7 +29,11 @@ import {
   tokenUsage,
 } from "../src/cost-model.js";
 import { readScanLogs } from "../src/scan-logs.js";
-import { sessionParentThreadId } from "../src/scan-sessions.js";
+import {
+  cachedScanAttributionReader,
+  sessionParentThreadId,
+  type ScanExecutionAttribution,
+} from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 import { PLUGIN_ROOT as BUNDLED_PLUGIN_ROOT } from "./plugin-root.js";
 import {
@@ -3510,3 +3515,121 @@ test.each(["sdk-owner", "unbound-owner", "unknown-worker"] as const)(
     }
   },
 );
+
+test("cost polls reuse attribution until SQLite changes and refresh it at final accounting", async () => {
+  const home = await codexHome();
+  const databasePath = join(home, "workbench.sqlite3");
+  const database = new Database(databasePath);
+  database.run("PRAGMA journal_mode=WAL");
+  database.run("CREATE TABLE attribution (value TEXT)");
+  const attribution: ScanExecutionAttribution = {
+    formatVersion: 1,
+    executionThreadIds: [],
+    owner: {
+      threadId: "parent",
+      turnId: "parent-turn",
+      startedAt: "2026-01-01T00:00:00Z",
+      dedicated: true,
+    },
+    startedAt: "2026-01-01T00:00:00Z",
+    completedAt: null,
+  };
+  database
+    .query("INSERT INTO attribution VALUES (?)")
+    .run(JSON.stringify(attribution));
+  for (const [thread, input] of [
+    ["parent", 100],
+    ["worker", 200],
+  ] as const) {
+    const path = await writeSession(home, thread, {});
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "turn_context",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: { turn_id: `${thread}-turn`, model: "gpt-5.6-sol" },
+        },
+        {
+          type: "token_usage_record",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: {
+            thread_id: thread,
+            turn_id: `${thread}-turn`,
+            response_id: `${thread}-response`,
+            model: "gpt-5.6-sol",
+            usage: { input_tokens: input, output_tokens: 0 },
+          },
+        },
+      ]) + "\n",
+    );
+  }
+  let reads = 0;
+  const reader = cachedScanAttributionReader(home, async () => {
+    reads++;
+    return JSON.parse(
+      (
+        database.query("SELECT value FROM attribution").get() as {
+          value: string;
+        }
+      ).value,
+    ) as ScanExecutionAttribution;
+  });
+  const tracker = costTracker(home);
+  tracker.setAttributionReader(reader);
+  tracker.start("parent");
+  try {
+    for (let poll = 0; poll < 8; poll++)
+      expect((await tracker.refresh()).usage).toMatchObject({
+        input_tokens: 100,
+      });
+    expect(reads).toBe(1);
+    attribution.executionThreadIds.push("worker");
+    database
+      .query("UPDATE attribution SET value = ?")
+      .run(JSON.stringify(attribution));
+    expect((await tracker.refresh()).usage).toMatchObject({
+      input_tokens: 300,
+    });
+    expect(reads).toBe(2);
+    database.run("PRAGMA wal_checkpoint(TRUNCATE)");
+    expect((await tracker.refresh()).usage).toMatchObject({
+      input_tokens: 300,
+    });
+    expect(reads).toBe(3);
+    for (let poll = 0; poll < 8; poll++) await tracker.refresh();
+    expect(reads).toBe(3);
+    expect((await tracker.stop()).usage).toMatchObject({ input_tokens: 300 });
+    expect(reads).toBe(4);
+  } finally {
+    await tracker.stop();
+    database.close();
+  }
+});
+
+test("attribution caching notices database replacement and writes during a read", async () => {
+  const directory = await codexHome();
+  const path = join(directory, "workbench.sqlite3");
+  const next = join(directory, "replacement.sqlite3");
+  await writeFile(path, "first");
+  let changeDuringRead = false;
+  let reads = 0;
+  const reader = cachedScanAttributionReader(directory, async () => {
+    reads++;
+    const before = await readFile(path, "utf8");
+    if (changeDuringRead) {
+      changeDuringRead = false;
+      await appendFile(path, "-committed-during-read");
+    }
+    return { startedAt: before } as ScanExecutionAttribution;
+  });
+  expect((await reader())?.startedAt).toBe("first");
+  expect((await reader())?.startedAt).toBe("first");
+  expect(reads).toBe(1);
+  await writeFile(next, "replacement");
+  await rename(next, path);
+  changeDuringRead = true;
+  expect((await reader())?.startedAt).toBe("replacement");
+  expect((await reader())?.startedAt).toBe("replacement-committed-during-read");
+  expect(reads).toBe(3);
+});

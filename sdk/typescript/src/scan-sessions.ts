@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { isRecord } from "./record.js";
 
@@ -21,6 +22,39 @@ export interface ScanExecutionAttribution {
   };
   startedAt: string;
   completedAt: string | null;
+}
+
+/** Reuse attribution until SQLite changes; token-log polling remains independent. */
+export function cachedScanAttributionReader(
+  stateDirectory: string,
+  read: () => Promise<ScanExecutionAttribution | null | undefined>,
+): (force?: boolean) => Promise<ScanExecutionAttribution | null | undefined> {
+  const database = join(stateDirectory, "workbench.sqlite3");
+  let cachedKey: string | null = null;
+  let cached: ScanExecutionAttribution | null | undefined;
+  return async (force = false) => {
+    const [main, wal] = await Promise.all([
+      databaseSignature(database),
+      databaseSignature(`${database}-wal`),
+    ]);
+    const key = main === null ? null : `${main};${wal}`;
+    if (!force && key !== null && key === cachedKey) return cached;
+    const value = await read();
+    // Save the pre-read signature so a concurrent transaction is read next time.
+    cachedKey = key;
+    cached = value;
+    return value;
+  };
+}
+
+async function databaseSignature(path: string): Promise<string | null> {
+  try {
+    const metadata = await stat(path, { bigint: true });
+    return `${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeNs}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 export function attributedScanThreads(

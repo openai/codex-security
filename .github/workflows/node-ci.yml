@@ -405,11 +405,21 @@ jobs:
       - name: Test source compatibility checker
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+      - name: Prepare private Windows test root
+        if: runner.os == 'Windows'
+        id: windows-temp
+        shell: pwsh
+        run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
       - name: Test Python source contracts
         shell: bash
         env:
           PYTEST_MARKERS: ${{ matrix.markers }}
-        run: python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
+          WINDOWS_TEST_ROOT: ${{ steps.windows-temp.outputs.path }}
+        run: |
+          if [ -n "$WINDOWS_TEST_ROOT" ]; then
+            export TEMP="$WINDOWS_TEST_ROOT" TMP="$WINDOWS_TEST_ROOT" TMPDIR="$WINDOWS_TEST_ROOT"
+          fi
+          python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
         run: python -c "import xml.etree.ElementTree as ET; assert not ET.parse('reports/python.xml').findall('.//testcase/skipped'), 'Native platform tests must run without skips'"

@@ -22,7 +22,9 @@ import { startRpc } from "./package-rpc.mjs";
 import { packageSmokeTimeouts } from "../package-smoke-timeouts.mjs";
 
 const installedRoot = await realpath(process.argv[2]);
-const installedRequire = createRequire(join(installedRoot, "package.json"));
+const { resolvePluginPython } = await import(
+  pathToFileURL(join(installedRoot, "dist", "runtime.js")).href
+);
 const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
@@ -44,20 +46,13 @@ try {
     "package-rpc.mjs",
     "package-deep-spawn.mjs",
   ]) {
-    if (name === "package-deep-codex.mjs") {
-      await writeFile(
-        join(root, name),
-        (await readFile(new URL(name, import.meta.url), "utf8")).replace(
-          '"smol-toml"',
-          JSON.stringify(
-            pathToFileURL(installedRequire.resolve("smol-toml")).href,
-          ),
-        ),
-      );
-    } else {
-      await copyFile(new URL(name, import.meta.url), join(root, name));
-    }
+    await copyFile(new URL(name, import.meta.url), join(root, name));
   }
+  const installedRequire = createRequire(join(installedRoot, "package.json"));
+  await copyFile(
+    installedRequire.resolve("smol-toml"),
+    join(root, "package-toml.cjs"),
+  );
   const executable = join(
     root,
     process.platform === "win32"
@@ -68,13 +63,8 @@ try {
     await copyFile(process.execPath, executable);
   await chmod(executable, 0o700);
 
-  const workflows = await Promise.allSettled([
-    runInstalledSdk(installedPlugin, executable),
-    runDetachedPlugin(detachedPlugin, executable),
-  ]);
-  for (const workflow of workflows) {
-    if (workflow.status === "rejected") throw workflow.reason;
-  }
+  await runInstalledSdk(installedPlugin, executable);
+  await runDetachedPlugin(detachedPlugin, executable);
   console.log(
     "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
   );
@@ -121,6 +111,7 @@ async function fixture(name, pluginRoot, executable) {
       "TMP",
       "TEMP",
       "TMPDIR",
+      "PYTHON",
     ]
       .filter((key) => process.env[key] !== undefined)
       .map((key) => [key, process.env[key]]),
@@ -133,7 +124,6 @@ async function fixture(name, pluginRoot, executable) {
     CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
     CODEX_SECURITY_STATE_DIR: join(directory, "state"),
     CODEX_SECURITY_SCAN_ROOT: join(directory, "scans"),
-    PYTHON: process.env.PYTHON || "python3",
     OPENAI_API_KEY: "synthetic-package-deep-key",
     ...(process.platform === "win32"
       ? {
@@ -142,6 +132,11 @@ async function fixture(name, pluginRoot, executable) {
         }
       : {}),
     PACKAGE_DEEP_TRACE: join(directory, "executions.jsonl"),
+  });
+  env.PYTHON = await resolvePluginPython({
+    environment: env,
+    protectedRoot: target,
+    homeDirectory: home,
   });
   return { directory, target, home, env, pluginRoot };
 }
@@ -590,6 +585,12 @@ async function readExecutions(f) {
 
 async function assertExecutions(f, scanId, preflights = 3) {
   const executions = await readExecutions(f);
+  for (const execution of executions) {
+    assert.equal(
+      await realpath(execution.python),
+      await realpath(f.env.PYTHON),
+    );
+  }
   const workers = executions.filter((entry) => entry.phase === "worker");
   const reducers = executions.filter((entry) => entry.phase === "reducer");
   const incomplete = f.env.PACKAGE_DEEP_EMPTY_ONCE ? 1 : 0;

@@ -55,17 +55,16 @@ export async function testReconstructedWorkers({
   async function prepareReconstructedScan(name: string) {
     const uncappedSandbox = {
       filesystemDenies: trustedParentSandboxWithDenials.filesystemDenies,
+      literalFilesystemDenies:
+        trustedParentSandboxWithDenials.literalFilesystemDenies,
     };
     const currentParentSandbox =
       name === "first" ? uncappedSandbox : trustedParentSandboxWithDenials;
+    const filesystem = { ...deniedWorkerPermissionProfile.filesystem };
+    delete filesystem["glob_scan_max_depth"];
     const fixture = await fakeCodexFixture({
       ...deniedWorkerPermissionProfile,
-      filesystem: {
-        ":root": "read",
-        "/repo/.env": "deny",
-        "/repo/**/*.pem": "deny",
-        "/repo/**/.secret": "deny",
-      },
+      filesystem,
     });
     const codexHome = path.join(fixture.root, "home");
     const configPath = path.join(fixture.root, "scan config.toml");

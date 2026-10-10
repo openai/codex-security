@@ -5,7 +5,7 @@ import { appendFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { startRpc } from "./package-rpc.mjs";
-import { parse as parseToml } from "smol-toml";
+import { parse } from "./package-toml.cjs";
 
 try {
   await run();
@@ -19,7 +19,7 @@ try {
 async function trace(event) {
   await appendFile(
     process.env.PACKAGE_DEEP_TRACE,
-    `${JSON.stringify(event)}\n`,
+    `${JSON.stringify({ ...event, python: process.env.PYTHON })}\n`,
   );
 }
 
@@ -75,19 +75,18 @@ async function run() {
   }
   let prompt = "";
   for await (const chunk of process.stdin) prompt += chunk;
-  const config = {};
+  const overrides = [];
   for (let index = 0; index < args.length; index++) {
-    if (args[index] !== "-c" && args[index] !== "--config") continue;
-    const setting = args[++index];
-    const equals = setting.indexOf("=");
-    config[setting.slice(0, equals)] = setting.slice(equals + 1);
+    if (args[index] === "-c" || args[index] === "--config")
+      overrides.push(args[++index]);
   }
-  const servers = parseToml(`mcp_servers = ${config.mcp_servers}`).mcp_servers;
-  const artifacts = servers.cs_artifacts;
+  const config = parse(overrides.join("\n"));
+  const artifacts = config.mcp_servers.cs_artifacts;
   const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;
   assert.ok(root, "The real worker must supply its bound artifact root.");
-  assert.equal(servers["codex-security"].enabled, false);
+  assert.equal(config.mcp_servers["codex-security"].enabled, false);
+  assert.notEqual(artifacts.enabled, false);
   const layout = env.CODEX_SECURITY_ARTIFACT_LAYOUT;
   const threadId = `package-${layout}-${basename(root)}-${basename(join(root, ".."))}`;
   console.log(JSON.stringify({ type: "thread.started", thread_id: threadId }));

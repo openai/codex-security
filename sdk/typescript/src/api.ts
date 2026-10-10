@@ -9,7 +9,6 @@ import {
   runAcceptedAudit,
   type ScanDraftInput,
 } from "./accepted-audit.js";
-import { pathToFileURL } from "node:url";
 import {
   chmod,
   lstat,
@@ -23,6 +22,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
+import { pathToFileURL } from "node:url";
 import {
   basename,
   dirname,
@@ -50,7 +50,6 @@ import {
 
 import {
   createCodexClient,
-  readCodexSessionTurn,
   type CodexSessionClient as CodexClientLike,
   type CodexSessionThread as CodexThreadLike,
   type CodexSessionEvent as ScanEvent,
@@ -97,7 +96,10 @@ import {
   type ScanSessionEvent,
   type ScanWorkerEvent,
 } from "./cost.js";
-import type { ScanExecutionAttribution } from "./scan-sessions.js";
+import {
+  cachedScanAttributionReader,
+  type ScanExecutionAttribution,
+} from "./scan-sessions.js";
 import {
   DeepScanProgressTracker,
   type DeepScanProgress,
@@ -313,6 +315,12 @@ export interface ScanOptions extends ScanSettings {
   ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  /** @internal Authoritative registration receipt for CLI scan navigation. */
+  onScanRegistered?: (scan: {
+    scanId: string;
+    scanDir: string;
+    startedAt?: string;
+  }) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onScanStarted?: () => void;
@@ -415,6 +423,7 @@ type ScanObserverName =
   | "onCost"
   | "onOutputArchived"
   | "onOutputDirReady"
+  | "onScanRegistered"
   | "onScanStarted"
   | "onTrustedAccessStatus"
   | "onReconnect"
@@ -1855,6 +1864,16 @@ export class CodexSecurity {
         });
       }
       activeScan = { id: scanId, options: workbenchOptions, mode };
+      notifyObserver(
+        options,
+        "onScanRegistered",
+      )({
+        scanId,
+        scanDir,
+        ...(typeof registration["startedAt"] === "string"
+          ? { startedAt: registration["startedAt"] }
+          : {}),
+      });
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           options,
@@ -1866,20 +1885,22 @@ export class CodexSecurity {
       }
       throwIfAborted(signal, scanDir);
       if (mode === "deep") {
-        tracker.setAttributionReader(async () => {
-          const context = await workbench(
-            { ...workbenchOptions, signal: undefined },
-            ["get-scan", "--scan-id", scanId],
-          );
-          const scan = context["scan"];
-          if (isRecord(scan) && !("executionAttribution" in scan))
-            return undefined;
-          return isRecord(scan) && isRecord(scan["executionAttribution"])
-            ? (scan[
-                "executionAttribution"
-              ] as unknown as ScanExecutionAttribution)
-            : null;
-        });
+        tracker.setAttributionReader(
+          cachedScanAttributionReader(stateDirectory, async () => {
+            const context = await workbench(
+              { ...workbenchOptions, signal: undefined },
+              ["get-scan", "--scan-id", scanId],
+            );
+            const scan = context["scan"];
+            if (isRecord(scan) && !("executionAttribution" in scan))
+              return undefined;
+            return isRecord(scan) && isRecord(scan["executionAttribution"])
+              ? (scan[
+                  "executionAttribution"
+                ] as unknown as ScanExecutionAttribution)
+              : null;
+          }),
+        );
       }
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
@@ -3545,6 +3566,16 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      notifyObserver(
+        options,
+        "onScanRegistered",
+      )({
+        scanId,
+        scanDir,
+        ...(typeof registration["startedAt"] === "string"
+          ? { startedAt: registration["startedAt"] }
+          : {}),
+      });
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           options,
@@ -4192,9 +4223,14 @@ async function readCodexTurn(options: {
   usage: unknown;
   lastStreamError: string | null;
 }> {
+  const { readCodexSessionTurn } = await import(
+    pathToFileURL(
+      join(await bundledPluginRoot(), "scripts", "codex_session.mjs"),
+    ).href
+  );
   return readCodexSessionTurn({
     ...options,
-    onEvent: async (event) => {
+    onEvent: async (event: ScanEvent) => {
       await options.onEvent?.(event);
       if (event.type === "turn.failed") {
         throw new CodexSecurityError(turnFailureMessage(event["error"]));
@@ -5091,6 +5127,7 @@ function selectedWorkerRuntimeConfig(
   return {
     ...Object.fromEntries(
       [
+        ...CODEX_AUTH_CONFIG_KEYS,
         "analytics",
         "responses_api_metadata",
         "openai_base_url",
