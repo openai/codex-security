@@ -1489,6 +1489,139 @@ test("equivalent inventory rows preserve publication identity when reordered", a
   expect(f.posts).toHaveLength(1);
 });
 
+test.each([false, true])(
+  "inventory normalization upgrades saved immutable requests and receipts (reset: %j)",
+  async (reset) => {
+    const record = { ...sast, repository: { id: repository.id } };
+    const nodes = [
+      {
+        ...inventoryNode("GITHUB"),
+        repository: {
+          ...repository,
+          name: "Example/Project",
+          url: "https://github.com/Example/Project.git",
+        },
+      },
+      {
+        ...inventoryNode("GITHUB"),
+        repository: { ...repository, url: repositoryUrl },
+      },
+    ];
+    const payload = {
+      data: {
+        sastFindings: { nodes: [record] },
+        versionControlResources: { nodes },
+      },
+    };
+    // The earlier mapper used the last inventory row. This single-row export
+    // stages exactly that historical evidence with real publication receipts.
+    const f = await cloudFixture({
+      data: { ...payload.data, versionControlResources: { nodes: [nodes[1]] } },
+    });
+    const deps = {
+      ...f.deps,
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+      },
+    };
+    const original = await prepareExternalPublication(f.file, f.options, deps);
+    f.state.failReadback = true;
+    let originalPath = "";
+    try {
+      await original.publish();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ExternalPublicationError);
+      originalPath = (error as ExternalPublicationError).result
+        .savedSubmission!;
+    }
+    const saved = JSON.parse(await readFile(originalPath, "utf8"));
+    expect(saved.receipts).toHaveLength(1);
+    const identity = [
+      original.preview.accountId,
+      original.preview.destination.id,
+      original.preview.destination.repo_connector_id,
+      original.preview.source,
+      original.preview.findings,
+    ];
+    // Reproduce the previous checkpoint encoding, before code-unit key ordering.
+    const oldKey = hash(
+      "sha256",
+      JSON.stringify(identity, (_key, child) =>
+        child !== null && typeof child === "object" && !Array.isArray(child)
+          ? Object.fromEntries(
+              Object.keys(child)
+                .sort((left, right) => left.localeCompare(right))
+                .map((key) => [key, child[key]]),
+            )
+          : child,
+      ),
+    );
+    const oldPath = join(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+      "external-finding-publications",
+      `${oldKey}.pending.json`,
+    );
+    if (oldPath !== originalPath) await rename(originalPath, oldPath);
+    await writeFile(f.file, JSON.stringify(payload));
+    if (reset) {
+      f.destination.reset_marker = "generation-2";
+      await expect(
+        prepareExternalPublication(f.file, f.options, deps),
+      ).rejects.toThrow("saved request was retired");
+      await expect(readFile(oldPath, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(f.posts).toHaveLength(1);
+      return;
+    }
+    const upgraded = await prepareExternalPublication(f.file, f.options, deps);
+    expect(upgraded.preview.resumed).toBe(true);
+    expect(upgraded.preview.requests).toEqual(original.preview.requests);
+    expect(upgraded.preview.findings).not.toEqual(original.preview.findings);
+    let migratedPath = "";
+    try {
+      await upgraded.publish();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ExternalPublicationError);
+      migratedPath = (error as ExternalPublicationError).result
+        .savedSubmission!;
+    }
+    const migrated = await readFile(migratedPath, "utf8");
+    const migratedData = JSON.parse(migrated);
+    expect(migratedData.requests).toEqual(saved.requests);
+    expect(migratedData.receipts).toEqual(saved.receipts);
+    nodes.reverse();
+    await writeFile(f.file, JSON.stringify(payload));
+    const reordered = await prepareExternalPublication(f.file, f.options, deps);
+    expect(reordered.preview.resumed).toBe(true);
+    expect(reordered.preview.requests).toEqual(original.preview.requests);
+    migratedData.requests[0].items[0].evidence.description =
+      "Modified saved evidence";
+    await writeFile(migratedPath, JSON.stringify(migratedData));
+    await expect(
+      prepareExternalPublication(f.file, f.options, deps),
+    ).rejects.toThrow("Saved import evidence");
+    await writeFile(migratedPath, migrated);
+    const incomplete = JSON.parse(migrated);
+    delete incomplete.inputProjection.savedEvidenceDigest;
+    await writeFile(migratedPath, JSON.stringify(incomplete));
+    await expect(
+      prepareExternalPublication(f.file, f.options, deps),
+    ).rejects.toThrow("Saved import evidence");
+    await writeFile(migratedPath, migrated);
+    const newer = f.reports.get("sast:occurrence-1")!;
+    newer.version += 1;
+    newer.evidence.description = "Newer Cloud evidence";
+    f.state.failReadback = false;
+    expect((await reordered.publish()).verified).toBe(1);
+    expect(f.posts).toHaveLength(1);
+    expect(f.reports.get("sast:occurrence-1")!.evidence.description).toBe(
+      "Newer Cloud evidence",
+    );
+  },
+);
+
 test.each([
   ["GITHUB", "GITLAB"],
   ["GITLAB", "GITHUB"],
