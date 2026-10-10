@@ -25,12 +25,13 @@ import { runCommand } from "./support/shell.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import { TestClient } from "./support/api-client.js";
 
 const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 const description =
-  'An imported report with a comma, a "quoted value", and Unicode: café.\n\n' +
+  'An imported report with a comma, a "quoted value", and Unicode: café �.\n\n' +
   "The full second paragraph must survive importing and indexing.\n" +
   "A final line describes the reported impact.";
 const sourceOccurrenceIds = [
@@ -165,6 +166,27 @@ async function storedScans(context: Awaited<ReturnType<typeof fixture>>) {
   }>;
 }
 
+test("a rejected import registration keeps existing output in place", async () => {
+  const context = await fixture();
+  const outputDir = join(context.root, "scan");
+  await mkdir(outputDir, { mode: 0o700 });
+  await writeFile(join(outputDir, "previous.txt"), "previous scan\n");
+  await expect(
+    importScan(
+      { ...context.options, outputDir, archiveExisting: true },
+      {
+        ...context.dependencies,
+        runWorkbench: async () => {
+          throw new Error("fixture registration rejected");
+        },
+      },
+    ),
+  ).rejects.toThrow("fixture registration rejected");
+  expect(await readFile(join(outputDir, "previous.txt"), "utf8")).toBe(
+    "previous scan\n",
+  );
+});
+
 test.each(["csv", "json"] as const)(
   "%s import seals every source occurrence and indexes a separate dataset scan",
   async (format) => {
@@ -221,6 +243,9 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
     expect(result.manifest.scan.scope.runtimeStatus).toBe("imported");
     expect(result.coverage.completeness).toBe("unknown");
+    expect(result.coverage.surfaces).toMatchObject([
+      { disposition: "reported" },
+    ]);
     expect(result.turnResult["imported"]).toBe(true);
     expect(result.threadId).toBe("");
     expect(await readFile(result.reportPath, "utf8")).toContain(
@@ -238,10 +263,10 @@ test.each(["csv", "json"] as const)(
       import: { format, sourceRef, findingCount: 2 },
     });
     expect(
-      result.manifest.scan.artifacts.some(
+      result.manifest.scan.artifacts.filter(
         (artifact) => artifact.path === sourceRef,
       ),
-    ).toBe(true);
+    ).toHaveLength(1);
     expect(await readFile(join(result.scanDir, sourceRef), "utf8")).toBe(
       context.source,
     );
@@ -268,6 +293,93 @@ test.each(["csv", "json"] as const)(
     expect(imported.format).toBe(format);
     expect(imported.sourcePath).not.toBe(context.options.sourcePath);
     expect(await readFile(imported.sourcePath, "utf8")).toBe(context.source);
+  },
+);
+
+test.each(["csv", "json"] as const)(
+  "empty %s imports preserve source integrity without claiming an analyzed surface",
+  async (format) => {
+    const context = await fixture(format);
+    const source =
+      format === "csv"
+        ? `${csvColumns.join(",")}\n`
+        : JSON.stringify({ findings: [] });
+    await writeFile(context.options.sourcePath, source);
+    const result = completed(
+      await importScan(context.options, context.dependencies),
+    );
+    expect(result.manifest.scan.status).toBe("completed");
+    expect(result.findings.findings).toEqual([]);
+    expect(result.coverage).toMatchObject({
+      completeness: "unknown",
+      surfaces: [],
+    });
+    const sourceRef = `artifacts/import/source.${format}`;
+    expect(result.manifest.scan["extensions"]).toMatchObject({
+      import: { format, sourceRef, findingCount: 0 },
+    });
+    expect(
+      result.manifest.scan.artifacts.filter(
+        (artifact) => artifact.path === sourceRef,
+      ),
+    ).toHaveLength(1);
+    const retainedSource = join(result.scanDir, sourceRef);
+    expect(await readFile(retainedSource, "utf8")).toBe(source);
+    expect((await storedScans(context))[0]).toMatchObject({
+      status: "complete",
+      occurrence_count: 0,
+    });
+    const manifestPath = join(result.scanDir, "scan-manifest.json");
+    const manifestText = await readFile(manifestPath, "utf8");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        ...result.manifest,
+        scan: {
+          ...result.manifest.scan,
+          artifacts: result.manifest.scan.artifacts.filter(
+            (artifact) => artifact.path !== sourceRef,
+          ),
+        },
+      }),
+    );
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("Import source is missing from sealed artifacts");
+    await writeFile(manifestPath, manifestText);
+    await writeFile(retainedSource, `${source}\n`);
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("sealed artifact changed");
+    await writeFile(retainedSource, source);
+    await loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT });
+    await rm(retainedSource);
+    await expect(
+      loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("expected a file inside the scan directory");
+  },
+);
+
+test.each(["csv", "json"] as const)(
+  "%s import rejects invalid UTF-8 before persistence and preserves valid text",
+  async (format) => {
+    const context = await fixture(format);
+    const source = Buffer.from(`\uFEFF${context.source}`);
+    await writeFile(context.options.sourcePath, source);
+    const workbench = mock(runWorkbench);
+    const dependencies = { ...context.dependencies, runWorkbench: workbench };
+    expect(
+      await importScan({ ...context.options, dryRun: true }, dependencies),
+    ).toMatchObject({ findingCount: 2 });
+    source[source.indexOf(Buffer.from("café"))] = 0xff;
+    await writeFile(context.options.sourcePath, source);
+    for (const dryRun of [false, true]) {
+      await expect(
+        importScan({ ...context.options, dryRun }, dependencies),
+      ).rejects.toThrow(TypeError);
+    }
+    expect(workbench).not.toHaveBeenCalled();
+    expect(await readFile(context.options.sourcePath)).toEqual(source);
   },
 );
 
@@ -496,6 +608,169 @@ test("imports archive prior output without replacing its saved findings", async 
   ).toHaveLength(2);
 });
 
+test.each(["root", "child", "linked", "inverse", "aliased", "aliased-child"])(
+  "archival preserves the active workbench at a %s state path",
+  async (layout) => {
+    const context = await fixture();
+    const outputDir = join(context.root, "results");
+    await mkdir(outputDir, { mode: 0o700 });
+    let stateDirectory =
+      layout === "root"
+        ? outputDir
+        : layout === "inverse"
+          ? context.stateDirectory
+          : join(outputDir, "state");
+    if (layout === "linked" || layout.startsWith("aliased")) {
+      await mkdir(context.stateDirectory, { mode: 0o700 });
+      await symlink(
+        context.stateDirectory,
+        stateDirectory,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
+    if (layout.startsWith("aliased")) {
+      const alias = join(context.root, "alias");
+      await symlink(
+        context.root,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      stateDirectory = join(alias, "results", "state");
+      if (layout === "aliased-child")
+        stateDirectory = join(stateDirectory, "child");
+    }
+    if (layout === "inverse") {
+      const inside = join(outputDir, "state");
+      await mkdir(inside, { mode: 0o700 });
+      await symlink(
+        inside,
+        stateDirectory,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
+    context.dependencies.environment.CODEX_SECURITY_STATE_DIR = stateDirectory;
+    const first = completed(
+      await importScan(
+        {
+          ...context.options,
+          outputDir: join(context.root, "previous"),
+        },
+        context.dependencies,
+      ),
+    );
+    const repository = join(context.root, "repository");
+    await mkdir(repository);
+    await writeFile(
+      join(repository, "example.ts"),
+      "export const value = 1;\n",
+    );
+    const client = new TestClient(context.options.config!, {
+      ...context.dependencies,
+      runWorkbench,
+    });
+    try {
+      await expect(
+        client.run(repository, {
+          mock: true,
+          outputDir,
+          archiveExisting: true,
+        }),
+      ).rejects.toThrow("workbench state or active database");
+      const saved = await runWorkbench(context.workbenchOptions, [
+        "get-scan",
+        "--scan-id",
+        first.manifest.scan.id,
+      ]);
+      expect((saved["scan"] as { scanId: string }).scanId).toBe(
+        first.manifest.scan.id,
+      );
+      expect(await readFile(first.manifestPath, "utf8")).toContain(
+        first.manifest.scan.id,
+      );
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each(["active scan", "missing parent"])(
+  "registration preserves output when rejecting %s",
+  async (reason) => {
+    const context = await fixture();
+    const options = {
+      ...context.options,
+      outputDir: join(context.root, "results"),
+    };
+    const first = completed(await importScan(options, context.dependencies));
+    const manifest = await readFile(first.manifestPath, "utf8");
+    if (reason === "active scan") {
+      const update = await runCommand(
+        context.python,
+        [
+          "-c",
+          "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE scans SET status='running'\"); c.commit()",
+          join(context.stateDirectory, "workbench.sqlite3"),
+        ],
+        { timeout: 30_000 },
+      );
+      expect(update.status, update.stderr).toBe(0);
+    }
+    await expect(
+      importScan(
+        {
+          ...options,
+          archiveExisting: true,
+          ...(reason === "missing parent"
+            ? { parentScanId: "00000000-0000-4000-8000-000000000001" }
+            : {}),
+        },
+        context.dependencies,
+      ),
+    ).rejects.toThrow(
+      reason === "active scan" ? "running scan" : "scan not found",
+    );
+    expect(await readFile(first.manifestPath, "utf8")).toBe(manifest);
+    expect(await storedScans(context)).toHaveLength(1);
+    expect((await storedScans(context))[0]?.scan_dir).toBe(first.scanDir);
+  },
+);
+
+test("registration preserves archived output when its response is lost after commit", async () => {
+  const context = await fixture();
+  const options = {
+    ...context.options,
+    outputDir: join(context.root, "results"),
+  };
+  const first = completed(await importScan(options, context.dependencies));
+  const manifest = await readFile(first.manifestPath, "utf8");
+  const loseRegistrationReply: typeof runWorkbench = async (
+    options,
+    args,
+    input,
+  ) => {
+    const result = await runWorkbench(options, args, input);
+    if (args[0] === "register-cli-scan")
+      throw new Error("Synthetic response lost after commit");
+    return result;
+  };
+  await expect(
+    importScan(
+      { ...options, archiveExisting: true },
+      { ...context.dependencies, runWorkbench: loseRegistrationReply },
+    ),
+  ).rejects.toThrow("Synthetic response lost after commit");
+  const scans = await storedScans(context);
+  expect(scans).toHaveLength(2);
+  const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
+  expect(archived.scan_dir).not.toBe(first.scanDir);
+  expect(
+    await readFile(join(archived.scan_dir, "scan-manifest.json"), "utf8"),
+  ).toBe(manifest);
+  expect(
+    await stat(join(first.scanDir, "scan-manifest.json")).catch(() => null),
+  ).toBeNull();
+});
+
 test.each(["failure", "abort"] as const)(
   "an import %s after registration leaves a terminal saved scan",
   async (mode) => {
@@ -503,7 +778,7 @@ test.each(["failure", "abort"] as const)(
     const controller = new AbortController();
     const run: typeof runWorkbench = async (options, args, input) => {
       if (args[0] === "prepare-scan-completion" && mode === "failure") {
-        throw new Error("Synthetic import completion failure");
+        throw new Error("--synthetic-import-completion-failure");
       }
       const result = await runWorkbench(options, args, input);
       if (args[0] === "register-cli-scan" && mode === "abort")
@@ -521,7 +796,7 @@ test.each(["failure", "abort"] as const)(
       await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
     else
       await expect(operation).rejects.toThrow(
-        "Synthetic import completion failure",
+        "--synthetic-import-completion-failure",
       );
     const scans = await storedScans(context);
     expect(scans).toHaveLength(1);

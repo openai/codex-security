@@ -1,5 +1,9 @@
 const fullGitCommit = /^[0-9a-f]{40}$/u;
 
+/**
+ * @param {{ gitHead?: unknown }} packageJson
+ * @param {string | undefined} expectedGitHead
+ */
 export function assertExpectedGitHead(packageJson, expectedGitHead) {
   if (expectedGitHead === undefined) return;
 

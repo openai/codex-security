@@ -24,7 +24,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 afterEach(cleanup);
 
 const cliClientFactory =
-  (deps: ConstructorParameters<typeof CodexSecurity>[1]) =>
+  (deps: NonNullable<ConstructorParameters<typeof CodexSecurity>[1]>) =>
   (config: CodexSecurityConfig) =>
     new CodexSecurity(config, { ...deps }, { surface: "cli" });
 

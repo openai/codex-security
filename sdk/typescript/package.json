@@ -31,7 +31,8 @@
     "./schemas/project-config.schema.json": "./schemas/project-config.schema.json"
   },
   "bin": {
-    "codex-security": "./bin/codex-security.mjs"
+    "codex-security": "./bin/codex-security.mjs",
+    "cs": "./bin/codex-security.mjs"
   },
   "files": [
     "bin",
@@ -53,7 +54,7 @@
   "scripts": {
     "audit:prod": "pnpm audit --prod --audit-level high",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "node --run clean && node scripts/generate-deep-defaults.mjs && tsc -p tsconfig.build.json && node scripts/generate-project-config-schema.mjs && node scripts/build-dashboard.mjs",
+    "build": "node --run clean && node scripts/generate-deep-defaults.mjs && tsc -p tsconfig.build.json && node scripts/generate-project-config-schema.mjs",
     "build:ci": "tsc -p tsconfig.ci.json",
     "build:evals": "node --run build && tsc -p ../../evals/tsconfig.json",
     "build:examples": "tsc -p tsconfig.examples.json",
@@ -65,7 +66,6 @@
     "generate:models:check": "node scripts/generate-models.cjs --check",
     "lint": "tsc --noEmit",
     "prepack": "node --run build:plugin && node --run build",
-    "start:server": "node dist/server/index.js",
     "test": "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     "test:ci": "node -e \"require('node:fs').mkdirSync('reports',{recursive:true})\" && pnpm run test --coverage --coverage-reporter=text --coverage-reporter=lcov --reporter=junit --reporter-outfile=reports/junit.xml",
     "test:mcp": "node --run build:plugin && pnpm --dir ../../plugins/codex-security/mcp-app run test:mcp",
@@ -77,11 +77,11 @@
     "@inquirer/prompts": "8.7.2",
     "@linear/sdk": "97.0.0",
     "@octokit/core": "7.0.8",
-    "@openai/codex": "0.162.0-alpha.16",
-    "@openai/codex-sdk": "0.162.0-alpha.16",
+    "@openai/codex": "0.162.0",
+    "@openai/codex-sdk": "0.162.0",
     "ajv": "8.20.0",
     "fflate": "0.8.3",
-    "incur": "0.5.1",
+    "incur": "0.7.0",
     "ink": "7.1.1",
     "js-tiktoken": "1.0.21",
     "papaparse": "5.7.0",
@@ -89,33 +89,28 @@
     "react": "19.3.0",
     "semver": "7.8.5",
     "smol-toml": "1.9.0",
-    "string-width": "8.2.2",
+    "string-width": "8.3.0",
+    "strip-ansi": "7.2.0",
     "yaml": "2.9.1",
     "yauzl": "3.4.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@openai/apps-sdk-ui": "0.2.2",
     "@stryker-mutator/core": "10.0.0",
-    "@tailwindcss/postcss": "4.3.3",
     "@types/bun": "1.4.2",
-    "@types/node": "26.6.3",
+    "@types/node": "26.6.4",
     "@types/papaparse": "5.5.2",
     "@types/react": "19.3.0",
-    "@types/react-dom": "19.3.0",
     "@types/semver": "7.8.0",
     "@types/yauzl": "3.4.0",
     "esbuild": "0.28.2",
     "fast-check": "4.10.2",
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "16.0.0",
-    "katex": "0.18.9",
+    "json5": "2.2.3",
     "minimatch": "10.2.6",
-    "postcss": "8.5.28",
     "prettier": "3.9.9",
-    "react-dom": "19.3.0",
     "saxes": "6.0.0",
-    "tailwindcss": "4.3.3",
     "typescript": "7.0.2"
   }
 }

@@ -9,6 +9,7 @@ import re
 import sqlite3
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -18,6 +19,10 @@ import finalize_scan_contract as finalizer
 from workbench_scan_usage import _reject_nonstandard_json_number as reject_nonstandard_json_number
 
 reject_non_finite_json = finalizer._reject_non_finite_json
+
+
+def timestamp_key(value: str) -> datetime:
+    return finalizer.parse_timestamp(value)
 
 
 def require_uuid(value: str, label: str) -> str:
@@ -84,15 +89,6 @@ def _valid_legacy_scan_cost(cost: object) -> bool:
     )
 
 
-def _valid_scan_token_counts(usage: object) -> bool:
-    return (
-        isinstance(usage, dict)
-        and set(usage) == set(SCAN_USAGE_TOKEN_KEYS)
-        and all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
-        and usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] <= usage["inputTokens"]
-    )
-
-
 def _valid_measured_scan_usage(usage: object) -> bool:
     if not isinstance(usage, dict):
         return False
@@ -131,8 +127,10 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
         return False
-    counts = {key: usage.get(key) for key in SCAN_USAGE_TOKEN_KEYS}
-    if not _valid_scan_token_counts(counts):
+    if (
+        not all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
+        or usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
+    ):
         return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:

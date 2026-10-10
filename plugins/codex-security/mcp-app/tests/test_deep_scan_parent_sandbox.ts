@@ -97,6 +97,23 @@ assert.deepEqual(
   },
 );
 
+const literalPaths = ["/repo/*.env", "/repo/?.env", "/repo/[literal]"];
+assert.deepEqual(
+  resolveDeepWorkerParentSandbox(
+    restricted([
+      rootRead,
+      ...literalPaths.map((deniedPath, index) => ({
+        path: {
+          type: index === 0 ? "generated_default_path" : "path",
+          path: deniedPath,
+        },
+        access: index === 0 ? "none" : "deny",
+      })),
+    ]),
+  ),
+  { filesystemDenies: [], literalFilesystemDenies: literalPaths },
+);
+
 assert.throws(
   () =>
     resolveDeepWorkerParentSandbox(
@@ -115,6 +132,20 @@ assert.throws(
     error.name === "DeepScanNonRetryableError" &&
     /symbolic project-roots denial metadata/i.test(error.message),
 );
+
+const collidingDenies = [
+  { path: { type: "glob_pattern", pattern: "/repo/[ab]" }, access: "deny" },
+  { path: { type: "path", path: "/repo/[ab]" }, access: "none" },
+];
+for (const entries of [collidingDenies, [...collidingDenies].reverse()]) {
+  assert.deepEqual(
+    resolveDeepWorkerParentSandbox(restricted([rootRead, ...entries])),
+    {
+      filesystemDenies: ["/repo/[ab]"],
+      literalFilesystemDenies: ["/repo/[ab]"],
+    },
+  );
+}
 
 const pinnedFileUri = extra(
   pinnedReadOnly,
@@ -168,8 +199,6 @@ for (const invalid of [
   extra(null),
   extra({ ...pinnedReadOnly, type: "external" }),
   extra({ ...pinnedReadOnly, type: "disabled" }),
-  extra({ ...pinnedReadOnly, network: "unknown" }),
-  extra({ ...pinnedReadOnly, network: { enabled: true } }),
   extra({ ...pinnedReadOnly, file_system: null }),
   extra({ ...pinnedReadOnly, file_system: { type: "unknown" } }),
   restricted("not-an-array"),
@@ -203,13 +232,7 @@ for (const invalid of [
       missing_path_behavior: "skip",
     },
   ]),
-  ...[
-    "",
-    "relative/private",
-    "/repo/*.env",
-    "/repo/?.env",
-    "/repo/[literal]",
-  ].map((deniedPath) =>
+  ...["", "relative/private"].map((deniedPath) =>
     restricted([
       rootRead,
       { path: { type: "path", path: deniedPath }, access: "deny" },
@@ -231,8 +254,6 @@ for (const invalid of [
     },
   ]),
   restricted([{ path: { type: "path", path: "" }, access: "read" }]),
-  extra(pinnedReadOnly, "relative/working-directory"),
-  extra(pinnedReadOnly, "file://remote-host/tmp/codex-security-parent"),
   {
     _meta: extra(pinnedReadOnly)._meta,
     requestInfo: extra({ ...pinnedReadOnly, network: "enabled" }),

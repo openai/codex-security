@@ -679,9 +679,9 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
-  test("does not expose attacker-controlled keys in validation errors", async () => {
+  test("identifies unusual property names unambiguously in validation errors", async () => {
     const scanDir = await copyExample();
-    const marker = "PRIVATE_JSON_KEY";
+    const marker = 'synthetic/"~\nkey';
     await writeFile(
       join(scanDir, "findings.json"),
       JSON.stringify({ [marker]: 9007199254740992 }),
@@ -696,7 +696,7 @@ describe("canonical scan contract", () => {
 
     expect(thrown).toBeInstanceOf(ContractValidationError);
     expect((thrown as Error).message).toContain("unsafe integer-valued");
-    expect((thrown as Error).message).not.toContain(marker);
+    expect((thrown as Error).message).toContain(`[${JSON.stringify(marker)}]`);
   });
 
   test("accepts valid schemas beyond the previous complexity limit", async () => {
@@ -931,35 +931,28 @@ describe("canonical scan contract", () => {
     expect(stderr).toContain("duplicate artifact path");
   });
 
-  test("rejects calendar-invalid RFC 3339 timestamps", async () => {
+  test.each([
+    ["2026-02-30T18:00:00Z", false],
+    ["0000-01-01T00:00:00Z", false],
+    ["1900-02-29T00:00:00Z", false],
+    ["2026-01-01T24:00:00Z", false],
+    ["2026-01-01T00:00:60Z", false],
+    ["2026-01-01T00:00:00+24:00", false],
+    ["2026-01-01T00:00Z", false],
+    ["2026-05-31t18:09:00z", true],
+    ["0001-01-01T00:00:00Z", true],
+    ["2000-02-29T23:59:59.123456+23:59", true],
+    ["2026-01-01T00:00:00Z\n", false],
+  ] as const)("validates RFC 3339 timestamp %j", async (value, valid) => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-02-30T18:00:00Z";
-    manifest["scan"]["sealedAt"] = "2026-02-30T18:00:00Z";
+    manifest["scan"]["completedAt"] = value;
+    manifest["scan"]["sealedAt"] = value;
     await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("date-time");
-
-    manifest["scan"]["completedAt"] = "0000-01-01T00:00:00Z";
-    manifest["scan"]["sealedAt"] = "0000-01-01T00:00:00Z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("date-time");
-  });
-
-  test("accepts lowercase RFC 3339 separators", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-05-31t18:09:00z";
-    manifest["scan"]["sealedAt"] = "2026-05-31t18:09:00z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toBeDefined();
+    const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    if (valid) await expect(loaded).resolves.toBeDefined();
+    else await expect(loaded).rejects.toThrow("date-time");
   });
 
   test("requires completed and sealed timestamps to match exactly", async () => {
@@ -1112,7 +1105,7 @@ describe("canonical scan contract", () => {
           manifest["scan"]["target"]["remote"] =
             "https://example.com\\@evil.test/repo";
         },
-        "scan.target.remote",
+        "/scan/target/remote",
       ],
     ];
 
@@ -1160,6 +1153,24 @@ describe("canonical scan contract", () => {
     );
   });
 
+  test("identifies the failing schema field and required member", async () => {
+    for (const field of ["severity", "confidence"]) {
+      const scanDir = await copyExample();
+      const path = join(scanDir, "findings.json");
+      const document = await readJson(path);
+      document["findings"][0][field].level = null;
+      await writeJson(path, document);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(`/findings/0/${field}/level`);
+      delete document["findings"][0][field].level;
+      await writeJson(path, document);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow("required property 'level'");
+    }
+  });
+
   test("rejects unsafe and non-finite JSON numbers before contract typing", async () => {
     for (const [field, expected] of [
       ["startLine", "unsafe integer-valued JSON numbers"],
@@ -1186,7 +1197,7 @@ describe("canonical scan contract", () => {
         ];
       }
       if (field === "overflow") {
-        finding["extensions"] = { overflow: 0 };
+        finding["extensions"] = { 'evidence/"~\n': { overflow: 0 } };
       }
       await writeJson(findingsPath, findings);
       let text = await readFile(findingsPath, "utf8");
@@ -1215,6 +1226,10 @@ describe("canonical scan contract", () => {
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
       ).rejects.toThrow(expected);
+      if (field === "overflow")
+        await expect(
+          loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+        ).rejects.toThrow('["extensions"]["evidence/\\"~\\n"]["overflow"]');
     }
   });
 
