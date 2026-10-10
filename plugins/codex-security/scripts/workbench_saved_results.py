@@ -58,6 +58,7 @@ from workbench_budget_candidates import (
     _diff_candidate_decision,
     _diff_candidate_phase_snapshot,
     _diff_candidate_reason,
+    _generated_diff_candidate_decision,
     archive_candidate_payloads,
     archive_resolved_deferred_payloads,
     archive_resolved_diff_payloads,
@@ -745,22 +746,6 @@ def _bind_retained_source_owners(
         if len(owners) == 1:
             _bind_finding_worker(finding, next(iter(owners)))
     return result
-
-
-def _generated_diff_candidate_decision(item: dict[str, Any]) -> bool:
-    candidate = item.get("candidate")
-    if not isinstance(candidate, dict) or item.get("candidateId") != candidate.get("candidate_id"):
-        return False
-    try:
-        decision = _diff_candidate_decision(candidate)
-    except (KeyError, ValueError):
-        return False
-    return (
-        decision is not None
-        and all(item.get(field) == decision[field] for field in ("label", "disposition"))
-        and item.get("notes")
-        in (decision["notes"], _diff_candidate_decision(candidate, legacy_reason=True)["notes"])
-    )
 
 
 def _stopped_diff_candidate_decisions(

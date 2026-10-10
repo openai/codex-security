@@ -4,7 +4,7 @@ import { build } from "esbuild";
 import { importSource } from "../import-module.ts";
 
 export const discoveryPluginRoot = path.resolve(
-  process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT ??
+  process.env["CODEX_SECURITY_TEST_PLUGIN_ROOT"] ??
     path.join(
       import.meta.dirname,
       "../../../../../sdk/typescript/_bundled_plugin",
