@@ -77,14 +77,6 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
     (asset?.["type"] === "CONTAINER_IMAGE"
       ? (text(asset["imageId"]) ?? text(asset["containerImageId"]))
       : null);
-  const updated = text(record["updatedAt"]);
-  const updatedSeconds = updated ? Date.parse(updated) / 1000 : null;
-  if (
-    updatedSeconds !== null &&
-    (!Number.isFinite(updatedSeconds) || updatedSeconds < 0)
-  ) {
-    throw new Error("Wiz updatedAt is not a valid timestamp.");
-  }
   // lastDetectedAt is not proof that the entire vendor record was updated.
   const evidence = {
     title:
@@ -116,8 +108,7 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
     code_revision: null,
     source_scan_id: null,
     image_digests: digest ? [digest] : [],
-    source_updated_at:
-      updatedSeconds === null ? null : Math.floor(updatedSeconds),
+    source_updated_at: updatedAt(record["updatedAt"], "updatedAt"),
     source_data: record,
   };
   return {

@@ -190,6 +190,13 @@ function sameFindingSelection(
   );
 }
 
+async function readOptionalFile(path: string): Promise<string | undefined> {
+  return readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+}
+
 async function writeAtomicJson(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
@@ -442,29 +449,14 @@ export async function prepareExternalPublication(
   ])) {
     if (legacyKey === key) continue;
     const legacyPath = join(state, `${legacyKey}.pending.json`);
-    const captured = await readFile(legacyPath, "utf8").catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return undefined;
-        throw error;
-      },
-    );
+    const captured = await readOptionalFile(legacyPath);
     if (captured !== undefined) {
       // Preserve requests staged by the earlier locale-based filename format.
       // Hold both publication locks while moving the original checkpoint.
       await withImportLock(state, key, dependencies.signal, async () =>
         withImportLock(state, legacyKey, dependencies.signal, async () => {
-          const current = await readFile(pendingPath, "utf8").catch(
-            (error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOENT") return undefined;
-              throw error;
-            },
-          );
-          const serialized = await readFile(legacyPath, "utf8").catch(
-            (error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOENT") return undefined;
-              throw error;
-            },
-          );
+          const current = await readOptionalFile(pendingPath);
+          const serialized = await readOptionalFile(legacyPath);
           if (current !== undefined) {
             recovered = validateSaved(current);
             if (serialized !== undefined) {
@@ -526,13 +518,9 @@ export async function prepareExternalPublication(
       );
     }
   }
-  let saved: SavedSubmission | undefined = recovered;
-  try {
-    const serialized = await readFile(pendingPath, "utf8");
-    saved = validateSaved(serialized);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
+  const serialized = await readOptionalFile(pendingPath);
+  const saved =
+    serialized === undefined ? recovered : validateSaved(serialized);
   if (saved) {
     const content = saved;
     for (const submission of content.requests) {
@@ -540,12 +528,7 @@ export async function prepareExternalPublication(
         // The old request is never sent after reset. A subsequent explicit
         // invocation prepares a fresh submission and asks for approval again.
         await withImportLock(state, key, dependencies.signal, async () => {
-          const current = await readFile(pendingPath, "utf8").catch(
-            (error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOENT") return undefined;
-              throw error;
-            },
-          );
+          const current = await readOptionalFile(pendingPath);
           if (
             current !== undefined &&
             sameSubmission(JSON.parse(current) as SavedSubmission, content)
@@ -679,12 +662,7 @@ export async function prepareExternalPublication(
       progress({ phase: "waiting", completed: 0 });
       return await withImportLock(state, key, dependencies.signal, async () => {
         // Re-read under the lock to keep checkpoints from another publisher.
-        const pending = await readFile(pendingPath, "utf8").catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return undefined;
-            throw error;
-          },
-        );
+        const pending = await readOptionalFile(pendingPath);
         const current =
           pending === undefined
             ? submission
