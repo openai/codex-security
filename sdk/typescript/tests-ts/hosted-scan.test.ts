@@ -892,7 +892,7 @@ test.each(["cancel", "disconnect", "signal"])(
 );
 
 test.each(["result", "error"])(
-  "disconnect interrupts a blocked terminal %s without a second response",
+  "output closure interrupts a blocked terminal %s without a second response",
   async (terminal) => {
     const input = new PassThrough();
     const writing = Promise.withResolvers<void>();
@@ -919,8 +919,9 @@ test.each(["result", "error"])(
     );
     await writing.promise;
     input.end();
+    output.destroy();
     try {
-      expect(await finished).toBe(terminal === "result" ? 0 : 2);
+      expect(await finished).toBe(2);
       expect(output.destroyed).toBe(true);
       expect(writes).toBe(1);
     } finally {

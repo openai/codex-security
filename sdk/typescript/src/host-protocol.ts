@@ -60,6 +60,7 @@ export async function runHostProtocol(
   const controller = new AbortController();
   let runId: string | number | undefined;
   let terminalCode: number | undefined;
+  let completed = false;
   let pending:
     | {
         id: string;
@@ -68,18 +69,29 @@ export async function runHostProtocol(
         onProgress?: (event: unknown) => void;
       }
     | undefined;
-  const { promise: completion, resolve: complete } =
+  const { promise: completion, resolve: resolveCompletion } =
     Promise.withResolvers<number>();
+  const complete = (code: number) => {
+    if (completed) return;
+    completed = true;
+    resolveCompletion(code);
+  };
   const stopOutput = (code: number) => {
-    if (output instanceof Writable) output.destroy();
+    if (completed) return;
     complete(code);
+    if (output instanceof Writable) {
+      // Native stdout can emit close repeatedly when destroy() is called from
+      // its close listener. Detach before destroying, even before cleanup runs.
+      output.off("close", outputClosed);
+      output.destroy();
+    }
   };
   const lines = createInterface({
     input,
     crlfDelay: Infinity,
     terminal: false,
   });
-  const send = async (message: object) => {
+  const send = async (message: object, onFlushed?: () => void) => {
     const line = `${JSON.stringify(message)}\n`;
     if (output instanceof Writable) {
       if (output.destroyed) throw new Error("Host output is closed.");
@@ -89,6 +101,10 @@ export async function runHostProtocol(
           if (settled) return;
           settled = true;
           output.off("close", closed);
+          // Node can emit error/close before the rejected Promise is observed.
+          // Record the failed write now, so the selected result cannot win.
+          if (error) outputError(error);
+          else onFlushed?.();
           error ? reject(error) : resolve();
         };
         const closed = () =>
@@ -96,7 +112,10 @@ export async function runHostProtocol(
         output.once("close", closed);
         output.write(line, settle);
       });
-    } else output.write(line);
+    } else {
+      output.write(line);
+      onFlushed?.();
+    }
   };
   const fail = (
     code: number,
@@ -104,7 +123,11 @@ export async function runHostProtocol(
     canWrite = true,
     data?: object,
   ) => {
-    if (terminalCode !== undefined) return;
+    if (completed) return;
+    if (terminalCode !== undefined) {
+      if (!canWrite) stopOutput(2);
+      return;
+    }
     terminalCode = 2;
     controller.abort(new Error(message));
     pending?.reject(new Error(message));
@@ -128,13 +151,14 @@ export async function runHostProtocol(
       .then(() => complete(2));
   };
   const disconnected = () => {
-    // A peer can close stdin after reading the terminal response but before its
-    // write callback runs. Preserve the outcome without waiting on that peer.
-    if (terminalCode !== undefined) stopOutput(terminalCode);
-    else fail(-32000, "Host disconnected before the run completed.");
+    // Stdin EOF does not close stdout. If a terminal response is already being
+    // written, its callback decides whether delivery succeeded.
+    if (terminalCode === undefined)
+      fail(-32000, "Host disconnected before the run completed.");
   };
   const inputError = (error: Error) => fail(-32000, error.message);
   const outputError = (error: Error) => fail(-32000, error.message, false);
+  const outputClosed = () => outputError(new Error("Host output is closed."));
   const interrupted = () => {
     if (terminalCode !== undefined) stopOutput(2);
     else fail(-32800, `${operation.label} canceled.`);
@@ -160,7 +184,7 @@ export async function runHostProtocol(
   };
   input.on("error", inputError);
   input.on("close", disconnected);
-  if (output instanceof Writable) output.on("close", disconnected);
+  if (output instanceof Writable) output.on("close", outputClosed);
   lines.on("close", disconnected);
   lines.on("error", inputError);
   output.on?.("error", outputError);
@@ -219,10 +243,12 @@ export async function runHostProtocol(
         .then(
           async (result) => {
             if (terminalCode !== undefined) return;
-            terminalCode = result.status === "completed" ? 0 : 1;
+            const code = result.status === "completed" ? 0 : 1;
+            terminalCode = code;
             try {
-              await send({ jsonrpc: "2.0", id: runId, result });
-              complete(terminalCode);
+              await send({ jsonrpc: "2.0", id: runId, result }, () =>
+                complete(code),
+              );
             } catch {
               complete(2);
             }
@@ -280,7 +306,7 @@ export async function runHostProtocol(
     input.removeListener("error", inputError);
     input.removeListener("close", disconnected);
     if (output instanceof Writable)
-      output.removeListener("close", disconnected);
+      output.removeListener("close", outputClosed);
     output.off?.("error", outputError);
     signal?.removeEventListener("abort", interrupted);
   }
