@@ -116,13 +116,15 @@ test("Node output close after a successful terminal flush preserves success", as
 });
 
 test.each(["cancel", "disconnect"])(
-  "Node blocked execution pipe terminates on %s without recursive stdout teardown",
+  "Node queued stdout execution write terminates on %s without recursive teardown",
   async (action) => {
-    const host = launch("blocked-execution");
+    const host = launch("queued-execution");
     try {
-      const writing = once(host.child.stdout, "readable");
       host.send(run);
-      await writing;
+      expect(await host.lines.next()).toEqual({
+        value: '{"queued":true}',
+        done: false,
+      });
       if (action === "cancel")
         host.send({
           jsonrpc: "2.0",

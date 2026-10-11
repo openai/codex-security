@@ -33,13 +33,23 @@ if (scenario === "cli") {
               },
             })
           : process.stdout;
+  // Windows stdout pipes write synchronously. Hold a native queued write
+  // without blocking the event loop that must receive cancellation.
+  if (scenario === "queued-execution") output.cork();
   const code = await runHostProtocol(process.stdin, output, {
     label: "Scan",
     requestMethod: "execution.run",
     awaitCancellationReceipt: true,
     async run(_params, execute) {
-      if (scenario === "blocked-execution")
-        await execute("request-1", { payload: "x".repeat(16 * 1024 * 1024) });
+      if (scenario === "queued-execution") {
+        const execution = execute("request-1", {
+          payload: "synthetic request",
+        });
+        process.stderr.write(
+          JSON.stringify({ queued: output.writableLength > 0 }) + "\n",
+        );
+        await execution;
+      }
       return { status: process.argv[3] ?? "completed" };
     },
   });
