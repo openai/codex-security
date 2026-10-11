@@ -165,55 +165,78 @@ reasoning-summary configuration.
 
 ## Generate a security policy
 
-`policy` drafts `SECURITY.md` guidance for later scans. Review the draft before
-copying it into the checkout; the command saves it outside the repository.
+Use `policy` to draft or update `SECURITY.md` before a scan. The policy describes
+the project's security boundaries and what should count as a finding. This step
+is optional: you can scan with an existing policy or without one.
+
+From the repository root, run:
 
 ```bash
 codex-security policy .
-codex-security policy . --path services/api
-codex-security policy . --knowledge-base architecture.md --model gpt-5.6-terra --effort high
-codex-security policy . --dry-run --json
 ```
 
-The repository defaults to the current directory. `--path` selects a component,
-which inherits policies from its Git root, with the closest policy taking
-precedence. Targets and links stay within the checkout and outside Git metadata.
-Inherited policies may refer to ancestor `SECURITY.md` files or the checkout's
-`.github/SECURITY.md` and `docs/SECURITY.md`; they cannot widen a component's scope.
-Linked worktrees and initialized submodules use their own roots. For a separate
-Git directory, set `core.worktree` to the checkout's absolute path; use
-`git worktree repair` for moved linked worktrees.
+The command saves a draft outside the repository and leaves existing files
+unchanged. In a terminal, it asks about facts the source cannot establish and
+shows the proposed diff.
+
+1. Read the saved `SECURITY.md`, diff, and **Review notes**. Edit the draft as
+   needed. Preserve reporting instructions and confirm exclusions, accepted
+   risks, and severity decisions with the project owner.
+2. If you choose to use the draft, copy only the reviewed `SECURITY.md` to the
+   displayed **Policy target**. Keep the supporting documents outside the
+   repository.
+3. Run `codex-security scan .`. The scan reads the policy from the repository.
+
+If you reject the draft, skip the copy and scan with your existing policy or
+without one. If the command reports that `SECURITY.md` is already up to date, no
+copy is needed; review any notes and continue to the scan.
+
+You can leave answers blank during generation. Keep unresolved decisions
+explicit in any policy you adopt, or scan without adopting the draft while you
+resolve them. Regenerate if relevant source or neighboring policies changed
+during generation.
+
+### Existing policies and components
+
+If your existing root or component `SECURITY.md` already describes the relevant
+security boundaries, scan with it directly. To propose an update, use `policy .`
+for the root policy or select a component:
+
+```bash
+codex-security policy . --path services/api
+```
+
+This drafts `services/api/SECURITY.md`, whether or not that file already exists.
+The repository defaults to the current directory. A component inherits policies
+from its Git root, with the closest policy taking precedence. Inherited policies
+may refer to ancestor `SECURITY.md` files or the checkout's `.github/SECURITY.md`
+and `docs/SECURITY.md`; they cannot widen the component's scope.
+
+A `.github/SECURITY.md` or `docs/SECURITY.md` often describes how to report
+vulnerabilities. Keep those instructions: these files do not automatically
+provide repository-wide scan guidance. Use a root `SECURITY.md` for that guidance,
+or a component `SECURITY.md` for guidance specific to that directory. Before
+replacing the policy target, check whether either reporting file links to it;
+the replacement can affect their guidance too.
+
+### Generation options and saved files
 
 Generation describes the system, builds a threat model, then drafts the policy.
-In a terminal it asks about facts the source cannot establish and previews the
-diff. `--headless` skips questions; unanswered questions remain in review notes.
-The command uses scan authentication and read-only access to the selected source.
-It denies Git metadata and sibling-component access, disables network, web, apps,
-and MCP, and uses only Codex's core shell environment. Knowledge-base text stays
-in private review artifacts during generation and is removed afterward.
+Add context with `--knowledge-base`:
 
-| Invocation                   | Result                                                    |
-| ---------------------------- | --------------------------------------------------------- |
-| `policy .`                   | Generate documents, ask questions, and preview the draft. |
-| `policy . --headless --json` | Generate without prompts; return paths and review notes.  |
-| `policy . --format md`       | Generate and write the draft to stdout.                   |
-| `policy . --dry-run --json`  | Check local inputs without calling Codex.                 |
+```bash
+codex-security policy . --knowledge-base architecture.md
+```
 
-Generation currently fails on Unix directories with non-UTF-8 names. On macOS,
-the bundled runtime does not fully enforce write restrictions under `/tmp`
-(including `/private/tmp`); keep source and artifacts elsewhere when read-only
-enforcement is required. See the
-[upstream sandbox issue](https://github.com/openai/codex/issues/32395).
+| Invocation                   | Result                                                   |
+| ---------------------------- | -------------------------------------------------------- |
+| `policy . --headless --json` | Generate without prompts; return paths and review notes. |
+| `policy . --format md`       | Generate and write the draft to stdout.                  |
+| `policy . --dry-run --json`  | Check local inputs without calling Codex.                |
 
-### Review the draft
-
-Preserve reporting instructions and obtain owner approval for exclusions,
-accepted risks, and severity decisions. Check linked `.github/SECURITY.md` and
-`docs/SECURITY.md` files: installing the draft can affect their guidance too.
-Regenerate if relevant source or neighboring policies changed during generation.
-
-Use an empty output directory outside every enclosing checkout and its Git
-metadata, or keep the default location in the Codex Security state directory:
+`--headless` leaves unanswered questions in the review notes. By default, files
+go in the Codex Security state directory. To choose a location, use an empty
+directory outside every enclosing checkout and its Git metadata:
 
 ```bash
 codex-security policy . --path services/api --headless \
@@ -236,6 +259,24 @@ completed-draft manifest is written. A preview failure reports saved paths.
 `--json` includes status and estimated cost. `--full-output` reports failures
 with `ok: false`. If a stage cannot inspect required evidence, generation stops
 and keeps completed documents. Fix the problem and retry in a new directory.
+
+### Source access and restrictions
+
+The command uses scan authentication and read-only access to the selected source.
+It denies Git metadata and sibling-component access, disables network, web, apps,
+and MCP, and uses only Codex's core shell environment. Knowledge-base text stays
+in private review artifacts during generation and is removed afterward.
+
+Targets and links stay within the checkout and outside Git metadata. Linked
+worktrees and initialized submodules use their own roots. For a separate Git
+directory, set `core.worktree` to the checkout's absolute path; use
+`git worktree repair` for moved linked worktrees.
+
+Generation currently fails on Unix directories with non-UTF-8 names. On macOS,
+the bundled runtime does not fully enforce write restrictions under `/tmp`
+(including `/private/tmp`); keep source and artifacts elsewhere when read-only
+enforcement is required. See the
+[upstream sandbox issue](https://github.com/openai/codex/issues/32395).
 
 ### Generate a policy from TypeScript
 

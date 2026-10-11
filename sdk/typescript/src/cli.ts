@@ -3336,7 +3336,7 @@ export async function main(
     },
   })
     .command("policy", {
-      description: "Draft SECURITY.md guidance for review.",
+      description: "Draft SECURITY.md for review.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3367,11 +3367,11 @@ export async function main(
         headless: z
           .boolean()
           .default(false)
-          .describe("Skip owner questions and authentication prompts."),
+          .describe("Skip questions and sign-in prompts."),
         dryRun: z
           .boolean()
           .default(false)
-          .describe("Validate local generation inputs without starting Codex."),
+          .describe("Check inputs without generating a policy."),
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         provider: PROVIDER_OPTION.describe(
@@ -3387,7 +3387,9 @@ export async function main(
         { args: { repository: "." }, options: { path: "services/api" } },
       ],
       hint:
-        "Save a draft for review:\n" +
+        "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.\n" +
+        "Your existing policy stays unchanged until you replace it.\n\n" +
+        "Save a draft without answering questions:\n" +
         "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])

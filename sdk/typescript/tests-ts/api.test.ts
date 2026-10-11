@@ -1085,8 +1085,10 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
     for (const model of [
       "gpt-6-astra",
+      "gpt-6-sol",
       "gpt-6.1-sol",
       "gpt-6-luna",
+      "openai.gpt-6-sol",
       "openai.gpt-6.1-sol",
       "openai.gpt-6-luna",
     ]) {

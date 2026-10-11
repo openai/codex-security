@@ -67,6 +67,9 @@ describe("CLI help", () => {
     for (const command of ["login", "policy .", "scan .", "findings"]) {
       expect(text).toContain(`  codex-security ${command}`);
     }
+    expect(text.indexOf("codex-security policy .")).toBeLessThan(
+      text.indexOf("codex-security scan ."),
+    );
     expect(text).toContain("<command> --help");
   });
 

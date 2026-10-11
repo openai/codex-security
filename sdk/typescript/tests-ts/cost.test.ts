@@ -218,6 +218,45 @@ describe("scan cost", () => {
       },
     });
   });
+  test.each(["gpt-6-sol", "openai.gpt-6-sol"])(
+    "prices every token category and both context ranges for %s",
+    (model) => {
+      expect(
+        estimateScanCost(model, {
+          input_tokens: 1_000_000,
+          cached_input_tokens: 200_000,
+          cache_write_input_tokens: 300_000,
+          output_tokens: 100_000,
+        }),
+      ).toEqual({
+        model,
+        inputTokens: 1_000_000,
+        cachedInputTokens: 200_000,
+        cacheWriteInputTokens: 300_000,
+        outputTokens: 100_000,
+        estimatedUsd: 2.79,
+        estimatedUsdRange: { min: 2.79, max: 5.08, context: "unknown" },
+        pricing: {
+          source: "https://developers.openai.com/api/docs/models/gpt-6-sol",
+          asOf: "2026-10-10",
+          serviceTier: "standard",
+          context: "short",
+          usdPerMillionTokens: {
+            input: 2,
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            output: 10,
+          },
+          longContextUsdPerMillionTokens: {
+            input: 4,
+            cacheRead: 0.4,
+            cacheWrite: 5,
+            output: 15,
+          },
+        },
+      });
+    },
+  );
   test.each([
     [{ cache_write_tokens: 15 }, 15],
     [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],

@@ -196,6 +196,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  codexExecutableReadPaths,
   createIsolatedHome,
   executablePathForSpawn,
   expandHome,
@@ -1029,6 +1030,10 @@ export class CodexSecurity {
         runtime.plugin.pluginRoot,
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
       ].filter((path, index, roots) => roots.indexOf(path) === index);
+      const policyFilesystem = policyFilesystemPermissions(
+        inputs.gitMetadataPaths,
+        await codexExecutableReadPaths(this.#codexCommand().command),
+      );
       const { codex } = await this.#createSessionCodex(
         session,
         "policy",
@@ -1044,12 +1049,10 @@ export class CodexSecurity {
         options.auth,
         undefined,
         policyCodexConfig(session.sessionConfig),
-        inputs.gitMetadataPaths.length === 0
-          ? []
-          : [
-              // CLI override keys split on dots, so keep paths inside the TOML value.
-              `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
-            ],
+        [
+          // CLI override keys split on dots, so keep paths inside the TOML value.
+          `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystem)}`,
+        ],
       );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
@@ -4734,10 +4737,13 @@ export function scanRuntimeCodexConfig(
 
 function policyFilesystemPermissions(
   gitMetadataPaths: readonly string[] = [],
+  codexPaths: readonly string[] = [],
 ): JsonObject {
   return {
     ":minimal": "read",
     ":workspace_roots": "read",
+    // Linux's sandbox re-executes Codex, including installations outside /usr.
+    ...Object.fromEntries(codexPaths.map((path) => [path, { ".": "read" }])),
     // A scoped "." keeps native permission paths literal, including glob characters.
     ...Object.fromEntries(
       gitMetadataPaths.map((path) => [path, { ".": "deny" }]),
