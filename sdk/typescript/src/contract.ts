@@ -716,7 +716,7 @@ function portableRelativePath(value: string, context: string): string {
   return normalized;
 }
 
-function safeScopePath(value: string): string {
+export function safeScopePath(value: string): string {
   return value === "."
     ? value
     : safeRelativePath(value, "manifest scope include path");

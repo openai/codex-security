@@ -116,7 +116,11 @@ Significant whitespace is preserved; `" service "` and `" "` do not select
 `"service"` or the repository. An explicit empty string is invalid. Paths use the
 ordinary CLI target resolver's filename semantics, with repository-relative
 paths required here. They are normalized, deduplicated and sorted without
-changing filename characters. Every selected path must exist and remain inside
+changing filename characters. Preparation also checks the existing output
+contract: scope paths must be valid UTF-8 and cannot contain control characters,
+backslashes, or start with a drive prefix such as `C:`. Incompatible filenames
+fail before executor dispatch, including on POSIX where those files may exist.
+Every selected path must exist and remain inside
 the repository at the frozen revision before any execution request. Missing paths fail the whole
 request; the CLI never skips them or broadens the scope. Canonical path aliases
 are rejected with an actionable correction. Diff, Deep, resume, mock, local

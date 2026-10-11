@@ -128,12 +128,43 @@ test.each([
   "/tmp",
   "",
   "nul\0path",
+  "C:part.ts",
+  "tab\tname.ts",
+  "line\nname.ts",
+  "invalid\ud800.ts",
   "../src",
   "src/../other",
   ...(process.platform === "win32" ? ["C:/src", "C:src", "a\\..\\b"] : []),
 ])("rejects unsupported scope %p", (path) =>
   expect(() => normalizeHostedScope(path)).toThrow(),
 );
+
+for (const path of ["C:part.ts", "tab\tname.ts", "line\nname.ts"]) {
+  test.skipIf(process.platform === "win32")(
+    `rejects tracked contract-incompatible scope ${JSON.stringify(path)} before execution`,
+    async () => {
+      const input = await fixture([path]);
+      input.scope = { paths: [path] };
+      let calls = 0;
+      await expect(
+        runHostedScan(input, {
+          executor: {
+            async run(request) {
+              calls++;
+              await writeDraft(request);
+              return {
+                requestId: request.requestId,
+                status: "completed",
+                sessionId: "incompatible-scope",
+              };
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ reason: "scope_syntax" });
+      expect(calls).toBe(0);
+    },
+  );
+}
 
 test.each([
   {
@@ -500,27 +531,36 @@ test("malformed run input returns one protocol error", async () => {
   expect(messages[0].error.code).toBe(-32602);
 });
 
-test("a missing scope has a typed preparation error and never asks for execution", async () => {
-  const params = await fixture();
-  params.scope!.paths = ["missing"];
-  const input = new PassThrough();
-  const output = new PassThrough();
-  let text = "";
-  output.on("data", (chunk) => {
-    text += chunk.toString();
-  });
-  const completed = runHostedScanProtocol(input, output);
-  input.write(
-    JSON.stringify({ jsonrpc: "2.0", id: "run", method: "run", params }) + "\n",
-  );
-  expect(await completed).toBe(2);
-  const messages = text
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(messages).toHaveLength(1);
-  expect(messages[0].error.data).toEqual({ reason: "scope_missing" });
-});
+test.each([
+  { path: "missing", reason: "scope_missing" },
+  { path: "C:part.ts", reason: "scope_syntax" },
+  { path: "tab\tname.ts", reason: "scope_syntax" },
+  { path: "line\nname.ts", reason: "scope_syntax" },
+])(
+  "scope %p has a typed preparation error and never asks for execution",
+  async ({ path, reason }) => {
+    const params = await fixture();
+    params.scope!.paths = [path];
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let text = "";
+    output.on("data", (chunk) => {
+      text += chunk.toString();
+    });
+    const completed = runHostedScanProtocol(input, output);
+    input.write(
+      JSON.stringify({ jsonrpc: "2.0", id: "run", method: "run", params }) +
+        "\n",
+    );
+    expect(await completed).toBe(2);
+    const messages = text
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(messages).toHaveLength(1);
+    expect(messages[0].error.data).toEqual({ reason });
+  },
+);
 
 test.each([
   { args: ["scan", "--host=true"] },

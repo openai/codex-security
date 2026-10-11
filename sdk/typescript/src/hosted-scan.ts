@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { readScanFile } from "./contract.js";
+import { readScanFile, safeScopePath } from "./contract.js";
 import { isRecord } from "./record.js";
 import { VERSION } from "./version.js";
 import {
@@ -75,7 +75,14 @@ export function normalizeHostedScope(path: string): string {
   const normalized = parts
     .filter((part) => part !== "" && part !== ".")
     .join("/");
-  return normalized || ".";
+  try {
+    return safeScopePath(normalized || ".");
+  } catch {
+    throw new HostedScanPreparationError(
+      "scope_syntax",
+      `${JSON.stringify(path)} cannot be used as scan scope: the output contract requires UTF-8 repository-relative paths without drive prefixes, backslashes, or control characters.`,
+    );
+  }
 }
 
 function comparePaths(left: string, right: string): number {
