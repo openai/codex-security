@@ -23,7 +23,6 @@ import { prepareScanPublication } from "../src/publication.js";
 import { recordPublishedIssues } from "../src/publication-store.js";
 import type {
   CoverageDocument,
-  Finding,
   FindingsDocument,
   ScanManifest,
 } from "../src/models.js";
@@ -56,13 +55,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-publication-integration-",
 );
 
-interface PublicationFixture {
-  python: string;
-  scanDirectory: string;
-  stateDirectory: string;
-  environment: NodeJS.ProcessEnv;
-  findings: Finding[];
-}
+type PublicationFixture = Awaited<ReturnType<typeof fixture>>;
 
 interface PromptFinding {
   findingId: string;
@@ -91,7 +84,7 @@ interface StoredPublication {
 
 afterEach(cleanup);
 
-async function fixture(count: number): Promise<PublicationFixture> {
+async function fixture(count: number) {
   const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
   const stateDirectory = join(root, "state");

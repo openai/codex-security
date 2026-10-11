@@ -1,3 +1,4 @@
+import { readSubprocess } from "./support/shell.js";
 import { parseJsonLines } from "./support/json.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -80,11 +81,7 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
         stderr: "pipe",
         timeout: 30_000,
       });
-      const [status, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ]);
+      const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(0);
       const response = parseJsonLines<{ id?: number; result?: unknown }>(
         stdout,

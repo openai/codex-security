@@ -927,5 +927,10 @@ class ScanFixtureTestCase(TestCase):
     def read_json(self, name: str) -> dict[str, object]:
         return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
 
+    def write_json(self, relative_path: str, payload: object) -> None:
+        path = self.scan_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()

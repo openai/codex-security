@@ -145,11 +145,6 @@ The extraction root is not enforced.
             encoding="utf-8",
         )
 
-    def write_json(self, relative_path: str, payload: object) -> None:
-        path = self.scan_dir / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
     def completion_binding(self) -> dict[str, object]:
         return {
             "scanId": "scan_001",

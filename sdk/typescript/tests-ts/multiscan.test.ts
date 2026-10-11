@@ -51,11 +51,7 @@ const testPosix = process.platform === "win32" ? test.skip : test;
 
 afterEach(cleanup);
 
-async function fixture(): Promise<{
-  root: string;
-  input: string;
-  output: string;
-}> {
+async function fixture() {
   const root = await temporaryDirectory();
   return {
     root,
@@ -70,11 +66,7 @@ function git(repository: string, ...args: string[]): string {
   }).trim();
 }
 
-async function repository(
-  root: string,
-  name: string,
-  objectFormat = "sha1",
-): Promise<{ path: string; revision: string }> {
+async function repository(root: string, name: string, objectFormat = "sha1") {
   const path = join(root, name);
   await mkdir(join(path, "src"), { recursive: true });
   await writeFile(

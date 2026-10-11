@@ -13,7 +13,6 @@ import {
 } from "../src/auth.js";
 import { PluginBootstrapError } from "../src/index.js";
 import { runCodexCommand } from "../src/runtime.js";
-import type { CodexCommand } from "../src/index.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
@@ -24,10 +23,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 
 afterEach(cleanup);
 
-async function fakeCodex(): Promise<{
-  command: CodexCommand;
-  environment: NodeJS.ProcessEnv;
-}> {
+async function fakeCodex() {
   const root = await temporaryDirectory();
   const script = join(root, "codex.mjs");
   await writeFile(

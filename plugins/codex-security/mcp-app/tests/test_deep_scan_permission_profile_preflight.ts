@@ -1,3 +1,4 @@
+import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import { readJson, readJsonLines } from "./support/json.ts";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 interface PreflightFixture {
@@ -1102,7 +1103,6 @@ if (scenario.inheritStdio) {
   writeFileSync(scenario.descendantPidPath, String(descendant.pid));
   descendant.unref();
 }
-let buffer = "";
 let catalogIndex = 0;
 if (scenario.ignoreTermination) setInterval(() => {}, 1_000);
 
@@ -1110,20 +1110,8 @@ process.on("SIGTERM", () => {
   writeFileSync(scenario.terminatedPath, "SIGTERM");
   if (!scenario.ignoreTermination) process.exit(0);
 });
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  while (true) {
-    const newline = buffer.indexOf("\\n");
-    if (newline < 0) return;
-    const line = buffer.slice(0, newline).trim();
-    buffer = buffer.slice(newline + 1);
-    if (!line) continue;
-    const message = JSON.parse(line);
-    appendFileSync(scenario.callsPath, JSON.stringify(message) + "\\n");
-    handle(message);
-  }
-});
+${jsonLineInputSource(`    appendFileSync(scenario.callsPath, JSON.stringify(message) + "\\n");
+    handle(message);`)}
 process.stdin.on("end", () => {
   writeFileSync(scenario.terminatedPath, "stdin-end");
   if (!scenario.ignoreTermination) process.exit(0);

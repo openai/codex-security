@@ -69,14 +69,7 @@ type SarifDocument = {
   }>;
 };
 
-type ScanFixture = {
-  python: string;
-  repository: string;
-  stateDir: string;
-  scanDir: string;
-  scanId: string;
-  registration: Record<string, unknown>;
-};
+type ScanFixture = Awaited<ReturnType<typeof startDraftScan>>;
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-scan-recovery-",
@@ -99,7 +92,7 @@ async function workbench(
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
   recipeFromStdin = false,
-): Promise<ScanFixture> {
+) {
   const root = await temporaryDirectory();
   const python =
     process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
@@ -148,13 +141,13 @@ async function startDraftScan(
     }
   }
 
-  const fixture: ScanFixture = {
+  const fixture = {
     python: python!,
     repository: target,
     stateDir: join(root, "state"),
     scanDir,
     scanId: "",
-    registration: {},
+    registration: {} as Record<string, unknown>,
   };
   const recipe = JSON.stringify({
     config: {},
