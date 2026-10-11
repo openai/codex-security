@@ -52,6 +52,18 @@ const result = await runHostedScan(
     },
   },
 );
+
+// These host methods are application code, outside the CLI.
+await host.persistReceipt(result);
+if (result.status === "completed") {
+  // Check the frozen identity/scope and artifact paths, hashes, sizes and seals.
+  await host.verifyAndAcceptArtifacts(result);
+} else if (result.status === "acceptance_unknown") {
+  // Look up the existing attempt/session; do not call runHostedScan again.
+  await host.reconcileExecution(result.identity, result.execution);
+}
+// incomplete, failed and canceled receipts remain recorded but are not accepted
+// completed scans. Persistence retries reuse this receipt without more inference.
 ```
 
 The function creates and closes its scan client internally, reusing the ordinary
@@ -98,9 +110,14 @@ parameters below. IDs are strings or safe integers from -9007199254740991 throug
 
 Omit `scope` to scan the entire repository, matching the local CLI default.
 `{"paths":["."]}` also means the repository. An explicit empty list is invalid;
-root cannot be mixed with narrower paths. Paths are normalized, deduplicated and
-sorted. Every selected path must exist and remain inside the repository at the
-frozen revision before any execution request. Missing paths fail the whole
+root cannot be mixed with narrower paths. Each entry is one literal filename or
+directory: `app/[slug]/page.tsx` and `reports/a,b.ts` are not patterns or lists.
+Significant whitespace is preserved; `" service "` and `" "` do not select
+`"service"` or the repository. An explicit empty string is invalid. Paths use the
+ordinary CLI target resolver's filename semantics, with repository-relative
+paths required here. They are normalized, deduplicated and sorted without
+changing filename characters. Every selected path must exist and remain inside
+the repository at the frozen revision before any execution request. Missing paths fail the whole
 request; the CLI never skips them or broadens the scope. Canonical path aliases
 are rejected with an actionable correction. Diff, Deep, resume, mock, local
 workflow and post-scan execution are unsupported in this hosted Standard API.
@@ -117,7 +134,28 @@ required `params.requestId`. Params contain `version: 2`, normalized
   inference credentials.
 
 The CLI and executor must share these filesystem paths or explicitly transfer
-the same state. Run the plugin stdio server from
+the same state. This includes:
+
+- The frozen checkout and matching `pluginRoot` tree, including its executable
+  helpers, skills, and MCP server.
+- The whole `stateDirectory`, including the registered workbench database,
+  journals, and scan inputs; a live database file alone is not a consistent copy.
+- `outputDirectory`, where the executor records its draft and the CLI later
+  writes the validated manifest, findings, coverage, and report.
+- The temporary files named by `CODEX_SECURITY_CONFIG_PATH` and, for path scans,
+  `CODEX_SECURITY_TARGET_PATHS_FILE` in `runtime.environment`. These are required
+  by preflight and scope binding, even though they can live outside the state
+  and output directories. The supplied interpreter paths must also resolve.
+
+Keep these paths available throughout the invocation. The CLI removes its
+temporary config/scope files when the invocation closes; caller-owned state
+and output directories remain available. If remote work may outlive an
+`acceptance_unknown` return, the host must preserve the files that work still
+needs before returning that outcome. Use shared mounts or a coordinated transfer
+that preserves the supplied path bindings, not independent copies of mutable
+workbench state.
+
+Run the plugin stdio server from
 `pluginRoot/scripts/launch_codex_security_mcp --stdio` with the supplied
 environment. The executor needs the target files, plugin skills and registered
 artifacts, and must expose `record_codex_security_scan_draft`. CLI workbench
@@ -141,7 +179,23 @@ CLI stops without resubmitting and leaves reconciliation to the host. The termin
 result retains `execution` even when scanning fails or is canceled. The runtime's
 `hostProtocolVersion` identifies this protocol as version 2.
 A package-exported example is available at
-`@openai/codex-security/schemas/hosted-scan-v2.fixture.json`.
+`@openai/codex-security/schemas/hosted-scan-v2.fixture.json`. Its `response` is
+the executor's reply; `terminal` is the separate final scan receipt. The example
+hashes and sizes are illustrative and do not validate any real files.
+
+| Final scan status      | Host handling                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `completed`            | Verify artifact receipts and seals before accepting output.                                      |
+| `incomplete`           | Preserve partial evidence; do not accept a completed scan.                                       |
+| `failed` or `canceled` | Retain identity, diagnostics and any execution/usage receipt.                                    |
+| `acceptance_unknown`   | Reconcile the existing remote attempt and collect usage before cleanup; do not resubmit blindly. |
+
+Reconciliation uses the host's durable attempt/session identifiers and provider
+status. Preserve state and output for inspection, and cancel or join remote work
+before releasing resources it still uses. The hosted API has no replay store,
+resume, or finalize-only operation: calling `runHostedScan` again registers a new
+scan. A provider reporting execution completion does not substitute for a
+validated, sealed scan receipt.
 
 ## Progress, cancellation and artifacts
 
@@ -154,17 +208,20 @@ Send `{"jsonrpc":"2.0","method":"cancel","params":{"id":"run"}}` with the
 original run request ID. The CLI aborts its executor signal, emits
 `execution.cancel` with `{requestId}`, and waits for the host's outcome/usage
 before returning a canceled result. The host must continue reading notifications
-while executing. SIGINT/SIGTERM, disconnects and blocked output terminate the
-transport promptly, even while a write callback is stuck. The host independently
-cancels remote work and reconciles its known execution identities in those cases.
+while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with
+blocked output terminate the transport even while a write callback is stuck.
+Input EOF before the terminal response fails the run; EOF while that response is
+flushing waits for the write callback. A selected successful result is not a
+successful delivery. Hosts own deadlines and independently cancel remote work
+and reconcile known execution identities after transport failure.
 
 Preparation failures include typed `error.data.reason` for missing, escaping,
 aliased or syntactically invalid paths and revision mismatch. Other failures
 must not be presented as missing paths.
 
 The terminal run result includes `version: 2`, `status`, frozen
-identity/revision/normalized scope, output directory, scan ID and plugin version
-when registered, `provenance` (CLI/plugin/build identity), optional `execution`,
+identity/revision/normalized scope, output directory, scan ID when registered,
+plugin version when known, `provenance` (CLI/plugin/build identity), optional `execution`,
 and `artifacts`. Each artifact is `{path, sha256, bytes}` over its exact bytes.
 Receipts cover canonical outputs, sealed supplemental files, and preserved
 source files bound by the manifest. Sealed partial coverage stays `incomplete`;

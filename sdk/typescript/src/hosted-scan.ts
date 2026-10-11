@@ -12,7 +12,7 @@ import {
 } from "./scan-executor.js";
 export type { ScanExecutor, ScanExecutionRequest } from "./scan-executor.js";
 import { realpath } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { CodexSecurity } from "./api.js";
 import {
@@ -59,19 +59,20 @@ export class HostedScanPreparationError extends Error {
 }
 
 export function normalizeHostedScope(path: string): string {
-  const selected = path.trim();
+  const parts = path.split(process.platform === "win32" ? /[/\\]/ : "/");
   if (
-    /^[\\/]|^[a-z]:/i.test(selected) ||
-    /[\\*?\[\]{},\u0000-\u001f\u007f]/u.test(path) ||
-    selected.split("/").includes("..")
+    path.length === 0 ||
+    path.includes("\0") ||
+    isAbsolute(path) ||
+    (process.platform === "win32" && /^[a-z]:/i.test(path)) ||
+    parts.includes("..")
   ) {
     throw new HostedScanPreparationError(
       "scope_syntax",
-      "Use literal repository-relative folders or files without traversal, globs, or comma-separated lists.",
+      "Use non-empty repository-relative folders or files without parent traversal or NUL characters.",
     );
   }
-  const normalized = selected
-    .split("/")
+  const normalized = parts
     .filter((part) => part !== "" && part !== ".")
     .join("/");
   return normalized || ".";
@@ -180,6 +181,7 @@ export async function runHostedScan(
   const context = await prepareHostedScan(input, options.signal);
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;
+  let scanId: string | undefined;
   const onEvent = (event: ScanExecutionEvent): void => {
     void Promise.resolve()
       .then(() => options.onEvent?.(event))
@@ -216,10 +218,10 @@ export async function runHostedScan(
     version: 2 as const,
     ...context,
     outputDirectory,
+    ...(scanId === undefined ? {} : { scanId }),
     ...(request === undefined
       ? {}
       : {
-          scanId: request.scanId,
           pluginVersion: request.runtime.pluginVersion,
         }),
     provenance: {
@@ -242,6 +244,10 @@ export async function runHostedScan(
       signal: options.signal,
       onOutputDirReady(path) {
         outputDirectory = path;
+      },
+      onScanRegistered(scan) {
+        scanId = scan.scanId;
+        outputDirectory = scan.scanDir;
       },
       onProgress(progress) {
         onEvent({ type: "progress", progress });

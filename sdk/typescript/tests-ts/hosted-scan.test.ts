@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
   normalizeHostedScope,
@@ -24,12 +24,16 @@ import {
 import { runHostedScanProtocol } from "../src/hosted-scan-protocol.js";
 import { runHostProtocol } from "../src/host-protocol.js";
 import { CodexSecurity, runHostedScan } from "../src/index.js";
-import type {
-  ScanExecutionEvent,
-  ScanExecutionResult,
+import {
+  ScanExecutionResultSchema,
+  type ScanExecutionEvent,
+  type ScanExecutionResult,
 } from "../src/scan-executor.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { normalizeTarget } from "../src/targets.js";
+import { runWorkbench } from "../src/runtime.js";
+import { pythonExecutable } from "./support/python.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -38,16 +42,20 @@ afterEach(async () => {
   );
 });
 
-async function fixture(): Promise<HostedScanInput> {
+async function fixture(
+  additionalFiles: readonly string[] = [],
+): Promise<HostedScanInput> {
   const root = await mkdtemp(join(await realpath(tmpdir()), "hosted-scan-"));
   roots.push(root);
   const repository = join(root, "repository");
-  for (const name of ["service-a", "service-b", "service-c"]) {
-    await mkdir(join(repository, name), { recursive: true });
-    await writeFile(
-      join(repository, name, "index.ts"),
-      "export const value = 1;\n",
-    );
+  for (const name of [
+    "service-a/index.ts",
+    "service-b/index.ts",
+    "service-c/index.ts",
+    ...additionalFiles,
+  ]) {
+    await mkdir(dirname(join(repository, name)), { recursive: true });
+    await writeFile(join(repository, name), "export const value = 1;\n");
   }
   const git = (...args: string[]) =>
     execFileSync("git", ["-C", repository, ...args], {
@@ -118,15 +126,117 @@ async function writeDraft(request: ScanExecutionRequest) {
 
 test.each([
   "/tmp",
-  "C:/src",
+  "",
+  "nul\0path",
   "../src",
   "src/../other",
-  "src/*",
-  "a,b",
-  "a\\b",
-  "a\n",
+  ...(process.platform === "win32" ? ["C:/src", "C:src", "a\\..\\b"] : []),
 ])("rejects unsupported scope %p", (path) =>
   expect(() => normalizeHostedScope(path)).toThrow(),
+);
+
+test.each([
+  {
+    name: "bracketed routes, commas and a literal tilde",
+    paths: ["app/[slug]/page.tsx", "reports/a,b.ts", "~"],
+    files: ["app/[slug]/page.tsx", "reports/a,b.ts", "~"],
+    reportedPaths: [
+      String.raw`app/\[slug\]/page.tsx`,
+      '`"reports/a,b.ts"`',
+      "~",
+    ],
+  },
+  ...(process.platform === "win32"
+    ? []
+    : [
+        {
+          name: "significant spaces and POSIX filename characters",
+          paths: [" ", " service ", "literal/*?.ts", "service  space"],
+          files: [
+            " /index.ts",
+            " service /index.ts",
+            "service/index.ts",
+            "literal/*?.ts",
+            "service  space/index.ts",
+            "service space/index.ts",
+          ],
+          reportedPaths: [
+            '`" "`',
+            '`" service "`',
+            String.raw`literal/\*?.ts`,
+            '`"service  space"`',
+          ],
+        },
+      ]),
+])(
+  "hosted literal paths preserve $name through sealed artifacts",
+  async ({ paths: selectedPaths, files, reportedPaths }) => {
+    const paths = [...selectedPaths];
+    const input = await fixture(files);
+    input.scope = { paths };
+    const ordinary = await normalizeTarget(
+      input.repository,
+      paths.map((path) => `./${path}`),
+    );
+    expect(ordinary.paths).toEqual(paths);
+    const result = await runHostedScan(input, {
+      executor: {
+        async run(request) {
+          expect(request.scope.paths).toEqual(paths);
+          await writeDraft(request);
+          return {
+            requestId: request.requestId,
+            status: "completed",
+            sessionId: "literal-paths",
+          };
+        },
+      },
+    });
+    expect(result.status, JSON.stringify(result)).toBe("completed");
+    expect(result.scope.paths).toEqual(paths);
+    const manifest = JSON.parse(
+      await readFile(
+        join(result.outputDirectory, "scan-manifest.json"),
+        "utf8",
+      ),
+    );
+    const coverage = JSON.parse(
+      await readFile(join(result.outputDirectory, "coverage.json"), "utf8"),
+    );
+    expect(manifest.scan.scope.includePaths).toEqual(paths);
+    expect(manifest.scan.sealedAt).toBeTruthy();
+    expect(coverage.includePaths).toEqual(paths);
+    expect(coverage.mode).toBe("scoped_path");
+    const report = await readFile(
+      join(result.outputDirectory, "report.md"),
+      "utf8",
+    );
+    for (const path of reportedPaths) expect(report).toContain(path);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "missing whitespace paths never fall back to a trimmed sibling or repository",
+  async () => {
+    const input = await fixture();
+    let calls = 0;
+    for (const path of [" ", " service-a "]) {
+      await expect(
+        runHostedScan(
+          { ...input, scope: { paths: [path] } },
+          {
+            executor: {
+              async run(): Promise<never> {
+                calls++;
+                throw new Error("must not dispatch");
+              },
+            },
+          },
+        ),
+      ).rejects.toMatchObject({ reason: "scope_missing" });
+    }
+    expect(calls).toBe(0);
+  },
 );
 
 test.each(["service-a", "service-a/index.ts", "."])(
@@ -717,6 +827,52 @@ test.each(["failed", "canceled", "acceptance_unknown"] as const)(
   },
 );
 
+test("cancellation after registration retains scan identity before executor dispatch", async () => {
+  const input = await fixture();
+  const controller = new AbortController();
+  let calls = 0;
+  const result = await runHostedScan(input, {
+    signal: controller.signal,
+    onEvent(event) {
+      if (
+        event.type === "progress" &&
+        event.progress.phase === "preflight" &&
+        event.progress.filesTotal > 0
+      )
+        controller.abort();
+    },
+    executor: {
+      async run(): Promise<never> {
+        calls++;
+        throw new Error("must not dispatch");
+      },
+    },
+  });
+  expect(result.status).toBe("canceled");
+  expect(calls).toBe(0);
+  expect(result.scanId).toBeString();
+  expect(result.execution).toBeUndefined();
+  const history = await runWorkbench(
+    {
+      python: pythonExecutable()!,
+      pluginRoot: join(import.meta.dirname, "../_bundled_plugin"),
+      environment: {
+        PATH: process.env["PATH"],
+        SYSTEMROOT: process.env["SYSTEMROOT"],
+        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+      },
+    },
+    ["list-scans", "--repository", input.repository],
+  );
+  expect(history["scans"]).toMatchObject([
+    {
+      scanId: result.scanId,
+      scanDir: result.outputDirectory,
+      progress: { status: "failed" },
+    },
+  ]);
+});
+
 test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
   const input = await fixture();
   const controller = new AbortController();
@@ -952,6 +1108,15 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
     HostedScanInputSchema.safeParse({ ...fixture.run.params, scope: undefined })
       .success,
   ).toBe(true);
+  expect(fixture.terminal.id).toBe(fixture.run.id);
+  expect(fixture.terminal.result).toMatchObject({
+    version: 2,
+    status: "completed",
+    identity: fixture.run.params.identity,
+    scope: fixture.run.params.scope,
+    scanId: fixture.execution.params.scanId,
+    execution: ScanExecutionResultSchema.parse(fixture.response.result),
+  });
 });
 
 test("standalone SDK rejects local scan options and configuration before dispatch", async () => {
