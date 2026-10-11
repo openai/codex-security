@@ -1272,20 +1272,56 @@ test.each([undefined, "toon", "yaml", "md"])(
 
 for (const kind of ["sast", "secret", "iac"] as const) {
   test.each([
-    [repositoryUrl, "example/project/feature/parser", "feature/parser"],
+    [repositoryUrl, "example/project/feature/parser", "feature/parser", null],
     [
       "https://GitHub.com/Example/Project.git/",
       "EXAMPLE/PROJECT/Feature/Parser/More",
       "Feature/Parser/More",
+      null,
     ],
-    [repositoryUrl, "Feature/Parser", "Feature/Parser"],
-    [repositoryUrl, "fix/example/project/Parser", "fix/example/project/Parser"],
-    [repositoryUrl, "example/project", "example/project"],
-    ["https://github.com/", "example/project/feature/parser", null],
+    [
+      "https://GitHub.com/Example/Project.git/",
+      "EXAMPLE/PROJECT.git/Feature/Parser/More",
+      "Feature/Parser/More",
+      null,
+    ],
+    [
+      repositoryUrl,
+      "example/project.git/Feature/Parser",
+      "Feature/Parser",
+      null,
+    ],
+    [
+      "https://github.com/demo/demo",
+      "demo/demo/Feature/Parser/More",
+      "Feature/Parser/More",
+      "demo",
+    ],
+    [
+      "https://github.com/Demo/Demo.git/",
+      "DEMO/DEMO.git/Feature/Parser/More",
+      "Feature/Parser/More",
+      "demo",
+    ],
+    [
+      "https://github.example.test/team/project",
+      "PROJECT/Feature/Parser",
+      "Feature/Parser",
+      "project",
+    ],
+    [repositoryUrl, "Feature/Parser", "Feature/Parser", null],
+    [
+      repositoryUrl,
+      "fix/example/project/Parser",
+      "fix/example/project/Parser",
+      null,
+    ],
+    [repositoryUrl, "example/project", "example/project", null],
+    ["https://github.com/", "example/project/feature/parser", null, null],
   ])(
-    kind + " URL-only repository metadata preserves the branch from %s: %s",
-    async (url, branch, expected) => {
-      const repository = { url };
+    kind + " repository qualifiers preserve the branch from %s: %s",
+    async (url, branch, expected, name) => {
+      const repository = { url, ...(name ? { name } : {}) };
       const record =
         kind === "sast"
           ? {
@@ -1318,7 +1354,7 @@ for (const kind of ["sast", "secret", "iac"] as const) {
       expect(parsed.findings[0]!.evidence.branch).toBe(expected);
       expect(parsed.findings[0]!.evidence.details!.repository).toEqual({
         url,
-        name: null,
+        name,
         id: null,
       });
       expect(parsed.findings[0]!.evidence.source_data).toEqual(record);
@@ -1384,7 +1420,7 @@ test.each(["project", "project/component"])(
       repository: { id: repository.id },
       repositoryBranch: {
         ...sast.repositoryBranch,
-        name: `${alias}/Feature/Parser`,
+        name: `${alias.toUpperCase()}/Feature/Parser`,
       },
     };
     const nodes = ["example/project", "project", alias].map((name) => ({
