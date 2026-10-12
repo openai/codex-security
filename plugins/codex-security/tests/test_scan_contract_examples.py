@@ -310,6 +310,30 @@ class ScanContractExamplesTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "is not one of"):
             validate_schema_node(coverage, schema, "coverage")
 
+    def test_coverage_rejects_unsafe_deferred_paths(self) -> None:
+        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
+        for path in (
+            "src/handler.py",
+            "../outside.py",
+            "src/../../outside.py",
+            "/etc/passwd",
+            "src\\\\outside.py",
+            "C:/outside.py",
+            ".",
+            "src/\\x00outside.py",
+        ):
+            with self.subTest(path=path):
+                coverage = copy.deepcopy(self.coverage)
+                coverage["completeness"] = "partial"
+                coverage["deferred"] = [
+                    {"id": "deferred-review", "reason": "Review remains incomplete.", "paths": [path]}
+                ]
+                if path == "src/handler.py":
+                    validate_schema_node(coverage, schema, "coverage")
+                else:
+                    with self.assertRaises(AssertionError):
+                        validate_schema_node(coverage, schema, "coverage")
+
     def test_findings_accept_safe_writeup_and_reject_unsafe_path(self) -> None:
         schema = read_json(SCHEMA_DIR / "findings.schema.json")
         findings = copy.deepcopy(self.findings)
