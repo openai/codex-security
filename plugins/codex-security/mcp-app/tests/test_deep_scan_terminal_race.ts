@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type {
+  DeepScanPublication,
+  ScanDraftInput,
+} from "../src/artifact-scan-draft.js";
 import type { DeepScanRunState } from "../src/deep-scan/types.js";
 import { importModule } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
@@ -202,7 +205,11 @@ for (const ordering of [
         pluginRoot,
         threadId: "fixture-owner",
         heartbeatIntervalMs: 60_000,
-        onComplete: async (draft: ScanDraftInput) => {
+        onComplete: async (
+          draft: ScanDraftInput,
+          signal: AbortSignal,
+          publication: DeepScanPublication,
+        ) => {
           const context = await createScanArtifactContext(
             run.scanId,
             runWorkbench,
@@ -212,6 +219,8 @@ for (const ordering of [
             context,
             draft,
             runWorkbench,
+            signal,
+            publication,
           );
         },
         onStopped: async (stopped: DeepScanRunState) => {
