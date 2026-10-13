@@ -858,6 +858,56 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
+  test("rejects unsafe paths in sealed deferred coverage", async () => {
+    const invalidPaths = [
+      "../../outside.ts",
+      "/outside.ts",
+      "C:/outside.ts",
+      "src\\outside.ts",
+      "src:outside.ts",
+      ".",
+      "src/../outside.ts",
+      "src/\u0000outside.ts",
+    ];
+
+    const validScanDir = await copyExample();
+    const validCoveragePath = join(validScanDir, "coverage.json");
+    const validCoverage = await readJson(validCoveragePath);
+    validCoverage["completeness"] = "partial";
+    validCoverage["deferred"] = [
+      {
+        id: "deferred-source-review",
+        reason: "A source review was not completed.",
+        paths: ["src/parser.ts"],
+      },
+    ];
+    await writeJson(validCoveragePath, validCoverage);
+    await reseal(validScanDir);
+    await expect(
+      loadContract(validScanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
+
+    for (const path of invalidPaths) {
+      const scanDir = await copyExample();
+      const coveragePath = join(scanDir, "coverage.json");
+      const coverage = await readJson(coveragePath);
+      coverage["completeness"] = "partial";
+      coverage["deferred"] = [
+        {
+          id: "deferred-source-review",
+          reason: "A source review was not completed.",
+          paths: [path],
+        },
+      ];
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toBeInstanceOf(ContractValidationError);
+    }
+  });
+
   test.each([-1, 0])(
     "agrees with Python on a finding end-line offset of %i",
     async (offset) => {

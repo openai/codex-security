@@ -2313,7 +2313,7 @@ The extraction root is not enforced.
         self.assertFalse(warnings)
 
     def test_recovery_publishes_findings_without_unsafe_deferred_paths(self) -> None:
-        valid = {"id": "review", "reason": "Repository review is incomplete.", "paths": ["."]}
+        valid = {"id": "review", "reason": "Repository review is incomplete.", "paths": ["src"]}
         self.coverage["deferred"] = [
             {"id": "invalid", "reason": "Invalid scope.", "paths": ["../outside.py"]},
             valid,
@@ -2474,7 +2474,13 @@ The extraction root is not enforced.
 
     def test_rejects_unsafe_deferred_paths(self) -> None:
         self.coverage["completeness"] = "partial"
-        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+        for path in (
+            "../../outside.ts",
+            "/outside.ts",
+            r"C:\outside.ts",
+            ".",
+            "src:outside.ts",
+        ):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
@@ -2482,7 +2488,7 @@ The extraction root is not enforced.
                 self.write_scan()
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError,
-                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
+                    r"deferred\[0\]\.paths\[0\].*(?:expected a safe repository-relative POSIX path|does not match schema pattern)",
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
@@ -2498,7 +2504,7 @@ The extraction root is not enforced.
             }
         ]
         self.coverage["completeness"] = "partial"
-        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+        for path in ("src", "src/extract.py"):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
