@@ -7,7 +7,7 @@ export interface CodeownersRule {
   line: number;
   rule: string;
   owners: CodeownerIdentity[];
-  matches: RegExp;
+  matches: (path: string) => boolean;
 }
 
 /** GitHub CODEOWNERS uses the last matching rule, including ownerless rules. */
@@ -53,58 +53,90 @@ export function parseCodeowners(source: string): CodeownersRule[] {
   return rules;
 }
 
-function codeownersPattern(pattern: string): RegExp | null {
+type PatternToken = { literal: string } | "*" | "?" | "**" | "**/";
+
+function codeownersPattern(pattern: string): CodeownersRule["matches"] | null {
   if (pattern.startsWith("!") || pattern.startsWith("\\#")) return null;
   const anchored = pattern.startsWith("/");
   if (anchored) pattern = pattern.slice(1);
   const directory = pattern.endsWith("/");
   if (directory) pattern = pattern.slice(0, -1);
-  const prefix = anchored || pattern.includes("/") ? "^" : "(?:^|/)";
-  let expression = "";
-  for (let index = 0; index < pattern.length; index++) {
-    const character = pattern[index]!;
-    if (character === "\\" && index + 1 < pattern.length) {
-      expression += escapeRegex(pattern[++index]!);
+  const rooted = anchored || pattern.includes("/");
+  const immediate = /(?:^|\/)[*?]$/u.test(pattern);
+  const characters = Array.from(pattern);
+  const tokens: PatternToken[] = [];
+  for (let index = 0; index < characters.length; index++) {
+    const character = characters[index]!;
+    if (character === "\\" && index + 1 < characters.length) {
+      tokens.push({ literal: characters[++index]! });
     } else if (
       character === "[" ||
       character === "]" ||
-      pattern.startsWith("***", index)
+      (character === "*" &&
+        characters[index + 1] === "*" &&
+        characters[index + 2] === "*")
     ) {
       return null;
     } else if (
       character === "*" &&
-      pattern[index + 1] === "*" &&
-      (index === 0 || pattern[index - 1] === "/") &&
-      (index + 2 === pattern.length || pattern[index + 2] === "/")
+      characters[index + 1] === "*" &&
+      (index === 0 || characters[index - 1] === "/") &&
+      (index + 2 === characters.length || characters[index + 2] === "/")
     ) {
-      if (pattern[index + 2] === "/") {
-        expression += "(?:[^/]+/)*";
+      if (characters[index + 2] === "/") {
+        tokens.push("**/");
         index += 2;
       } else {
-        expression += ".*";
+        tokens.push("**");
         index++;
       }
-    } else if (character === "*") expression += "[^/]*";
-    else if (character === "?") expression += "[^/]";
-    else expression += escapeRegex(character);
+    } else if (character === "*" || character === "?") tokens.push(character);
+    else tokens.push({ literal: character });
   }
-  // A whole-component terminal wildcard matches immediate children, as in docs/*.
-  // Partial-component patterns such as service* can also match directories.
-  const suffix = directory
-    ? "/"
-    : /(?:^|\/)[*?]$/u.test(pattern)
-      ? "$"
-      : "(?:/|$)";
-  return new RegExp(prefix + expression + suffix, "u");
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return (path) => {
+    let active = new Set([0]);
+    let next = new Set<number>();
+    // Deduplicate reachable positions: O(pattern * path) work and O(pattern)
+    // space, including when several wildcards can consume the same character.
+    for (let offset = 0; ;) {
+      const boundary = offset === 0 || path[offset - 1] === "/";
+      if (!rooted && boundary) active.add(0);
+      for (const index of active) {
+        const token = tokens[index];
+        if (token === "*" || token === "**" || (token === "**/" && boundary))
+          active.add(index + 1);
+      }
+      const end = offset === path.length;
+      // docs/* ends at the immediate child; service* may own a directory.
+      if (
+        active.has(tokens.length) &&
+        (directory
+          ? path[offset] === "/"
+          : end || (!immediate && path[offset] === "/"))
+      )
+        return true;
+      if (end) return false;
+      const character = String.fromCodePoint(path.codePointAt(offset)!);
+      next.clear();
+      for (const index of active) {
+        const token = tokens[index];
+        if (token === undefined) continue;
+        if (typeof token === "object") {
+          if (token.literal === character) next.add(index + 1);
+        } else if (token === "?") {
+          if (character !== "/") next.add(index + 1);
+        } else if (token !== "*" || character !== "/") next.add(index);
+      }
+      if (rooted && next.size === 0) return false;
+      [active, next] = [next, active];
+      offset += character.length;
+    }
+  };
 }
 
 export function codeownersForPath(
   rules: readonly CodeownersRule[],
   path: string,
 ): CodeownersRule | undefined {
-  return rules.findLast(({ matches }) => matches.test(path));
+  return rules.findLast(({ matches }) => matches(path));
 }

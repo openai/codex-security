@@ -675,6 +675,8 @@ test.each([
   ["api1/main.ts", "/api? @api-team", "api-team", 2],
   ["docs/start.md", "docs/* @docs-team", "docs-team", 2],
   ["docs/nested/start.md", "docs/* @docs-team", "default", 1],
+  ["src/handler.ts", "/src/**/handler.ts @src-team", "src-team", 2],
+  ["src/deep/handler.ts", "/src/**/handler.ts @src-team", "src-team", 2],
 ] as const)(
   "selects the committed owner for %s using %s",
   async (path, rule, handle, line) => {

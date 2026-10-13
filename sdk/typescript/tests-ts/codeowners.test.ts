@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { codeownersForPath, parseCodeowners } from "../src/codeowners.js";
 
 test.each([
@@ -25,10 +27,52 @@ test.each([
   ["/app/\\[id\\]/page.ts", "app/i/page.ts", false],
   ["/\\*\\*\\*/main.rb", "***/main.rb", true],
   ["*.ts", "src/A.TS", false],
+  ["**/logs", "logs/file.txt", true],
+  ["**/logs", "catalogs/file.txt", false],
+  ["a/**/b/**/file?.ts", "a/b/file1.ts", true],
+  ["a/**/b/**/file?.ts", "a/x/b/y/z/file1.ts", true],
+  ["a/**/b/**/file?.ts", "a/x/b/y/z/file12.ts", false],
+  ["/a*b?c", "axbyc/child.ts", true],
+  ["/a*b?c", "a/xbyc/child.ts", false],
+  ["/literal\\?.ts", "literal?.ts", true],
+  ["/literal\\?.ts", "literal1.ts", false],
+  ["/src/?.ts", "src/💡.ts", true],
+  ["/src/💡*.ts", "src/💡-test.ts", true],
+  ["docs/*/", "docs/chapter/start.md", true],
 ] as const)("matches %s against %s: %p", (pattern, path, matches) => {
   expect(
     codeownersForPath(parseCodeowners(`${pattern} @alex`), path) !== undefined,
   ).toBe(matches);
+});
+
+test("matches overlapping wildcards without backtracking", async () => {
+  const module = new URL("../src/codeowners.ts", import.meta.url).href;
+  // Run in a child so a regression cannot hang the test runner's event loop.
+  // The deadline is a watchdog, not a microbenchmark assertion.
+  const { stdout } = await promisify(execFile)(
+    "node",
+    [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "--eval",
+      `
+      import { parseCodeowners, codeownersForPath } from ${JSON.stringify(module)};
+      const cases = [
+        ["/" + "*a".repeat(24) + "b", "a".repeat(80)],
+        ["/" + "**/".repeat(24) + "b", "a/".repeat(80)],
+      ];
+      console.log(JSON.stringify(cases.map(([pattern, path]) => {
+        const rules = parseCodeowners(pattern + " @owner");
+        return ["b", "c"].map(end => codeownersForPath(rules, path + end) !== undefined);
+      })));
+    `,
+    ],
+    { timeout: 10_000 },
+  );
+  expect(JSON.parse(stdout)).toEqual([
+    [true, false],
+    [true, false],
+  ]);
 });
 
 test("uses the last matching rule and preserves all owners and ownerless overrides", () => {
