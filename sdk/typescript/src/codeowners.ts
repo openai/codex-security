@@ -88,10 +88,11 @@ function codeownersPattern(pattern: string): RegExp | null {
     else if (character === "?") expression += "[^/]";
     else expression += escapeRegex(character);
   }
-  // A terminal single wildcard matches one path component, as in docs/*.
+  // A whole-component terminal wildcard matches immediate children, as in docs/*.
+  // Partial-component patterns such as service* can also match directories.
   const suffix = directory
     ? "/"
-    : /(?<!\\)[*?]$/u.test(pattern) && !pattern.endsWith("/**")
+    : /(?:^|\/)[*?]$/u.test(pattern)
       ? "$"
       : "(?:/|$)";
   return new RegExp(prefix + expression + suffix, "u");

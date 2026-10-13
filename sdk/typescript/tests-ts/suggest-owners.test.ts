@@ -671,6 +671,10 @@ test.each([
   ],
   ["lib/main.rb", "***/*.rb @ruby-team", "default", 1],
   ["app/[id]/page.ts", "/app/\\[id\\]/page.ts @routes-team", "routes-team", 2],
+  ["services/api.ts", "/service* @service-team", "service-team", 2],
+  ["api1/main.ts", "/api? @api-team", "api-team", 2],
+  ["docs/start.md", "docs/* @docs-team", "docs-team", 2],
+  ["docs/nested/start.md", "docs/* @docs-team", "default", 1],
 ] as const)(
   "selects the committed owner for %s using %s",
   async (path, rule, handle, line) => {
