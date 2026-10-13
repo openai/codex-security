@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { decodeUtf8 } from "./helpers/utf8.js";
 import { decodePosixBytes } from "./helpers/posix-path.js";
-import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
+import { runPythonWithInput } from "./python_command.js";
 import {
   stableJson,
   candidateRelativePath,
@@ -23,7 +23,7 @@ import {
   replaceArtifactText,
 } from "./artifact-io.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+import { candidateSchemaV1 } from "./artifact-candidate.js";
 
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";
@@ -49,6 +49,11 @@ export type DiscoveryCandidatesInput = Pick<
   z.infer<typeof workbenchDiscoveryCandidatesInputSchema>,
   "candidates"
 >;
+import {
+  missingPythonHelperMessage,
+  resolvePythonCommand,
+} from "./python_command.js";
+export const rawDiscoveryCandidateSchema = definitions.rawDiscoveryCandidate;
 
 /**
  * Normalize in memory and replace the bound canonical candidate ledger.

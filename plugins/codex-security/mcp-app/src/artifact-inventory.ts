@@ -22,6 +22,14 @@ const execFile = promisify(nodeExecFile);
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const label = "review_items";
 
+export interface PreparedReviewItems {
+  reviewItemsTotal: number;
+}
+export interface ReviewItemsResult {
+  items: ReviewItem[];
+  nextCursor?: string;
+}
+
 const definitions = artifactSchemaDocuments["tools/review-items"].$defs;
 export type ReviewItem = z.infer<typeof definitions.reviewItem>;
 export const {
@@ -33,8 +41,8 @@ export const {
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
-) {
-  if (context.layout !== "scan") {
+): Promise<PreparedReviewItems> {
+  if (!context.scanId) {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
     );

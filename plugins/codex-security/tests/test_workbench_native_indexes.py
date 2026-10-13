@@ -246,7 +246,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     )
     running_workspace = create_saved_workspace(state_dir, first_target)
     older_running = start_delivered_scan(state_dir, "--workspace-id", str(running_workspace["id"]))
-    complete_scan(state_dir, first_target, identity_anchor="first-finding")
+    repeated_first = complete_scan(state_dir, first_target, identity_anchor="first-finding")
     distinct_first = complete_scan(
         state_dir,
         first_target,
@@ -271,6 +271,170 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
     assert second["openFindingsCount"] == 1
     assert second["scanCount"] == 1
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET started_at = '2026-08-01T00:00:00Z'")
+    expected_latest = {
+        first_target_id: max(
+            older_first["scanId"],
+            older_running["results"]["scanId"],
+            repeated_first["scanId"],
+            distinct_first["scanId"],
+        ),
+        second_target_id: latest_second["scanId"],
+    }
+    tied = run_workbench(state_dir, "list-repositories")["repositories"]
+    assert [item["latestScan"]["scanId"] for item in tied] == sorted(
+        expected_latest.values(), reverse=True
+    )
+    assert {item["targetId"]: item["latestScan"]["scanId"] for item in tied} == expected_latest
+
+
+def test_composition_occurrences_only_publish_through_parent_or_explicit_import(
+    tmp_path: Path, workbench_db, workbench_api
+) -> None:
+    connection = workbench_db
+    timestamp = "2026-08-01T00:00:00Z"
+    later = "2026-08-02T00:00:00Z"
+    parent_dir = tmp_path / "parent"
+    with connection:
+        for repository in ("scan-repository", "import-repository"):
+            connection.execute(
+                "INSERT INTO security_targets (id, current_path, display_name, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, ?)",
+                (repository, str(tmp_path / repository), repository, timestamp, timestamp),
+            )
+        connection.execute(
+            "INSERT INTO workspaces (id, target_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("workspace", "scan-repository", timestamp, timestamp),
+        )
+        for scan_id, mode, parent_id, directory in (
+            ("parent", "deep", None, parent_dir),
+            ("child", "standard", "parent", parent_dir / "artifacts/deep-scan/passes/1"),
+            ("rerun", "standard", "parent", tmp_path / "ordinary-rerun"),
+        ):
+            connection.execute(
+                "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, "
+                "scope, mode, scan_dir, status, phase, parent_scan_id, started_at, created_at, "
+                "updated_at) VALUES (?, 'workspace', 'scan-repository', ?, 'synthetic', '.', "
+                "?, ?, ?, 'discovery', ?, ?, ?, ?)",
+                (
+                    scan_id,
+                    str(tmp_path / "scan-repository"),
+                    mode,
+                    str(directory),
+                    "running" if scan_id == "parent" else "complete",
+                    parent_id,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+        connection.execute("UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = 'child'")
+
+    example = json.loads(
+        (Path(__file__).parents[1] / "examples/completed-scan/findings.json").read_text()
+    )["findings"][0]
+
+    def finding(identity, scan_id, summary):
+        return {
+            **example,
+            "findingId": identity,
+            "occurrenceId": f"{scan_id}-{identity}",
+            "identity": {"anchor": identity},
+            "fingerprints": {"algorithm": "synthetic", "primary": f"synthetic:{identity}"},
+            "summary": summary,
+        }
+
+    def index(scan_id, findings):
+        with connection:
+            workbench_api["index_findings"](connection, scan_id, {"findings": findings}, later)
+
+    def assert_published(documents):
+        expected = {document["findingId"]: document for document in documents}
+        stored = connection.execute(
+            "SELECT id, details_json FROM findings WHERE details_json IS NOT NULL"
+        ).fetchall()
+        assert {row["id"]: json.loads(row["details_json"]) for row in stored} == expected
+        return {
+            "repositories": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT DISTINCT repository_id AS id, repository_id AS label FROM finding_repositories ORDER BY repository_id"
+                )
+            ]
+        }
+
+    def store(finding, timestamp, repository):
+        from workbench_finding_index import upsert_finding
+
+        upsert_finding(connection, finding, timestamp, repository)
+        connection.execute(
+            "INSERT OR REPLACE INTO finding_embeddings(finding_id, model, vector_json) VALUES (?, ?, ?)",
+            (finding["findingId"], "synthetic-model", json.dumps([0.25, 0.75])),
+        )
+
+    independent = finding("independent", "import", "Independently reviewed document")
+    store(independent, timestamp, "import-repository")
+    original = dict(
+        connection.execute("SELECT * FROM findings WHERE id = 'independent'").fetchone()
+    )
+    original_embedding = dict(connection.execute("SELECT * FROM finding_embeddings").fetchone())
+    child_only = finding("child-only", "child", "Internal pass evidence")
+    dropped = finding("dropped-duplicate", "child", "Duplicate excluded from the aggregate")
+    later_child = finding("independent", "child", "Different internal pass summary")
+    index("child", [child_only, dropped, later_child])
+
+    dashboard = assert_published([independent])
+    assert dashboard["repositories"] == [{"id": "import-repository", "label": "import-repository"}]
+    assert (
+        dict(connection.execute("SELECT * FROM findings WHERE id = 'independent'").fetchone())
+        == original
+    )
+    assert (
+        dict(connection.execute("SELECT * FROM finding_embeddings").fetchone())
+        == original_embedding
+    )
+    assert [tuple(row) for row in connection.execute("SELECT * FROM finding_repositories")] == [
+        ("import-repository", "independent")
+    ]
+    occurrences = connection.execute(
+        "SELECT details_json FROM finding_occurrences WHERE scan_id = 'child'"
+    ).fetchall()
+    assert {json.loads(row[0])["findingId"]: json.loads(row[0]) for row in occurrences} == {
+        item["findingId"]: item for item in (child_only, dropped, later_child)
+    }
+    assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone()[0] == 3
+
+    rerun = finding("ordinary-rerun", "rerun", "An ordinary linked rerun remains public")
+    index("rerun", [rerun])
+    assert_published([independent, rerun])
+    merged = finding("merged", "parent", "Published parent aggregate")
+    index("parent", [merged])
+    with connection:
+        connection.execute("UPDATE scans SET status = 'complete' WHERE id = 'parent'")
+    assert_published([independent, rerun, merged])
+    assert (
+        connection.execute(
+            "SELECT details_json FROM findings WHERE id = 'dropped-duplicate'"
+        ).fetchone()[0]
+        is None
+    )
+
+    explicitly_imported = {**child_only, "summary": "Explicitly published after review"}
+    store(explicitly_imported, later, "scan-repository")
+    assert_published([independent, rerun, merged, explicitly_imported])
+    assert (
+        json.loads(
+            connection.execute(
+                "SELECT details_json FROM finding_occurrences WHERE id = ?",
+                (child_only["occurrenceId"],),
+            ).fetchone()[0]
+        )
+        == child_only
+    )
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_overlapping_scans_mark_findings_present_in_latest_started_scan(tmp_path: Path) -> None:

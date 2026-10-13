@@ -17,7 +17,6 @@ import pytest
 from workbench_test_support import (
     BUDGET_COST,
     SCRIPT,
-    begin_deep_scan,
     claim_remediation_resend,
     create_saved_git_workspace,
     create_saved_workspace,
@@ -26,14 +25,12 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
-    mark_handoff_delivered,
+    mark_deep_aggregate_ready,
     mark_remediation_delivered,
     request_remediation,
     request_remediation_action,
-    resume_deep_scan,
     run_workbench,
     save_workspace,
-    scan_claim_command,
     scan_command,
     set_remediation,
     set_triage,
@@ -52,19 +49,44 @@ HEAD_CHANGED_WARNING = (
     "Repository HEAD changed while the scan was running; "
     "results were saved for the original revision."
 )
+
+
 WORKTREE_CHANGED_WARNING = (
     "Working-tree contents changed while the scan was running; "
     "results were saved for the original snapshot."
 )
+
+
 DIRECTORY_CHANGED_WARNING = (
     "Directory contents changed while the scan was running; "
     "results were saved for the original snapshot."
 )
+
+
+TARGET_UNAVAILABLE_WARNING = (
+    "The scan target became unavailable while the scan was running; "
+    "results were saved for the original revision or snapshot."
+)
+
+
 GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
 )
+
+
+BUDGET_COST = {
+    "model": "gpt-5.6-sol",
+    "inputTokens": 1250,
+    "cachedInputTokens": 200,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 30,
+    "estimatedUsd": 0.00625,
+}
+
+
 BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost limit."
+
 
 EXPECTED_TABLES = {
     "deep_scan_dedup_inputs",
@@ -101,13 +123,7 @@ EXPECTED_TABLES = {
 
 
 def budget_scan_fixture(
-    tmp_path: Path,
-    *,
-    candidates: list[dict[str, Any]] | None = None,
-    mode: str = "deep",
-    paths: list[str] | None = None,
-    terminal: bool = True,
-    terminal_reason: str = "saturated",
+    tmp_path: Path, *, mode: str = "deep"
 ) -> tuple[Path, Path, Path, str, Path]:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -128,57 +144,23 @@ def budget_scan_fixture(
                 "config": {},
                 "mode": mode,
                 "repository": str(target),
-                "target": {
-                    "kind": "paths" if paths else "repository",
-                    "paths": paths or [],
-                },
+                "target": {"kind": "repository", "paths": []},
                 "maxCostUsd": 0.005,
             }
         ),
     )
     scan_id = str(registered["scanId"])
-    if mode != "deep":
-        return state_dir, target, scan_dir, scan_id, scan_dir / "candidate_ledger.jsonl"
-    begin_deep_scan(
-        state_dir,
-        "sdk-thread",
-        "--scan-id",
+    write_completed_contract(
+        scan_dir,
         scan_id,
-        environment={"CODEX_HOME": str(tmp_path / "codex-home")},
+        target,
+        relative_path="app.py",
+        coverage_mode="deep_repository" if mode == "deep" else "repository",
     )
-    discovery = scan_dir / "artifacts" / "02_discovery"
-    discovery.mkdir(parents=True, exist_ok=True)
-    (discovery / "in_scope_files.txt").write_text("app.py\n")
-    ledger = discovery / "candidate_ledger.jsonl"
-    rows = (
-        candidates
-        if candidates is not None
-        else [
-            {
-                "candidate_id": "candidate-1",
-                "cwe_ids": ["CWE-89"],
-                "locations": [{"path": "app.py", "start_line": 1, "end_line": 1, "role": "sink"}],
-                "summary": "User input reaches a SQL statement",
-                "evidence": "request.args['value'] reaches execute() without parameter binding",
-            }
-        ]
-    )
-    ledger.write_text("".join(f"{json.dumps(row)}\n" for row in rows))
-    if terminal:
-        manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        manifest.write_text('{"status":"succeeded"}\n')
-        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-            connection.execute(
-                """
-                UPDATE deep_scan_runs
-                SET status = 'succeeded', phase = 'terminal', terminal_reason = ?,
-                    manifest_path = ?, completed_at = updated_at
-                WHERE scan_id = ?
-                """,
-                (terminal_reason, str(manifest), scan_id),
-            )
-    return state_dir, target, scan_dir, scan_id, ledger
+    checkpoint = scan_dir / "artifacts/deep-scan/checkpoint.json"
+    if mode == "deep":
+        checkpoint = mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
+    return state_dir, target, scan_dir, scan_id, checkpoint
 
 
 def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -> dict[str, object]:
@@ -192,6 +174,85 @@ def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -
         BUDGET_WARNING,
         check=check,
     )
+
+
+@pytest.mark.parametrize("terminal", ["saturated", "capped"])
+def test_budget_completion_preserves_ordinary_aggregate_and_unresolved_work(
+    tmp_path: Path, terminal: str
+) -> None:
+    state, _, directory, scan_id, checkpoint = budget_scan_fixture(tmp_path)
+    manifest_path = directory / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["artifacts"] = []
+    manifest_path.write_text(json.dumps(manifest))
+    state_before = json.loads(checkpoint.read_text())
+    checkpoint.write_text(json.dumps({**state_before, "terminalReason": terminal}))
+    findings = json.loads((directory / "findings.json").read_text())["findings"]
+    coverage_path = directory / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["deferred"] = [
+        {
+            "id": "dependency-follow-up",
+            "reason": "A synthetic dependency needs follow-up.",
+            "paths": ["app.py"],
+        }
+    ]
+    coverage_path.write_text(json.dumps(coverage))
+    completed = complete_budget_scan(state, scan_id)["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["cost"] == BUDGET_COST
+    assert completed["findingCount"] == len(findings)
+    retained = json.loads(coverage_path.read_text())
+    assert retained["completeness"] == "partial"
+    assert any(row["reason"] == coverage["deferred"][0]["reason"] for row in retained["deferred"])
+    assert any(row["reason"] == BUDGET_WARNING for row in retained["deferred"])
+
+
+@pytest.mark.parametrize("failure", ["below_limit", "unfinished", "standard"])
+def test_budget_completion_requires_exceeded_limit_and_finished_deep_aggregate(
+    tmp_path: Path, failure: str
+) -> None:
+    state, _, _, scan_id, checkpoint = budget_scan_fixture(
+        tmp_path, mode="standard" if failure == "standard" else "deep"
+    )
+    if failure == "unfinished":
+        saved = json.loads(checkpoint.read_text())
+        saved.pop("terminalReason")
+        checkpoint.write_text(json.dumps(saved))
+    cost = {**BUDGET_COST, **({"estimatedUsd": 0.005} if failure == "below_limit" else {})}
+    rejected = run_workbench(
+        state,
+        "complete-budget-exhausted-scan",
+        "--scan-id",
+        scan_id,
+        "--cost-json",
+        json.dumps(cost),
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
+        == "running"
+    )
+
+
+def test_budget_completion_preserves_a_prepared_scan_seal(tmp_path: Path) -> None:
+    state, _, directory, scan_id, _ = budget_scan_fixture(tmp_path)
+    run_workbench(state, "prepare-scan-completion", "--scan-id", scan_id)
+    sealed = {
+        path.relative_to(directory): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+    rejected = complete_budget_scan(state, scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "already sealed" in rejected["stderr"]
+    assert all((directory / path).read_bytes() == payload for path, payload in sealed.items())
+    completed = run_workbench(state, "complete-scan", "--scan-id", scan_id)["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["warnings"] == []
 
 
 def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
@@ -220,349 +281,6 @@ def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limi
     assert scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]["maxCostUsd"] == 0.005
 
 
-def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
-    tmp_path: Path,
-) -> None:
-    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
-    original_ledger = ledger.read_bytes()
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    assert completed["findings"] == []
-    assert completed["cost"] == BUDGET_COST
-    assert completed["warnings"] == [BUDGET_WARNING]
-    assert ledger.read_bytes() == original_ledger
-    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    assert manifest["scan"]["target"]["displayName"] == target.name
-    assert manifest["scan"]["target"]["targetId"] == stable_target_id(target)
-    assert manifest["scan"]["sealedAt"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["mode"] == "deep_repository"
-    assert coverage["completeness"] == "partial"
-    assert coverage["deferred"][0]["id"] == "candidate-1"
-    assert coverage["deferred"][0]["paths"] == ["app.py"]
-    assert "cost limit" in coverage["deferred"][0]["reason"]
-    assert "User input reaches a SQL statement" in coverage["deferred"][0]["reason"]
-    assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
-    report = (scan_dir / "report.md").read_text()
-    assert "No findings were validated before the scan reached its cost limit" in report
-    assert "User input reaches a SQL statement" in report
-
-
-def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
-    state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
-    write_completed_contract(
-        scan_dir,
-        scan_id,
-        target,
-        relative_path="app.py",
-        coverage_mode="deep_repository",
-    )
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    assert completed["findingCount"] == 1
-    assert "Unsafe archive extraction" in completed["findings"][0]["title"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
-    assert coverage["deferred"][0]["id"] == "candidate-1"
-
-
-@pytest.mark.parametrize(
-    ("validation", "attack_path", "surface_disposition", "deferred"),
-    [
-        ("suppressed", None, "rejected", False),
-        ("reportable", "ignore", "rejected", False),
-        ("suppressed", "ignore", "rejected", False),
-        ("not_applicable", None, "not_applicable", False),
-        ("not_applicable", "ignore", "not_applicable", False),
-        ("deferred", "ignore", "needs_follow_up", True),
-        ("suppressed", "deferred", "needs_follow_up", True),
-        ("not_applicable", "deferred", "needs_follow_up", True),
-        ("reportable", None, "needs_follow_up", True),
-        ("reportable", "reportable", "needs_follow_up", True),
-        (None, None, "needs_follow_up", True),
-    ],
-)
-def test_budget_exhaustion_preserves_existing_candidate_decisions(
-    tmp_path: Path,
-    validation: str | None,
-    attack_path: str | None,
-    surface_disposition: str,
-    deferred: bool,
-) -> None:
-    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
-    candidate = json.loads(ledger.read_text())
-    if validation is not None:
-        candidate["validation"] = {"disposition": validation}
-    if attack_path is not None:
-        candidate["attack_path"] = {"decision": attack_path}
-    ledger.write_text(f"{json.dumps(candidate)}\n")
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    assert completed["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
-    assert coverage["surfaces"][0]["disposition"] == surface_disposition
-    assert any(row["id"] == "candidate-1" for row in coverage["deferred"]) is deferred
-    if not deferred:
-        assert coverage["deferred"][0]["id"] == "scan-cost-limit"
-
-
-def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -> None:
-    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
-    candidate = json.loads(ledger.read_text())
-    candidate["validation"] = {"disposition": "suppressed"}
-    ledger.write_text(f"{json.dumps(candidate)}\n")
-    write_completed_contract(
-        scan_dir,
-        scan_id,
-        target,
-        relative_path="app.py",
-        coverage_mode="deep_repository",
-    )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
-    coverage["surfaces"].append(
-        {
-            "id": "candidate-candidate-1",
-            "label": "Already dismissed candidate",
-            "disposition": "rejected",
-            "receiptRefs": [],
-        }
-    )
-    coverage_path.write_text(json.dumps(coverage))
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["findingCount"] == 1
-    preserved = json.loads(coverage_path.read_text())
-    assert sum(row["id"] == "candidate-candidate-1" for row in preserved["surfaces"]) == 1
-    assert preserved["surfaces"][1]["disposition"] == "rejected"
-    assert not any(row["id"] == "candidate-1" for row in preserved["deferred"])
-
-
-@pytest.mark.parametrize(
-    ("reason", "marker_added"),
-    [
-        ("Upstream validation dependency was unavailable.", True),
-        ("Validation was deferred because the scan reached its cost limit unexpectedly.", True),
-        ("Validation was deferred because the scan reached its cost limit.", False),
-        (
-            "Validation was deferred because the scan reached its cost limit: existing proof gap.",
-            False,
-        ),
-    ],
-)
-def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_marker(
-    tmp_path: Path,
-    reason: str,
-    marker_added: bool,
-) -> None:
-    state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, candidates=[])
-    write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
-    findings_path = scan_dir / "findings.json"
-    findings = json.loads(findings_path.read_text())
-    findings["findings"] = []
-    findings_path.write_text(json.dumps(findings))
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
-    existing = {"id": "existing-proof-gap", "reason": reason, "paths": ["app.py"]}
-    coverage["deferred"] = [existing]
-    coverage_path.write_text(json.dumps(coverage))
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    preserved = json.loads(coverage_path.read_text())
-    assert preserved["deferred"][0] == existing
-    assert len(preserved["deferred"]) == 1 + marker_added
-    if marker_added:
-        assert preserved["deferred"][1] == {
-            "id": "scan-cost-limit",
-            "reason": "Validation was deferred because the scan reached its cost limit.",
-        }
-    assert (
-        "No findings were validated before the scan reached its cost limit"
-        in (scan_dir / "report.md").read_text()
-    )
-
-
-def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
-    state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, terminal_reason="capped")
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    assert (
-        json.loads((scan_dir / "coverage.json").read_text())["deferred"][0]["id"] == "candidate-1"
-    )
-
-
-def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path) -> None:
-    state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, candidates=[])
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    assert completed["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
-    assert coverage["deferred"] == [
-        {
-            "id": "scan-cost-limit",
-            "reason": "Validation was deferred because the scan reached its cost limit.",
-        }
-    ]
-
-
-def test_budget_exhaustion_preserves_scoped_path_inventory(tmp_path: Path) -> None:
-    state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, paths=["app.py"])
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["mode"] == "scoped_path"
-    assert coverage["inventoryStrategy"] == "scoped_path"
-    assert coverage["includePaths"] == ["app.py"]
-
-
-def test_budget_exhaustion_rejects_scan_below_configured_limit(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path)
-    cost = {**BUDGET_COST, "estimatedUsd": 0.005}
-
-    rejected = scan_command(
-        state_dir,
-        "complete-budget-exhausted-scan",
-        scan_id,
-        "--cost-json",
-        json.dumps(cost),
-        check=False,
-    )
-
-    assert rejected["returncode"] != 0
-    assert "has not exceeded its configured cost limit" in str(rejected["stderr"])
-
-
-def test_budget_exhaustion_rejects_incomplete_discovery(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path, terminal=False)
-
-    rejected = complete_budget_scan(state_dir, scan_id, check=False)
-
-    assert rejected["returncode"] != 0
-    assert "requires successfully completed Deep Scan discovery" in str(rejected["stderr"])
-    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
-
-
-def test_budget_exhaustion_rejects_standard_scan(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path, mode="standard")
-
-    rejected = complete_budget_scan(state_dir, scan_id, check=False)
-
-    assert rejected["returncode"] != 0
-    assert "Only a running CLI Deep Scan" in str(rejected["stderr"])
-
-
-def test_budget_exhaustion_rejects_invalid_candidate_ledger(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, ledger = budget_scan_fixture(tmp_path)
-    ledger.write_text('{"candidate_id":"candidate-1"}\n')
-
-    rejected = complete_budget_scan(state_dir, scan_id, check=False)
-
-    assert rejected["returncode"] != 0
-    assert "contains an invalid candidate" in str(rejected["stderr"])
-
-
-def test_budget_exhaustion_rejects_unsafe_candidate_path(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, ledger = budget_scan_fixture(tmp_path)
-    candidate = json.loads(ledger.read_text())
-    candidate["locations"][0]["path"] = "../outside.py"
-    ledger.write_text(f"{json.dumps(candidate)}\n")
-
-    rejected = complete_budget_scan(state_dir, scan_id, check=False)
-
-    assert rejected["returncode"] != 0
-    assert "candidate location must be repository-relative" in str(rejected["stderr"])
-
-
-def test_budget_exhaustion_rejects_candidate_outside_inventory(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, ledger = budget_scan_fixture(tmp_path)
-    candidate = json.loads(ledger.read_text())
-    candidate["locations"][0]["path"] = "outside-scope.py"
-    ledger.write_text(f"{json.dumps(candidate)}\n")
-
-    rejected = complete_budget_scan(state_dir, scan_id, check=False)
-
-    assert rejected["returncode"] != 0
-    assert "must include a location in its in-scope inventory" in str(rejected["stderr"])
-
-
-def test_budget_exhaustion_rejects_windows_drive_candidate_path(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, ledger = budget_scan_fixture(tmp_path)
-    candidate = json.loads(ledger.read_text())
-    candidate["locations"][0]["path"] = "C:/outside.py"
-    ledger.write_text(f"{json.dumps(candidate)}\n")
-
-    rejected = complete_budget_scan(state_dir, scan_id, check=False)
-
-    assert rejected["returncode"] != 0
-    assert "candidate location must be repository-relative" in str(rejected["stderr"])
-
-
-def test_budget_exhaustion_preserves_out_of_scope_supporting_evidence(tmp_path: Path) -> None:
-    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
-    candidate = json.loads(ledger.read_text())
-    candidate["locations"].append(
-        {"path": "shared/control.py", "start_line": 9, "end_line": 9, "role": "root_control"}
-    )
-    ledger.write_text(f"{json.dumps(candidate)}\n")
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["deferred"][0]["paths"] == ["app.py", "shared/control.py"]
-
-
-def test_budget_exhaustion_preserves_unicode_line_separator_inventory(tmp_path: Path) -> None:
-    candidate = {
-        "candidate_id": "candidate-1",
-        "cwe_ids": ["CWE-89"],
-        "locations": [{"path": "dir\u2028name.py", "start_line": 1, "end_line": 1, "role": "sink"}],
-        "summary": "Candidate in a Unicode filename",
-        "evidence": "The source contains an untrusted SQL expression.",
-    }
-    state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, candidates=[candidate])
-    (target / "dir\u2028name.py").write_text("query = value\n")
-    (scan_dir / "artifacts" / "02_discovery" / "in_scope_files.txt").write_text(
-        "dir\u2028name.py\n"
-    )
-
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
-
-    assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["deferred"][0]["paths"] == ["dir\u2028name.py"]
-
-
-def test_budget_exhaustion_rejects_symlink_candidate_ledger(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, ledger = budget_scan_fixture(tmp_path)
-    outside = tmp_path / "outside.jsonl"
-    outside.write_text(ledger.read_text())
-    ledger.unlink()
-    ledger.symlink_to(outside)
-
-    rejected = complete_budget_scan(state_dir, scan_id, check=False)
-
-    assert rejected["returncode"] != 0
-    assert "candidate ledger path" in str(rejected["stderr"]).casefold()
-
-
 def test_workbench_reopens_workspace_only_from_owning_thread(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -589,25 +307,39 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
     target = tmp_path / "target"
     (target / "src").mkdir(parents=True)
     workspace_id = str(uuid.uuid4())
-    create_workspace(
-        state_dir, workspace_id, "--thread-id", "thread-i", "--target-path", str(target)
+    run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        workspace_id,
+        "--thread-id",
+        "thread-i",
+        "--target-path",
+        str(target),
     )
-    save_workspace(state_dir, workspace_id, str(target), ".", "deep")
+    run_workbench(
+        state_dir,
+        "save-workspace",
+        "--workspace-id",
+        workspace_id,
+        "--target-path",
+        str(target),
+        "--scope",
+        ".",
+        "--mode",
+        "deep",
+    )
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
-    resume_deep_scan(state_dir, scan_id, "thread-i", environment={"CODEX_HOME": str(codex_home)})
-    manifest_path = scan_dir / "coordinator-manifest.json"
-    manifest_path.write_text("{}\n")
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            """
-            UPDATE deep_scan_runs
-            SET status = 'succeeded', phase = 'terminal',
-                terminal_reason = 'capped', manifest_path = ?,
-                completed_at = updated_at
-            WHERE scan_id = ?
-            """,
-            (str(manifest_path), scan_id),
-        )
+    run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "thread-i",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -615,7 +347,7 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
         inventory_strategy="deep_repository_repeated_discovery",
     )
 
-    completed = scan_command(state_dir, "complete-scan", scan_id)
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
     coverage = json.loads((scan_dir / "coverage.json").read_text())
@@ -762,7 +494,14 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     workspace_id = str(saved["id"])
     assert saved["userContext"] == "Pay attention to uploaded archives."
 
-    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
+    started = run_workbench(
+        state_dir,
+        "start-scan",
+        "--workspace-id",
+        workspace_id,
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )
     results = started["results"]
     assert isinstance(results, dict)
     assert results["userContext"] == "Pay attention to uploaded archives."
@@ -777,19 +516,29 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert not (scan_dir / "events.jsonl").exists()
 
     claim_token = str(uuid.uuid4())
-    claimed = scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
+    claimed = run_workbench(
+        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
+    )
     assert claimed["results"]["handoffClaimedAt"] is not None
     assert claimed["results"]["handoffClaimToken"] == claim_token
-    released = scan_claim_command(state_dir, "release-handoff-delivery", scan_id, claim_token)
+    released = run_workbench(
+        state_dir, "release-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
+    )
     assert released["results"]["handoffClaimedAt"] is None
-    claimed_again = scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
+    claimed_again = run_workbench(
+        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
+    )
     assert claimed_again["results"]["handoffClaimedAt"] is not None
-    delivered = mark_handoff_delivered(state_dir, scan_id, claim_token)
+    delivered = run_workbench(
+        state_dir, "mark-handoff-delivered", "--scan-id", scan_id, "--claim-token", claim_token
+    )
     assert delivered["results"]["handoffStatus"] == "delivered"
     assert delivered["results"]["handoffClaimedAt"] is None
 
-    updated = update_progress(
+    updated = run_workbench(
         state_dir,
+        "update-progress",
+        "--scan-id",
         scan_id,
         "--phase",
         "validation",
@@ -810,7 +559,9 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert updated["scan"]["progress"]["candidates"] == {"reportable": 1}
 
     write_completed_contract(scan_dir, scan_id, target)
-    completed = scan_claim_command(state_dir, "complete-scan", scan_id, claim_token)
+    completed = run_workbench(
+        state_dir, "complete-scan", "--scan-id", scan_id, "--claim-token", claim_token
+    )
     completed_scan = completed["scan"]
     assert completed_scan["progress"]["status"] == "complete"
     assert completed_scan["findingCount"] == 1
@@ -847,7 +598,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert finding["remediationTests"] == ["Reject traversal entries during extraction."]
     assert finding["locations"][0]["absolutePath"] == str(target / "src" / "extract.py")
 
-    reopened = workspace_command(state_dir, "get-workspace", workspace_id)
+    reopened = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
     assert reopened["results"]["findings"][0]["findingId"].startswith("csf_")
     assert reopened["results"]["findings"][0]["occurrenceId"].startswith("occ_")
     assert reopened["results"]["findings"][0]["attackPath"]["reachability"] == (
@@ -875,20 +626,29 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
                 occurrence_id,
             ),
         )
-    aliased = get_scan(state_dir, scan_id)
+    aliased = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
     assert aliased["scan"]["findings"][0]["rootCause"] == {
         "code": "destination.write_bytes(entry.read())",
         "evidenceRefs": ["archive-write"],
         "summary": "Legacy containment details remain visible.",
     }
 
-    set_triage(state_dir, occurrence_id, "closed", "--close-reason", "already_fixed")
+    run_workbench(
+        state_dir,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence_id,
+        "--status",
+        "closed",
+        "--close-reason",
+        "already_fixed",
+    )
     with sqlite3.connect(database) as connection:
         connection.execute(
             "UPDATE finding_occurrences SET details_json = '{}' WHERE id = ?",
             (occurrence_id,),
         )
-    backfilled = workspace_command(state_dir, "get-workspace", workspace_id)
+    backfilled = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
     assert backfilled["results"]["findings"][0]["attackPath"]["impact"]["level"] == "high"
     assert backfilled["results"]["findings"][0]["triage"]["status"] == "closed"
 
@@ -901,7 +661,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             """,
             (occurrence_id,),
         )
-    poisoned = get_scan(state_dir, scan_id)
+    poisoned = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
     assert "attackPath" not in poisoned["scan"]["findings"][0]
     assert poisoned["scan"]["findings"][0]["title"] == finding["title"]
 
@@ -913,7 +673,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (49,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -1988,76 +1748,6 @@ def test_workbench_marks_nested_git_paths_as_review_changes_unsupported(tmp_path
     assert inspected["targetMetadata"]["reviewChangesSupported"] is False
 
 
-@pytest.mark.parametrize("scope", ["src", " component", "component ", "./ "])
-def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: str) -> None:
-    if os.name == "nt" and scope.endswith(" "):
-        pytest.skip("Windows removes trailing spaces from directory names.")
-    state_dir = tmp_path / "state"
-    target = tmp_path / ("target" if os.name == "nt" else "target ")
-    target.mkdir()
-    if target.name.endswith(" "):
-        (tmp_path / "target").mkdir()
-    (target / scope).mkdir()
-    if scope != scope.strip() and scope.strip() != "./":
-        (target / scope.strip()).mkdir()
-    inspected = run_workbench(state_dir, "inspect-target", "--target-path", str(target))
-    workspace_id = str(uuid.uuid4())
-    created = create_workspace(
-        state_dir, workspace_id, "--target-path", inspected["targetPath"], "--scope", scope
-    )
-    assert created["targetPath"] == str(target)
-    assert created["scope"] == scope
-    saved = save_workspace(
-        state_dir, workspace_id, created["targetPath"], created["scope"], "standard"
-    )
-    assert saved["targetPath"] == str(target)
-    assert saved["scope"] == scope
-    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
-    scan = get_scan(state_dir, started["results"]["scanId"])["scan"]
-    assert scan["targetPath"] == str(target)
-    assert scan["scope"] == scope
-    assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
-
-
-@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000])
-def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
-    state_dir = tmp_path / "state"
-    workspace_id = str(uuid.uuid4())
-    created = create_workspace(state_dir, workspace_id, "--target-path", blank, "--scope", blank)
-    assert created["targetPath"] is None
-    assert created["scope"] == "."
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = save_workspace(state_dir, workspace_id, str(target), blank, "standard")
-    assert saved["targetPath"] == str(target)
-    assert saved["scope"] == "."
-
-
-@pytest.mark.parametrize("field", ["scope", "target-path"])
-@pytest.mark.parametrize("leading", [False, True])
-def test_workspace_checks_retained_literal_path_length(tmp_path: Path, field: str, leading: bool):
-    state_dir = tmp_path / "state"
-    value = " " * 5000 + "src" if leading else "src" + " " * 5000
-    result = run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        str(uuid.uuid4()),
-        f"--{field}={value}",
-        check=False,
-    )
-    assert result["returncode"] != 0
-    assert result["stderr"] == "Text value must be no longer than 4096 characters.\n"
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
-
-
-def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
-    scope = " " * 4093 + "src"
-    created = create_workspace(tmp_path / "state", str(uuid.uuid4()), "--scope", scope)
-    assert created["scope"] == scope
-
-
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     missing = tmp_path / "missing"
@@ -2381,6 +2071,7 @@ def test_workbench_warns_after_working_tree_head_changes(
         scan_dir,
         scan_id,
         target,
+        relative_path="README.md",
         target_kind="git_diff",
         diff_base_revision=revision,
         diff_head_revision=revision,
@@ -3315,6 +3006,76 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     reopened = get_scan(state_dir, scan_id)
     assert reopened["scan"]["reportAvailable"] is False
     assert "markdownReport" not in reopened["scan"]["artifacts"]
+
+
+@pytest.mark.parametrize("scope", ["src", " component", "component ", "./ "])
+def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: str) -> None:
+    if os.name == "nt" and scope.endswith(" "):
+        pytest.skip("Windows removes trailing spaces from directory names.")
+    state_dir = tmp_path / "state"
+    target = tmp_path / ("target" if os.name == "nt" else "target ")
+    target.mkdir()
+    if target.name.endswith(" "):
+        (tmp_path / "target").mkdir()
+    (target / scope).mkdir()
+    if scope != scope.strip() and scope.strip() != "./":
+        (target / scope.strip()).mkdir()
+    inspected = run_workbench(state_dir, "inspect-target", "--target-path", str(target))
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(
+        state_dir, workspace_id, "--target-path", inspected["targetPath"], "--scope", scope
+    )
+    assert created["targetPath"] == str(target)
+    assert created["scope"] == scope
+    saved = save_workspace(
+        state_dir, workspace_id, created["targetPath"], created["scope"], "standard"
+    )
+    assert saved["targetPath"] == str(target)
+    assert saved["scope"] == scope
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
+    scan = get_scan(state_dir, started["results"]["scanId"])["scan"]
+    assert scan["targetPath"] == str(target)
+    assert scan["scope"] == scope
+    assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
+
+
+@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000])
+def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
+    state_dir = tmp_path / "state"
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(state_dir, workspace_id, "--target-path", blank, "--scope", blank)
+    assert created["targetPath"] is None
+    assert created["scope"] == "."
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = save_workspace(state_dir, workspace_id, str(target), blank, "standard")
+    assert saved["targetPath"] == str(target)
+    assert saved["scope"] == "."
+
+
+@pytest.mark.parametrize("field", ["scope", "target-path"])
+@pytest.mark.parametrize("leading", [False, True])
+def test_workspace_checks_retained_literal_path_length(tmp_path: Path, field: str, leading: bool):
+    state_dir = tmp_path / "state"
+    value = " " * 5000 + "src" if leading else "src" + " " * 5000
+    result = run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        str(uuid.uuid4()),
+        f"--{field}={value}",
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert result["stderr"] == "Text value must be no longer than 4096 characters.\n"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
+
+
+def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
+    scope = " " * 4093 + "src"
+    created = create_workspace(tmp_path / "state", str(uuid.uuid4()), "--scope", scope)
+    assert created["scope"] == scope
 
 
 @pytest.mark.cross_platform

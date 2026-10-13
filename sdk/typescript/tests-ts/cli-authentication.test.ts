@@ -860,30 +860,34 @@ describe("CLI authentication", () => {
     ).toBe(17);
   });
 
-  test("keeps delegated credentials in the configured Codex home", async () => {
-    const root = await temporaryDirectory("codex-security-login-home-");
-    const repository = join(root, "repository");
-    const relativeHome = join(repository, ".codex-security-home");
-    const tildeHome = join(root, ".codex-security-home");
-    const mountedHome = join(root, "mounted-codex-home");
-    const defaultHome = join(root, ".codex");
-    await mkdir(repository, { mode: 0o700 });
-    await mkdir(relativeHome, { mode: 0o700 });
-    await mkdir(tildeHome, { mode: 0o700 });
-    await mkdir(mountedHome, { mode: 0o700 });
-    await mkdir(defaultHome, { mode: 0o700 });
-    try {
-      for (const [configuredHome, expectedHome, userHome] of [
-        [".codex-security-home", relativeHome, root],
-        ["~/.codex-security-home", tildeHome, root],
-        [mountedHome, mountedHome, join(root, "missing-home")],
-        ...(process.platform === "win32"
-          ? []
-          : ([
-              ["", defaultHome, root],
-              ["   ", defaultHome, root],
-            ] as const)),
-      ] as const) {
+  for (const kind of [
+    "relative",
+    "tilde",
+    "mounted",
+    ...(process.platform === "win32" ? [] : (["empty", "whitespace"] as const)),
+  ] as const) {
+    test(`keeps delegated credentials in the configured Codex home (${kind})`, async () => {
+      const root = await temporaryDirectory("codex-security-login-home-");
+      const repository = join(root, "repository");
+      const relativeHome = join(repository, ".codex-security-home");
+      const tildeHome = join(root, ".codex-security-home");
+      const mountedHome = join(root, "mounted-codex-home");
+      const defaultHome = join(root, ".codex");
+      await mkdir(repository, { mode: 0o700 });
+      await mkdir(relativeHome, { mode: 0o700 });
+      await mkdir(tildeHome, { mode: 0o700 });
+      await mkdir(mountedHome, { mode: 0o700 });
+      await mkdir(defaultHome, { mode: 0o700 });
+      try {
+        const [configuredHome, expectedHome, userHome] = (
+          {
+            relative: [".codex-security-home", relativeHome, root],
+            tilde: ["~/.codex-security-home", tildeHome, root],
+            mounted: [mountedHome, mountedHome, join(root, "missing-home")],
+            empty: ["", defaultHome, root],
+            whitespace: ["   ", defaultHome, root],
+          } as const
+        )[kind];
         const credentialAncestors = [
           join(expectedHome, "state"),
           join(expectedHome, "state", "plugins"),
@@ -929,7 +933,18 @@ describe("CLI authentication", () => {
         await expect(stat(join(repository, "auth.json"))).rejects.toThrow();
         expect(run(["login", "status"])).toBe(0);
         expect(run(["logout"])).toBe(0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
       }
+    }, 60_000);
+  }
+
+  test("shows delegated login help with a blank mixed-case Codex home", async () => {
+    const root = await temporaryDirectory("codex-security-login-help-");
+    const repository = join(root, "repository");
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(join(root, ".codex"), { mode: 0o700 });
+    try {
       expect(
         spawnSync(
           process.execPath,

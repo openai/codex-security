@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { parseJson, stringifyJson } from "../helpers/json";
 import { requireSqliteText } from "./database";
@@ -27,12 +28,14 @@ export type SeverityCheckpoint =
       action: "begin";
       scanId: string;
       findingIds: string[];
+      inputs?: Record<string, string>;
       assessedAt: string;
       rubricSha256: string | null;
       knowledgeBaseSha256: string | null;
     }
   | {
       action: "save";
+      reused?: boolean;
       scanId: string;
       finding: Finding;
       assessment: Assessment;
@@ -63,6 +66,74 @@ export function assessments(
     .all(
       stringifyJson(findingIds, 0),
       ...(scanId === undefined ? [] : [scanId]),
+    );
+  return rows.map((row) => parseJson(String(row.value)) as Assessment);
+}
+
+function scanAssessments(
+  database: DatabaseSync,
+  findingIds: string[],
+  scanId: string,
+): Assessment[] {
+  const saved = assessments(database, findingIds, scanId);
+  const byFinding = new Map(
+    saved.map((assessment) => [assessment.findingId, assessment]),
+  );
+  const missing = findingIds.filter((id) => !byFinding.has(id));
+  const fingerprints = new Map(
+    database
+      .prepare(
+        `SELECT json_object('id', findings.id, 'fingerprint', findings.fingerprint) AS value
+     FROM json_each(?) AS selected CROSS JOIN findings ON findings.id = selected.value`,
+      )
+      .all(stringifyJson(missing, 0))
+      .map((row) => {
+        const value = parseJson(String(row.value)) as {
+          id: string;
+          fingerprint: string;
+        };
+        return [value.id, value.fingerprint];
+      }),
+  );
+  for (const assessment of assessments(database, missing)) {
+    const fingerprint = fingerprints.get(assessment.findingId!);
+    if (fingerprint === undefined) continue;
+    // Match the retained migration without changing a database opened for publication.
+    const occurrence = `occ_${createHash("sha256").update(`${scanId}\0${fingerprint}`).digest("hex").slice(0, 24)}`;
+    if (assessment.occurrenceId === occurrence)
+      byFinding.set(assessment.findingId, assessment);
+  }
+  return findingIds.flatMap((id) => {
+    const assessment = byFinding.get(id);
+    return assessment === undefined ? [] : [assessment];
+  });
+}
+
+function reusableAssessments(
+  database: DatabaseSync,
+  payload: Extract<SeverityCheckpoint, { action: "begin" }>,
+): Assessment[] {
+  requireSqliteText(Object.entries(payload.inputs!).flat());
+  const projection = Object.entries(fields)
+    .map(([key, column]) => `'${key}', ${column}`)
+    .join(", ");
+  const rows = database
+    .prepare(
+      `SELECT json_object(${projection}) AS value FROM (
+    SELECT assessment.*, selected.key AS finding_order,
+      ROW_NUMBER() OVER (PARTITION BY assessment.finding_id
+        ORDER BY (assessment.scan_id = ?) DESC, assessment.assessed_at DESC, assessment.scan_id) AS rank
+    FROM json_each(?) AS selected
+    JOIN scan_severity_assessments AS assessment
+      ON assessment.finding_id = selected.key AND assessment.input_sha256 = selected.value
+    WHERE assessment.rubric_sha256 IS ? AND assessment.knowledge_base_sha256 IS ?
+  ) WHERE rank = 1 ORDER BY finding_order`,
+    )
+    .all(
+      payload.scanId,
+      stringifyJson(payload.inputs, 0),
+      payload.rubricSha256,
+      payload.knowledgeBaseSha256,
     );
   return rows.map((row) => parseJson(String(row.value)) as Assessment);
 }
@@ -99,19 +170,11 @@ export function severityCheckpoint(
           payload.rubricSha256,
           payload.knowledgeBaseSha256,
         );
-      // Cache hits are not saved again by the classifier. Keep each scan's own assessments.
-      database
-        .prepare(
-          `INSERT INTO scan_severity_assessments
-           SELECT ?, assessment.* FROM json_each(?) AS selected
-           JOIN finding_severity_assessments AS assessment
-             ON assessment.finding_id = selected.value
-           WHERE true
-           ON CONFLICT(scan_id, finding_id) DO NOTHING`,
-        )
-        .run(payload.scanId, stringifyJson(payload.findingIds, 0));
       return {
-        assessments: assessments(database, payload.findingIds, payload.scanId),
+        assessments:
+          payload.inputs === undefined
+            ? scanAssessments(database, payload.findingIds, payload.scanId)
+            : reusableAssessments(database, payload),
       };
     }
     if (payload.action !== "save")
@@ -153,23 +216,16 @@ export function severityCheckpoint(
           timestamp,
         );
     }
-    for (const [table, key, row] of [
-      ["finding_severity_assessments", "finding_id", values],
-      [
-        "scan_severity_assessments",
-        "scan_id, finding_id",
-        { scan_id: payload.scanId, ...values },
-      ],
-    ] as const) {
-      const columns = Object.keys(row);
-      database
-        .prepare(
-          `INSERT INTO ${table} (${columns.join(", ")})
-         VALUES (${columns.map(() => "?").join(", ")})
-         ON CONFLICT(${key}) DO UPDATE SET ${columns.map((column) => `${column} = excluded.${column}`).join(", ")}`,
-        )
-        .run(...Object.values(row));
-    }
+    const row = { scan_id: payload.scanId, ...values };
+    const columns = Object.keys(row);
+    database
+      .prepare(
+        `INSERT INTO scan_severity_assessments (${columns.join(", ")})
+       VALUES (${columns.map(() => "?").join(", ")})
+       ON CONFLICT(scan_id, finding_id) DO UPDATE SET ${columns.map((column) => `${column} = excluded.${column}`).join(", ")}
+       ${payload.reused ? "WHERE " + ["input_sha256", "rubric_sha256", "knowledge_base_sha256"].map((column) => `scan_severity_assessments.${column} IS NOT excluded.${column}`).join(" OR ") : ""}`,
+      )
+      .run(...Object.values(row));
     return {};
   });
 }
@@ -211,11 +267,9 @@ export function readSeverityClassification(
       return {
         scanId,
         ...classification,
-        assessments: assessments(
-          database,
-          classification.findingIds,
-          hasScanAssessments ? scanId : undefined,
-        ),
+        assessments: hasScanAssessments
+          ? scanAssessments(database, classification.findingIds, scanId)
+          : assessments(database, classification.findingIds),
       };
     });
   } finally {

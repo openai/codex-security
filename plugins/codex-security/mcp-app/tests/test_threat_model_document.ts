@@ -23,7 +23,6 @@ import {
 const pluginRoot = join(import.meta.dirname, "../../");
 const {
   recordCodexSecurityScanDraftViaWorkbench,
-  recordCodexSecurityWorkerScanDraft,
   saveThreatModelDocument,
   scanDraftInputSchema,
 } = await importModule({
@@ -176,16 +175,13 @@ test("terminal Deep model inheritance retries a changed canonical draft", async 
   }
 });
 
-test("model-only worker checkpoints save Markdown before findings and retain it on retry", async () => {
+test("model-only scan checkpoints save Markdown before findings and retain it on retry", async () => {
   const root = await temporaryDirectory("threatmodel-worker-");
   try {
     const context = {
-      root,
-      repoRoot: root,
-      layout: "worker",
-      scanId,
+      ...draftFixture(root, "standard").context,
+      handoffClaimToken: undefined,
       pluginRoot,
-      scope: ".",
     };
     const checkpoint = {
       scanId,
@@ -217,24 +213,29 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
         .threatModel,
       legacyModel,
     );
-    const result = await recordCodexSecurityWorkerScanDraft(
-      context,
-      checkpoint,
-    );
+    const result = await recordCodexSecurityScanDraft(context, checkpoint);
     assert.equal(result.warnings, undefined);
     const contents = await readFile(join(root, "threatmodel.md"), "utf8");
     assert.ok(contents.startsWith(markdown));
     assert.match(contents, /Model scope: services\/api/);
     assert.match(contents, /provisional/);
-    assert.equal((await readdir(join(root, "checkpoints"))).length, 1);
-    await recordCodexSecurityWorkerScanDraft(context, {
+    const checkpoints = (await readdir(join(root, "checkpoints"))).filter(
+      (name) => name.endsWith(".json"),
+    );
+    assert.ok(checkpoints.length > 0);
+    for (const name of checkpoints)
+      assert.deepEqual(
+        (await readJson(root, "checkpoints", name)).threatModel,
+        threatModel,
+      );
+    await recordCodexSecurityScanDraft(context, {
       scanId,
       complete: false,
       findings: [],
       coverage,
     });
-    const saved = await readJson(root, "result.json");
-    assert.deepEqual(saved.threatModel, threatModel);
+    const saved = await readJson(root, "scan-manifest.json");
+    assert.deepEqual(saved.scan.threatModel, threatModel);
     assert.equal(
       await readFile(join(root, "threatmodel.md"), "utf8"),
       contents,
@@ -244,17 +245,21 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
   }
 });
 
-test("a convenience-document failure preserves the worker result and reports a warning", async () => {
+test("a convenience-document failure preserves the scan result and reports a warning", async () => {
   const root = await temporaryDirectory("threatmodel-write-failure-");
   try {
     await mkdir(join(root, "threatmodel.md"));
-    const result = await recordCodexSecurityWorkerScanDraft(
-      { root, repoRoot: root, layout: "worker", scanId, pluginRoot },
+    const result = await recordCodexSecurityScanDraft(
+      {
+        ...draftFixture(root, "standard").context,
+        handoffClaimToken: undefined,
+        pluginRoot,
+      },
       { scanId, complete: false, threatModel, findings: [], coverage },
     );
     assert.match(result.warnings[0], /threatmodel\.md could not be written/);
     assert.deepEqual(
-      (await readJson(root, "result.json")).threatModel,
+      (await readJson(root, "scan-manifest.json")).scan.threatModel,
       threatModel,
     );
   } finally {
@@ -262,15 +267,13 @@ test("a convenience-document failure preserves the worker result and reports a w
   }
 });
 
-test("the configured worker interpreter is honored without losing the canonical model on failure", async () => {
+test("the configured scan interpreter is honored without losing the canonical model on failure", async () => {
   const root = await temporaryDirectory("threatmodel-python-");
   try {
-    const result = await recordCodexSecurityWorkerScanDraft(
+    const result = await recordCodexSecurityScanDraft(
       {
-        root,
-        repoRoot: root,
-        layout: "worker",
-        scanId,
+        ...draftFixture(root, "standard").context,
+        handoffClaimToken: undefined,
         pluginRoot,
         pythonCommand: join(root, "missing-interpreter"),
       },
@@ -278,7 +281,7 @@ test("the configured worker interpreter is honored without losing the canonical 
     );
     assert.match(result.warnings[0], /missing-interpreter/);
     assert.deepEqual(
-      (await readJson(root, "result.json")).threatModel,
+      (await readJson(root, "scan-manifest.json")).scan.threatModel,
       threatModel,
     );
   } finally {
@@ -339,27 +342,24 @@ test("overlapping draft projections retain the latest committed model", async (t
   });
   syncBuiltinESMExports();
   const context = {
-    root,
-    repoRoot: root,
-    layout: "worker",
-    scanId,
+    ...draftFixture(root, "standard").context,
+    handoffClaimToken: undefined,
     pluginRoot,
     pythonCommand: "fixture-python",
     targetRevision: "example-revision",
-    targetContract: { target: { requiredSnapshotDigest: "example-snapshot" } },
   };
   const firstModel = { format: "markdown", content: "# First model\n" };
   const latestModel = { format: "markdown", content: "# Latest model\n" };
   const events = watch(root);
   const latestCommitted = (async () => {
     for await (const event of events) {
-      if (event.filename !== "result.json") continue;
-      const value = await readJson(root, "result.json");
-      if (value.threatModel.content === latestModel.content) return;
+      if (event.filename !== "scan-manifest.json") continue;
+      const value = await readJson(root, "scan-manifest.json");
+      if (value.scan.threatModel.content === latestModel.content) return;
     }
   })();
   try {
-    const first = recordCodexSecurityWorkerScanDraft(context, {
+    const first = recordCodexSecurityScanDraft(context, {
       scanId,
       complete: false,
       threatModel: firstModel,
@@ -372,7 +372,7 @@ test("overlapping draft projections retain the latest committed model", async (t
       input.provenance.snapshotDigest,
       context.targetContract.target.requiredSnapshotDigest,
     );
-    const latest = recordCodexSecurityWorkerScanDraft(context, {
+    const latest = recordCodexSecurityScanDraft(context, {
       scanId,
       complete: false,
       threatModel: latestModel,
@@ -398,7 +398,7 @@ test("overlapping draft projections retain the latest committed model", async (t
       latestModel.content,
     );
     assert.deepEqual(
-      (await readJson(root, "result.json")).threatModel,
+      (await readJson(root, "scan-manifest.json")).scan.threatModel,
       latestModel,
     );
   } finally {

@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { parse } from "smol-toml";
+import { CodexSecurityError } from "./errors.js";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { configuredCodexHome } from "./auth.js";
+import { environmentEntry, expandHomePath } from "./codex-home.js";
 import {
   resolveCodexProfile,
   modelProviderConfigOverride,
@@ -15,6 +18,9 @@ import { isRecord } from "./record.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
+  codexSecurityCredentialHome,
+  requireSecureCredentialHome,
+  type ProcessEnvironment,
   acquireCodexSecurityCredentialHomeLock,
   executablePathForSpawn,
   requirePrivateCredentialHome,
@@ -64,6 +70,33 @@ export async function createProviderProfile(
   options: Parameters<typeof requirePrivateCredentialHome>[2] = {},
 ): Promise<ProviderProfile> {
   const providers = resolveCodexProfile(config)["model_providers"];
+  return createPrivateProfile(
+    codexHome,
+    {
+      model_providers: isRecord(providers) ? providers : {},
+    },
+    options,
+  );
+}
+
+/** Preserve credential-bearing replay tables outside readable scan history. */
+export async function createReplayProfile(
+  codexHome: string,
+  config: JsonObject,
+): Promise<ProviderProfile> {
+  const resolved = resolveCodexProfile(config);
+  const saved: JsonObject = {};
+  for (const key of ["model_providers", "mcp_servers"]) {
+    if (isRecord(resolved[key])) saved[key] = resolved[key] as JsonObject;
+  }
+  return createPrivateProfile(codexHome, saved);
+}
+
+async function createPrivateProfile(
+  codexHome: string,
+  config: JsonObject,
+  options: Parameters<typeof requirePrivateCredentialHome>[2] = {},
+): Promise<ProviderProfile> {
   const name = `codex_security_${randomUUID()}`;
   const path = join(codexHome, `${name}.config.toml`);
   if ((options.platform ?? process.platform) === "win32") {
@@ -74,10 +107,55 @@ export async function createProviderProfile(
       options,
     );
   }
-  await writeCodexConfig(path, {
-    model_providers: isRecord(providers) ? providers : {},
-  });
+  await writeCodexConfig(path, config);
   return { name, path, cleanup: () => rm(path, { force: true }) };
+}
+
+/** Restore saved private settings from the credential home, never from scan artifacts. */
+export async function restoreReplayProfile(
+  config: JsonObject,
+  profile: unknown,
+  environment: ProcessEnvironment,
+): Promise<JsonObject> {
+  if (profile === undefined) return config;
+  if (
+    !isRecord(profile) ||
+    typeof profile["name"] !== "string" ||
+    (profile["home"] !== "ambient" && profile["home"] !== "managed") ||
+    !/^codex_security_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+      profile["name"],
+    )
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan contains an invalid replay profile.",
+    );
+  }
+  const requestedHome = environmentEntry(environment, "CODEX_HOME");
+  const codexHome =
+    profile["home"] === "ambient"
+      ? await realpath(
+          requestedHome?.trim()
+            ? expandHomePath(requestedHome, environment)
+            : configuredCodexHome(environment),
+        )
+      : codexSecurityCredentialHome(environment);
+  // The managed home has stricter ownership rules. Native execution preserves
+  // the invoking home's permissions and reads the same private profile files.
+  if (profile["home"] === "managed")
+    await requireSecureCredentialHome(codexHome);
+  const saved = parse(
+    await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
+  );
+  const restored: JsonObject = {};
+  for (const key of ["model_providers", "mcp_servers"]) {
+    if (isRecord(saved[key])) restored[key] = saved[key] as JsonObject;
+  }
+  if (Object.keys(restored).length === 0) {
+    throw new CodexSecurityError(
+      "The saved replay profile contains no private configuration.",
+    );
+  }
+  return { ...config, ...restored };
 }
 
 /** The pinned SDK lacks the native CLI's private profile-file option. */
@@ -190,7 +268,7 @@ export async function legacyWorkerUsesScanProvider(
   });
 }
 
-export async function withCodexPreflightLock<T>(
+async function withCodexPreflightLock<T>(
   env: Record<string, string> | undefined,
   signal: AbortSignal | undefined,
   operation: () => Promise<T>,

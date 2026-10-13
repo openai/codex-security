@@ -1,16 +1,30 @@
-import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
+import { spawnSync } from "node:child_process";
+
+import { mkdtempSync, rmSync } from "node:fs";
+
+import { tmpdir } from "node:os";
+
+import { join } from "node:path";
+
 import { afterEach, expect, test } from "bun:test";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import { runNodePython } from "./support/python-probe.js";
 
-const temporaryDirectories = createTemporaryDirectoriesSync();
+import { fileURLToPath } from "node:url";
 
-afterEach(temporaryDirectories.cleanup);
+const PLUGIN_ROOT = fileURLToPath(
+  new URL("../../../plugins/codex-security/", import.meta.url),
+);
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const root of temporaryDirectories.splice(0))
+    rmSync(root, { recursive: true, force: true });
+});
 
 const stoppedScanProbe = [
   "import argparse, hashlib, json, os, pathlib, shutil, sqlite3, subprocess, sys, uuid",
   "plugin = pathlib.Path(sys.argv[1])",
-  "root = pathlib.Path(sys.argv[2])",
+  "root = pathlib.Path(sys.argv[2]).resolve()",
   "source = sys.argv[3]",
   "terminal_status = sys.argv[4] if len(sys.argv) > 4 else 'failed'",
   "state = root / 'state'",
@@ -25,38 +39,36 @@ const stoppedScanProbe = [
   "environment = {**os.environ, 'CODEX_SECURITY_STATE_DIR': str(state), 'CODEX_HOME': str(home)}",
   "script = plugin / 'scripts' / 'workbench_db.py'",
   "def run(*arguments):",
-  "    completed = subprocess.run([sys.executable, '-I', '-B', str(script), *arguments], check=True, capture_output=True, text=True, env=environment)",
+  "    completed = subprocess.run([sys.executable, '-I', '-B', str(script), *arguments], capture_output=True, text=True, env=environment)",
+  "    assert completed.returncode == 0, completed.stderr",
   "    return json.loads(completed.stdout)",
-  "started = run('begin-deep-scan', '--thread-id', 'stopped-result-owner', '--target-path', str(target), '--scope', '.', '--scan-root', str(root / 'scans'), '--available-parallelism', '4')['deepScan']",
+  "scan_dir = root / 'scans' / 'parent'",
+  "scan_dir.parent.mkdir(mode=0o700)",
+  "scan_dir.mkdir(mode=0o700)",
+  "recipe = {'repository': str(target), 'target': {'kind':'repository','paths':[]}, 'mode':'deep','config':{'model':'synthetic-model'}}",
+  "started = run('register-cli-scan', '--repository', str(target), '--scan-dir', str(scan_dir), '--recipe-json', json.dumps(recipe))",
   "scan_id = started['scanId']",
-  "scan_dir = pathlib.Path(started['scanDir'])",
-  "worker_id = str(uuid.uuid4())",
-  "artifact_dir = scan_dir / 'artifacts' / 'deep_discovery' / source",
-  "artifact_dir.mkdir(parents=True)",
-  "prompt_path = artifact_dir / 'prompt.md'",
-  "prompt_path.write_text('Review the fixture.\\n', encoding='utf-8')",
-  "result_path = artifact_dir / 'result.json'",
-  "base = ('upsert-deep-scan-worker', '--scan-id', scan_id, '--worker-id', worker_id, '--kind', 'discovery', '--prompt-path', str(prompt_path), '--artifact-dir', str(artifact_dir), '--attempt', '1')",
-  "run(*base, '--status', 'running')",
+  "run('set-scan-thread', '--scan-id', scan_id, '--thread-id', 'stopped-result-owner')",
+  "artifact_dir = scan_dir / 'artifacts' / 'deep-scan' / 'passes' / 'pass-1'",
+  "for directory in (scan_dir / 'artifacts', scan_dir / 'artifacts' / 'deep-scan', artifact_dir.parent, artifact_dir): directory.mkdir(mode=0o700)",
+  "child = run('register-cli-scan', '--repository', str(target), '--scan-dir', str(artifact_dir), '--parent-scan-id', scan_id, '--recipe-json', json.dumps({**recipe,'mode':'standard'}))",
   "finding = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text(encoding='utf-8'))['findings'][0]",
+  "for field in ('findingId','occurrenceId','fingerprints'): finding.pop(field, None)",
   "finding.setdefault('provenance', {})['candidateId'] = 'checkpoint-candidate'",
   "payload = {'scanId': scan_id, 'findings': [finding], 'coverage': {'completeness': 'partial', 'surfaces': [], 'explicitExclusions': [], 'deferred': [{'candidateId': 'pending-validation', 'reason': 'Validation stopped with the scan.', 'paths': ['src/extract.py']}]}, 'threatModel': {'summary': 'Synthetic stopped-scan threat model.'}}",
-  "if source == 'accepted':",
-  "    result_path.write_text(json.dumps(payload), encoding='utf-8')",
-  "    run(*base, '--status', 'succeeded', '--result-manifest-path', str(result_path))",
-  "else:",
+  "if source != 'accepted':",
   "    checkpoint = {**payload, 'complete': False}",
-  "    checkpoint_dir = artifact_dir / 'checkpoints'",
+  "    checkpoint_dir = scan_dir / 'checkpoints'",
   "    checkpoint_dir.mkdir()",
   "    if source == 'refined-checkpoint':",
   "        earlier = json.loads(json.dumps(checkpoint))",
   "        earlier['findings'][0]['locations'][0].update({'startLine': 21, 'endLine': 26})",
   "        later = json.loads(json.dumps(checkpoint))",
   "        later['findings'][0]['locations'][0].update({'startLine': 24, 'endLine': 26})",
-  "        for document in (earlier, later):",
+  "        later['findings'][0]['provenance']['previousFindings'] = earlier['findings']",
+  "        for document in (later,):",
   "            encoded = json.dumps(document).encode()",
   "            (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
-  "        result_path.write_text(json.dumps(later), encoding='utf-8')",
   "    else:",
   "        if source == 'distinct-instances':",
   "            first = json.loads(json.dumps(finding))",
@@ -66,15 +78,28 @@ const stoppedScanProbe = [
   "            checkpoint['findings'] = [first, second]",
   "        encoded = json.dumps(checkpoint).encode()",
   "        (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
-  "        result_path.write_text('{incomplete', encoding='utf-8')",
+  "documents = {name: json.loads((plugin / 'examples' / 'completed-scan' / name).read_text()) for name in ('scan-manifest.json','findings.json','coverage.json')}",
+  "child_findings = later['findings'] if source == 'refined-checkpoint' else checkpoint['findings'] if source == 'distinct-instances' else payload['findings']",
+  "manifest = documents['scan-manifest.json']['scan']",
+  "for field in ('id','producer','startedAt','completedAt','sealedAt','artifacts','status'): manifest.pop(field, None)",
+  "manifest['target'] = {'kind': child['contract']['target']['allowedKinds'][0]}",
+  "manifest['scope'] = {'includePaths':['.'],'excludePaths':[]}",
+  "documents['findings.json'].update(scanId=child['scanId'], findings=child_findings)",
+  "documents['coverage.json'].update(scanId=child['scanId'], surfaces=[], deferred=[], mode='repository')",
+  "for name, document in documents.items(): (artifact_dir / name).write_text(json.dumps(document))",
+  "run('prepare-scan-completion', '--scan-id', child['scanId'])",
+  "run('complete-scan', '--scan-id', child['scanId'])",
+  "aggregate = later if source == 'refined-checkpoint' else checkpoint if source != 'accepted' else payload",
+  "composition = {'version':2,'startedAt':'2026-01-01T00:00:00Z','passes':[{'directory':'artifacts/deep-scan/passes/pass-1','scanId':child['scanId']}],'mergedScanIds':[child['scanId']],'aggregate':aggregate,'noNewStreak':0,'consecutiveErrors':0}",
+  "(scan_dir / 'artifacts' / 'deep-scan' / 'checkpoint.json').write_text(json.dumps(composition))",
   "if source == 'cancel-io-retry':",
   "    os.environ.update(environment)",
   "    sys.path.insert(0, str(plugin / 'scripts'))",
   "    import workbench_db",
   "    connection = workbench_db.connect()",
   "    original_write = workbench_db.saved_results._write_prepared_scan_finalization",
-  "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared, *, projection_warnings=None: (_ for _ in ()).throw(OSError('synthetic cancellation publication failure'))",
-  "    workbench_db.saved_results.cancel_scan_locked(workbench_db._WORKBENCH_DB_CONTEXT, connection, argparse.Namespace(scan_id=scan_id, thread_id=None))",
+  "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared, **kwargs: (_ for _ in ()).throw(OSError('synthetic cancellation publication failure'))",
+  "    workbench_db.saved_results.cancel_scan_locked(workbench_db, connection, argparse.Namespace(scan_id=scan_id, thread_id=None))",
   "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
   "    connection.close()",
   "    run('preserve-scan-results', '--scan-id', scan_id, '--thread-id', 'stopped-result-owner')",
@@ -85,9 +110,12 @@ const stoppedScanProbe = [
   "        frozen = database.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'frozen': json.loads(frozen) if frozen else None}))",
   "    raise SystemExit(0)",
-  "run('fail-deep-scan', '--scan-id', scan_id, '--message', 'Synthetic worker stopped.', '--deep-status', terminal_status)",
+  "if terminal_status == 'canceled': run('cancel-scan', '--scan-id', scan_id)",
+  "else: run('fail-scan', '--scan-id', scan_id, '--message', 'Synthetic ordinary scan stopped.')",
   "if source == 'legacy-seal-io-retry':",
   "    shutil.rmtree(artifact_dir)",
+  "    shutil.rmtree(scan_dir / 'checkpoints', ignore_errors=True)",
+  "    (scan_dir / 'artifacts' / 'deep-scan' / 'checkpoint.json').unlink()",
   "    manifest_path = scan_dir / 'scan-manifest.json'",
   "    legacy_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    legacy_manifest['scan']['status'] = 'completed'",
@@ -100,27 +128,20 @@ const stoppedScanProbe = [
   "    connection.execute('UPDATE scans SET seal_manifest_digest = NULL, retained_source_digests_json = NULL WHERE id = ?', (scan_id,))",
   "    connection.commit()",
   "    original_write = workbench_db.saved_results._write_prepared_scan_finalization",
-  "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared, *, projection_warnings=None: (_ for _ in ()).throw(OSError('synthetic publication failure'))",
+  "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared, **kwargs: (_ for _ in ()).throw(OSError('synthetic publication failure'))",
   "    first_failed = False",
   "    try:",
-  "        workbench_db.saved_results.preserve_scan_results_locked(workbench_db._WORKBENCH_DB_CONTEXT, connection, scan_id)",
+  "        workbench_db.saved_results.preserve_scan_results_locked(workbench_db, connection, scan_id)",
   "    except OSError:",
   "        first_failed = True",
   "    frozen_after_failure = connection.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
-  "    retry_published = workbench_db.saved_results.preserve_scan_results_locked(workbench_db._WORKBENCH_DB_CONTEXT, connection, scan_id)",
+  "    retry_published = workbench_db.saved_results.preserve_scan_results_locked(workbench_db, connection, scan_id)",
   "    frozen_after_success = connection.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    final_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    final_findings = json.loads((scan_dir / 'findings.json').read_text(encoding='utf-8'))['findings']",
   "    connection.close()",
-  "    frozen_sources = json.loads(frozen_after_success)",
-  "    head_relative = next(path for path in frozen_sources if path.startswith('checkpoint-heads/'))",
-  "    head_path = scan_dir / head_relative",
-  "    head = json.loads(head_path.read_text(encoding='utf-8'))",
-  "    snapshot_bytes = (scan_dir / 'checkpoints' / head['checkpoint']).read_bytes()",
-  "    snapshot = json.loads(snapshot_bytes)",
-  "    head_evidence = head_path.read_bytes()",
-  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': json.loads(frozen_after_success) if frozen_after_success else None, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings), 'scanId': scan_id, 'head': head, 'headPath': head_relative, 'headDigest': hashlib.sha256(head_evidence).hexdigest(), 'snapshot': snapshot, 'snapshotDigest': hashlib.sha256(snapshot_bytes).hexdigest()}))",
+  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': json.loads(frozen_after_success) if frozen_after_success else None, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings)}))",
   "    raise SystemExit(0)",
   "if source == 'late-checkpoint':",
   "    manifest_before = (scan_dir / 'scan-manifest.json').read_bytes()",
@@ -149,34 +170,20 @@ const stoppedScanProbe = [
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings)}))",
 ].join("\n");
 
-function runStoppedScanProbe(
-  source: string,
-  prefix: string,
-  terminalStatus?: string,
-) {
-  const python = Bun.which("python3") ?? Bun.which("python");
-  expect(python).not.toBeNull();
-  const root = temporaryDirectories.create(prefix);
-  const result = runNodePython(python!, [
-    "-c",
-    stoppedScanProbe,
-    PLUGIN_ROOT,
-    root,
-    source,
-    ...(terminalStatus === undefined ? [] : [terminalStatus]),
-  ]);
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout);
-}
-
 test.each(["accepted", "checkpoint"] as const)(
   "preserves %s Deep findings when the scan stops",
   (source) => {
-    const recovered = runStoppedScanProbe(
-      source,
-      "codex-security-stopped-scan-",
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const root = mkdtempSync(join(tmpdir(), "codex-security-stopped-scan-"));
+    temporaryDirectories.push(root);
+    const result = spawnSync(
+      python!,
+      ["-I", "-B", "-c", stoppedScanProbe, PLUGIN_ROOT, root, source],
+      { encoding: "utf8" },
     );
-    expect(recovered).toEqual({
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
       findingCount: 1,
       progressStatus: "failed",
       artifactFindingCount: 1,
@@ -185,12 +192,28 @@ test.each(["accepted", "checkpoint"] as const)(
   30_000,
 );
 
-test("keeps refined checkpoints as one finding with retained history", () => {
-  const recovered = runStoppedScanProbe(
-    "refined-checkpoint",
-    "codex-security-refined-checkpoint-",
+test("keeps ordinary scan refinement history when the parent stops", () => {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = mkdtempSync(
+    join(tmpdir(), "codex-security-refined-checkpoint-"),
   );
-  expect(recovered).toEqual({
+  temporaryDirectories.push(root);
+  const result = spawnSync(
+    python!,
+    [
+      "-I",
+      "-B",
+      "-c",
+      stoppedScanProbe,
+      PLUGIN_ROOT,
+      root,
+      "refined-checkpoint",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
     findingCount: 1,
     progressStatus: "failed",
     artifactFindingCount: 1,
@@ -199,15 +222,29 @@ test("keeps refined checkpoints as one finding with retained history", () => {
   });
 }, 30_000);
 
-test.each(["failed", "interrupted"] as const)(
-  "keeps the first %s seal immutable when a worker writes late",
+test.each(["failed", "canceled"] as const)(
+  "keeps the first %s seal immutable when a late checkpoint arrives",
   (terminalStatus) => {
-    const recovered = runStoppedScanProbe(
-      "late-checkpoint",
-      "codex-security-late-checkpoint-",
-      terminalStatus,
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const root = mkdtempSync(join(tmpdir(), "codex-security-late-checkpoint-"));
+    temporaryDirectories.push(root);
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        stoppedScanProbe,
+        PLUGIN_ROOT,
+        root,
+        "late-checkpoint",
+        terminalStatus,
+      ],
+      { encoding: "utf8" },
     );
-    expect(recovered).toEqual({
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
       findingCount: 1,
       artifactFindingCount: 1,
       manifestUnchanged: true,
@@ -218,10 +255,25 @@ test.each(["failed", "interrupted"] as const)(
 );
 
 test("retries a legacy stopped seal after transient publication failure", () => {
-  const recovered = runStoppedScanProbe(
-    "legacy-seal-io-retry",
-    "codex-security-legacy-seal-retry-",
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = mkdtempSync(join(tmpdir(), "codex-security-legacy-seal-retry-"));
+  temporaryDirectories.push(root);
+  const result = spawnSync(
+    python!,
+    [
+      "-I",
+      "-B",
+      "-c",
+      stoppedScanProbe,
+      PLUGIN_ROOT,
+      root,
+      "legacy-seal-io-retry",
+    ],
+    { encoding: "utf8" },
   );
+  expect(result.status, result.stderr).toBe(0);
+  const recovered = JSON.parse(result.stdout);
   expect(recovered).toMatchObject({
     firstFailed: true,
     frozenAfterFailure: "{}",
@@ -229,38 +281,40 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     status: "failed",
     findingCount: 1,
   });
-  expect(recovered.head.checkpoint).toBe(`${recovered.snapshotDigest}.json`);
-  expect(recovered.headPath).toBe(
-    `checkpoint-heads/${recovered.headDigest}.json`,
-  );
-  expect(recovered.frozenAfterSuccess).toMatchObject({
-    [`checkpoints/${recovered.head.checkpoint}`]: recovered.snapshotDigest,
-    [recovered.headPath]: recovered.headDigest,
-  });
-  expect(recovered.snapshot).toMatchObject({
-    scanId: recovered.scanId,
-    findings: [
-      expect.objectContaining({
-        provenance: expect.objectContaining({
-          candidateId: "checkpoint-candidate",
-        }),
-      }),
-    ],
-    coverage: {
-      completeness: "partial",
-      deferred: expect.arrayContaining([
-        expect.objectContaining({ candidateId: "pending-validation" }),
-      ]),
-    },
-  });
+  const frozenSources = Object.entries(recovered.frozenAfterSuccess);
+  expect(frozenSources.map(([path]) => path.split("/")[0]).sort()).toEqual([
+    "checkpoint-heads",
+    "checkpoints",
+    "source-order",
+  ]);
+  for (const [checkpointPath, checkpointDigest] of frozenSources) {
+    expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(checkpointPath.split("/")[1]).toBe(`${checkpointDigest}.json`);
+  }
 }, 30_000);
 
-test("preserves distinct instances from one worker candidate", () => {
-  const recovered = runStoppedScanProbe(
-    "distinct-instances",
-    "codex-security-distinct-instances-",
+test("preserves distinct instances from one ordinary scan candidate", () => {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = mkdtempSync(
+    join(tmpdir(), "codex-security-distinct-instances-"),
   );
-  expect(recovered).toEqual({
+  temporaryDirectories.push(root);
+  const result = spawnSync(
+    python!,
+    [
+      "-I",
+      "-B",
+      "-c",
+      stoppedScanProbe,
+      PLUGIN_ROOT,
+      root,
+      "distinct-instances",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
     findingCount: 2,
     artifactFindingCount: 2,
     instances: ["first", "second"],
@@ -268,11 +322,17 @@ test("preserves distinct instances from one worker candidate", () => {
 }, 30_000);
 
 test("retries canceled result publication after a transient failure", () => {
-  const recovered = runStoppedScanProbe(
-    "cancel-io-retry",
-    "codex-security-cancel-retry-",
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = mkdtempSync(join(tmpdir(), "codex-security-cancel-retry-"));
+  temporaryDirectories.push(root);
+  const result = spawnSync(
+    python!,
+    ["-I", "-B", "-c", stoppedScanProbe, PLUGIN_ROOT, root, "cancel-io-retry"],
+    { encoding: "utf8" },
   );
-  expect(recovered).toEqual({
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
     findingCount: 1,
     progressStatus: "canceled",
     artifactFindingCount: 1,

@@ -53,6 +53,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             WHERE source_scans.target_id = ?
                 AND source_scans.id != ?
                 AND source_scans.status = 'complete'
+                AND source_scans.parent_scan_role IS NOT 'deep_pass'
         )
         SELECT *
         FROM ranked_decisions

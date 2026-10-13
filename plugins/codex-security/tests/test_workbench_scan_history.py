@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -12,14 +13,13 @@ from typing import Any
 
 import pytest
 from test_workbench_db import HEAD_CHANGED_WARNING
-from test_workbench_deep_scan import begin_target_scan
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
+    begin_legacy_scan,
     fail_scan,
     get_scan,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
-    resume_deep_scan,
+    mark_deep_aggregate_ready,
     run_workbench,
     scan_command,
     set_triage,
@@ -28,110 +28,53 @@ from workbench_test_support import (
 )
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
+
+
 FINALIZER = SCRIPT.with_name("finalize_scan_contract.py")
 
 
-@pytest.mark.parametrize("complete", [False, True])
-@pytest.mark.parametrize("upgrade", [False, True])
-def test_rename_persists_without_changing_scan_results(
-    tmp_path: Path, complete: bool, upgrade: bool
-) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=complete)
-    before = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
-    if upgrade:
-        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-            connection.execute("ALTER TABLE scans DROP COLUMN name")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 42")
+def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_api) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            "CREATE TABLE scans (id TEXT, started_at TEXT, parent_scan_role TEXT);"
+            "CREATE TABLE finding_occurrences (id TEXT, scan_id TEXT, finding_id TEXT, title TEXT);"
+            "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, "
+            "before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);"
+        )
+        connection.executemany(
+            "INSERT INTO scans VALUES (?, ?, ?)",
+            [("parent", "1", None), ("child", "2", "deep_pass"), ("rerun", "3", None)],
+        )
+        connection.executemany(
+            "INSERT INTO finding_occurrences VALUES (?, ?, 'stable', 'Synthetic finding')",
+            [("p", "parent"), ("c", "child"), ("c2", "child"), ("r", "rerun")],
+        )
+        connection.executemany(
+            "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'Confirmed')",
+            [("parent", "child", "p", "c"), ("child", "rerun", "c", "r")],
+        )
+        matches = workbench_api["scan_history"].finding_matches
+        for occurrence, scan_id, started in (("p", "parent", "1"), ("r", "rerun", "3")):
+            rows, known_since, known_scans = matches(connection, occurrence, scan_id, started)
+            assert {row["scanId"] for row in rows} == ({"parent", "rerun"} - {scan_id})
+            assert known_since == "1"
+            assert known_scans == ["parent", "rerun"]
+        rows, _, _ = matches(connection, "c", "child", "2")
+        assert {row["occurrenceId"] for row in rows} == {"p", "c2", "r"}
 
-    renamed = run_workbench(
-        state_dir, "rename-scan", "--scan-id", scan["scanId"], "--name=  Release audit  "
+
+def run_workbench(state_dir: Path, *args: str, check: bool = True) -> dict[str, Any]:
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        check=check,
+        capture_output=True,
+        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
+        text=True,
     )
-
-    assert renamed == {"scanId": scan["scanId"], "name": "Release audit"}
-    after = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
-    assert after == {**before, "name": "Release audit"}
-    listed = run_workbench(state_dir, "list-scans", "--query", "release audit")["scans"]
-    assert [(item["scanId"], item["name"]) for item in listed] == [
-        (scan["scanId"], "Release audit")
-    ]
-
-
-def test_rename_rejects_blank_names(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=False)
-
-    blank = run_workbench(
-        state_dir, "rename-scan", "--scan-id", scan["scanId"], "--name=  ", check=False
-    )
-    assert blank["returncode"] != 0
-    assert "Scan name cannot be empty" in blank["stderr"]
-    assert run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["name"] is None
-
-
-@pytest.mark.parametrize(
-    ("name", "query"),
-    [("Évaluation", "évaluation"), ("Straße", "STRASSE"), ("Проверка", "проверка")],
-)
-def test_scan_name_search_ignores_unicode_case(tmp_path: Path, name: str, query: str) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=False)
-    run_workbench(state_dir, "rename-scan", "--scan-id", scan["scanId"], f"--name={name}")
-
-    listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
-
-    assert [(item["scanId"], item["name"]) for item in listed] == [(scan["scanId"], name)]
-
-
-def test_scan_history_search_casefolds_displayed_fields(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "Straße"
-    (repository / "Ä").mkdir(parents=True)
-    (repository / "Ä" / "source.py").write_text("pass\n")
-    scan = start_prompt_only_scan(
-        state_dir,
-        repository,
-        tmp_path / "scans",
-        extra_args=("--scope=Ä", "--target-summary=Überblick"),
-    )["scan"]
-    for query in ("Straße", "STRASSE", "Ä", "ä", "Überblick", "ÜBERBLICK"):
-        listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
-        assert [item["scanId"] for item in listed] == [scan["scanId"]]
-    assert run_workbench(state_dir, "list-scans", "--query", "unrelated")["scans"] == []
-
-
-def test_rename_does_not_reorder_scan_history(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    older = create_cli_scan(state_dir, tmp_path / "scans", repository)
-    newer = create_cli_scan(state_dir, tmp_path / "scans", repository)
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        for scan, timestamp in (
-            (older, "2026-08-01T00:00:00Z"),
-            (newer, "2026-08-02T00:00:00Z"),
-        ):
-            connection.execute(
-                "UPDATE scans SET started_at = ?, updated_at = ? WHERE id = ?",
-                (timestamp, timestamp, scan["scanId"]),
-            )
-            connection.execute(
-                "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
-                (timestamp, scan["scanId"]),
-            )
-    before = run_workbench(state_dir, "list-scans")["scans"]
-    assert [scan["scanId"] for scan in before] == [newer["scanId"], older["scanId"]]
-
-    run_workbench(state_dir, "rename-scan", "--scan-id", older["scanId"], "--name=Release audit")
-
-    after = run_workbench(state_dir, "list-scans")["scans"]
-    assert after == [before[0], {**before[1], "name": "Release audit"}]
+    if not check:
+        return {"returncode": completed.returncode, "stderr": completed.stderr}
+    return json.loads(completed.stdout)
 
 
 def compare_scan_pair(
@@ -223,8 +166,7 @@ def create_cli_scan(
     if not complete:
         return launched
     if mode == "deep":
-        resume_deep_scan(state_dir, launched["scanId"], "thread-scan-history")
-        mark_deep_coordinator_succeeded(state_dir, launched["scanId"], scan_dir)
+        mark_deep_aggregate_ready(state_dir, launched["scanId"], scan_dir)
 
     coverage_mode = (
         "scoped_path" if paths else "deep_repository" if mode == "deep" else "repository"
@@ -274,6 +216,128 @@ def create_cli_scan(
         completion.extend(("--cost-json", json.dumps(cost)))
     run_workbench(state_dir, *completion)
     return launched
+
+
+def insert_scan(
+    connection: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    scan_id: str,
+    mode: str,
+    status: str,
+    phase: str,
+    timestamp: str,
+    seal: str | None = None,
+    failure: str | None = None,
+    canceled: bool = False,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO scans (
+            id, workspace_id, target_path, target_revision, scope, mode,
+            scan_dir, status, phase, handoff_status, failure_message,
+            started_at, completed_at, created_at, updated_at, canceled_at,
+            seal_manifest_digest
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scan_id,
+            workspace_id,
+            "/tmp/target",
+            "fixture-revision",
+            ".",
+            mode,
+            f"/tmp/scans/{scan_id}",
+            status,
+            phase,
+            "delivered",
+            failure,
+            timestamp,
+            timestamp if status != "running" else None,
+            timestamp,
+            timestamp,
+            timestamp if canceled else None,
+            seal,
+        ),
+    )
+
+
+def test_finding_history_work_does_not_grow_with_unrelated_scans(workbench_db, workbench_api):
+    connection = workbench_db
+    connection.execute(
+        "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('history', '0', '0')"
+    )
+
+    def add_scan(scan_id, timestamp):
+        insert_scan(
+            connection,
+            workspace_id="history",
+            scan_id=scan_id,
+            mode="standard",
+            status="complete",
+            phase="reporting",
+            timestamp=timestamp,
+        )
+
+    connection.execute(
+        "INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) "
+        "VALUES ('shared', 'shared', 'synthetic', 'fixture', '0', '0')"
+    )
+    for index, scan_id in enumerate(("before", "selected", "after", "hidden")):
+        add_scan(scan_id, str(index))
+        connection.execute(
+            "INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity, "
+            "confidence, remediation, created_at) "
+            "VALUES (?, 'shared', ?, 'Fixture', 'Synthetic evidence', 'high', 'high', 'Fix', '0')",
+            (scan_id, scan_id),
+        )
+    connection.execute(
+        "UPDATE scans SET parent_scan_id = 'before', parent_scan_role = 'deep_pass' "
+        "WHERE id IN ('selected', 'hidden')"
+    )
+    connection.execute("UPDATE scans SET parent_scan_id = 'before' WHERE id = 'after'")
+    for before, after in (("before", "selected"), ("selected", "after")):
+        connection.execute(
+            "INSERT INTO scan_comparisons "
+            "(before_scan_id, after_scan_id, result_json, created_at, updated_at) "
+            "VALUES (?, ?, '{}', '0', '0')",
+            (before, after),
+        )
+        connection.execute(
+            "INSERT INTO scan_comparison_matches "
+            "(before_scan_id, after_scan_id, before_occurrence_id, after_occurrence_id, reason) "
+            "VALUES (?, ?, ?, ?, 'Synthetic confirmed match')",
+            (before, after, before, after),
+        )
+
+    def measure():
+        instructions = 0
+
+        def step():
+            nonlocal instructions
+            instructions += 1
+            return 0
+
+        connection.set_progress_handler(step, 1)
+        try:
+            result = workbench_api["scan_history"].finding_matches(
+                connection, "selected", "selected", "1"
+            )
+        finally:
+            connection.set_progress_handler(None, 0)
+        return result, instructions
+
+    # Count executed SQLite instructions, independent of machine speed or load.
+    expected, original_work = measure()
+    matches, first, bounds = expected
+    assert [match["scanId"] for match in matches] == ["after", "before"]
+    assert first == "0"
+    assert bounds == ["before", "after"]
+    for index in range(1024):
+        add_scan(f"unrelated-{index}", "4")
+    observed, expanded_work = measure()
+    assert observed == expected
+    assert expanded_work <= original_work
 
 
 def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_path: Path) -> None:
@@ -362,10 +426,10 @@ def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_
     repository, other_repository = tmp_path / "repository", tmp_path / "other-repository"
     repository.mkdir()
     other_repository.mkdir()
-    scan = begin_target_scan(
+    scan = begin_legacy_scan(
         state_dir, codex_home, repository, tmp_path / "results", thread_id="desktop-owner"
     )["deepScan"]
-    other = begin_target_scan(
+    other = begin_legacy_scan(
         state_dir, codex_home, other_repository, tmp_path / "results", thread_id="other-owner"
     )["deepScan"]
     workers = [
@@ -1465,3 +1529,106 @@ def test_cli_diff_launch_accepts_equal_refs_and_distinct_working_tree_base(tmp_p
                 base_revision,
                 head,
             )
+
+
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_rename_persists_without_changing_scan_results(
+    tmp_path: Path, complete: bool, upgrade: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=complete)
+    before = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    if upgrade:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute("ALTER TABLE scans DROP COLUMN name")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 42")
+
+    renamed = run_workbench(
+        state_dir, "rename-scan", "--scan-id", scan["scanId"], "--name=  Release audit  "
+    )
+
+    assert renamed == {"scanId": scan["scanId"], "name": "Release audit"}
+    after = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert after == {**before, "name": "Release audit"}
+    listed = run_workbench(state_dir, "list-scans", "--query", "release audit")["scans"]
+    assert [(item["scanId"], item["name"]) for item in listed] == [
+        (scan["scanId"], "Release audit")
+    ]
+
+
+def test_rename_rejects_blank_names(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=False)
+
+    blank = run_workbench(
+        state_dir, "rename-scan", "--scan-id", scan["scanId"], "--name=  ", check=False
+    )
+    assert blank["returncode"] != 0
+    assert "Scan name cannot be empty" in blank["stderr"]
+    assert run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["name"] is None
+
+
+@pytest.mark.parametrize(
+    ("name", "query"),
+    [("Évaluation", "évaluation"), ("Straße", "STRASSE"), ("Проверка", "проверка")],
+)
+def test_scan_name_search_ignores_unicode_case(tmp_path: Path, name: str, query: str) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=False)
+    run_workbench(state_dir, "rename-scan", "--scan-id", scan["scanId"], f"--name={name}")
+
+    listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
+
+    assert [(item["scanId"], item["name"]) for item in listed] == [(scan["scanId"], name)]
+
+
+def test_scan_history_search_casefolds_displayed_fields(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "Straße"
+    (repository / "Ä").mkdir(parents=True)
+    (repository / "Ä" / "source.py").write_text("pass\n")
+    scan = start_prompt_only_scan(
+        state_dir,
+        repository,
+        tmp_path / "scans",
+        extra_args=("--scope=Ä", "--target-summary=Überblick"),
+    )["scan"]
+    for query in ("Straße", "STRASSE", "Ä", "ä", "Überblick", "ÜBERBLICK"):
+        listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
+        assert [item["scanId"] for item in listed] == [scan["scanId"]]
+    assert run_workbench(state_dir, "list-scans", "--query", "unrelated")["scans"] == []
+
+
+def test_rename_does_not_reorder_scan_history(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    older = create_cli_scan(state_dir, tmp_path / "scans", repository)
+    newer = create_cli_scan(state_dir, tmp_path / "scans", repository)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        for scan, timestamp in (
+            (older, "2026-08-01T00:00:00Z"),
+            (newer, "2026-08-02T00:00:00Z"),
+        ):
+            connection.execute(
+                "UPDATE scans SET started_at = ?, updated_at = ? WHERE id = ?",
+                (timestamp, timestamp, scan["scanId"]),
+            )
+            connection.execute(
+                "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
+                (timestamp, scan["scanId"]),
+            )
+    before = run_workbench(state_dir, "list-scans")["scans"]
+    assert [scan["scanId"] for scan in before] == [newer["scanId"], older["scanId"]]
+
+    run_workbench(state_dir, "rename-scan", "--scan-id", older["scanId"], "--name=Release audit")
+
+    after = run_workbench(state_dir, "list-scans")["scans"]
+    assert after == [before[0], {**before[1], "name": "Release audit"}]

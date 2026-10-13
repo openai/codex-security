@@ -77,23 +77,22 @@ def start_headless_standard_scan(
     )
 
 
-def prompt_scan_arguments(target: Path, root: Path) -> argparse.Namespace:
-    return argparse.Namespace(
-        thread_id="thread-fixture",
-        target_path=str(target),
-        scope=".",
-        mode="standard",
-        diff_target_kind=None,
-        diff_base_revision=None,
-        diff_head_revision=None,
-        diff_content_digest=None,
-        user_context=None,
-        user_context_stdin=False,
-        target_summary=None,
-        scan_root=str(root / "scans"),
-        model=None,
-        reasoning_effort=None,
-    )
+def test_create_private_directory_propagates_missing_root_error() -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="missing_scan_root_test")
+    root = mock.Mock(spec=Path)
+    root.parent = root
+    failure = FileNotFoundError("Synthetic unavailable drive root.")
+    root.mkdir.side_effect = failure
+    directory = mock.Mock(spec=Path)
+    directory.parent = root
+    directory.mkdir.side_effect = FileNotFoundError("Synthetic missing parent.")
+
+    with pytest.raises(FileNotFoundError) as raised:
+        namespace["create_private_directory"](directory)
+
+    assert raised.value is failure
+    root.mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
+    directory.mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
 
 
 def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> None:
@@ -209,6 +208,26 @@ def test_prompt_only_scan_creates_submitted_delivered_scan(
     assert workspace["results"]["scanId"] == scan["scanId"]
 
 
+@pytest.mark.parametrize("mode", ["standard", "diff"])
+def test_ordinary_scan_start_does_not_reuse_completed_results(tmp_path: Path, mode: str) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    options = {
+        "mode": mode,
+        "extra_args": ("--diff-target-kind", "working_tree") if mode == "diff" else (),
+    }
+    first = start_prompt_only_scan(state_dir, target, tmp_path / "scans", **options)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET status = 'complete', completed_at = updated_at WHERE id = ?",
+            (first["scan"]["scanId"],),
+        )
+    repeated = start_prompt_only_scan(state_dir, target, tmp_path / "scans", **options)
+    assert repeated["startDisposition"] == "created"
+    assert repeated["scan"]["scanId"] != first["scan"]["scanId"]
+
+
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     tmp_path: Path,
 ) -> None:
@@ -233,6 +252,195 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     next_phase = update_progress(state_dir, scan_id, "--phase", "discovery")
     assert next_phase["scan"]["progress"]["phase"] == "discovery"
     assert next_phase["scan"]["userContext"] == updated_context
+
+
+def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    namespace = runpy.run_path(str(SCRIPT), run_name="setup_scan_target_identity_test")
+    start = namespace["start_scan"]
+    start_globals = start.__globals__
+    real_scan_target_identity = start_globals["scan_target_identity"]
+    observed_metadata: list[os.stat_result | None] = []
+
+    def record_target_identity(
+        target_path: Path,
+        diff_target: dict[str, str] | None,
+        *,
+        metadata: os.stat_result | None = None,
+    ) -> tuple[str, str | None, int | str, int | str]:
+        observed_metadata.append(metadata)
+        if metadata is None:
+            return real_scan_target_identity(target_path, diff_target)
+        return real_scan_target_identity(target_path, diff_target, metadata=metadata)
+
+    args = argparse.Namespace(
+        model=None,
+        reasoning_effort=None,
+        scan_root=str(tmp_path / "scans"),
+        workspace_id=str(saved["id"]),
+    )
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
+        mock.patch.dict(
+            start_globals,
+            {"scan_target_identity": record_target_identity},
+        ),
+        closing(start_globals["connect"]()) as connection,
+    ):
+        started = start(connection, args)
+
+    assert len(observed_metadata) == 1
+    metadata = observed_metadata[0]
+    assert metadata is not None
+    scan_id = str(started["results"]["scanId"])
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        identity = connection.execute(
+            "SELECT target_device, target_inode FROM scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+    identity_helpers = runpy.run_path(str(SCRIPT.with_name("filesystem_identity.py")))
+    serialize_identity = identity_helpers["serialize_filesystem_identity"]
+    assert identity == (
+        serialize_identity(metadata.st_dev),
+        serialize_identity(metadata.st_ino),
+    )
+
+
+def test_prompt_only_scan_does_not_join_setup_owned_scans(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    scan_root = tmp_path / "scans"
+    saved = create_saved_workspace(
+        state_dir,
+        target,
+        thread_id="thread-prompt-only-scan",
+    )
+    pending = start_scan_command(state_dir, str(saved["id"]), "--scan-root", str(scan_root))
+    assert pending["results"]["handoffStatus"] == "pending"
+    prompt_only = start_prompt_only_scan(state_dir, target, scan_root)
+    assert prompt_only["startDisposition"] == "created"
+    assert prompt_only["scan"]["handoffStatus"] == "delivered"
+    assert prompt_only["scan"]["scanId"] != pending["results"]["scanId"]
+
+
+def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    head = initialize_git_repository(target)
+    (target / "README.md").write_text("changed fixture\n")
+    started = start_prompt_only_scan(
+        state_dir,
+        target,
+        tmp_path / "scans",
+        thread_id="thread-diff",
+        mode="diff",
+        extra_args=("--diff-target-kind", "working_tree"),
+    )
+    assert started["scan"]["diffTarget"]["kind"] == "working_tree"
+    assert started["scan"]["diffTarget"]["baseRevision"] == head
+    assert started["scan"]["diffTarget"]["headRevision"] == head
+    assert started["workspace"]["diffTarget"] == started["scan"]["diffTarget"]
+
+
+@pytest.mark.parametrize("change_target", [False, True])
+def test_prompt_registration_keeps_existing_scans_readable(
+    tmp_path: Path, change_target: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "fixture.py"
+    source.write_text("original\n")
+    existing = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
+    scan_id = existing["scan"]["scanId"]
+    namespace = runpy.run_path(str(SCRIPT), run_name="prompt_registration_readers")
+    start = namespace["_start_prompt_driven_scan"]
+    real_identity = start.__globals__["scan_target_identity"]
+    hashing = Event()
+    resume = Event()
+    calls = 0
+
+    def pause_second_hash(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            hashing.set()
+            assert resume.wait(20)
+        return real_identity(*args, **kwargs)
+
+    def register():
+        with closing(namespace["connect"]()) as connection:
+            return start(
+                connection,
+                argparse.Namespace(
+                    thread_id="thread-prompt-only-scan",
+                    target_path=str(target),
+                    scope=".",
+                    mode="standard",
+                    diff_target_kind=None,
+                    diff_base_revision=None,
+                    diff_head_revision=None,
+                    diff_content_digest=None,
+                    user_context="Inspect authentication boundaries",
+                    user_context_file=None,
+                    target_summary="Prompt-only scan",
+                    scan_root=str(tmp_path / "scans"),
+                    model=None,
+                    reasoning_effort=None,
+                ),
+                headless_standard=False,
+            )
+
+    def read_scans():
+        read = get_scan(state_dir, str(scan_id))
+        listed = run_workbench(state_dir, "list-scans")
+        assert read["scan"]["scanId"] == scan_id
+        assert any(scan["scanId"] == scan_id for scan in listed["scans"])
+
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
+        mock.patch.dict(start.__globals__, {"scan_target_identity": pause_second_hash}),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        registration = pool.submit(register)
+        try:
+            assert hashing.wait(10)
+            pool.submit(read_scans).result(timeout=10)
+            if change_target:
+                source.write_text("changed during registration\n")
+        finally:
+            resume.set()
+        if change_target:
+            with pytest.raises(SystemExit, match="target changed while the scan was starting"):
+                registration.result(timeout=10)
+        else:
+            assert registration.result(timeout=10)["startDisposition"] == "joined"
+    assert calls == 2
+
+
+def prompt_scan_arguments(target: Path, root: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        thread_id="thread-fixture",
+        target_path=str(target),
+        scope=".",
+        mode="standard",
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+        user_context=None,
+        user_context_stdin=False,
+        target_summary=None,
+        scan_root=str(root / "scans"),
+        model=None,
+        reasoning_effort=None,
+    )
 
 
 @pytest.mark.parametrize("headless_standard", [False, True])
@@ -430,173 +638,3 @@ def test_concurrent_prompt_scan_starts_join_the_winner(
     assert results[0]["scan"]["scanId"] == results[1]["scan"]["scanId"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 1
-
-
-def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    namespace = runpy.run_path(str(SCRIPT), run_name="setup_scan_target_identity_test")
-    start = namespace["start_scan"]
-    start_globals = start.__globals__
-    real_scan_target_identity = start_globals["scan_target_identity"]
-    observed_metadata: list[os.stat_result | None] = []
-
-    def record_target_identity(
-        target_path: Path,
-        diff_target: dict[str, str] | None,
-        *,
-        metadata: os.stat_result | None = None,
-    ) -> tuple[str, str | None, int | str, int | str]:
-        observed_metadata.append(metadata)
-        if metadata is None:
-            return real_scan_target_identity(target_path, diff_target)
-        return real_scan_target_identity(target_path, diff_target, metadata=metadata)
-
-    args = argparse.Namespace(
-        model=None,
-        reasoning_effort=None,
-        scan_root=str(tmp_path / "scans"),
-        workspace_id=str(saved["id"]),
-    )
-    with (
-        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
-        mock.patch.dict(
-            start_globals,
-            {"scan_target_identity": record_target_identity},
-        ),
-        closing(start_globals["connect"]()) as connection,
-    ):
-        started = start(connection, args)
-
-    assert len(observed_metadata) == 1
-    metadata = observed_metadata[0]
-    assert metadata is not None
-    scan_id = str(started["results"]["scanId"])
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        identity = connection.execute(
-            "SELECT target_device, target_inode FROM scans WHERE id = ?",
-            (scan_id,),
-        ).fetchone()
-    identity_helpers = runpy.run_path(str(SCRIPT.with_name("filesystem_identity.py")))
-    serialize_identity = identity_helpers["serialize_filesystem_identity"]
-    assert identity == (
-        serialize_identity(metadata.st_dev),
-        serialize_identity(metadata.st_ino),
-    )
-
-
-def test_prompt_only_scan_does_not_join_setup_owned_scans(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    scan_root = tmp_path / "scans"
-    saved = create_saved_workspace(
-        state_dir,
-        target,
-        thread_id="thread-prompt-only-scan",
-    )
-    pending = start_scan_command(state_dir, str(saved["id"]), "--scan-root", str(scan_root))
-    assert pending["results"]["handoffStatus"] == "pending"
-    prompt_only = start_prompt_only_scan(state_dir, target, scan_root)
-    assert prompt_only["startDisposition"] == "created"
-    assert prompt_only["scan"]["handoffStatus"] == "delivered"
-    assert prompt_only["scan"]["scanId"] != pending["results"]["scanId"]
-
-
-def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    head = initialize_git_repository(target)
-    (target / "README.md").write_text("changed fixture\n")
-    started = start_prompt_only_scan(
-        state_dir,
-        target,
-        tmp_path / "scans",
-        thread_id="thread-diff",
-        mode="diff",
-        extra_args=("--diff-target-kind", "working_tree"),
-    )
-    assert started["scan"]["diffTarget"]["kind"] == "working_tree"
-    assert started["scan"]["diffTarget"]["baseRevision"] == head
-    assert started["scan"]["diffTarget"]["headRevision"] == head
-    assert started["workspace"]["diffTarget"] == started["scan"]["diffTarget"]
-
-
-@pytest.mark.parametrize("change_target", [False, True])
-def test_prompt_registration_keeps_existing_scans_readable(
-    tmp_path: Path, change_target: bool
-) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    source = target / "fixture.py"
-    source.write_text("original\n")
-    existing = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
-    scan_id = existing["scan"]["scanId"]
-    namespace = runpy.run_path(str(SCRIPT), run_name="prompt_registration_readers")
-    start = namespace["_start_prompt_driven_scan"]
-    real_identity = start.__globals__["scan_target_identity"]
-    hashing = Event()
-    resume = Event()
-    calls = 0
-
-    def pause_second_hash(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            hashing.set()
-            assert resume.wait(20)
-        return real_identity(*args, **kwargs)
-
-    def register():
-        with closing(namespace["connect"]()) as connection:
-            return start(
-                connection,
-                argparse.Namespace(
-                    thread_id="thread-prompt-only-scan",
-                    target_path=str(target),
-                    scope=".",
-                    mode="standard",
-                    diff_target_kind=None,
-                    diff_base_revision=None,
-                    diff_head_revision=None,
-                    diff_content_digest=None,
-                    user_context="Inspect authentication boundaries",
-                    user_context_file=None,
-                    target_summary="Prompt-only scan",
-                    scan_root=str(tmp_path / "scans"),
-                    model=None,
-                    reasoning_effort=None,
-                ),
-                headless_standard=False,
-            )
-
-    def read_scans():
-        read = get_scan(state_dir, str(scan_id))
-        listed = run_workbench(state_dir, "list-scans")
-        assert read["scan"]["scanId"] == scan_id
-        assert any(scan["scanId"] == scan_id for scan in listed["scans"])
-
-    with (
-        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
-        mock.patch.dict(start.__globals__, {"scan_target_identity": pause_second_hash}),
-        ThreadPoolExecutor(max_workers=2) as pool,
-    ):
-        registration = pool.submit(register)
-        try:
-            assert hashing.wait(10)
-            pool.submit(read_scans).result(timeout=10)
-            if change_target:
-                source.write_text("changed during registration\n")
-        finally:
-            resume.set()
-        if change_target:
-            with pytest.raises(SystemExit, match="target changed while the scan was starting"):
-                registration.result(timeout=10)
-        else:
-            assert registration.result(timeout=10)["startDisposition"] == "joined"
-    assert calls == 2

@@ -1,3 +1,4 @@
+import { workflowDigest } from "../src/finding-workflow.js";
 import { modelResponseText } from "./support/model-response-text.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -229,4 +230,24 @@ test("cancellation and invalid inputs cannot produce a successful classification
     "must not be empty",
   );
   expect((await classifySeverity([])).assessments).toEqual([]);
+});
+
+test("legacy severity assessments require unchanged evidence and original occurrence", async () => {
+  const current = await classifySeverity([finding]);
+  const legacy = {
+    ...current,
+    assessments: current.assessments.map((assessment) => ({
+      ...assessment,
+      inputSha256: workflowDigest(finding),
+    })),
+  };
+  expect(validateSeverityClassification(legacy, [finding])).toEqual(legacy);
+  for (const changed of [
+    { ...finding, occurrenceId: "another-occurrence" },
+    { ...finding, summary: "Changed evidence" },
+  ]) {
+    expect(() => validateSeverityClassification(legacy, [changed])).toThrow(
+      "does not match",
+    );
+  }
 });

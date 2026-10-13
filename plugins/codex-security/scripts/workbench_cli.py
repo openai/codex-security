@@ -8,7 +8,6 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import deep_scan_workbench as deep_scan
 from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
@@ -97,7 +96,25 @@ def parse_args(description: str) -> argparse.Namespace:
         diff_content_digest=None,
     )
 
-    deep_scan.register_subcommands(subparsers, positive_int)
+    begin_deep_scan = subparsers.add_parser("begin-deep-scan")
+    begin_deep_scan.add_argument("--thread-id", required=True)
+    begin_target = begin_deep_scan.add_mutually_exclusive_group(required=True)
+    begin_target.add_argument("--scan-id")
+    begin_target.add_argument("--target-path")
+    begin_deep_scan.add_argument("--scope", default=".")
+    add_user_context(begin_deep_scan)
+    begin_deep_scan.add_argument("--scan-root")
+    begin_deep_scan.add_argument("--claim-token")
+    begin_deep_scan.add_argument("--model")
+    begin_deep_scan.add_argument("--reasoning-effort")
+    begin_deep_scan.set_defaults(
+        mode="deep",
+        target_summary=None,
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+    )
 
     get_scan = add_command("get-scan", "--scan-id")
     get_scan.add_argument("--occurrence-id")
@@ -120,7 +137,7 @@ def parse_args(description: str) -> argparse.Namespace:
     list_scans.add_argument("--mode", choices=MODES)
     list_scans.add_argument("--repository")
     list_scans.add_argument("--scan-root")
-    list_scans.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
+    list_scans.add_argument("--offset", type=non_negative_int, default=0)
     list_scans.add_argument("--limit", type=positive_int)
 
     list_unmatched_scan_pairs = add_command("list-unmatched-scan-pairs", "--repository")
@@ -139,7 +156,8 @@ def parse_args(description: str) -> argparse.Namespace:
     )
     register_cli_scan.add_argument("--archived-scan-dir")
 
-    add_command("set-scan-thread", "--scan-id", "--thread-id")
+    set_scan_thread = add_command("set-scan-thread", "--scan-id", "--thread-id")
+    set_scan_thread.add_argument("--claim-token")
 
     set_scan_cost_limit = add_command("set-scan-cost-limit", "--scan-id")
     set_scan_cost_limit.add_argument("--max-cost-usd", required=True, type=float)
@@ -147,6 +165,7 @@ def parse_args(description: str) -> argparse.Namespace:
     add_command("get-scan-recipe", "--scan-id")
 
     get_cli_scan_resume = add_command("get-cli-scan-resume", "--scan-id")
+    get_cli_scan_resume.add_argument("--claim-token")
     get_cli_scan_resume.add_argument("--allow-unavailable", action="store_true")
 
     compare_scans = add_command("compare-scans", "--before-scan-id", "--after-scan-id")
@@ -168,36 +187,35 @@ def parse_args(description: str) -> argparse.Namespace:
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
     list_global_findings.add_argument("--target-id")
-    list_global_findings.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
+    list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
     list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
     list_repositories = subparsers.add_parser("list-repositories")
     list_repositories.add_argument("--query")
     list_repositories.add_argument("--target-id")
     list_repositories.add_argument("--status", choices=("scanned", "not_scanned", "open_findings"))
-    list_repositories.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
+    list_repositories.add_argument("--offset", type=non_negative_int, default=0)
     list_repositories.add_argument("--limit", type=positive_int)
 
     list_findings = add_command("list-findings", "--scan-id")
     list_findings.add_argument("--query")
     list_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_findings.add_argument("--status", choices=FINDING_STATUSES)
-    list_findings.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
+    list_findings.add_argument("--offset", type=non_negative_int, default=0)
     list_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
 
     update_progress = add_command("update-progress", "--scan-id")
     update_progress.add_argument("--phase", choices=PHASES)
-    update_progress.add_argument("--phase-items-total", type=deep_scan.non_negative_int)
-    update_progress.add_argument("--phase-items-completed", type=deep_scan.non_negative_int)
+    update_progress.add_argument("--phase-items-total", type=non_negative_int)
+    update_progress.add_argument("--phase-items-completed", type=non_negative_int)
     update_progress.add_argument("--phase-progress-unit", choices=PHASE_PROGRESS_UNITS)
     preflight_issues = update_progress.add_mutually_exclusive_group()
     preflight_issues.add_argument("--preflight-issues-json")
     preflight_issues.add_argument("--preflight-issues-json-stdin", action="store_true")
-    update_progress.add_argument("--review-items-total", type=deep_scan.non_negative_int)
-    update_progress.add_argument("--review-items-completed", type=deep_scan.non_negative_int)
-    update_progress.add_argument("--reportable-findings-count", type=deep_scan.non_negative_int)
+    update_progress.add_argument("--review-items-total", type=non_negative_int)
+    update_progress.add_argument("--review-items-completed", type=non_negative_int)
+    update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
-    update_progress.add_argument("--coordinator-generation", type=positive_int)
     update_progress.add_argument("--model")
     update_progress.add_argument("--reasoning-effort")
 
@@ -212,19 +230,23 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_budget_exhausted_scan = add_command(
         "complete-budget-exhausted-scan", "--scan-id", "--cost-json"
     )
+    complete_budget_exhausted_scan.add_argument("--claim-token")
     complete_budget_exhausted_scan.add_argument("--message")
 
     cancel_scan = add_command("cancel-scan", "--scan-id")
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument("--defer-publication", action="store_true", help=argparse.SUPPRESS)
 
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
+    fail_scan.add_argument("--defer-publication", action="store_true", help=argparse.SUPPRESS)
 
     preserve_scan = add_command("preserve-scan-results", "--scan-id")
     preserve_scan.add_argument("--thread-id")
     preserve_scan.add_argument("--claim-token")
-    preserve_scan.add_argument("--coordinator-generation", type=positive_int)
+    preserve_scan.add_argument("--cost-json")
+    preserve_scan.add_argument("--after-stop", action="store_true", help=argparse.SUPPRESS)
 
     recovery_help = "Validate and republish retained checkpoints for a failed, non-canceled scan."
     recover_scan = subparsers.add_parser(
@@ -316,6 +338,13 @@ def parse_args(description: str) -> argparse.Namespace:
         index = arguments.index("--user-context-stdin")
         arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
     return parser.parse_args(arguments)
+
+
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("Value must be non-negative.")
+    return parsed
 
 
 if __name__ == "__main__":

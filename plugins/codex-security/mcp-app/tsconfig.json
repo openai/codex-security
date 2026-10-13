@@ -2,14 +2,14 @@
   "compilerOptions": {
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "lib": ["ESNext"],
     "noEmit": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
     "types": ["node"],
-    "lib": ["ES2024"],
     "allowImportingTsExtensions": true
   },
-  "include": ["*.ts", "src", "tests/**/*.ts", "scripts/*.mts"]
+  "include": ["main.ts", "helpers-main.ts", "server.ts", "src"]
 }

@@ -40,7 +40,7 @@ export interface ScanResultOptions {
   findings: FindingsDocument;
   coverage: CoverageDocument;
   scanDir: string;
-  threadId: string;
+  threadId: string | null;
   turnResult: TurnResultMetadata;
   sarifPath?: string | null;
   threatModelPath?: string | null;
@@ -52,7 +52,8 @@ export class ScanResult {
   public readonly findings: FindingsDocument;
   public readonly coverage: CoverageDocument;
   public readonly scanDir: string;
-  public readonly threadId: string;
+  /** Null when an empty capped composition completed without a model session. */
+  public readonly threadId: string | null;
   public readonly turnResult: Readonly<TurnResultMetadata>;
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;

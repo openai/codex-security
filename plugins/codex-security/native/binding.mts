@@ -14,6 +14,11 @@ export const binaryPath = join(
 export interface UnixBinding {
   unixEnvironment(name: Buffer): Buffer | null;
   userHome(username: Buffer): { errno: number; value: Buffer | null };
+  fileLock(
+    fd: number,
+    unlock: boolean,
+    nonblocking: boolean,
+  ): { value: number; errno: number };
 }
 
 export function loadBinding(): UnixBinding {
