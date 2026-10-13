@@ -97,7 +97,7 @@ After completing connection setup, the same host connection can be used by
 `codex exec`:
 
 ```bash
-codex exec --ephemeral --json -s read-only 'Use $cloud-findings to read findings and the latest scan status for example/security-demo in my selected workspace. Inspect one finding and its report. If the workspace or repository is ambiguous, explain the required selection and stop. Do not change anything.'
+codex exec --ephemeral --json -s read-only 'Use $codex-security:cloud-findings to read findings and the latest scan status for example/security-demo in my selected workspace. Inspect one finding and its report. If the workspace or repository is ambiguous, explain the required selection and stop. Do not change anything.'
 ```
 
 Noninteractive execution needs an existing authenticated connection; it cannot

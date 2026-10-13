@@ -5,7 +5,9 @@ description: Read existing Codex Security Cloud findings, reports, recorded assi
 
 # Cloud findings
 
-Use the connected Codex Security Cloud tools for existing findings and scans. Discover the relevant `defense_factory_*` tools through tool search when needed. This workflow only reads data. Do not launch or cancel scans, close or edit findings, generate patches, run verification, upload results, or send notifications. The connector has other tools that can write; connecting it does not make those tools part of this workflow. Local security scans do not need Cloud connected.
+Use the connected Codex Security Cloud tools for existing findings and scans. This workflow only reads data. Do not launch or cancel scans, close or edit findings, generate patches, run verification, upload results, or send notifications. The connector has other tools that can write; connecting it does not make those tools part of this workflow. Local security scans do not need Cloud connected.
+
+Before using the tools and filters below, discover the relevant `defense_factory_*` tools through tool search and inspect their current schemas. Use only exposed tools and parameters. If a requested capability is unavailable, explain which part cannot be completed and continue with the supported parts of the request. A report available only through a missing evidence reader remains unread; a missing `assignee` filter cannot perform an assignee-filtered query. Do not silently drop a requested filter or describe a partial answer as complete.
 
 ## Resolve the account and repository
 
@@ -22,7 +24,7 @@ For a finding link, accept the selected Cloud `webOrigin` with the path `/codex/
 
 ## List and inspect findings
 
-Use `defense_factory_findings_list` with the discovered repository URL in `repo` and the user's filters; `repo` accepts comma-separated URLs, not repository IDs. Workflow tools use the returned repository ID in `repo_id`. Supported filters include severity (`criticality`), lifecycle `status`, `source`, `q`, `path_prefix`, `start_at`, `end_at`, `scan_id`, `review_run_id`, `validated`, `has_patch`, `author`, and `assignee`; use the tool's current schema for their accepted values. `assignee` accepts comma-separated recorded user emails and is separate from commit authorship. Do not invent an assigned-team filter.
+Use `defense_factory_findings_list` with the discovered repository URL in `repo` and the user's filters; `repo` accepts comma-separated URLs, not repository IDs. Workflow tools use the returned repository ID in `repo_id`. Filters may include severity (`criticality`), lifecycle `status`, `source`, `q`, `path_prefix`, `start_at`, `end_at`, `scan_id`, `review_run_id`, `validated`, `has_patch`, `author`, and `assignee`; use the tool's current schema for available filters and their accepted values. `assignee` accepts comma-separated recorded user emails and is separate from commit authorship. Do not invent an assigned-team filter.
 
 Follow returned cursors with the same filters and sort order when a complete list or count is requested. Reset the cursor if the filters change. State when only a page or a subset was read. For repository-run findings, use `source: repository_scan` and `scan_id` equal to the run ID. Inspect selected finding IDs with `defense_factory_findings_get` before describing their evidence, assignment, patches, or verification.
 
