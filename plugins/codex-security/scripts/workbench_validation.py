@@ -10,34 +10,22 @@ import sqlite3
 import sys
 import uuid
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
-from workbench_scan_usage import _reject_nonstandard_json_number as reject_nonstandard_json_number
+from workbench_scan_usage import TOKEN_FIELDS
+from workbench_scan_usage import (
+    _reject_nonstandard_json_number as reject_nonstandard_json_number,
+)
 
 reject_non_finite_json = finalizer._reject_non_finite_json
 
 
-def timestamp_key(value: str) -> tuple[datetime, str]:
-    """Compare accepted timestamps without rounding fractions or rewriting text."""
-    utc = value[-1] in "Zz"
-    whole_second = datetime.fromisoformat(value[:19] + ("+00:00" if utc else value[-6:]))
-    fraction = value[20 : -1 if utc else -6].rstrip("0") if value[19:20] == "." else ""
-    return whole_second, fraction
-
-
-def compare_timestamps(left: str, right: str) -> int:
-    left_key, right_key = timestamp_key(left), timestamp_key(right)
-    return (left_key > right_key) - (left_key < right_key)
-
-
-def register_timestamp_collation(connection: sqlite3.Connection) -> None:
-    name = "codex_security_timestamp"
-    if not any(row[1].lower() == name for row in connection.execute("PRAGMA collation_list")):
-        connection.create_collation(name, compare_timestamps)
+def timestamp_key(value: str) -> datetime:
+    return finalizer.parse_timestamp(value)
 
 
 def require_uuid(value: str, label: str) -> str:
@@ -60,12 +48,7 @@ def sqlite_busy(error: sqlite3.OperationalError) -> bool:
     return "locked" in str(error).lower() or "busy" in str(error).lower()
 
 
-def path_within_scope(path: str, scope: str) -> bool:
-    candidate = PurePosixPath(path)
-    requested = PurePosixPath(scope)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    return candidate.is_relative_to(requested)
+path_within_scope = finalizer.path_within_scope
 
 
 def require_close_note(close_reason: str | None, note: str | None) -> None:
@@ -80,14 +63,7 @@ def user_context_argument(args: argparse.Namespace) -> str | None:
     return optional_text(value)
 
 
-SCAN_USAGE_TOKEN_KEYS = (
-    "inputTokens",
-    "cachedInputTokens",
-    "cacheWriteInputTokens",
-    "outputTokens",
-    "reasoningOutputTokens",
-    "totalTokens",
-)
+SCAN_USAGE_TOKEN_KEYS = tuple(TOKEN_FIELDS.values())
 
 
 def _valid_legacy_scan_cost(cost: object) -> bool:

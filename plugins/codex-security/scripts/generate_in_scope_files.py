@@ -196,12 +196,7 @@ def generate_diff_in_scope_files(
                     continue
             elif path.is_symlink() or not path.is_file() or is_binary_file(path):
                 continue
-            try:
-                relative_path = relative.as_posix().encode("utf-8")
-            except UnicodeEncodeError as error:
-                raise InventoryError(
-                    "Git changes contain a path that cannot be encoded as UTF-8 for the file inventory"
-                ) from error
+            relative_path = os.fsencode(relative.as_posix())
             if b"\n" in relative_path or b"\r" in relative_path:
                 raise InventoryError(
                     "Git changes contain a path that cannot fit in the file inventory"

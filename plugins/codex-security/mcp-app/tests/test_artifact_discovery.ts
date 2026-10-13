@@ -407,7 +407,9 @@ async function verifyNormalizerFailuresPreserveOutput(
   await writeFile(inventory, Buffer.from([0xff]));
   await assert.rejects(
     recordCodexSecurityDiscoveryCandidates({ candidates: [] }, context),
-    /UTF-8|encoded data/,
+    process.platform === "win32"
+      ? /UTF-8|encoded data/
+      : /in-scope file row 1:.*ENOENT/,
   );
   assert.equal(await readFile(destination, "utf8"), original);
   await writeFile(inventory, scope);

@@ -390,7 +390,10 @@ async function testReducerValidation(root: string) {
     ),
     [previousCollisionA.summary, previousCollisionB.summary],
   );
-  const referenced = (original: Record<string, unknown>, refs: string[]) => ({
+  const referenced = <Finding extends Record<string, unknown>>(
+    original: Finding,
+    refs: string[],
+  ) => ({
     ...original,
     provenance: { source: "local_plugin", sourceFindingIds: refs },
   });

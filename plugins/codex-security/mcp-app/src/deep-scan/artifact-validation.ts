@@ -190,7 +190,7 @@ export function reconcileDeepReduction(
     const sourceValues = [
       ...discoveries.map((discovery) => discovery.result[field]),
       previous?.[field],
-    ].filter((value): value is Record<string, unknown> => value !== undefined);
+    ].filter((value) => value !== undefined);
     if (
       sourceValues.some((value) => !isDeepStrictEqual(sourceValues[0], value))
     ) {
@@ -199,7 +199,7 @@ export function reconcileDeepReduction(
       );
     }
     if (sourceValues[0] !== undefined) {
-      result[field] = structuredClone(sourceValues[0]);
+      Object.assign(result, { [field]: structuredClone(sourceValues[0]) });
     }
   }
   return result;

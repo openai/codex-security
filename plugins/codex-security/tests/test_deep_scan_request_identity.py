@@ -26,6 +26,7 @@ def test_target_request_does_not_reuse_different_user_context(
     target.mkdir()
     scan_root = tmp_path / "scans"
     first = begin_target_scan(state_dir, codex_home, target, scan_root, user_context=first_context)
+    assert first["deepScan"]["filePaths"] == []
     first_scan_id = str(first["deepScan"]["scanId"])
     mark_deep_coordinator_succeeded(
         state_dir, first_scan_id, Path(str(first["deepScan"]["scanDir"]))

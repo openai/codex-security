@@ -57,7 +57,7 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 
 - `contains-json` validates the fenced `triage-finding/v0` JSON block against `schemas/triage-result-v0.schema.json`.
 - `assertions/triage-io.mts` checks input order, `input_id`, `source_type`,
-  verdicts, array fields, and `$fix-finding` handoff behavior.
+  verdicts, array fields, and `$fix-finding` handoff behavior. Its shared triage parser accepts complete JSON or multiline JSON code fences, including indented and CRLF fences. Inline fences and JSON embedded in prose are not accepted.
 - `tests/invocation-behavior.yaml` opts out of those default JSON assertions for the no-finding case with `options.disableDefaultAsserts: true`.
 - `assertions/missing-input.mts` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.
@@ -66,7 +66,9 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 
 The explicit Connector case returns a three-field JSON decision for transport,
 fallback, and account/repository scope. The code-scanning case returns request
-paths and query parameters as JSON. Other intake cases use freeform answers.
+paths and query parameters as JSON. A separate default-transport case checks
+that intake selects REST without an explicit Connector request. Other intake
+cases use freeform answers.
 
 ## Calibration Dataset
 

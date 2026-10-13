@@ -39,7 +39,11 @@ if (role === "holder") {
     else process.exit(0);
   });
   process.send({ holderPid: holder.pid });
-  process.send("ready");
+  // Exit and IPC delivery can race; wait until the parent observes readiness.
+  await new Promise((resolve) => {
+    process.once("message", resolve);
+    process.send("ready");
+  });
   if (mode === "abandoned" || mode === "late") process.exit(0);
   setInterval(() => {}, 1000);
   const send = (message, completeLine = true) => {

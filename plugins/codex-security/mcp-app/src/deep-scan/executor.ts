@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   accessSync,
   constants as fsConstants,
@@ -13,6 +14,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  parse,
   resolve,
   sep,
   win32,
@@ -22,6 +24,7 @@ import {
   type CyberAccessProgram,
   type ThreadEvent,
 } from "@openai/codex-sdk";
+import { readCodexSessionTurn } from "../../../scripts/codex_session.mjs";
 import { parse as parseToml } from "smol-toml";
 import {
   createCodexProfileClient,
@@ -29,6 +32,7 @@ import {
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
 import { executablePathForSpawn } from "./executable-path.js";
+import { writePrivateFile } from "./artifacts.js";
 import {
   classifyCodexWorkerError,
   DeepScanNonRetryableError,
@@ -59,6 +63,8 @@ export interface CodexSdkWorkerArtifactContext {
   repoRoot: string;
   scanId: string;
   scope?: string;
+  includePaths?: readonly string[];
+  filePaths?: readonly string[];
   pythonCommand?: string;
 }
 
@@ -78,6 +84,15 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   ) {}
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
+    const includePaths = this.modelSettings.artifactContext?.includePaths;
+    const scopeInput = JSON.stringify({
+      paths: includePaths,
+      filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+    });
+    const includePathsFile =
+      includePaths === undefined
+        ? undefined
+        : resolve(dirname(request.promptPath), `scope-${randomUUID()}.json`);
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
@@ -101,6 +116,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         }
         childEnv[name] = value;
       }
+      if (includePathsFile !== undefined) {
+        // Keep host-bound inputs beside the prompt, outside the worker's output root.
+        await writePrivateFile(includePathsFile, scopeInput);
+      }
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
       const configOverrides = profileConfigOverrides({
@@ -111,7 +130,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         mcp_servers: {
           // A disabled server still needs a valid transport during native resolution.
           "codex-security": { command: "node", enabled: false },
-          ...this.compactArtifactServer(request),
+          ...this.compactArtifactServer(request, includePathsFile),
         },
         ...workerSubagentConfig(
           request.subagents,
@@ -177,9 +196,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const thread = request.resumeThreadId
         ? codex.resumeThread(request.resumeThreadId, threadOptions)
         : codex.startThread(threadOptions);
-      const input = request.resumeThreadId
+      const workerPrompt = request.resumeThreadId
         ? (request.continuationPrompt ?? prompt)
         : prompt;
+      const pluginRoot = this.modelSettings.artifactContext?.pluginRoot;
+      const input = pluginRoot
+        ? `${workerPrompt}\n\nFor a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name and read <skill-name>/SKILL.md beneath ${JSON.stringify(join(pluginRoot, "skills"))}. Follow that file and resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow; this does not expand the worker's assigned role.`
+        : workerPrompt;
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {
@@ -193,46 +216,46 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           signal: controller.signal,
           cyberAccessProgram: runtimeSettings.cyberAccessProgram,
         });
-        let threadId: string | undefined;
-        let turnCompleted = false;
-        let lastStreamError: string | undefined;
         const diagnostics: CodexWorkerDiagnostic[] = [];
-        for await (const event of events) {
-          const item = event.type === "item.completed" ? event.item : event;
-          if (item.type === "error") {
-            const fallbackError = deepScanPermissionProfileFallbackError(
-              item.message,
-            );
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
+        const turn = await readCodexSessionTurn({
+          thread,
+          events,
+          stopOnCompletion: true,
+          onEvent: async (event) => {
+            const item = event.type === "item.completed" ? event.item : event;
+            if (item.type === "error") {
+              const fallbackError = deepScanPermissionProfileFallbackError(
+                item.message,
+              );
+              if (fallbackError) {
+                controller.abort(fallbackError);
+                throw fallbackError;
+              }
             }
-          }
-          if (event.type === "thread.started") {
-            threadId = event.thread_id;
-            await request.onThreadStarted?.(threadId);
-          } else if (event.type === "item.completed") {
-            appendItemDiagnostic(diagnostics, event.item);
-          } else if (event.type === "turn.completed") {
-            turnCompleted = true;
-            request.signal.removeEventListener("abort", forwardAbort);
-            break;
-          } else if (event.type === "turn.failed") {
-            throw new Error(event.error.message);
-          } else if (event.type === "error") {
-            // Codex exec currently emits retry-in-progress notifications as error events.
-            lastStreamError = event.message;
-            appendStreamDiagnostic(diagnostics, event.message);
-          }
-        }
-        if (!turnCompleted) {
-          const detail = lastStreamError ? `: ${lastStreamError}` : "";
+            if (event.type === "thread.started") {
+              await request.onThreadStarted?.(event.thread_id);
+            } else if (event.type === "item.completed") {
+              appendItemDiagnostic(diagnostics, event.item);
+            } else if (event.type === "turn.completed") {
+              request.signal.removeEventListener("abort", forwardAbort);
+            } else if (event.type === "turn.failed") {
+              throw new Error(event.error.message);
+            } else if (event.type === "error") {
+              // Codex exec emits retry-in-progress notifications as error events.
+              appendStreamDiagnostic(diagnostics, event.message);
+            }
+          },
+        });
+        if (turn.status !== "completed") {
+          const detail = turn.lastStreamError
+            ? `: ${turn.lastStreamError}`
+            : "";
           throw new Error(
             `Codex worker stream ended before turn.completed${detail}`,
           );
         }
         return {
-          threadId: threadId ?? thread.id ?? undefined,
+          threadId: turn.threadId ?? thread.id ?? undefined,
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         };
       } finally {
@@ -240,10 +263,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
     } catch (error) {
       throw classifyCodexWorkerError(error);
+    } finally {
+      if (includePathsFile !== undefined)
+        await fs.rm(includePathsFile, { force: true });
     }
   }
 
-  private compactArtifactServer(request: CodexWorkerRequest): Record<
+  private compactArtifactServer(
+    request: CodexWorkerRequest,
+    includePathsFile?: string,
+  ): Record<
     string,
     {
       command: string;
@@ -296,6 +325,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...(scan.scope !== undefined
             ? { CODEX_SECURITY_SCOPE: scan.scope }
             : {}),
+          ...(includePathsFile === undefined
+            ? {}
+            : { CODEX_SECURITY_INCLUDE_PATHS_FILE: includePathsFile }),
           ...(scan.pythonCommand !== undefined
             ? { CODEX_SECURITY_PYTHON_COMMAND: scan.pythonCommand }
             : {}),
@@ -339,21 +371,35 @@ function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
 }
 
 function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+  const filesystem = new Map<string, string | Record<string, string>>([
+    [":root", "read"],
+    ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
+  ]);
+  for (const literal of sandbox.literalFilesystemDenies ?? []) {
+    if (sandbox.filesystemDenies.includes(literal)) {
+      const root = parse(literal).root;
+      const scope = filesystem.get(root);
+      filesystem.set(root, {
+        ...(typeof scope === "object"
+          ? scope
+          : scope === undefined
+            ? {}
+            : { ".": scope }),
+        [literal.slice(root.length)]: "deny",
+      });
+    }
+    filesystem.set(literal, { ".": "deny" });
+  }
   return {
     extends: ":read-only",
     // Object.fromEntries preserves literal keys such as "__proto__" without
     // letting a denied path mutate the serializer object prototype.
-    filesystem: Object.fromEntries([
-      [":root", "read"],
-      ...Array.from(sandbox.filesystemDenies, (key) => [key, "deny"]),
-      ...Array.from(sandbox.literalFilesystemDenies ?? [], (key) => [
-        key,
-        { ".": "deny" },
-      ]),
+    filesystem: {
+      ...Object.fromEntries(filesystem),
       ...(sandbox.globScanMaxDepth === undefined
-        ? []
-        : [["glob_scan_max_depth", sandbox.globScanMaxDepth]]),
-    ]),
+        ? {}
+        : { glob_scan_max_depth: sandbox.globScanMaxDepth }),
+    },
     network: { enabled: false },
   };
 }
@@ -503,6 +549,7 @@ async function workerRuntimeSettings(
       "service_tier",
       "analytics",
       "responses_api_metadata",
+      "skills",
     ].map((key) => [key, selected[key]]),
   );
   const settings: CodexSdkWorkerRuntimeSettings = { config: inherited };

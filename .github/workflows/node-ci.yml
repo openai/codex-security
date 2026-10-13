@@ -404,14 +404,24 @@ jobs:
       - name: Test source compatibility checker
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+      - name: Prepare private Windows test root
+        if: runner.os == 'Windows'
+        id: windows-temp
+        shell: pwsh
+        run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
       - name: Test Python source contracts
         shell: bash
         env:
           PYTEST_MARKERS: ${{ matrix.markers }}
-        run: python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
+          WINDOWS_TEST_ROOT: ${{ steps.windows-temp.outputs.path }}
+        run: |
+          if [ -n "$WINDOWS_TEST_ROOT" ]; then
+            export TEMP="$WINDOWS_TEST_ROOT" TMP="$WINDOWS_TEST_ROOT" TMPDIR="$WINDOWS_TEST_ROOT"
+          fi
+          python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
-        run: python -c "import xml.etree.ElementTree as ET; assert not ET.parse('reports/python.xml').findall('.//testcase/skipped'), 'Native platform tests must run without skips'"
+        run: python -c "import pathlib, xml.etree.ElementTree as ET; assert not any(ET.parse(report).findall('.//testcase/skipped') for report in pathlib.Path('reports').glob('python*.xml')), 'Native platform tests must run without skips'"
       - name: Upload Python test reports
         if: always()
         continue-on-error: true
@@ -419,7 +429,7 @@ jobs:
         with:
           name: python-test-reports-${{ matrix.os }}-${{ matrix.python }}
           overwrite: true
-          path: reports/python.xml
+          path: reports/python*.xml
           if-no-files-found: warn
           retention-days: 14
       - name: Set up Node.js for triage evals
@@ -474,7 +484,7 @@ jobs:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [validate-title, package]
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -511,7 +521,7 @@ jobs:
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7
+        run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7 --seed=${{ github.run_number }}
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true

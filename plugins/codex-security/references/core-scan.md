@@ -17,9 +17,13 @@ Before deciding whether a candidate is reportable, read existing reviewer false-
 
 Keep discovery, validation, and attack-path reasoning within this one self-contained audit; do not invoke separate phase skills. Do not create ranking phases, per-file or per-candidate ledgers, separate phase worker pools, repeated phase reports, or receipt files.
 
+Use `followup_task` when a returned worker must perform another review or answer a required recheck. `send_message` is an update to an existing turn, not a request that starts another turn; sending at a worker's final-response tail does not establish that it acted on the message. Wait only while assigned work or a required follow-up is still pending. When the parent has finished its remaining in-scope source review and all assigned reviews have returned, reconcile their evidence and submit the result; do not enter an idle wait for unspecified future updates. If work remains incomplete at a user limit, retain it as deferred work in a partial result.
+
 ## Offline Source Search
 
 Resolve one working native local search command before scanning and pass its verified path to every worker. Prefer an existing ripgrep executable; reject DotSlash, bootstrap, or other download-capable wrappers, and fall back to local `git grep`, `find`, or `grep`. Do not install tools or trigger network downloads.
+
+Prefer quoted interpreter `-c` programs or pipes when shell heredocs or here-strings require unavailable temporary storage. When analysis needs files, use only the managed temporary staging already authorized by the assigned workflow (`artifact-storage.md`). Keep target source read-only and do not widen permissions. Check command exit status and tool errors, including MCP `isError`, before parsing successful JSON output; an error or truncated preview is not a JSON document. Code mode is a fresh JavaScript isolate: use only its documented globals and tools, not assumed Node.js APIs or `structuredClone`. When available, use `load`/`store` for serializable state between cells, with `null` for absent values.
 
 ## Secrets Exposed in Source
 
@@ -32,6 +36,8 @@ Distinguish credential material from public keys or certificates, identifiers, e
 ## Repository Security Policy
 
 Resolve and cache directory-specific security guidance with `<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out -` (use `launch_codex_security_mcp.cmd` on Windows). Resolve once per distinct reviewed directory or investigation packet, pass the matching inherited policy to its worker, and let the closest nested `SECURITY.md` take precedence.
+
+Apply that policy when deciding reportability as well as when mapping the component. An intentionally vulnerable example or QA fixture can define application boundaries that remain in scope with synthetic data. If its applicable policy asks to assess those boundaries, retain source-supported findings and identify their fixture context, calibrating impact to the supported local scenario. Do not substitute the enclosing product's disclosure eligibility for that component's review policy or claim real credential, financial, or deployment impact from a simulation. Explicit user exclusions still control the requested scope.
 
 ## Threat Map And Investigation Packets
 
@@ -59,7 +65,9 @@ Send this prompt to the independent baseline subagent, followed only by the auth
 
 Perform a thorough static security analysis of the repository in its actual implementation language or languages. Find every real vulnerability supported by specific source evidence.
 
-Follow this self-contained baseline audit only. Apply the supplied threat model, exact user security context, optional authoritative knowledge-base documents, and nearest inherited `SECURITY.md` policy; knowledge-base facts override generated assumptions and repository policies, but never explicit user instructions. Resolve and cache a more specific policy when entering a new source directory. Do not load Codex Security skills, start another scan, use security-scan tools, or delegate.
+Follow this self-contained baseline audit only. Apply the supplied threat model, exact user security context, optional authoritative knowledge-base documents, and nearest inherited `SECURITY.md` policy; knowledge-base facts override generated assumptions and repository policies, but never explicit user instructions. Resolve and cache a more specific policy when entering a new source directory. When that policy includes an example or QA fixture's application boundaries, assess them under that policy and calibrate its synthetic impact instead of excluding it under the enclosing product's disclosure criteria. Do not load Codex Security skills, start another scan, use security-scan tools, or delegate.
+
+Prefer quoted interpreter `-c` programs or pipes when shell heredocs or here-strings require unavailable temporary storage. When analysis needs files, use only the managed temporary staging already authorized by the assigned workflow (`artifact-storage.md`). Keep target source read-only and do not widen permissions. Check command exit status and tool errors before parsing successful JSON output; an error or truncated preview is not a JSON document. Code mode is a fresh JavaScript isolate: use only its documented globals and tools, not assumed Node.js APIs or `structuredClone`. When available, use `load`/`store` for serializable state between cells, with `null` for absent values.
 
 Explore the architecture, entry points, attack surfaces, parsers, uploads, protocol handlers, and data inputs. Trace attacker-controlled input to security-sensitive operations. Verify effective controls and counterevidence before reporting a finding.
 
@@ -81,7 +89,9 @@ Send this prompt to each investigator, followed only by its assigned real packet
 ```markdown
 Investigate the assigned source-backed security questions in the authorized repository. Treat every packet as a starting point, not a conclusion or a boundary on repository exploration.
 
-Follow this self-contained investigator prompt. Apply the supplied threat model, exact user security context, optional authoritative knowledge-base documents, and nearest inherited `SECURITY.md` policy; knowledge-base facts override generated assumptions and repository policies, but never explicit user instructions. Resolve and cache a more specific policy when entering a new source directory. Do not invoke Codex Security phase skills or MCP tools, load their references, or delegate to another worker.
+Follow this self-contained investigator prompt. Apply the supplied threat model, exact user security context, optional authoritative knowledge-base documents, and nearest inherited `SECURITY.md` policy; knowledge-base facts override generated assumptions and repository policies, but never explicit user instructions. Resolve and cache a more specific policy when entering a new source directory. When that policy includes an example or QA fixture's application boundaries, assess them under that policy and calibrate its synthetic impact instead of excluding it under the enclosing product's disclosure criteria. Do not invoke Codex Security phase skills or MCP tools, load their references, or delegate to another worker.
+
+Prefer quoted interpreter `-c` programs or pipes when shell heredocs or here-strings require unavailable temporary storage. When analysis needs files, use only the managed temporary staging already authorized by the assigned workflow (`artifact-storage.md`). Keep target source read-only and do not widen permissions. Check command exit status and tool errors before parsing successful JSON output; an error or truncated preview is not a JSON document. Code mode is a fresh JavaScript isolate: use only its documented globals and tools, not assumed Node.js APIs or `structuredClone`. When available, use `load`/`store` for serializable state between cells, with `null` for absent values.
 
 Read the actual source, follow callers and dataflow, inspect authentication and authorization, ownership, tenant boundaries, parsing, state transitions, sensitive operations, effective controls, and counterevidence. Preserve independent vulnerable operations even when they share a helper. Continue investigating after finding one issue.
 

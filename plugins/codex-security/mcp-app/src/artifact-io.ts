@@ -24,6 +24,8 @@ export interface ArtifactContext {
   layout: "scan" | "worker" | "reducer";
   scanId?: string;
   scope?: string;
+  includePaths?: readonly string[];
+  filePaths?: readonly string[];
   pluginRoot?: string;
   pythonCommand?: string;
   targetContract?: Readonly<Record<string, unknown>>;

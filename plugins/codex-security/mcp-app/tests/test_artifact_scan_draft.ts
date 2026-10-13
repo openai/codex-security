@@ -3,7 +3,6 @@ import { readJson, snapshotScanDraft, writeJsonLine } from "./support/json.ts";
 import { mock } from "node:test";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { ArtifactContext } from "../src/artifact-context.js";
-import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 type FixtureFinding = Record<string, unknown> & {
   provenance: Record<string, unknown>;
   identity?: { anchor: string; instance?: string };
@@ -104,7 +103,7 @@ try {
   });
 
   const rejectsDraft = (
-    input: ScanDraftInput,
+    input: unknown,
     error: RegExp,
     boundContext: ArtifactContext = context,
   ) => assert.rejects(recordCodexSecurityScanDraft(boundContext, input), error);
@@ -840,6 +839,10 @@ try {
     "obsolete.json",
   );
   await writeFile(obsoleteCheckpointPath, "{malformed obsolete checkpoint\n");
+  const deepPublication = {
+    coordinatorGeneration: 3,
+    resultPath: path.join(deepParentRoot, "workers", "reducer", "result.json"),
+  };
   const deepWorkbenchWrites = mock.fn(async (arguments_: string[]) => {
     assert.deepEqual(arguments_.slice(0, 3), [
       "write-scan-draft",
@@ -853,6 +856,8 @@ try {
       arguments_[arguments_.indexOf("--checkpoint-path") + 1];
     const staged = await readJson(draftPath);
     const stagedCheckpoint = await readJson(checkpointPath);
+    assert.deepEqual(staged.deepScanPublication, deepPublication);
+    assert.equal(stagedCheckpoint.deepScanPublication, undefined);
     assert.deepEqual(staged.findings, acceptedDeepFindings);
     assert.deepEqual(staged.coverage, acceptedDeepCoverage);
     assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
@@ -862,6 +867,8 @@ try {
     deepParentContext,
     acceptedDeepDraft,
     deepWorkbenchWrites,
+    undefined,
+    deepPublication,
   );
   assert.equal(
     deepWorkbenchWrites.mock.callCount(),
@@ -3022,10 +3029,7 @@ async function archiveFirstWorkerAttempt(output: string) {
 }
 
 // Projection cases below use the same fixture root but model independent scans.
-async function recordFreshScanDraft(
-  context: ArtifactContext,
-  input: ScanDraftInput,
-) {
+async function recordFreshScanDraft(context: ArtifactContext, input: unknown) {
   await Promise.all([
     ...[
       "scan-manifest.json",

@@ -218,7 +218,12 @@ describe("saved logs JSON output", () => {
       } else {
         expect(stdout.text()).toBe(expected);
       }
-      expect(stderr.text()).toBe("");
+      if (args.length === 0) {
+        expect(stderr.text()).toContain("scans show scan-1");
+        expect(stderr.text()).toContain("scans logs scan-1");
+      } else {
+        expect(stderr.text()).toBe("");
+      }
     } finally {
       await rm(f.state, { recursive: true, force: true });
     }

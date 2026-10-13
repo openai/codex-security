@@ -1,10 +1,10 @@
+import { send, completeTurn } from "./app-server-messages.mjs";
 import assert from "node:assert/strict";
 import { appendFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { createInterface } from "node:readline";
 
-const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 let loggedIn = false;
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
@@ -103,21 +103,6 @@ for await (const line of createInterface({ input: process.stdin })) {
         false,
       );
     }
-    send({ id: request.id, result: { turn: { id: "synthetic-turn" } } });
-    send({
-      method: "item/completed",
-      params: {
-        threadId: "synthetic-thread",
-        turnId: "synthetic-turn",
-        item: { type: "agentMessage", text: "Synthetic patch complete" },
-      },
-    });
-    send({
-      method: "turn/completed",
-      params: {
-        threadId: "synthetic-thread",
-        turn: { id: "synthetic-turn", status: "completed" },
-      },
-    });
+    completeTurn(request, () => "Synthetic patch complete", "synthetic-thread");
   }
 }

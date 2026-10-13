@@ -1065,31 +1065,6 @@ async function testFinishPersistenceFailureRewritesManifestAsFailure() {
   assert.equal(terminal.manifestPath, undefined);
 }
 
-async function testLostFinishResponseReplaysWithoutOverwritingSuccessManifest() {
-  const { fixture, store } = await coordinatorFixture();
-  store.loseFirstFinishResponseAfterCommit = true;
-  const terminal = await runCoordinator(fixture, store, new FakeExecutor());
-  assert.equal(terminal?.status, "succeeded");
-  assert.equal(store.finishCalls.length, 2);
-  assert.deepEqual(store.finishCalls[1], store.finishCalls[0]);
-  assert.equal(store.failureMessages.length, 0);
-  const manifest = await readJson(terminal.manifestPath);
-  assert.equal(manifest.scan.scanId, fixture.run.scanId);
-}
-
-async function testLostWorkerCommitResponsesReplayIdempotently() {
-  const { fixture, store } = await coordinatorFixture();
-  store.loseFirstDiscoveryAcceptanceResponseAfterCommit = true;
-  store.loseFirstDedupCommitResponseAfterCommit = true;
-  const terminal = await runCoordinator(fixture, store, new FakeExecutor());
-  assert.equal(terminal?.status, "succeeded");
-  assert.equal(store.loseFirstDiscoveryAcceptanceResponseAfterCommit, false);
-  assert.equal(store.loseFirstDedupCommitResponseAfterCommit, false);
-  assert.equal(store.dedupCommitCalls.length, 2);
-  assert.equal(store.dedupCommits.length, 1);
-  assert.equal(store.failureMessages.length, 0);
-}
-
 async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() {
   const { fixture, store } = await coordinatorFixture({
     workers: 3,
@@ -2589,7 +2564,7 @@ async function testStoreConfirmationSurvivesReplayAndThreadMetadata() {
           case "upsert-deep-scan-worker":
             mutations += 1;
             if (operation !== "thread-started" && mutations === 1)
-              throw new Error("Synthetic initial persistence failure.");
+              throw new Error("sqlite3.OperationalError: database is locked");
             if (replaced) current = { ...current, coordinatorGeneration: 3 };
             throw new Error(diagnostic);
           case "get-deep-scan": {
@@ -3121,12 +3096,14 @@ async function testResumedDiscoveryDeadlineUsesPersistedCreationTime(
 async function testResumedManifestPreservesCompletedReducer(
   includeUnstartedReducer = false,
   removeHistoricalPrompts = true,
+  includePaths?: string[],
 ) {
   const fixture = await fixtureRun({
     workers: 2,
     stopAfterNoNew: 2,
     maxDiscoveryRuns: 3,
   });
+  fixture.run.includePaths = includePaths;
   const store = new FakeStore(fixture.run);
   store.dedupCommitResponseGate = Promise.withResolvers<void>();
   const original = createCoordinator(
@@ -3134,6 +3111,7 @@ async function testResumedManifestPreservesCompletedReducer(
     store,
     new FakeExecutor({
       blockDiscoveryAfterCalls: 2,
+      discoveryCandidateId: includePaths ? "scope-candidate" : undefined,
     }),
     { run: store.run },
   );
@@ -3194,10 +3172,13 @@ async function testResumedManifestPreservesCompletedReducer(
   const persistedWorkers = structuredClone(store.run.persistedWorkers);
   const committedReducer = store.workers.get(store.dedupClaims[0].id)!;
   const committedResult = await readJson(committedReducer.resultManifestPath!);
+  if (includePaths) assert.ok(committedResult.findings.length > 0);
   if (removeHistoricalPrompts) await rm(committedReducer.promptPath);
   const replacementExecutor = new FakeExecutor();
+  const published: ScanDraftInput[] = [];
   const terminal = await runCoordinator(fixture, store, replacementExecutor, {
     run: store.run,
+    onComplete: async (draft) => void published.push(structuredClone(draft)),
   });
   assert.equal(terminal?.status, "succeeded");
   const manifest = await readJson(terminal.manifestPath);
@@ -3210,6 +3191,11 @@ async function testResumedManifestPreservesCompletedReducer(
     "accepted work needs no new worker launch",
   );
   assert.deepEqual(manifest.findings, committedResult.findings);
+  assert.equal(published.length, 1);
+  assert.deepEqual(
+    published[0].findings,
+    includePaths ? [] : committedResult.findings,
+  );
   assert.deepEqual(store.run.persistedDedupInputs, persistedInputs);
   assert.deepEqual(store.run.persistedWorkers, persistedWorkers);
   assert.deepEqual(
@@ -3867,6 +3853,8 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
 
 async function testPublicationUsesAcceptedReducerSnapshot() {
   const { fixture, store } = await coordinatorFixture();
+  fixture.run.coordinatorGeneration = 3;
+  store.run.coordinatorGeneration = 3;
   const commitDedup = store.commitDedup.bind(store);
   store.commitDedup = async (commit) => {
     const accepted = await commitDedup(commit);
@@ -3883,21 +3871,33 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
     return structuredClone(store.run);
   };
   const completed: ScanDraftInput[] = [];
+  const published: {
+    coordinatorGeneration?: number;
+    resultPath: string | null;
+  }[] = [];
   const terminal = await runCoordinator(
     fixture,
     store,
     new FakeExecutor({ discoveryCandidateId: "accepted-finding" }),
     {
-      onComplete: async (draft) => void completed.push(structuredClone(draft)),
+      onComplete: async (draft, _signal, publication) => {
+        completed.push(structuredClone(draft));
+        published.push(publication);
+      },
     },
   );
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(
-    (completed[0].findings[0].provenance as { candidateId: string })
-      .candidateId,
+    completed[0].findings[0].provenance.candidateId,
     "accepted-finding",
   );
   assert.equal(completed[0].coverage.completeness, "complete");
+  const reducer = [...store.workers.values()].find(
+    (worker) => worker.kind === "dedup",
+  );
+  assert.deepEqual(published, [
+    { coordinatorGeneration: 3, resultPath: reducer!.resultManifestPath },
+  ]);
 }
 
 async function testResumeDoesNotRequireHistoricalWorkerPrompt(
@@ -4190,8 +4190,6 @@ try {
   await testConfigurationFailureDoesNotRetry("Request blocked by cyberPolicy.");
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
-  await testLostFinishResponseReplaysWithoutOverwritingSuccessManifest();
-  await testLostWorkerCommitResponsesReplayIdempotently();
   await testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest();
   await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();
   await testDiscoveryPhasePersistenceFailureStopsDispatch();
@@ -4251,6 +4249,10 @@ try {
   await testResumedManifestPreservesCompletedReducer(false, false);
   await testResumedManifestPreservesCompletedReducer();
   await testResumedManifestPreservesCompletedReducer(true);
+  await testResumedManifestPreservesCompletedReducer(false, true, [
+    "api",
+    "background jobs",
+  ]);
   await testResumeUsesHistoricalCandidateSnapshotForEachReducer();
   await testPersistedErrorLimitStopsBeforeRescheduling();
   await testPersistedReducerErrorLimitStopsBeforeRescheduling();

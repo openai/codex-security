@@ -131,13 +131,15 @@ export CODEX_SECURITY_IMAGE=codex-security:local
 The existing `CODEX_SECURITY_RESULTS` and `CODEX_SECURITY_STATE` settings select
 the host directories (default `./results` and `./state`):
 
-| Container path                  | Durable contents                                    |
-| ------------------------------- | --------------------------------------------------- |
-| `/output`                       | Scan artifacts and any source checkouts stored here |
-| `/output/.codex-security-state` | CLI scan history and workbench database             |
-| `/state`                        | Codex sign-in and configuration                     |
+| Container path                             | Durable contents                                              |
+| ------------------------------------------ | ------------------------------------------------------------- |
+| `/output`                                  | Scan artifacts and any source checkouts stored here           |
+| `/output/.codex-security-state`            | CLI scan history and workbench database                       |
+| `/output/.codex-security-state/codex-home` | Wrapper sign-in credentials and private runtime configuration |
+| `/state`                                   | Ambient Codex configuration and credentials imported at setup |
 
-Keep all three across runner replacements. Keep the approved source checkout
+Keep both host mounts across runner replacements. The results mount also holds
+the wrapper's private credential directory. Keep the approved source checkout
 available at the same container path for later source reviews. For example,
 place a checkout under `results/repository`, then scan it with artifacts outside
 the checkout:

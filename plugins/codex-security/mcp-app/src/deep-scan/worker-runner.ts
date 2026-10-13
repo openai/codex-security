@@ -130,6 +130,7 @@ export class DeepScanWorkerRunner {
         pluginRoot: this.options.pluginRoot,
         targetPath: run.targetPath,
         scope: run.scope,
+        includePaths: run.includePaths,
         userContext: run.userContext,
         workerLabel,
         subagents: run.config.subagents,
@@ -207,11 +208,7 @@ export class DeepScanWorkerRunner {
     };
     let persisted: PersistedDeepScanWorker;
     try {
-      persisted = await this.replayStoreMutation(
-        "discovery_acceptance_replay",
-        workerId,
-        async () => await this.options.store.updateWorker(acceptance),
-      );
+      persisted = await this.options.store.updateWorker(acceptance);
     } catch (error) {
       if (confirmedOwnershipChange(error, run.scanId)) throw error;
       if (!this.options.signal.aborted) throw error;
@@ -344,11 +341,7 @@ export class DeepScanWorkerRunner {
       newFindings: reducerValidation.newFindings,
       resultManifestPath: resultPath,
     };
-    const committed = await this.replayStoreMutation(
-      "dedup_commit_replay",
-      reducerId,
-      async () => await this.options.store.commitDedup(commit),
-    );
+    const committed = await this.options.store.commitDedup(commit);
     this.options.log({
       event: "dedup_committed",
       scanId: run.scanId,
@@ -606,36 +599,6 @@ export class DeepScanWorkerRunner {
     });
   }
 
-  /** Replay idempotent SQLite commits when their process response is ambiguous. */
-  private async replayStoreMutation<T>(
-    event: string,
-    workerId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    try {
-      return await operation();
-    } catch (firstError) {
-      if (confirmedOwnershipChange(firstError, this.options.run.scanId))
-        throw firstError;
-      this.options.log({
-        event,
-        scanId: this.options.run.scanId,
-        workerId,
-        reason: errorNameWithCode(asError(firstError)),
-      });
-      try {
-        return await operation();
-      } catch (replayError) {
-        if (confirmedOwnershipChange(replayError, this.options.run.scanId))
-          throw replayError;
-        throw new Error(
-          `Deep Scan persistence replay failed: ${asError(replayError).message}`,
-          { cause: firstError },
-        );
-      }
-    }
-  }
-
   private async cancelAttempt(
     input: {
       workerId: string;
@@ -722,6 +685,7 @@ function reducerInputRecoveryInstructions(): string[] {
   return [
     "If input retrieval exceeded a response or IPC size limit, call get_codex_security_deep_reducer_inputs({ cursor?, maxBytes, findingRef? }) with a smaller maxBytes budget (for example, halve the failed request's budget), preserving its cursor and findingRef to retry the same page.",
     "Do not repeat an oversized request unchanged. If inputs have not been read yet, paginate all assigned findings and the previous aggregate, assembling each json fragment in code and following nextCursor until absent; inspect assembled data selectively and fetch details by findingRef.",
+    "Persist fragments, cursor: nextCursor ?? null, and completion together in one serializable store value after each successful page. Never store an undefined cursor or append a page already committed before a later cell failure. Check MCP isError before parsing its text as a page.",
     "Preserve pages already read and account for every finding before submitting the aggregate.",
   ];
 }

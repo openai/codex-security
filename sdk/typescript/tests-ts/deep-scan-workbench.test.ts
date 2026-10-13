@@ -170,6 +170,14 @@ test.each([
     await mkdir(repository);
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(join(repository, "source.py"), "# synthetic source\n");
+    const paths = _label === "supplied" ? ["api", "background jobs"] : [];
+    for (const path of paths) {
+      await mkdir(join(repository, path));
+      await writeFile(
+        join(repository, path, "source.py"),
+        "# scoped fixture\n",
+      );
+    }
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const command = workbench(python!, () => ({
@@ -193,7 +201,9 @@ test.each([
           },
           mode: "deep",
           repository,
-          target: { kind: "repository", paths: [] },
+          target: paths.length
+            ? { kind: "paths", paths }
+            : { kind: "repository", paths: [] },
         },
         userContext: scanPrompt,
       }),
@@ -216,6 +226,17 @@ test.each([
       "deep-scan-mcp/v1",
     ]);
     const deepScan = begun["deepScan"] as Record<string, unknown>;
+    const reloaded = await command([
+      "get-deep-scan",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      "synthetic-thread",
+    ]);
+    expect(reloaded["deepScan"]).toMatchObject({
+      includePaths: paths.length ? paths : ["."],
+      userContext: scanPrompt ?? null,
+    });
     const running = await command(["get-scan", "--scan-id", scanId]);
     expect(running["scan"]).toMatchObject({
       progress: {
@@ -246,6 +267,7 @@ test.each([
     );
     expect(workerContext).toMatchObject({
       scanId,
+      includePaths: paths.length ? paths : ["."],
       userContext: scanPrompt ?? null,
     });
   },

@@ -1,6 +1,6 @@
 import { isDeepStrictEqual as sameArray } from "node:util";
 import { createHash, hash } from "node:crypto";
-import { isNonEmptyString } from "./value.js";
+import { normalizePersistedFindingDetails } from "./finding-normalization.js";
 import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
@@ -15,8 +15,8 @@ import { regexes } from "zod";
 import { ContractValidationError, abortReason } from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
-  ContractObject as JsonRecord,
   CoverageDocument,
+  Finding,
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
@@ -92,9 +92,14 @@ export async function loadContractWithScanDirectory(
     );
   }
   throwIfAborted(options.signal);
-  let findingsPayload: unknown = payloads["findings.json"];
 
-  const ajv = createValidator();
+  // The plugin schemas are the immutable v0 contract. They are valid Draft
+  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
+  // optional strict-schema linter requires.
+  const ajv = new Ajv2020({ allErrors: false, strict: false }).addFormat(
+    "date-time",
+    { type: "string", validate: validRfc3339DateTime },
+  );
   for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
     const schema = await readJson(
       join(options.pluginRoot, "schemas", schemaName),
@@ -105,8 +110,7 @@ export async function loadContractWithScanDirectory(
     let valid: boolean;
     try {
       validate = ajv.compile(schema);
-      payload =
-        filename === "findings.json" ? findingsPayload : payloads[filename];
+      payload = payloads[filename];
       const validatePayload = (payload: unknown) => {
         const result = validate(payload);
         if (typeof result !== "boolean") {
@@ -125,12 +129,12 @@ export async function loadContractWithScanDirectory(
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
     }
-    if (filename === "findings.json") findingsPayload = payload;
+    payloads[filename] = payload;
     throwIfAborted(options.signal);
   }
-  const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
-  const findings = findingsPayload as FindingsDocument;
-  const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
+  const manifest = payloads["scan-manifest.json"] as ScanManifest;
+  const findings = payloads["findings.json"] as FindingsDocument;
+  const coverage = payloads["coverage.json"] as CoverageDocument;
   if (
     options.expectedScanId !== undefined &&
     manifest.scan.id !== options.expectedScanId
@@ -192,144 +196,9 @@ export function normalizePersistedFindings(payload: unknown): unknown {
   }
   for (const finding of compatible["findings"]) {
     if (!isRecord(finding)) continue;
-    const legacyEvidence = finding["code_evidence"];
-    if (Array.isArray(legacyEvidence)) {
-      finding["code_evidence"] = legacyEvidence.filter(
-        (evidence) =>
-          isRecord(evidence) &&
-          isNonEmptyString(evidence["id"]) &&
-          isNonEmptyString(evidence["code"]),
-      );
-    } else if ("code_evidence" in finding && legacyEvidence !== null) {
-      delete finding["code_evidence"];
-    }
-
-    for (const [sectionName, listFields] of [
-      ["rootCause", ["evidenceRefs", "evidence_refs"]],
-      ["root_cause", ["evidenceRefs", "evidence_refs"]],
-      [
-        "validation",
-        [
-          "assertions",
-          "counterEvidence",
-          "evidenceRefs",
-          "evidence_refs",
-          "limitations",
-        ],
-      ],
-      [
-        "attackPath",
-        [
-          "assumptions",
-          "blindspots",
-          "controls",
-          "evidenceRefs",
-          "evidence_refs",
-          "limitations",
-          "preconditions",
-          "steps",
-        ],
-      ],
-    ] satisfies Array<[string, string[]]>) {
-      const section = finding[sectionName];
-      if (!isRecord(section)) continue;
-      normalizeLegacyStringLists(section, listFields);
-    }
-
-    const legacyRootCause = finding["root_cause"];
-    if (isRecord(legacyRootCause)) {
-      removeUnsupportedLegacyStrings(legacyRootCause, [
-        "summary",
-        "code",
-        "language",
-      ]);
-    } else if (
-      "root_cause" in finding &&
-      legacyRootCause !== null &&
-      typeof legacyRootCause !== "string"
-    ) {
-      delete finding["root_cause"];
-    }
-
-    const validation = finding["validation"];
-    if (isRecord(validation)) {
-      if (!isNonEmptyString(validation["evidence"])) {
-        normalizeLegacyStringLists(validation, ["evidence"]);
-      }
-      removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
-      removeUnsupportedLegacyStrings(
-        validation,
-        ["status", "disposition", "result"].filter(
-          (field) => validation[field] !== null,
-        ),
-      );
-    }
-
-    const attackPath = finding["attackPath"];
-    if (!isRecord(attackPath)) continue;
-    removeUnsupportedLegacyStrings(attackPath, ["summary"]);
-    for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
-      const detail = attackPath[field];
-      if (!isRecord(detail)) {
-        if (!isNonEmptyString(detail)) delete attackPath[field];
-        continue;
-      }
-      removeUnsupportedLegacyStrings(detail, [
-        "summary",
-        "source",
-        "sink",
-        "outcome",
-        ...(field === "reachability" ? ["attacker", "entrypoint"] : []),
-      ]);
-      normalizeLegacyStringLists(detail, [
-        "evidenceRefs",
-        "evidence_refs",
-        "transformations",
-        ...(field === "reachability" ? ["preconditions"] : []),
-      ]);
-    }
-    for (const field of ["impact", "likelihood"]) {
-      const detail = attackPath[field];
-      if (isRecord(detail)) {
-        removeUnsupportedLegacyStrings(detail, ["level", "rationale", "why"]);
-      } else if (
-        detail !== undefined &&
-        detail !== null &&
-        !isNonEmptyString(detail)
-      ) {
-        delete attackPath[field];
-      }
-    }
+    normalizePersistedFindingDetails(finding, "canonical");
   }
   return compatible;
-}
-
-function normalizeLegacyStringLists(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (!(field in section)) continue;
-    const value = section[field];
-    if (Array.isArray(value)) {
-      section[field] = value.filter(isNonEmptyString);
-    } else if (isNonEmptyString(value)) {
-      section[field] = [value];
-    } else {
-      delete section[field];
-    }
-  }
-}
-
-function removeUnsupportedLegacyStrings(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (field in section && !isNonEmptyString(section[field])) {
-      delete section[field];
-    }
-  }
 }
 
 function validateCanonicalContract(
@@ -432,21 +301,12 @@ function validateCanonicalContract(
       }
     }
 
-    const fingerprint = `codex-security/v1:sha256:${hash(
-      "sha256",
-      [
-        "codex-security/v1",
-        manifest.scan.target.targetId,
-        finding.ruleId,
-        finding.identity.anchor,
-        finding.identity.instance ?? "",
-      ].join("\0"),
-    )}`;
-    const findingId = `csf_${hash("sha256", fingerprint).slice(0, 24)}`;
-    const occurrenceId = `occ_${hash(
-      "sha256",
-      [manifest.scan.id, fingerprint].join("\0"),
-    ).slice(0, 24)}`;
+    const { findingId, occurrenceId, fingerprints } = deriveFindingIdentity(
+      manifest.scan.id,
+      manifest.scan.target.targetId,
+      finding.ruleId,
+      finding.identity,
+    );
     if (finding.findingId !== findingId) {
       throw new ContractValidationError(
         `${context}.findingId: does not match derived fingerprint identity.`,
@@ -457,7 +317,7 @@ function validateCanonicalContract(
         `${context}.occurrenceId: does not match scan occurrence identity.`,
       );
     }
-    if (finding.fingerprints.primary !== fingerprint) {
+    if (finding.fingerprints.primary !== fingerprints.primary) {
       throw new ContractValidationError(
         `${context}.fingerprints: does not match derived fingerprint.`,
       );
@@ -603,21 +463,32 @@ async function validateSeal(
     }
   }
 
+  const requireSealedReference = (reference: unknown, context: string) => {
+    throwIfAborted(signal);
+    if (typeof reference !== "string") {
+      throw new ContractValidationError(`${context}: expected a string.`);
+    }
+    const normalized = portableRelativePath(reference, context.toLowerCase());
+    if (!normalized.startsWith("artifacts/")) {
+      throw new ContractValidationError(
+        `${context} must be under artifacts/: ${reference}`,
+      );
+    }
+    if (!artifactPaths.has(normalized)) {
+      throw new ContractValidationError(
+        `${context} is missing from sealed artifacts: ${reference}`,
+      );
+    }
+  };
   for (const surface of coverage.surfaces) {
     for (const receipt of surface.receiptRefs) {
-      throwIfAborted(signal);
-      const normalized = portableRelativePath(receipt, "coverage receipt");
-      if (!normalized.startsWith("artifacts/")) {
-        throw new ContractValidationError(
-          `Coverage receipt must be under artifacts/: ${receipt}`,
-        );
-      }
-      if (!artifactPaths.has(normalized)) {
-        throw new ContractValidationError(
-          `Coverage receipt is missing from sealed artifacts: ${receipt}`,
-        );
-      }
+      requireSealedReference(receipt, "Coverage receipt");
     }
+  }
+  const extensions = scan["extensions"];
+  const imported = isRecord(extensions) ? extensions["import"] : undefined;
+  if (isRecord(imported) && "sourceRef" in imported) {
+    requireSealedReference(imported["sourceRef"], "Import source");
   }
 
   for (const [index, finding] of findings.findings.entries()) {
@@ -963,18 +834,6 @@ function validateParsedJson(value: unknown, context: string): void {
   }
 }
 
-function createValidator(): Ajv2020 {
-  // The plugin schemas are the immutable v0 contract. They are valid Draft
-  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
-  // optional strict-schema linter requires.
-  const ajv = new Ajv2020({ allErrors: false, strict: false });
-  ajv.addFormat("date-time", {
-    type: "string",
-    validate: validRfc3339DateTime,
-  });
-  return ajv;
-}
-
 async function sha256ScanFile(
   scanDir: string,
   relativePath: string,
@@ -1150,4 +1009,31 @@ function nodeErrorCode(error: unknown): string | undefined {
 /** @internal */
 export function sha256Text(value: string): string {
   return hash("sha256", value);
+}
+
+export function deriveFindingIdentity(
+  scanId: string,
+  targetId: string,
+  ruleId: string,
+  identity: Finding["identity"],
+) {
+  const fingerprint = `codex-security/v1:sha256:${sha256Text(
+    [
+      "codex-security/v1",
+      targetId,
+      ruleId,
+      identity.anchor,
+      identity.instance ?? "",
+    ].join("\0"),
+  )}`;
+  return {
+    findingId: `csf_${sha256Text(fingerprint).slice(0, 24)}`,
+    occurrenceId: `occ_${sha256Text([scanId, fingerprint].join("\0")).slice(0, 24)}`,
+    ruleId,
+    identity,
+    fingerprints: {
+      algorithm: "codex-security/v1" as const,
+      primary: fingerprint,
+    },
+  };
 }

@@ -88,15 +88,28 @@ async function generate() {
 }
 
 generate().then((models) => {
-  const output = join(packageRoot, "src", "models.ts");
-  if (process.argv.includes("--check")) {
-    if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {
-      console.error(
-        "src/models.ts is out of date. Run `pnpm generate:models`.",
-      );
-      process.exitCode = 1;
-    }
-    return;
+  const shared = ["finding-normalization", "workbench-arguments"].map(
+    (name) => [
+      `${name}.ts`,
+      `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
+        readFileSync(
+          join(
+            packageRoot,
+            `../../plugins/codex-security/mcp-app/src/${name}.ts`,
+          ),
+          "utf8",
+        ),
+    ],
+  );
+  for (const [name, content] of [["models.ts", models], ...shared]) {
+    const output = join(packageRoot, "src", name);
+    if (process.argv.includes("--check")) {
+      if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== content) {
+        console.error(
+          `src/${name} is out of date. Run \`pnpm generate:models\`.`,
+        );
+        process.exitCode = 1;
+      }
+    } else writeFileSync(output, content);
   }
-  writeFileSync(output, models);
 });

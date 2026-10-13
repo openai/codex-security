@@ -20,10 +20,7 @@ async function resolveWindowsExecutable(
   candidate: string,
   path: string,
   protectedRoot: string,
-): Promise<{
-  executable: string;
-  environment: Record<string, string | undefined>;
-} | null> {
+): ReturnType<typeof resolveTrustedExecutable> {
   if (process.platform === "win32") {
     return await resolveTrustedExecutable(
       candidate,
@@ -54,10 +51,9 @@ async function resolveWindowsExecutable(
     { encoding: "utf8" },
   );
   expect(result.status).toBe(0);
-  return JSON.parse(result.stdout) as {
-    executable: string;
-    environment: Record<string, string | undefined>;
-  } | null;
+  return JSON.parse(result.stdout) as Awaited<
+    ReturnType<typeof resolveTrustedExecutable>
+  >;
 }
 
 describe("trusted executable resolution", () => {

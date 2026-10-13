@@ -94,6 +94,16 @@ async function testBeginProtocolAndParsing() {
   });
   assert.equal(joined.scanId, scanId);
   assert.equal(flagValue(joinedArgs, "--claim-token"), claimToken);
+  const scoped = parseDeepScan(
+    stateResult(scanId, {
+      deepScan: {
+        includePaths: ["api", "README.md"],
+        filePaths: ["README.md"],
+      },
+    }),
+  );
+  assert.deepEqual(scoped.includePaths, ["api", "README.md"]);
+  assert.deepEqual(scoped.filePaths, ["README.md"]);
 }
 
 async function testWriteSerializationAndRecovery() {

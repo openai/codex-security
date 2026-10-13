@@ -28,6 +28,8 @@ When an SDK or terminal host sets `CODEX_SECURITY_SCAN_ID`, emit its standalone 
 
 Keep discovery, validation, and attack-path reasoning within this Standard workflow; do not invoke separate phase skills or load Deep or diff references. Never call Deep-only tools. Do not create ranking phases, per-file or per-candidate ledgers, separate phase worker pools, repeated phase reports, or receipt files.
 
+Once the assigned reviews and required follow-ups have returned, submit the semantic result and follow the host's completion path. Do not wait for an unspecified worker update after the review is settled. `complete: true` finishes the audit turn; coverage must still be `partial` when source review or candidate work remains deferred.
+
 ## Windows Scope Binding
 
 In PowerShell, replace the placeholders inside single quotes with literal paths, doubling any single quote in a path. Keep the supplied `CODEX_SECURITY_TARGET_PATHS_FILE` value unchanged:

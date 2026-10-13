@@ -1,5 +1,4 @@
 import { readJson, writeJson } from "./support/json.ts";
-import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { hash } from "node:crypto";
@@ -39,6 +38,87 @@ const findingFor = (candidateId: string) => ({
   locations: [{ path: "src/example.py", startLine: 1 }],
   remediation: "Complete the review.",
   provenance: { source: "local_plugin", candidateId },
+});
+
+test("persisted draft recovery preserves evidence while removing unsupported optional details", async (t) => {
+  const f = await fixture(t, "worker");
+  const evidence = {
+    id: "canonical-source",
+    label: "Synthetic evidence",
+    path: "src/example.py",
+    startLine: 1,
+    code: "example()",
+    explanation: "Synthetic recovery fixture.",
+  };
+  const legacyEvidence = { id: "legacy-source", code: "legacy_example()" };
+  const input = {
+    ...f.draft(),
+    findings: [
+      {
+        ...findingFor("candidate-1"),
+        codeEvidence: [evidence],
+        code_evidence: [
+          evidence,
+          legacyEvidence,
+          legacyEvidence,
+          { id: " ", code: " " },
+          null,
+        ],
+        rootCause: { summary: " " },
+        root_cause: null,
+        validation: {
+          evidence: "single proof",
+          counterEvidence: [],
+          status: null,
+          evidenceRefs: ["canonical-source", "legacy-source", "missing"],
+        },
+        attackPath: {
+          steps: [" ", "Check the entrypoint", null],
+          reachability: {
+            attacker: false,
+            preconditions: [],
+            evidence_refs: ["missing"],
+          },
+        },
+      },
+    ],
+  };
+  const original = structuredClone(input);
+  const recovered = draftApi.parsePersistedScanDraft(input).findings[0];
+
+  assert.deepEqual(recovered.codeEvidence, [evidence]);
+  assert.deepEqual(recovered.code_evidence, [legacyEvidence]);
+  assert.equal(recovered.rootCause, undefined);
+  assert.equal(recovered.root_cause, undefined);
+  assert.deepEqual(recovered.validation, {
+    evidence: ["single proof"],
+    evidenceRefs: ["canonical-source", "legacy-source"],
+  });
+  assert.deepEqual(recovered.attackPath, {
+    steps: ["Check the entrypoint"],
+    reachability: { evidence_refs: [] },
+  });
+  assert.deepEqual(input, original);
+});
+
+test("worker checkpoints retain typed surface IDs", async (t) => {
+  const f = await fixture(t, "worker");
+  await f.write(
+    f.draft({
+      surfaces: [
+        { id: "http-api", label: "HTTP API", disposition: "no_issue_found" },
+      ],
+    }),
+  );
+  const head = await readJson(f.root, "checkpoint-head.json");
+  const checkpointPath = path.join(f.root, "checkpoints", head.checkpoint);
+  const checkpoint = await readJson(checkpointPath);
+  checkpoint.coverage.surfaces[0].id = "HTTP API";
+  await writeJson(checkpointPath, checkpoint);
+  await assert.rejects(
+    f.write(f.draft({ deferred: [generic] })),
+    /Invalid string/,
+  );
 });
 
 for (const observation of ["checkpoint head", "worker result"]) {
@@ -1007,7 +1087,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       );
       const pending = { id: "review", ...generic };
       const closing = f.draft({ resolvedDeferred: [close(pending.id)] }, true);
-      const fail = (input: ScanDraftInput) =>
+      const fail = (input: unknown) =>
         interruptDraftWrite(path.join(f.root, destination), () =>
           f.write(input),
         );

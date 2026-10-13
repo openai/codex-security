@@ -371,6 +371,8 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "scanId": run["scan_id"],
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
+        "includePaths": dependencies().requested_scan_paths(scan),
+        "filePaths": dependencies().requested_scan_file_paths(scan),
         "userContext": (
             json.loads(run["discovery_user_context_json"])
             if run["discovery_user_context_json"] is not None
@@ -1875,6 +1877,8 @@ def fail_deep_scan_locked(
                     kind="file",
                 )
             )
+        elif run["manifest_path"] == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
+            manifest_path = run["manifest_path"]
         if run["status"] in {"failed", "interrupted"} or scan["status"] == "failed":
             if (
                 run["status"] == args.deep_status

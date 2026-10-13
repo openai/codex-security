@@ -1247,6 +1247,8 @@ async function testParentToolList(bundle: string) {
           `${tool.name} must not accept a model-selected artifact destination.`,
         );
       }
+      if (tool.name === "record_codex_security_scan_draft")
+        assertSemanticInputProperties(tool.inputSchema);
     }
 
     const deepScanTool = tools.find(
@@ -1338,6 +1340,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     );
 
     const [tool] = tools;
+    assertSemanticInputProperties(tool.inputSchema);
     assert.deepEqual(tool.inputSchema.required, [
       "scanId",
       "findings",
@@ -1363,6 +1366,24 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       findings: [],
       coverage: workerDraft([]).coverage,
     };
+
+    for (const forbiddenInput of [
+      { ...input, scope: { includePaths: ["src"] } },
+      { ...input, coverage: { ...input.coverage, mode: "repository" } },
+      {
+        ...input,
+        findings: [
+          { ...finding("fixture", "src/fixture.py"), findingId: "host-owned" },
+        ],
+      },
+    ]) {
+      requireToolError(
+        await client.callTool({ name: tool.name, arguments: forbiddenInput }),
+        /Input validation error/,
+        "Omitting forbidden properties from the advertised shape must preserve validation.",
+      );
+    }
+    await assert.rejects(readFile(resultPath), { code: "ENOENT" });
 
     requireToolError(
       await client.callTool({
@@ -1525,6 +1546,7 @@ async function testReducerWorkerToolList(bundle: string) {
         `${tool.name} must expose scanId only when submitting its complete reduction.`,
       );
       if (tool.name === "record_codex_security_deep_reduction") {
+        assertSemanticInputProperties(tool.inputSchema);
         assert.deepEqual(tool.inputSchema.required, ["scanId", "findings"]);
         assert.equal(tool.inputSchema.additionalProperties, false);
         assert.equal(
@@ -1651,6 +1673,46 @@ async function testReducerWorkerToolList(bundle: string) {
     );
   } finally {
     await client.close();
+  }
+}
+
+function assertSemanticInputProperties(schema: Record<string, unknown>) {
+  const properties = schema.properties as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const findingSchema = properties.findings.items as Record<string, unknown>;
+  const groups: [Record<string, unknown>, string[]][] = [
+    [properties.scope, ["includePaths", "excludePaths"]],
+    [findingSchema, ["findingId", "occurrenceId", "fingerprints"]],
+  ];
+  if (properties.coverage)
+    groups.push([
+      properties.coverage,
+      [
+        "documentType",
+        "schemaVersion",
+        "scanId",
+        "mode",
+        "inventoryStrategy",
+        "includePaths",
+        "excludePaths",
+        "receiptRefs",
+      ],
+    ]);
+  for (const [object, forbidden] of groups) {
+    const names = object.propertyNames as { not: { enum: string[] } };
+    for (const key of forbidden) {
+      assert.equal(
+        Object.hasOwn(object.properties as object, key),
+        false,
+        `${key} must not be advertised as an optional unknown input`,
+      );
+      assert.ok(
+        names.not.enum.includes(key),
+        `${key} remains forbidden in tools/list`,
+      );
+    }
   }
 }
 
