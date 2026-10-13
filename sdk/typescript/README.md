@@ -319,7 +319,21 @@ within each worker. Time and run limits apply to discovery. After discovery
 stops, the scan combines and returns completed findings. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
 
+When a Deep scan has a saved accepted aggregate, recovering an interrupted
+publication reuses that aggregate and its original stop reason without another
+discovery or reducer run. Explicit cancellation and cost stops retain their
+stopped or partial-result behavior.
+Scans created by earlier versions keep their original workflow when resumed.
+
 ### Progress and cost
+
+Deep Scan accounting includes failed, replaced, and canceled worker attempts and
+their descendants once. Shared conversation usage is limited to the original
+scan turn and scan interval. Missing usage remains unavailable or partial;
+reported zero remains zero. When sessions use different models, `cost.modelCosts`
+records each model's tokens, estimate, and pricing basis, and `estimatedUsd` sums
+those estimates. A partial estimate has `cost.coverage: "partial"`; missing model
+attribution leaves the estimate unavailable until usage can be reconciled.
 
 Use `onProgress` for scan progress and `onCost` for cost updates.
 

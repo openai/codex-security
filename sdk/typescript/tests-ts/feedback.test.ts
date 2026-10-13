@@ -123,6 +123,60 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
   context.expectClosed();
 });
 
+test("attaches bound discovery and reducer logs from the recorded worker home", async () => {
+  const context = await setup();
+  const recordedHome = join(context.directory, "original-worker-home");
+  const sessions = join(recordedHome, "sessions");
+  await mkdir(sessions, { recursive: true });
+  await rm(join(context.home, "sessions", "rollout-worker.jsonl"));
+  for (const [id, parent] of [
+    ["worker-1", "thread-1"],
+    ["reducer-1", null],
+    ["other-scan-worker", null],
+  ] as const) {
+    await writeFile(
+      join(sessions, `rollout-${id}.jsonl`),
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id, parent_thread_id: parent },
+      }),
+    );
+  }
+  await sendFeedback(
+    {
+      ...context.options,
+      scan: {
+        ...context.options.scan,
+        mode: "deep",
+        executionThreadIds: ["worker-1", "reducer-1"],
+        executionAttribution: {
+          formatVersion: 1,
+          codexHome: recordedHome,
+          executionThreadIds: ["worker-1", "reducer-1"],
+          owner: {
+            threadId: "thread-1",
+            turnId: "owned-turn",
+            startedAt: "2026-09-10T10:00:00Z",
+          },
+          startedAt: "2026-09-10T10:00:00Z",
+          completedAt: "2026-09-10T12:00:00Z",
+        },
+      },
+    },
+    context.startCodex,
+  );
+  const { requests, attachments } = await context.transcript();
+  expect(requests[2].params.threadId).toBeUndefined();
+  expect(attachments).toHaveLength(1);
+  expect(
+    JSON.parse(attachments[0].content).sessions.map(
+      (session: { threadId: string }) => session.threadId,
+    ),
+  ).toEqual(["worker-1", "reducer-1", "thread-1"]);
+  expect(existsSync(attachments[0].path)).toBe(false);
+  context.expectClosed();
+});
+
 for (const missingParent of [false, true]) {
   test(`uploads only the selected Desktop scan logs with parent ${missingParent ? "missing" : "available"}`, async () => {
     const context = await setup();

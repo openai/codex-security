@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
+import type { ScanExecutionAttribution } from "../src/scan-sessions.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -130,6 +131,62 @@ test("feedback selects a scan prefix", async () => {
   expect(JSON.parse(result.stdout)).toEqual(report);
   expect(calls).toEqual([["get-scan", "--scan-id", "scan-pre"]]);
 });
+
+for (const includeLogs of [false, true]) {
+  test(`feedback requests private execution settings only with log opt-in (${includeLogs})`, async () => {
+    const executionAttribution = {
+      formatVersion: 1,
+      codexHome: "synthetic-recorded-worker-home",
+      executionThreadIds: ["discovery-thread", "reducer-thread"],
+      owner: {
+        threadId: "owner-thread",
+        turnId: "owned-turn",
+        startedAt: "2026-09-10T10:00:00Z",
+      },
+      startedAt: "2026-09-10T10:00:00Z",
+      completedAt: "2026-09-10T12:00:00Z",
+    } satisfies ScanExecutionAttribution;
+    const deps = dependencies();
+    deps.runWorkbench = async (
+      args,
+      _input,
+      _signal,
+      _python,
+      withExecutionSettings,
+    ) => {
+      expect(args).toEqual(["get-scan", "--scan-id", "scan-pre"]);
+      expect(withExecutionSettings === true).toBe(includeLogs);
+      return {
+        scan: {
+          scanId: "scan-pre",
+          ...(withExecutionSettings ? { executionAttribution } : {}),
+        },
+      };
+    };
+    deps.sendFeedback = async ({ scan }) => {
+      expect(scan?.executionAttribution).toEqual(
+        includeLogs ? executionAttribution : undefined,
+      );
+      return {
+        feedbackId: "feedback-1",
+        scanId: "scan-pre",
+        includedLogs: includeLogs,
+      };
+    };
+    const result = await run(
+      [
+        "scan-pre",
+        "--reason",
+        "Synthetic scan stopped",
+        ...(includeLogs ? ["--include-logs"] : []),
+        "--json",
+      ],
+      deps,
+    );
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+  });
+}
 
 test("feedback without saved scans sends a general report with logs off", async () => {
   const deps = dependencies();

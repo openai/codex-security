@@ -215,6 +215,16 @@ test("preserves complete worker usage and cost after direct engine completion", 
     scanDirectory: scanDir,
     model: "gpt-6.1-sol",
   });
+  // Match the host's known-zero receipt for a control session without a model turn.
+  tracker.recordUsage(
+    {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+    },
+    "engine-session",
+  );
   tracker.start("engine-session");
   const running = await tracker.refresh();
   const completed = (await events.next()).value;

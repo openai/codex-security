@@ -174,10 +174,7 @@ async function run() {
       do {
         const page = await server.call(
           "get_codex_security_deep_reducer_inputs",
-          {
-            maxBytes: 64_000,
-            ...(cursor === undefined ? {} : { cursor }),
-          },
+          { maxBytes: 256, ...(cursor === undefined ? {} : { cursor }) },
         );
         json += page.json;
         cursor = page.nextCursor;

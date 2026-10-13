@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import uuid
 from pathlib import Path
 
@@ -192,3 +193,72 @@ def test_deep_setup_draft_before_orchestration(
         retained = json.loads(added.pop().read_text())
         assert retained["complete"] is False
         assert retained["threatModel"] == {"summary": "Unselected progress"}
+
+
+@pytest.mark.parametrize("checkpoint_only", [False, True])
+@pytest.mark.parametrize("supplied_checkpoint", [False, True])
+def test_unsupported_deep_draft_preserves_saved_artifacts(
+    tmp_path: Path, checkpoint_only: bool, supplied_checkpoint: bool
+) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    environment = {"CODEX_HOME": str(codex_home)}
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(
+        contract_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    documents = {
+        key: json.loads((contract_dir / name).read_text())
+        for key, name in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    documents["manifest"] = {
+        "scan": {
+            **{key: documents["manifest"]["scan"][key] for key in ("target", "scope")},
+            "threatModel": {"format": "markdown", "content": "# Saved model\n"},
+            **({} if checkpoint_only else {"complete": False}),
+        }
+    }
+    documents["findings"]["findings"] = []
+    documents["coverage"].update(completeness="complete", surfaces=[], deferred=[])
+    drafts = scan_dir / "drafts"
+    drafts.mkdir(exist_ok=True)
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    args = ["write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged)]
+    assert run_workbench(state_dir, *args, environment=environment)["status"] == "draft_written"
+
+    model = {"format": "markdown", "content": "# New partial model\n"}
+    documents["manifest"]["scan"].update(complete=False, threatModel=model)
+    staged.write_text(json.dumps(documents))
+    if supplied_checkpoint:
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        checkpoint.update(complete=False, threatModel=model)
+        checkpoint_path = drafts / f"{uuid.uuid4()}.checkpoint.json"
+        checkpoint_path.write_text(json.dumps(checkpoint))
+        args.extend(["--checkpoint-path", str(checkpoint_path)])
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
+            ("future/v99", scan_id),
+        )
+        before_database = "\n".join(connection.iterdump())
+    before_files = {
+        path.relative_to(scan_dir): path.read_bytes()
+        for path in scan_dir.rglob("*")
+        if path.is_file()
+    }
+    rejected = run_workbench(state_dir, *args, environment=environment, check=False)
+    assert rejected["returncode"] != 0
+    assert "unsupported workflow or schema version" in str(rejected["stderr"])
+    assert {
+        path.relative_to(scan_dir): path.read_bytes()
+        for path in scan_dir.rglob("*")
+        if path.is_file()
+    } == before_files
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert "\n".join(connection.iterdump()) == before_database

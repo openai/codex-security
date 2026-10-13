@@ -19,7 +19,7 @@ let bundledRuntime: Promise<string> | undefined;
 
 export function loadBundledRuntime(): Promise<string> {
   return (bundledRuntime ??= Promise.all(
-    ["000", "001"].map((part) =>
+    ["000", "001", "002"].map((part) =>
       readFile(new URL(`mcp/server.mjs.br.part-${part}`, bundledPlugin)),
     ),
   ).then((parts) =>

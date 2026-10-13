@@ -11,8 +11,11 @@ import { Cli, Formatter, z } from "incur";
 import { main } from "../src/cli.js";
 import { scanLogsJson } from "../src/cli-scan-logs-json.js";
 import { readSavedScanLogs } from "../src/scan-logs.js";
+import { runWorkbench } from "../src/runtime.js";
 import { VERSION } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { pythonExecutable } from "./support/python.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -351,4 +354,182 @@ describe("saved logs JSON output", () => {
       await rm(state, { recursive: true, force: true });
     }
   });
+});
+
+test("saved logs include the privately recorded worker home after recovery", async () => {
+  const f = await fixture();
+  try {
+    const workerHome = join(f.state, "original-worker-home");
+    await mkdir(join(workerHome, "sessions"), { recursive: true });
+    const start = "2026-01-01T00:00:00Z";
+    await writeJsonLines(join(workerHome, "sessions", "worker.jsonl"), [
+      {
+        type: "session_meta",
+        payload: {
+          id: "original-worker",
+          source: {
+            subagent: { thread_spawn: { parent_thread_id: "thread-1" } },
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: start,
+        payload: { type: "task_started", turn_id: "worker-turn" },
+      },
+      {
+        type: "event_msg",
+        timestamp: start,
+        payload: {
+          type: "agent_message",
+          message: "Synthetic original worker activity",
+        },
+      },
+    ]);
+    const scan = {
+      scanId: "scan-1",
+      continuationThreadId: "thread-1",
+      mode: "deep",
+      executionAttribution: {
+        formatVersion: 1,
+        executionThreadIds: ["thread-1", "original-worker"],
+        owner: {
+          threadId: "thread-1",
+          turnId: "parent-turn",
+          startedAt: start,
+        },
+        startedAt: start,
+        completedAt: null,
+      },
+    };
+    let privateSettingsRequested = false;
+    f.deps.runWorkbench = async (
+      _args,
+      _input,
+      _signal,
+      _python,
+      privateSettings,
+    ) => {
+      privateSettingsRequested = privateSettings === true;
+      return {
+        scan: {
+          ...scan,
+          executionAttribution: {
+            ...scan.executionAttribution,
+            ...(privateSettings ? { codexHome: workerHome } : {}),
+          },
+        },
+      };
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(["scans", "logs", "scan-1", "--json"], f.deps)).toBe(0);
+    expect(privateSettingsRequested).toBe(true);
+    const logs = JSON.parse(stdout.text());
+    expect(
+      logs.sessions.map((session: { threadId: string }) => session.threadId),
+    ).toEqual(["thread-1", "original-worker"]);
+    expect(
+      logs.events.some(
+        (entry: { threadId: string }) => entry.threadId === "original-worker",
+      ),
+    ).toBe(true);
+    expect(logs).not.toHaveProperty("codexHome");
+    expect(stderr.text()).toBe("");
+  } finally {
+    await rm(f.state, { recursive: true, force: true });
+  }
+});
+
+test("saved logs remain readable for a future workflow without admitting execution", async () => {
+  const f = await fixture();
+  const target = await mkdtemp(join(tmpdir(), "saved-future-target-"));
+  const python = pythonExecutable()!;
+  const environment = {
+    ...process.env,
+    CODEX_SECURITY_STATE_DIR: f.state,
+    CODEX_HOME: join(f.state, "codex-home"),
+  };
+  const options = { pluginRoot: PLUGIN_ROOT, python, environment };
+  try {
+    const begun = await runWorkbench(options, [
+      "begin-deep-scan",
+      "--thread-id",
+      "thread-1",
+      "--target-path",
+      target,
+      "--scan-root",
+      join(f.state, "scans"),
+    ]);
+    const deepScan = begun["deepScan"] as { scanId: string; createdAt: string };
+    const scanId = deepScan.scanId;
+    await runWorkbench(options, [
+      "set-scan-thread",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      "thread-1",
+    ]);
+    f.deps.environment = environment;
+    await promisify(execFile)(
+      python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        "import sqlite3, sys; connection = sqlite3.connect(sys.argv[1]); connection.execute(\"UPDATE deep_scan_runs SET workflow_version = 'future/v99', usage_owner_json = ?, execution_settings_json = ? WHERE scan_id = ?\", (sys.argv[3], sys.argv[4], sys.argv[2])); connection.commit(); connection.close()",
+        join(f.state, "workbench.sqlite3"),
+        scanId,
+        JSON.stringify({
+          threadId: "thread-1",
+          turnId: "original",
+          startedAt: deepScan.createdAt,
+          dedicated: false,
+        }),
+        JSON.stringify({
+          version: 1,
+          settings: { codexHome: environment.CODEX_HOME, codexPath: python },
+        }),
+      ],
+      { env: environment },
+    );
+    let privateSettingsRequested = false;
+    f.deps.runWorkbench = async (
+      args,
+      input,
+      signal,
+      _python,
+      privateSettings,
+    ) => {
+      privateSettingsRequested ||= privateSettings === true;
+      return runWorkbench(
+        { ...options, signal, withExecutionSettings: privateSettings },
+        args,
+        input,
+      );
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const code = await runCli(["scans", "logs", scanId, "--json"], f.deps);
+    expect(stderr.text()).toBe("");
+    expect(code).toBe(0);
+    expect(privateSettingsRequested).toBe(true);
+    const logs = JSON.parse(stdout.text());
+    expect(logs.scanId).toBe(scanId);
+    expect(
+      logs.sessions.map((session: { threadId: string }) => session.threadId),
+    ).toEqual(["thread-1"]);
+    expect(logs).not.toHaveProperty("codexHome");
+    expect(stderr.text()).toBe("");
+    await expect(
+      runWorkbench(options, [
+        "claim-deep-scan-coordinator",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        "thread-1",
+      ]),
+    ).rejects.toThrow("unsupported workflow");
+  } finally {
+    await rm(target, { recursive: true, force: true });
+    await rm(f.state, { recursive: true, force: true });
+  }
 });

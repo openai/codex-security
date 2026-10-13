@@ -1,6 +1,5 @@
-import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
+import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
@@ -17,6 +16,12 @@ import { rankPoolCommand } from "./src/helpers/rank-pool";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
+
+export {
+  parseCanonicalScanDraft,
+  readScanAuditDraft,
+} from "./src/artifact-scan-draft.js";
+export { resumeSelectedDeepScan } from "./src/deep-scan/finalization.js";
 
 // Importing the bundled parser does not invoke its CLI adapter.
 const entryPath = import.meta.url.startsWith("file:")

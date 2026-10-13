@@ -14,6 +14,7 @@ import {
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -42,6 +43,7 @@ test.each([undefined, "Summarize the completed scan."])(
       runStreamed: postScanTurn,
     }));
     const started = mock();
+    const liveWorkerUsage = Promise.withResolvers<number>();
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       supportsDirectDeepScan: async () => true,
@@ -73,7 +75,40 @@ test.each([undefined, "Summarize the completed scan."])(
         );
         artifact.sha256 = hash("sha256", coverageBytes);
         await writeFile(manifestPath, JSON.stringify(manifest));
+        await writeSession(
+          codexHome,
+          "discovery-session",
+          {
+            input_tokens: 1_000,
+            cached_input_tokens: 200,
+            cache_write_input_tokens: 100,
+            output_tokens: 100,
+          },
+          {
+            cwd: join(
+              scanDir,
+              "artifacts",
+              "deep_discovery",
+              "workers",
+              "1",
+              "output",
+            ),
+            timestamp: "2026-07-26T12:00:01.000Z",
+          },
+        );
+        await writeFile(
+          join(codexHome, "sessions", "owner.jsonl"),
+          JSON.stringify({
+            type: "session_meta",
+            payload: {
+              id: "engine-session",
+              cwd: scanDir,
+              timestamp: "2026-07-26T12:00:00.000Z",
+            },
+          }) + "\n",
+        );
         yield { type: "thread.started", thread_id: "engine-session" };
+        expect(await liveWorkerUsage.promise).toBe(1_000);
         yield {
           type: "turn.completed",
           usage: {
@@ -86,6 +121,7 @@ test.each([undefined, "Summarize the completed scan."])(
       },
       runWorkbench: async (_options, args, input) => {
         commands.push(args[0]!);
+        if (args[0] === "get-scan") return { scan: { id: "scan_example_001" } };
         if (args[0] === "prepare-scan-completion") {
           await writeFile(
             join(scanDir, "report.md"),
@@ -102,7 +138,9 @@ test.each([undefined, "Summarize the completed scan."])(
         mode: "deep",
         postScanPrompt,
         onScanStarted: started,
+        onCost: (cost) => liveWorkerUsage.resolve(cost.inputTokens),
       });
+      expect(result.cost?.inputTokens).toBe(1_000);
       expect(result.threadId).toBe("engine-session");
       expect(result.reportPath).toBe(join(scanDir, "report.md"));
       expect(result.turnResult.finalResponse).toBe(finalReport);
