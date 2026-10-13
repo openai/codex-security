@@ -1,7 +1,10 @@
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
-use std::ffi::{CStr, CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
+use std::{
+    ffi::{CStr, CString, OsStr},
+    io,
+};
 
 #[napi(object, use_nullable = true)]
 pub struct UserHomeResult {
@@ -52,5 +55,31 @@ pub fn user_home(username: Buffer) -> napi::Result<UserHomeResult> {
             None
         };
         return Ok(UserHomeResult { errno: code, value });
+    }
+}
+
+#[napi(object)]
+pub struct SyscallResult {
+    pub value: i32,
+    pub errno: i32,
+}
+
+#[napi]
+pub fn file_lock(descriptor: i32, unlock: bool, nonblocking: bool) -> SyscallResult {
+    let flags = if unlock {
+        libc::LOCK_UN
+    } else {
+        libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 }
+    };
+    loop {
+        let value = unsafe { libc::flock(descriptor, flags) };
+        let errno = if value < 0 {
+            io::Error::last_os_error().raw_os_error().unwrap()
+        } else {
+            0
+        };
+        if errno != libc::EINTR {
+            return SyscallResult { value, errno };
+        }
     }
 }

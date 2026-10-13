@@ -103,6 +103,7 @@ export function createPolicyTestFixtures() {
           options: {
             path?: string;
             pluginRoot?: string;
+            pluginPath?: string;
             run?: (
               stage: SecurityPolicyStage,
               prompt: string,
@@ -131,6 +132,7 @@ export function createPolicyTestFixtures() {
             gitMetadataPaths: sources.gitMetadataPaths,
             outputDir,
             pluginRoot: options.pluginRoot ?? PLUGIN_ROOT,
+            pluginPath: options.pluginPath,
             guidance: "Synthetic inherited guidance",
             revision: null,
             model: "gpt-5.6-sol",

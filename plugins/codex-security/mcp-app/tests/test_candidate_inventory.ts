@@ -122,7 +122,6 @@ for (const deleted of [false, true]) {
           root: scanRoot,
           repoRoot: repo,
           scanId: "11111111-1111-4111-8111-111111111111",
-          layout: "scan",
           pluginRoot: path.resolve(import.meta.dirname, "../.."),
           mode: "diff",
           targetContract: {

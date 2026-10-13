@@ -1,0 +1,349 @@
+{
+  "sourceScanId": "11111111-1111-4111-8111-111111111111",
+  "parentScanId": "22222222-2222-4222-8222-222222222222",
+  "relativeDirectory": "artifacts/deep-scan/passes/pass-1",
+  "scope": {
+    "includePaths": ["src"],
+    "excludePaths": []
+  },
+  "findings": [
+    {
+      "ruleId": "path-traversal.archive-extraction",
+      "identity": {
+        "anchor": "outside"
+      },
+      "title": "Synthetic archive path finding",
+      "summary": "Archive names reach a file write without a containment check.",
+      "severity": {
+        "level": "high"
+      },
+      "confidence": {
+        "level": "high",
+        "rationale": "The source trace reaches the write."
+      },
+      "taxonomy": {
+        "category": "path-traversal",
+        "cwe": ["CWE-22"]
+      },
+      "locations": [
+        {
+          "path": "outside.py",
+          "startLine": 1,
+          "endLine": 2
+        }
+      ],
+      "remediation": "Validate containment before writing archive members.",
+      "validation": null,
+      "attackPath": null,
+      "provenance": {
+        "source": "local_plugin",
+        "extensions": {
+          "fixture": "preserve-source-provenance"
+        }
+      },
+      "extensions": {
+        "fixture": "preserve-finding-extensions"
+      }
+    },
+    {
+      "ruleId": "path-traversal.archive-extraction",
+      "identity": {
+        "anchor": "check"
+      },
+      "title": "Synthetic archive path finding",
+      "summary": "Archive names reach a file write without a containment check.",
+      "severity": {
+        "level": "high"
+      },
+      "confidence": {
+        "level": "high",
+        "rationale": "The source trace reaches the write."
+      },
+      "taxonomy": {
+        "category": "path-traversal",
+        "cwe": ["CWE-22"]
+      },
+      "locations": [
+        {
+          "path": "src/extract.py",
+          "startLine": 1,
+          "endLine": 2,
+          "role": "sink"
+        },
+        {
+          "path": "shared/control.py",
+          "startLine": 1,
+          "endLine": 1,
+          "role": "root_control"
+        }
+      ],
+      "remediation": "Validate containment before writing archive members.",
+      "validation": null,
+      "attackPath": null,
+      "provenance": {
+        "source": "local_plugin",
+        "extensions": {
+          "fixture": "preserve-source-provenance"
+        }
+      },
+      "extensions": {
+        "fixture": "preserve-finding-extensions"
+      },
+      "writeup": {
+        "reportPath": "findings/check/check.md"
+      }
+    },
+    {
+      "ruleId": "path-traversal.archive-extraction",
+      "identity": {
+        "anchor": "plain"
+      },
+      "title": "Synthetic archive path finding",
+      "summary": "Archive names reach a file write without a containment check.",
+      "severity": {
+        "level": "high"
+      },
+      "confidence": {
+        "level": "high",
+        "rationale": "The source trace reaches the write."
+      },
+      "taxonomy": {
+        "category": "path-traversal",
+        "cwe": ["CWE-22"]
+      },
+      "locations": [
+        {
+          "path": "src/extract.py",
+          "startLine": 1,
+          "endLine": 2,
+          "role": "sink"
+        },
+        {
+          "path": "shared/control.py",
+          "startLine": 1,
+          "endLine": 1,
+          "role": "root_control"
+        }
+      ],
+      "remediation": "Validate containment before writing archive members.",
+      "validation": null,
+      "attackPath": null,
+      "provenance": {
+        "source": "local_plugin",
+        "extensions": {
+          "fixture": "preserve-source-provenance"
+        }
+      },
+      "extensions": {
+        "fixture": "preserve-finding-extensions"
+      }
+    },
+    {
+      "ruleId": "path-traversal.archive-extraction",
+      "identity": {
+        "anchor": "check-3"
+      },
+      "title": "Synthetic archive path finding",
+      "summary": "Archive names reach a file write without a containment check.",
+      "severity": {
+        "level": "high"
+      },
+      "confidence": {
+        "level": "high",
+        "rationale": "The source trace reaches the write."
+      },
+      "taxonomy": {
+        "category": "path-traversal",
+        "cwe": ["CWE-22"]
+      },
+      "locations": [
+        {
+          "path": "src/extract.py",
+          "startLine": 1,
+          "endLine": 2,
+          "role": "sink"
+        },
+        {
+          "path": "shared/control.py",
+          "startLine": 1,
+          "endLine": 1,
+          "role": "root_control"
+        }
+      ],
+      "remediation": "Validate containment before writing archive members.",
+      "validation": null,
+      "attackPath": null,
+      "provenance": {
+        "source": "local_plugin",
+        "extensions": {
+          "fixture": "preserve-source-provenance"
+        }
+      },
+      "extensions": {
+        "fixture": "preserve-finding-extensions"
+      },
+      "writeup": {
+        "reportPath": "findings/check-3/check-3.md"
+      }
+    }
+  ],
+  "coverage": {
+    "completeness": "partial",
+    "surfaces": [
+      {
+        "id": "surface",
+        "label": "Archive input",
+        "candidateId": "candidate-\u00e9",
+        "disposition": "reported",
+        "receiptRefs": ["artifacts/receipt.json"]
+      }
+    ],
+    "explicitExclusions": [
+      {
+        "id": "exclude",
+        "paths": ["vendor"],
+        "reason": "Synthetic excluded subtree.",
+        "pattern": "vendor/**"
+      }
+    ],
+    "deferred": [
+      {
+        "id": "question",
+        "reason": "A synthetic deployment condition needs follow-up.",
+        "surfaceIds": ["surface"],
+        "receiptRefs": ["artifacts/receipt.json"]
+      }
+    ],
+    "openQuestions": [
+      {
+        "id": "open",
+        "question": "Which deployment restricts access?",
+        "surfaceIds": ["surface"]
+      }
+    ]
+  },
+  "files": {
+    "findings/check/check.md": "# Synthetic proof\nSee [evidence](@CHILD@-CHEC\u212a.MD) and [trace](@CHILD@-check-2.md/trace.txt).\n",
+    "findings/check/@CHILD@-CHEC\u212a.MD": "Evidence whose name aliases the projected report.\n",
+    "findings/check/@CHILD@-check-2.md/trace.txt": "Trace under a directory that aliases the next suffix.\n",
+    "findings/check-3/check-3.md": "# Other synthetic proof\n",
+    "artifacts/receipt.json": "{}\n"
+  },
+  "expected": {
+    "sourceFindingIndexes": [1, 2, 3],
+    "findings": [
+      {
+        "identity": {
+          "anchor": "check"
+        },
+        "locations": [
+          {
+            "path": "src/extract.py",
+            "startLine": 1,
+            "endLine": 2,
+            "role": "sink"
+          },
+          {
+            "path": "shared/control.py",
+            "startLine": 1,
+            "endLine": 1,
+            "role": "root_control"
+          }
+        ],
+        "sourceFindingIds": ["@CHILD@:0"],
+        "writeup": {
+          "reportPath": "artifacts/deep-scan/passes/pass-1/findings/check/check.md"
+        }
+      },
+      {
+        "identity": {
+          "anchor": "plain"
+        },
+        "locations": [
+          {
+            "path": "src/extract.py",
+            "startLine": 1,
+            "endLine": 2,
+            "role": "sink"
+          },
+          {
+            "path": "shared/control.py",
+            "startLine": 1,
+            "endLine": 1,
+            "role": "root_control"
+          }
+        ],
+        "sourceFindingIds": ["@CHILD@:1"]
+      },
+      {
+        "identity": {
+          "anchor": "check-3"
+        },
+        "locations": [
+          {
+            "path": "src/extract.py",
+            "startLine": 1,
+            "endLine": 2,
+            "role": "sink"
+          },
+          {
+            "path": "shared/control.py",
+            "startLine": 1,
+            "endLine": 1,
+            "role": "root_control"
+          }
+        ],
+        "sourceFindingIds": ["@CHILD@:2"],
+        "writeup": {
+          "reportPath": "artifacts/deep-scan/passes/pass-1/findings/check-3/check-3.md"
+        }
+      }
+    ],
+    "coverage": {
+      "completeness": "partial",
+      "surfaces": [
+        {
+          "id": "@CHILD@/surface",
+          "label": "Archive input",
+          "candidateId": "@CHILD@:e58295b9114eb779fb2c91d375fe1c103056bfe760954a8fbf7954a84c2cbb6a",
+          "disposition": "reported",
+          "receiptRefs": [
+            "artifacts/deep-scan/passes/pass-1/artifacts/receipt.json"
+          ],
+          "sourceCandidateId": "candidate-\u00e9"
+        }
+      ],
+      "explicitExclusions": [
+        {
+          "id": "@CHILD@/exclude",
+          "paths": ["vendor"],
+          "reason": "Synthetic excluded subtree.",
+          "pattern": "vendor/**"
+        }
+      ],
+      "deferred": [
+        {
+          "id": "@CHILD@/question",
+          "reason": "A synthetic deployment condition needs follow-up.",
+          "surfaceIds": ["@CHILD@/surface"],
+          "receiptRefs": [
+            "artifacts/deep-scan/passes/pass-1/artifacts/receipt.json"
+          ]
+        }
+      ],
+      "openQuestions": [
+        {
+          "id": "@CHILD@/open",
+          "question": "Which deployment restricts access?",
+          "surfaceIds": ["@CHILD@/surface"]
+        }
+      ]
+    },
+    "fileProjections": {
+      "artifacts/deep-scan/passes/pass-1/findings/check/check.md": "findings/check/check.md",
+      "artifacts/deep-scan/passes/pass-1/findings/check/@CHILD@-CHEC\u212a.MD": "findings/check/@CHILD@-CHEC\u212a.MD",
+      "artifacts/deep-scan/passes/pass-1/findings/check/@CHILD@-check-2.md/trace.txt": "findings/check/@CHILD@-check-2.md/trace.txt",
+      "artifacts/deep-scan/passes/pass-1/findings/check-3/check-3.md": "findings/check-3/check-3.md"
+    }
+  }
+}

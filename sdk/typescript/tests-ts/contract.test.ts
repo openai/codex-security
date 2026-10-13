@@ -22,6 +22,7 @@ import { runPython } from "./support/python-probe.js";
 import { propertyOptions } from "./support/property.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -1533,6 +1534,14 @@ describe("canonical scan contract", () => {
   });
 
   test("binds requested path scope, mode, and plugin version", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "binds requested path scope, mode, and plugin version",
+      )
+    )
+      return;
+    Reflect.deleteProperty(Set.prototype, "isSubsetOf");
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);

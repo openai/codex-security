@@ -142,3 +142,29 @@ export function runPythonWithInput(
     child.stdin.end(input);
   });
 }
+
+export function workbenchCommandTimeout(command: string | undefined): number {
+  return [
+    "begin-deep-scan",
+    "cancel-scan",
+    "fail-scan",
+    "complete-scan",
+    "export-findings",
+    "get-scan",
+    "get-workspace",
+    "inspect-setup",
+    "list-findings",
+    "preserve-scan-results",
+    "recover-scan-results",
+    "request-finding-remediation",
+    "request-finding-remediation-action",
+    "save-workspace",
+    "set-finding-triage",
+    "set-finding-remediation",
+    "start-headless-standard-scan",
+    "start-prompt-only-scan",
+    "start-scan",
+  ].includes(command ?? "")
+    ? 300_000
+    : 30_000;
+}

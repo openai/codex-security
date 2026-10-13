@@ -17,13 +17,13 @@ const commands = [
 
 function scanDependencies() {
   return dependencies({
-    onWorkbench: () => ({
+    onWorkbench: (args) => ({
       scanId: "saved-scan",
       scanDir: "/tmp/saved-scan",
       recipe: {
         repository: "/original/repository",
         target: { kind: "repository", paths: [] },
-        mode: "standard",
+        mode: args[0] === "get-cli-scan-resume" ? "deep" : "standard",
         config: {},
       },
     }),

@@ -1,15 +1,13 @@
-import { createReadStream } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { createInterface } from "node:readline";
-import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
-import zlib from "node:zlib";
 import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
   isScanArtifactDirectory,
+  readsCompressedSessions,
+  sessionEvents,
   sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
@@ -41,7 +39,7 @@ export function readSavedScanLogs(
   codexHome: string | readonly string[],
   options: { allowMissingRoot?: boolean } = {},
 ) {
-  const threadId = scan.continuationThreadId;
+  const threadId = scan.continuationThreadId ?? scan.threadIds?.[0];
   if (!threadId && !options.allowMissingRoot) {
     throw new CodexSecurityError(
       `No session is associated with scan ${scan.scanId}.`,
@@ -49,7 +47,7 @@ export function readSavedScanLogs(
   }
   return readScanLogs({
     scanId: scan.scanId,
-    threadId: threadId ?? scan.threadIds?.[0],
+    threadId,
     threadIds: scan.threadIds,
     executionThreadIds: scan.executionThreadIds ?? [],
     codexHome,
@@ -66,11 +64,13 @@ export function readSavedScanLogs(
   });
 }
 
-// Codex can compress cold rollouts to `.jsonl.zst`. Node 22.13 and 22.14 lack
-// zstd, so they still read plain rollouts only.
-const readsCompressedSessions = typeof zlib.createZstdDecompress === "function";
-
-type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
+interface SessionLog {
+  threadId: string;
+  parentThreadId: string | null;
+  startedAt: number | null;
+  workingDirectory: string | null;
+  path: string;
+}
 
 async function* scanSessions(codexHome: string, directory = "sessions") {
   for await (const path of sessionFiles(
@@ -97,9 +97,14 @@ async function* scanSessions(codexHome: string, directory = "sessions") {
   }
 }
 
-export async function findScanSession(codexHome: string, threadId: string) {
-  for await (const session of scanSessions(codexHome)) {
-    if (session.threadId === threadId) return session;
+export async function findScanSession(
+  codexHome: string,
+  threadId: string,
+): Promise<SessionLog | null> {
+  for (const directory of ["sessions", "archived_sessions"]) {
+    for await (const session of scanSessions(codexHome, directory)) {
+      if (session.threadId === threadId) return session;
+    }
   }
   return null;
 }
@@ -256,31 +261,5 @@ async function extendsSessionLog(
     return !(await events.next()).done;
   } finally {
     await events.return(undefined);
-  }
-}
-
-async function* sessionEvents(
-  path: string,
-): AsyncGenerator<Record<string, unknown>> {
-  const file = createReadStream(path);
-  const stream = path.endsWith(".zst")
-    ? pipeline(file, zlib.createZstdDecompress(), () => {})
-    : file;
-  const lines = createInterface({ input: stream, crlfDelay: Infinity });
-  try {
-    for await (const line of lines) {
-      if (line.trim() === "") continue;
-      try {
-        const event: unknown = JSON.parse(line);
-        if (isRecord(event)) yield event;
-      } catch {
-        continue;
-      }
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  } finally {
-    lines.close();
-    stream.destroy();
   }
 }

@@ -44,6 +44,125 @@ def migrate_finding_workflow_results(connection: sqlite3.Connection) -> None:
         )
 
 
+def backfill_unindexed_severity_assessments(connection: sqlite3.Connection) -> None:
+    from finalize_scan_contract import _stable_id
+
+    rows = connection.execute(
+        """SELECT classification.scan_id, assessment.finding_id,
+            assessment.occurrence_id, finding.fingerprint
+        FROM scan_severity_classifications AS classification
+        JOIN json_each(classification.finding_ids_json) AS selected
+        JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
+        JOIN findings AS finding ON finding.id = assessment.finding_id"""
+    ).fetchall()
+    for row in rows:
+        # Classification does not require indexing the scan's occurrences first.
+        if row["occurrence_id"] == _stable_id("occ", row["scan_id"], row["fingerprint"]):
+            connection.execute(
+                "INSERT OR IGNORE INTO scan_severity_assessments "
+                "SELECT ?, assessment.* FROM finding_severity_assessments AS assessment "
+                "WHERE assessment.finding_id = ?",
+                (row["scan_id"], row["finding_id"]),
+            )
+
+
+def backfill_composition_children(connection: sqlite3.Connection) -> None:
+    # Preserve the previous membership rule using stored paths, including archived
+    # scans and scans whose outputs no longer exist. Do not consult checkpoints.
+    rows = connection.execute(
+        "SELECT children.id, children.scan_dir, parents.scan_dir AS parent_scan_dir "
+        "FROM scans AS children JOIN scans AS parents ON parents.id = children.parent_scan_id "
+        "WHERE parents.mode = 'deep' AND children.mode = 'standard'"
+    ).fetchall()
+    for child in rows:
+        child_dir = Path(child["scan_dir"])
+        parent_dir = Path(child["parent_scan_dir"])
+        previous_parent = child_dir.parent.parent.parent.parent
+        if (
+            child_dir.parent == previous_parent / "artifacts/deep-scan/passes"
+            and parent_dir.parent == previous_parent.parent
+            and parent_dir.name.startswith(f"{previous_parent.name}.previous-")
+        ):
+            # Older archival moved only the parent row while retaining nested files.
+            archived_child = parent_dir / child_dir.relative_to(previous_parent)
+            for artifact in connection.execute(
+                "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (child["id"],)
+            ).fetchall():
+                path = Path(artifact["path"])
+                if path.is_relative_to(child_dir):
+                    connection.execute(
+                        "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
+                        (
+                            str(archived_child / path.relative_to(child_dir)),
+                            child["id"],
+                            artifact["kind"],
+                        ),
+                    )
+            connection.execute(
+                "UPDATE scans SET scan_dir = ? WHERE id = ?", (str(archived_child), child["id"])
+            )
+            child_dir = archived_child
+        if child_dir.parent == parent_dir / "artifacts/deep-scan/passes":
+            connection.execute(
+                "UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = ?", (child["id"],)
+            )
+
+    # Older indexers published pass findings before membership was persisted.
+    # Repair only records created with a retained occurrence. Earlier imports
+    # can lose their embedding when a pass later replaces the indexed document.
+    findings = connection.execute(
+        """SELECT DISTINCT findings.id FROM findings
+        JOIN finding_occurrences AS occurrence ON occurrence.finding_id = findings.id
+        JOIN scans ON scans.id = occurrence.scan_id
+        WHERE scans.parent_scan_role = 'deep_pass'
+            AND findings.details_json = occurrence.details_json
+            AND EXISTS (
+                SELECT 1 FROM finding_occurrences AS original
+                WHERE original.finding_id = findings.id
+                    AND original.created_at = findings.created_at
+            )
+            AND NOT EXISTS (SELECT 1 FROM finding_embeddings WHERE finding_id = findings.id)"""
+    ).fetchall()
+    for finding in findings:
+        finding_id = finding["id"]
+        connection.execute(
+            """DELETE FROM finding_repositories WHERE finding_id = ?
+            AND repository_id IN (
+                SELECT scans.target_id FROM finding_occurrences AS occurrence
+                JOIN scans ON scans.id = occurrence.scan_id
+                WHERE occurrence.finding_id = ? AND scans.parent_scan_role = 'deep_pass'
+            ) AND repository_id NOT IN (
+                SELECT scans.target_id FROM finding_occurrences AS occurrence
+                JOIN scans ON scans.id = occurrence.scan_id
+                WHERE occurrence.finding_id = ? AND scans.parent_scan_role IS NOT 'deep_pass'
+                    AND scans.target_id IS NOT NULL
+            )""",
+            (finding_id, finding_id, finding_id),
+        )
+        public = connection.execute(
+            """SELECT occurrence.details_json, occurrence.created_at
+            FROM finding_occurrences AS occurrence JOIN scans ON scans.id = occurrence.scan_id
+            WHERE occurrence.finding_id = ? AND scans.parent_scan_role IS NOT 'deep_pass'
+                AND occurrence.details_json != '{}'
+            ORDER BY occurrence.created_at DESC, occurrence.id DESC LIMIT 1""",
+            (finding_id,),
+        ).fetchone()
+        if public is not None:
+            connection.execute(
+                "UPDATE findings SET details_json = ?, updated_at = ? WHERE id = ?",
+                (public["details_json"], public["created_at"], finding_id),
+            )
+        elif (
+            connection.execute(
+                "SELECT 1 FROM finding_repositories WHERE finding_id = ?", (finding_id,)
+            ).fetchone()
+            is None
+        ):
+            connection.execute(
+                "UPDATE findings SET details_json = NULL WHERE id = ?", (finding_id,)
+            )
+
+
 def apply_migrations(
     connection: sqlite3.Connection,
     migrations: tuple[tuple[int, str, str], ...],
@@ -87,6 +206,10 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
+                elif version in (51, 55, 56):
+                    backfill_composition_children(connection)
+                elif version == 54:
+                    backfill_unindexed_severity_assessments(connection)
             if version not in applied:
                 connection.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",

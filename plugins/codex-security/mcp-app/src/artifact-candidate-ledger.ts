@@ -1,6 +1,6 @@
 import { asRecord } from "./record.js";
 import type * as z from "zod/v4";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+import { candidateLedgerRowSchema } from "./artifact-candidate.js";
 import {
   artifactDestination,
   readArtifactJsonl,
@@ -29,14 +29,17 @@ export async function recordCodexSecurityCandidateValidations(
   operation: "replace";
   rowsWritten: number;
 }> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       "Candidate validation requires a scan-bound artifact context.",
     );
   }
 
   // The MCP registry validates this request before invoking the writer.
-  const { validations } = input;
+  const { validations } = candidateValidationsInputSchema.parse({
+    ...input,
+    scanId: context.scanId,
+  });
   const candidates = await readCandidateLedger(
     context,
     "Compact candidate ledger",
@@ -96,14 +99,17 @@ export async function recordCodexSecurityCandidateAttackPaths(
   operation: "replace";
   rowsWritten: number;
 }> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       "Candidate attack-path analysis requires a scan-bound artifact context.",
     );
   }
 
   // The MCP registry validates this request before invoking the writer.
-  const { attackPaths } = input;
+  const { attackPaths } = candidateAttackPathsInputSchema.parse({
+    ...input,
+    scanId: context.scanId,
+  });
   const updates = new Map<string, CandidateAttackPathRecord>();
   for (const update of attackPaths) {
     if (updates.has(update.candidateId)) {
@@ -163,7 +169,7 @@ const components = [
   "02_discovery",
   "candidate_ledger.jsonl",
 ] as const;
-const rowSchema = candidateSchemaV1.passthrough();
+const rowSchema = candidateLedgerRowSchema;
 
 async function readCandidateLedger(
   context: ArtifactContext,

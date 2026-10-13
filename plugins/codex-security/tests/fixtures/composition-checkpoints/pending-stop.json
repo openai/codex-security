@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "startedAt": "2026-01-01T00:00:00Z",
+  "passes": [
+    {
+      "directory": "artifacts/deep-scan/passes/pass-1",
+      "scanId": "child"
+    }
+  ],
+  "mergedScanIds": [],
+  "aggregate": null,
+  "noNewStreak": 0,
+  "consecutiveErrors": 0,
+  "pendingStop": {
+    "reason": "canceled",
+    "message": "Synthetic cancellation.",
+    "costs": {
+      "artifacts/deep-scan/passes/pass-1": {
+        "model": "synthetic-model",
+        "inputTokens": 100,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 10,
+        "estimatedUsd": 0.01
+      }
+    }
+  }
+}

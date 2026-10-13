@@ -5,12 +5,11 @@ import { dirname, join, resolve } from "node:path";
 import { createFixture, writeFixture } from "./fixtures.mts";
 import { gradeResult } from "./grade.mts";
 import {
-  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+  EVAL_PERMISSION_PROFILE_ID,
+  shouldUseOpenAiApiKey,
   bundledCodexSdkEnvironment,
-  deepScanPermissionProfileFallbackError,
   executablePathForSpawn,
   inlineToml,
-  preflightDeepScanWorkerPermissionProfile,
 } from "./runtime.mts";
 
 export type PreparedEval = Awaited<ReturnType<typeof prepareEval>>;
@@ -31,7 +30,7 @@ export interface EvalCodex {
   startThread(settings: ThreadOptions): {
     runStreamed(
       prompt: string,
-      options: { outputSchema: unknown; signal: AbortSignal },
+      options: { outputSchema: unknown; signal?: AbortSignal },
     ): Promise<{ events: AsyncIterable<EvalEvent> }>;
   };
 }
@@ -217,7 +216,7 @@ export function codexSettings(
     // Raw TOML preserves literal filesystem keys that SDK object flattening loses.
     // Everything outside the source, references, and minimal runtime is unreadable.
     configOverrides: [
-      `default_permissions=${inlineToml(DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID)}`,
+      `default_permissions=${inlineToml(EVAL_PERMISSION_PROFILE_ID)}`,
       "allow_login_shell=false",
       'shell_environment_policy.inherit="core"',
       "shell_environment_policy.ignore_default_excludes=false",
@@ -230,7 +229,7 @@ export function codexSettings(
       'model_reasoning_effort="xhigh"',
       'web_search="disabled"',
       'windows.sandbox="elevated"',
-      `permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}=${inlineToml(permissionProfile(home, codexPath))}`,
+      `permissions.${EVAL_PERMISSION_PROFILE_ID}=${inlineToml(permissionProfile(home, codexPath))}`,
     ],
   };
 }
@@ -254,23 +253,11 @@ export async function preflightEval(
 ) {
   const openAiApiKey = environmentEntry(settings.env, "OPENAI_API_KEY")?.trim();
   const codexApiKey = environmentEntry(settings.env, "CODEX_API_KEY")?.trim();
-  const { useOpenAiApiKey } = await preflightDeepScanWorkerPermissionProfile({
-    codexPath: settings.codexPathOverride,
-    cwd: prepared.repo,
-    configOverrides: settings.configOverrides,
-    env: settings.env,
-    allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
-    expectedProfile: permissionProfile(
-      settings.env.CODEX_HOME,
-      settings.env.CODEX_CLI_PATH,
-    ),
-    signal,
-  });
-  return {
-    ...settings,
-    // Native exec reads CODEX_API_KEY; preserve native accounts before mapping the fallback.
-    ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
-  };
+  if (!openAiApiKey || codexApiKey) return settings;
+  if (!(await shouldUseOpenAiApiKey(settings, prepared.repo, signal)))
+    return settings;
+  // Native exec reads CODEX_API_KEY; preserve native accounts before mapping the fallback.
+  return { ...settings, apiKey: openAiApiKey };
 }
 
 function environmentEntry(environment: NodeJS.ProcessEnv, requested: string) {
@@ -288,13 +275,9 @@ export async function runPreparedEval(
   { model, signal }: { model?: string; signal?: AbortSignal } = {},
 ) {
   const thread = codex.startThread(threadSettings(prepared, model));
-  const controller = new AbortController();
-  const combinedSignal = signal
-    ? AbortSignal.any([signal, controller.signal])
-    : controller.signal;
   const { events } = await thread.runStreamed(prepared.prompt, {
     outputSchema,
-    signal: combinedSignal,
+    signal,
   });
   let finalResponse = "";
   let usage;
@@ -302,17 +285,6 @@ export async function runPreparedEval(
   let failure;
   try {
     for await (const event of events) {
-      const warning =
-        event.type === "error"
-          ? event.message
-          : event.type === "item.completed" && event.item!.type === "error"
-            ? event.item!.message
-            : undefined;
-      const fallback = deepScanPermissionProfileFallbackError(warning);
-      if (fallback && !failure) {
-        failure = fallback;
-        controller.abort(fallback);
-      }
       // Drain the aborted SDK stream so its child exits before state cleanup.
       if (failure) continue;
       if (
@@ -331,7 +303,7 @@ export async function runPreparedEval(
     throw failure ?? error;
   }
   if (failure) throw failure;
-  combinedSignal.throwIfAborted();
+  signal?.throwIfAborted();
   if (!completed) throw new Error("Eval stream ended before turn.completed");
   const semanticResult = JSON.parse(finalResponse);
   const report = {

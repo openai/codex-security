@@ -376,6 +376,51 @@ def test_scan_list_probes_requested_repository_once(
     ]
 
 
+def test_finding_history_does_not_scan_unrelated_occurrences(workbench_api, indexed_collections):
+    connection, _ = indexed_collections
+    connection.execute(
+        "UPDATE finding_occurrences SET finding_id = 'finding-0' WHERE id = 'occurrence-1'"
+    )
+
+    def read_history():
+        steps = 0
+
+        def count_step():
+            nonlocal steps
+            steps += 1
+            return 0
+
+        connection.set_progress_handler(count_step, 1)
+        try:
+            result = workbench_api["scan_history"].finding_matches(
+                connection, "occurrence-0", SCAN_IDS[0], "2026-08-01T00:00:00Z"
+            )
+        finally:
+            connection.set_progress_handler(None, 0)
+        return result, steps
+
+    expected, baseline_steps = read_history()
+    assert [row["occurrenceId"] for row in expected[0]] == ["occurrence-1"]
+    connection.executemany(
+        "INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) "
+        "SELECT ?, ?, rule_id, identity_anchor, created_at, updated_at FROM findings "
+        "WHERE id = 'finding-2'",
+        ((f"unrelated-{index}", f"unrelated-{index}") for index in range(10_000)),
+    )
+    connection.execute(
+        "INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity, "
+        "confidence, remediation, details_json, created_at) "
+        "SELECT findings.id, findings.id, source.scan_id, source.title, source.summary, "
+        "source.severity, source.confidence, source.remediation, source.details_json, source.created_at "
+        "FROM findings CROSS JOIN finding_occurrences AS source "
+        "WHERE findings.id LIKE 'unrelated-%' AND source.id = 'occurrence-2'"
+    )
+    actual, populated_steps = read_history()
+    assert actual == expected
+    # Count SQLite instructions, not elapsed time: unrelated history must stay out of the traversal.
+    assert populated_steps <= baseline_steps * 2
+
+
 @pytest.mark.parametrize(
     ("timestamps", "order"),
     [

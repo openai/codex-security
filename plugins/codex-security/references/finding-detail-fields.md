@@ -30,7 +30,7 @@ The finding detail view is a decision-focused projection of the canonical findin
 
 Keep background exposition, alternate exploit research, full PoC instructions, representative command output, and long source walkthroughs in the detailed write-up. Do not copy them into canonical fields merely to make the workspace report longer. The workspace should stay self-contained enough to support triage while avoiding duplicated or speculative prose.
 
-The workspace **Evidence** section is an artifact navigator, not another source-proof section. When `writeup.reportPath` is present, the workbench lists that verified scan-local report plus regular files below its sibling `poc/` directory. Each row opens the exact file in the editor through a host-mediated Codex navigation request. Do not place artifact paths in root-cause prose or add an unvalidated artifact list to the canonical finding merely for display.
+The workspace **Evidence** section is an artifact navigator, not another source-proof section. When `writeup.reportPath` is present, the workbench lists that verified scan-local report plus regular files below its sibling `poc/` directory. Each write-up needs a separate parent directory so supporting files belong to one report. Each row opens the exact file in the editor through a host-mediated Codex navigation request. Do not place artifact paths in root-cause prose or add an unvalidated artifact list to the canonical finding merely for display.
 
 ## Structured Example
 

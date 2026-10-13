@@ -1,0 +1,73 @@
+{
+  "version": 2,
+  "startedAt": "2026-01-01T00:00:00Z",
+  "passes": [],
+  "mergedScanIds": [],
+  "aggregate": {
+    "scanId": "parent",
+    "findings": [],
+    "coverage": {
+      "completeness": "partial",
+      "surfaces": [
+        {
+          "id": "child/api",
+          "label": "API",
+          "disposition": "needs_follow_up",
+          "receiptRefs": [
+            "artifacts/deep-scan/passes/pass-1/artifacts/api.json"
+          ],
+          "extension": {
+            "owner": "fixture"
+          }
+        }
+      ],
+      "explicitExclusions": [],
+      "deferred": [
+        {
+          "reason": "Review the remaining route.",
+          "candidateId": "fixture-candidate",
+          "extension": {
+            "notes": ["Keep context"]
+          }
+        }
+      ]
+    }
+  },
+  "noNewStreak": 2,
+  "consecutiveErrors": 1,
+  "mergeFailures": 0,
+  "legacy": {
+    "originThreadId": null,
+    "discoveryRuns": 3,
+    "coverage": {
+      "completeness": "partial",
+      "surfaces": [
+        {
+          "id": "child/api",
+          "label": "API",
+          "disposition": "needs_follow_up",
+          "receiptRefs": [
+            "artifacts/deep-scan/passes/pass-1/artifacts/api.json"
+          ],
+          "extension": {
+            "owner": "fixture"
+          }
+        }
+      ],
+      "explicitExclusions": [],
+      "deferred": [
+        {
+          "reason": "Review the remaining route.",
+          "candidateId": "fixture-candidate",
+          "extension": {
+            "notes": ["Keep context"]
+          }
+        }
+      ]
+    },
+    "extension": {
+      "retired": "coordinator"
+    }
+  },
+  "terminalReason": "capped"
+}

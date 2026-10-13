@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   lstat,
   mkdtemp,
@@ -31,14 +32,15 @@ const DOCUMENT_EXTENSIONS = new Set([
 export interface PreparedKnowledgeBase {
   path: string;
   sources: string[];
-  protectedRoots: string[];
+  snapshot: KnowledgeBaseSnapshot;
+  sha256: string;
   cleanup(): Promise<void>;
 }
 
 export interface KnowledgeBaseSnapshot {
   readonly sources: readonly string[];
-  readonly protectedRoots?: readonly string[];
   readonly documents: Readonly<Record<string, string>>;
+  readonly protectedRoots: readonly string[];
 }
 
 /** @internal Extract once so campaign identity and workers use identical inputs. */
@@ -49,6 +51,7 @@ export async function readKnowledgeBaseSnapshot(
   try {
     const sources = new Set<string>();
     const documents = new Set<string>();
+    const protectedRoots = new Set<string>();
 
     for (const requested of paths) {
       signal?.throwIfAborted();
@@ -68,6 +71,9 @@ export async function readKnowledgeBaseSnapshot(
       }
 
       const source = await realpath(path);
+      protectedRoots.add(
+        (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+      );
       const selected = metadata.isDirectory()
         ? (await discover(source, signal)).sort()
         : [source];
@@ -112,16 +118,11 @@ export async function readKnowledgeBaseSnapshot(
       extracted[filename] = text;
       index++;
     }
-    return {
-      sources: [...sources],
-      protectedRoots: await Promise.all(
-        [...sources].map(
-          async (source) =>
-            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-        ),
-      ),
-      documents: extracted,
-    };
+    return Object.freeze({
+      sources: Object.freeze([...sources]),
+      documents: Object.freeze(extracted),
+      protectedRoots: Object.freeze([...protectedRoots]),
+    });
   } catch (error) {
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
     throw new ConfigurationError(errorMessage(error), { cause: error });
@@ -138,15 +139,6 @@ export async function prepareKnowledgeBase(
       "documents" in input
         ? input
         : await readKnowledgeBaseSnapshot(input, signal);
-    const protectedRoots =
-      snapshot.protectedRoots === undefined
-        ? await Promise.all(
-            snapshot.sources.map(
-              async (source) =>
-                (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-            ),
-          )
-        : [...snapshot.protectedRoots];
     const path = await mkdtemp(
       join(directory ?? tmpdir(), "codex-security-knowledge-"),
     );
@@ -166,13 +158,32 @@ export async function prepareKnowledgeBase(
     return {
       path,
       sources: [...snapshot.sources],
-      protectedRoots,
+      snapshot,
+      // Keep the persisted document identity independent of execution metadata.
+      sha256: snapshotDigest(snapshot),
       cleanup: () => rm(path, { recursive: true, force: true }),
     };
   } catch (error) {
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
     throw new ConfigurationError(errorMessage(error), { cause: error });
   }
+}
+
+// Preserve the saved JSON identity without joining every document into one string.
+function snapshotDigest(snapshot: KnowledgeBaseSnapshot): string {
+  const hash = createHash("sha256");
+  hash.update('{"sources":');
+  hash.update(JSON.stringify(snapshot.sources));
+  hash.update(',"documents":{');
+  let separator = "";
+  for (const [filename, text] of Object.entries(snapshot.documents)) {
+    hash.update(separator);
+    hash.update(JSON.stringify(filename));
+    hash.update(":");
+    hash.update(JSON.stringify(text));
+    separator = ",";
+  }
+  return hash.update("}}").digest("hex");
 }
 
 /** @internal Read the same extracted document text used by scans. */

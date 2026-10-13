@@ -1,0 +1,96 @@
+{
+  "version": 2,
+  "startedAt": "2026-01-01T00:00:00Z",
+  "passes": [
+    {
+      "directory": "artifacts/deep-scan/passes/pass-1",
+      "scanId": "child",
+      "completed": true,
+      "extension": {
+        "retain": 1
+      }
+    },
+    {
+      "directory": "artifacts/deep-scan/passes/pass-2",
+      "failed": true
+    }
+  ],
+  "mergedScanIds": ["child"],
+  "aggregate": {
+    "scanId": "parent",
+    "findings": [
+      {
+        "ruleId": "unsafe-output",
+        "title": "Unsafe output",
+        "summary": "A request value reaches an HTML response.",
+        "severity": {
+          "level": "high"
+        },
+        "confidence": {
+          "level": "high",
+          "rationale": "Source establishes reachability."
+        },
+        "taxonomy": {
+          "category": "cross-site-scripting",
+          "cwe": ["CWE-79"]
+        },
+        "locations": [
+          {
+            "path": "src/render.js",
+            "startLine": 1
+          }
+        ],
+        "remediation": "Encode request values in HTML responses.",
+        "provenance": {
+          "source": "local_plugin",
+          "sourceFindingIds": ["child:0"],
+          "sourceFindings": [
+            {
+              "id": "child:0",
+              "finding": {
+                "findingId": "original-id",
+                "extensions": {
+                  "proof": ["Exact source payload"]
+                }
+              }
+            }
+          ]
+        },
+        "extensions": {
+          "candidateId": "fixture-candidate"
+        }
+      }
+    ],
+    "coverage": {
+      "completeness": "partial",
+      "surfaces": [
+        {
+          "id": "child/api",
+          "label": "API",
+          "disposition": "needs_follow_up",
+          "receiptRefs": [
+            "artifacts/deep-scan/passes/pass-1/artifacts/api.json"
+          ],
+          "extension": {
+            "owner": "fixture"
+          }
+        }
+      ],
+      "explicitExclusions": [],
+      "deferred": [
+        {
+          "reason": "Review the remaining route.",
+          "candidateId": "fixture-candidate",
+          "extension": {
+            "notes": ["Keep context"]
+          }
+        }
+      ]
+    }
+  },
+  "noNewStreak": 0,
+  "consecutiveErrors": 1,
+  "extension": {
+    "future": ["preserve", null, 7]
+  }
+}

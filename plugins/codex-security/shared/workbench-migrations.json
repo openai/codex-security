@@ -393,5 +393,44 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
     ]
+  },
+  {
+    "version": 51,
+    "name": "persist composition child membership",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN parent_scan_role TEXT\n    CHECK (parent_scan_role IS NULL OR parent_scan_role = 'deep_pass');",
+      "CREATE INDEX scans_by_composition_parent ON scans(parent_scan_id)\n    WHERE parent_scan_role = 'deep_pass';"
+    ]
+  },
+  {
+    "version": 52,
+    "name": "reuse scan severity assessments",
+    "statements": [
+      "CREATE INDEX scan_severity_reuse ON scan_severity_assessments\n    (finding_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at DESC);"
+    ]
+  },
+  {
+    "version": 53,
+    "name": "persist scan execution sessions",
+    "statements": [
+      "CREATE TABLE scan_execution_threads (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    thread_id TEXT NOT NULL,\n    PRIMARY KEY (scan_id, thread_id)\n);",
+      "INSERT INTO scan_execution_threads(scan_id, thread_id)\n    SELECT id, continuation_thread_id FROM scans\n    WHERE continuation_thread_id IS NOT NULL AND recipe_json IS NOT NULL;",
+      "INSERT OR IGNORE INTO scan_execution_threads(scan_id, thread_id)\n    SELECT scan_id, sdk_thread_id FROM deep_scan_workers WHERE sdk_thread_id IS NOT NULL;"
+    ]
+  },
+  {
+    "version": 54,
+    "name": "recover unindexed severity assessments",
+    "statements": []
+  },
+  {
+    "version": 55,
+    "name": "repair stored composition membership",
+    "statements": []
+  },
+  {
+    "version": 56,
+    "name": "repair archived composition paths",
+    "statements": []
   }
 ]

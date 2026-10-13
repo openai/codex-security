@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   writeFile,
@@ -56,7 +57,7 @@ function runWorkbench(args: string[], env: NodeJS.ProcessEnv, framed = false) {
   );
 }
 
-async function openWorkspace(env: NodeJS.ProcessEnv) {
+async function openWorkspace(env: NodeJS.ProcessEnv, sessionId?: string) {
   const server = startRpcServer({
     command: process.execPath,
     args: [serverBundlePath, "--stdio"],
@@ -67,7 +68,9 @@ async function openWorkspace(env: NodeJS.ProcessEnv) {
     assertNoError(await server.initialize("workbench-state-test"));
     return await server.callTool(2, {
       name: "open_codex_security_workspace",
-      arguments: { targetPath, scope: ".", mode: "standard" },
+      arguments: sessionId
+        ? { sessionId }
+        : { targetPath, scope: ".", mode: "standard" },
       _meta: { "openai/threadId": "workbench-state-thread" },
     });
   } finally {
@@ -83,6 +86,76 @@ try {
   assertNoError(await openWorkspace(environment));
   assert.equal(
     (await stat(path.join(defaultState, "workbench.sqlite3"))).isFile(),
+    true,
+  );
+
+  const started = runWorkbench(
+    [
+      "begin-deep-scan",
+      "--target-path",
+      targetPath,
+      "--thread-id",
+      "workbench-state-thread",
+    ],
+    environment,
+  );
+  assert.equal(started.status, 0, started.stderr);
+  const registered = JSON.parse(started.stdout);
+  const sessionId = registered.workspace.id;
+  const database = path.join(defaultState, "workbench.sqlite3");
+  const savedDatabase = path.join(fixtureRoot, "saved.sqlite3");
+  await rename(database, savedDatabase);
+  await mkdir(database); // SQLite cannot open a directory, independent of process privileges.
+  for (const scanRoot of [undefined, path.join(fixtureRoot, "shared-scans")]) {
+    const refused = await openWorkspace({
+      ...environment,
+      CODEX_SECURITY_SCAN_ROOT: scanRoot,
+    });
+    assert.equal(refused.result.isError, true);
+    assert.match(
+      refused.result.content
+        .map((item: { text?: string }) => item.text)
+        .join("\n"),
+      /sqlite3\.OperationalError: unable to open database file/,
+    );
+  }
+  await rm(database, { recursive: true });
+  await rename(savedDatabase, database);
+  const readers = await Promise.all([
+    openWorkspace(environment, sessionId),
+    openWorkspace(environment, sessionId),
+  ]);
+  for (const reopened of readers) {
+    assertNoError(reopened);
+    assert.equal(
+      reopened.result.structuredContent.workspace.results.scanId,
+      registered.scan.scanId,
+    );
+  }
+  const rejoined = runWorkbench(
+    [
+      "begin-deep-scan",
+      "--scan-id",
+      registered.scan.scanId,
+      "--thread-id",
+      "workbench-state-thread",
+      "--claim-token",
+      registered.scan.handoffClaimToken,
+    ],
+    environment,
+  );
+  assert.equal(rejoined.status, 0, rejoined.stderr);
+  assert.equal(JSON.parse(rejoined.stdout).scan.scanId, registered.scan.scanId);
+  const otherHome = {
+    ...environment,
+    CODEX_HOME: path.join(fixtureRoot, "other-home"),
+    CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "shared-scans"),
+  };
+  const separate = await openWorkspace(otherHome);
+  assertNoError(separate);
+  assert.notEqual(separate.result.structuredContent.workspace.id, sessionId);
+  assert.equal(
+    (await openWorkspace(otherHome, sessionId)).result.isError,
     true,
   );
 
@@ -110,7 +183,17 @@ try {
     ...environment,
     CODEX_SECURITY_STATE_DIR: explicitState,
   };
-  assertNoError(await openWorkspace(explicitEnvironment));
+  const explicitHosts = await Promise.all([
+    openWorkspace(explicitEnvironment),
+    openWorkspace(explicitEnvironment),
+  ]);
+  for (const opened of explicitHosts) assertNoError(opened);
+  assertNoError(
+    await openWorkspace(
+      explicitEnvironment,
+      explicitHosts[0].result.structuredContent.workspace.id,
+    ),
+  );
   assert.equal(
     (await stat(path.join(explicitState, "workbench.sqlite3"))).isFile(),
     true,

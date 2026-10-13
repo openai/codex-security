@@ -2,6 +2,7 @@ import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { CodexSecurityError } from "./errors.js";
+import { sameCheckedFileDevice } from "./contract.js";
 import { expandHome } from "./runtime.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
@@ -97,8 +98,8 @@ export async function readRegularInputFile(
     const opened = await file.stat({ bigint: true });
     if (
       !opened.isFile() ||
-      opened.dev !== selected.dev ||
-      opened.ino !== selected.ino
+      opened.ino !== selected.ino ||
+      !(await sameCheckedFileDevice(file, { path, metadata: selected }, opened))
     ) {
       throw new CodexSecurityError("Input files must remain regular files.");
     }

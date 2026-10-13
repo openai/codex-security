@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, stat, symlink } from "node:fs/promises";
@@ -6,6 +7,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test, type TestContext } from "node:test";
 import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import type * as Database from "../src/workbench/database.ts";
@@ -28,6 +30,9 @@ const { openWorkbenchDatabase, databaseInfo } = (await importSource(
 const { applyMigrations, migrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
+const { listStoredFindings } = (await importSource(
+  "src/workbench/findings.ts",
+)) as typeof import("../src/workbench/findings.ts");
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 
@@ -55,7 +60,7 @@ function assertMigrationNames(database: DatabaseSync, ...versions: number[]) {
       database
         .prepare("SELECT name FROM schema_migrations WHERE version = ?")
         .get(version)?.name,
-      migrations[version - 1].name,
+      migrations.find((item) => item.version === version)!.name,
     );
 }
 
@@ -514,7 +519,7 @@ test("recorded additive migrations restore missing columns and configured error 
   for (const version of [27, 28, 31, 32, 47])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
-      .run(version, migrations[version - 1].name);
+      .run(version, migrations.find((item) => item.version === version)!.name);
   applyMigrations(database);
   assert.equal(
     database
@@ -762,3 +767,268 @@ test("retries an upgrade when another process holds the write lock beyond the bu
     await writer.terminate();
   }
 });
+
+test("composition upgrades repair stored paths and public findings before Python opens them", async () => {
+  for (const pending of [51, 55, 56]) {
+    const directory = await temporary.create("workbench-composition-upgrade-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    const oldParent = join(directory, "deep");
+    const parent = `${oldParent}.previous-archived`;
+    const child = join(oldParent, "artifacts", "deep-scan", "passes", "pass-1");
+    const archived = join(parent, "artifacts", "deep-scan", "passes", "pass-1");
+    const external = join(directory, "external.json");
+    const seed = new DatabaseSync(databasePath);
+    applyMigrations(
+      seed,
+      migrations.filter((item) => item.version < pending),
+    );
+    insertScan(seed);
+    seed.exec(
+      "INSERT INTO security_targets VALUES ('target', '/synthetic/repository', 'repository', 'created', 'updated')",
+    );
+    seed
+      .prepare(
+        "UPDATE scans SET scan_dir = ?, status = 'complete' WHERE id = 'scan'",
+      )
+      .run(parent);
+    seed
+      .prepare(
+        `INSERT INTO scans (id, workspace_id, target_path, target_revision,
+      scope, mode, scan_dir, status, phase, started_at, created_at, updated_at,
+      parent_scan_id, target_id)
+      VALUES (?, 'workspace', '/synthetic/repository', 'revision', '.', 'standard', ?,
+        'complete', 'discovery', 'started', 'created', 'updated', 'scan', 'target')`,
+      )
+      .run("child", child);
+    seed
+      .prepare(
+        `INSERT INTO scans (id, workspace_id, target_path, target_revision,
+      scope, mode, scan_dir, status, phase, started_at, created_at, updated_at,
+      parent_scan_id, target_id)
+      VALUES ('public', 'workspace', '/synthetic/repository', 'revision', '.', 'standard', ?,
+        'complete', 'discovery', 'started', 'created', 'updated', 'scan', 'target')`,
+      )
+      .run(join(directory, "independent-rerun"));
+    const artifact = seed.prepare(
+      "INSERT INTO scan_artifacts VALUES ('child', ?, ?, 'created')",
+    );
+    artifact.run("findings", join(child, "findings.json"));
+    artifact.run("manifest", external);
+    for (const id of ["private", "public", "embedded"]) {
+      seed
+        .prepare(
+          `INSERT INTO findings (id, fingerprint, rule_id, identity_anchor,
+        created_at, updated_at, details_json) VALUES (?, ?, 'rule', 'anchor', 'created', 'updated', '{"pass":true}')`,
+        )
+        .run(id, id);
+      seed
+        .prepare(
+          `INSERT INTO finding_occurrences (id, finding_id, scan_id, title,
+        summary, severity, confidence, remediation, created_at, details_json)
+        VALUES (?, ?, 'child', 'title', 'summary', 'high', 'high', 'remediation', 'created', '{"pass":true}')`,
+        )
+        .run(`occ-${id}`, id);
+      seed
+        .prepare("INSERT INTO finding_repositories VALUES ('target', ?)")
+        .run(id);
+    }
+    seed.exec(`INSERT INTO finding_occurrences (id, finding_id, scan_id, title,
+      summary, severity, confidence, remediation, created_at, details_json)
+      VALUES ('occ-public-rerun', 'public', 'public', 'title', 'summary', 'high', 'high',
+        'remediation', 'later', '{"public":true}');
+      INSERT INTO finding_embeddings (finding_id, model, vector_json) VALUES ('embedded', 'model', '[1]');`);
+    seed.close();
+    const database = await openWorkbenchDatabase(databasePath);
+    try {
+      assert.equal(
+        database.prepare("SELECT scan_dir FROM scans WHERE id = 'child'").get()!
+          .scan_dir,
+        archived,
+      );
+      assert.equal(
+        database
+          .prepare("SELECT parent_scan_role FROM scans WHERE id = 'child'")
+          .get()!.parent_scan_role,
+        "deep_pass",
+      );
+      assert.equal(
+        database
+          .prepare("SELECT parent_scan_role FROM scans WHERE id = 'public'")
+          .get()!.parent_scan_role,
+        null,
+      );
+      assert.equal(
+        database
+          .prepare("SELECT path FROM scan_artifacts WHERE kind = 'findings'")
+          .get()!.path,
+        join(archived, "findings.json"),
+      );
+      assert.equal(
+        database
+          .prepare("SELECT path FROM scan_artifacts WHERE kind = 'manifest'")
+          .get()!.path,
+        external,
+      );
+      const snapshot = () => [
+        database
+          .prepare("SELECT id, details_json FROM findings ORDER BY id")
+          .all(),
+        database
+          .prepare("SELECT * FROM finding_repositories ORDER BY finding_id")
+          .all(),
+        database
+          .prepare("SELECT * FROM schema_migrations ORDER BY version")
+          .all(),
+      ];
+      assert.deepEqual(
+        snapshot()[0].map((row) => [row.id, row.details_json]),
+        [
+          ["embedded", '{"pass":true}'],
+          ["private", null],
+          ["public", '{"public":true}'],
+        ],
+      );
+      assert.deepEqual(
+        snapshot()[1].map((row) => row.finding_id),
+        ["embedded", "public"],
+      );
+      assert.equal(
+        listStoredFindings(database, { limit: 20, offset: 0 }).total,
+        2,
+      );
+      const repaired = snapshot();
+      applyMigrations(database);
+      execFileSync(process.env.PYTHON ?? "python", [
+        "-I",
+        "-X",
+        "utf8",
+        "-c",
+        `
+import sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+from workbench_schema import MIGRATIONS, apply_migrations
+with sqlite3.connect(sys.argv[2]) as db:
+    db.row_factory = sqlite3.Row
+    apply_migrations(db, MIGRATIONS, lambda: "python", lambda db: None)
+`,
+        fileURLToPath(new URL("../../scripts/", import.meta.url)),
+        databasePath,
+      ]);
+      assert.deepEqual(snapshot(), repaired);
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally {
+      database.close();
+    }
+  }
+});
+
+test("unindexed severity recovery matches stable occurrences without replacing assessments", (t) => {
+  const database = memory(t, 53);
+  for (const id of ["recover", "mismatch", "preserve"]) {
+    database
+      .prepare(
+        `INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+      VALUES (?, ?, 'rule', 'anchor', 'created', 'updated')`,
+      )
+      .run(id, id);
+    const occurrence = `occ_${createHash("sha256").update(`scan\0${id}`).digest("hex").slice(0, 24)}`;
+    database
+      .prepare(
+        `INSERT INTO finding_severity_assessments
+      (finding_id, occurrence_id, input_sha256, assessed_at, source, decision, level, rationale)
+      VALUES (?, ?, 'input', 'created', 'rubric', 'assessed', 'high', 'recovered')`,
+      )
+      .run(id, id === "mismatch" ? "unrelated" : occurrence);
+  }
+  database.exec(`INSERT INTO scan_severity_classifications VALUES ('scan', '["recover","mismatch","preserve"]', 'created', NULL, NULL);
+    INSERT INTO scan_severity_assessments
+      (scan_id, finding_id, input_sha256, assessed_at, source, decision, level, rationale)
+      VALUES ('scan', 'preserve', 'original', 'created', 'rubric', 'assessed', 'low', 'preserved');`);
+  database.exec(`CREATE TRIGGER reject_recovery BEFORE INSERT ON scan_severity_assessments
+    WHEN NEW.finding_id = 'recover' BEGIN SELECT RAISE(ABORT, 'fixture storage failure'); END;`);
+  assert.throws(() => applyMigrations(database), /fixture storage failure/u);
+  assert.equal(
+    database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 54")
+      .get(),
+    undefined,
+  );
+  database.exec("DROP TRIGGER reject_recovery");
+  applyMigrations(database);
+  assert.deepEqual(
+    database
+      .prepare(
+        "SELECT finding_id, rationale FROM scan_severity_assessments ORDER BY finding_id",
+      )
+      .all()
+      .map((row) => [row.finding_id, row.rationale]),
+    [
+      ["preserve", "preserved"],
+      ["recover", "recovered"],
+    ],
+  );
+});
+
+test("pre-release composition history moves without shadowing editable scan names", (t) => {
+  const database = memory(t);
+  applyMigrations(
+    database,
+    migrations.filter((item) => item.version <= 43 || item.version >= 51),
+  );
+  database.exec(
+    "DELETE FROM schema_migrations WHERE version = 42; ALTER TABLE scans DROP COLUMN name;",
+  );
+  for (const [from, to] of [
+    [43, 42],
+    [51, 43],
+    [52, 44],
+    [53, 45],
+    [54, 46],
+    [55, 48],
+    [56, 49],
+  ])
+    database
+      .prepare("UPDATE schema_migrations SET version = ? WHERE version = ?")
+      .run(to, from);
+  database.exec(
+    "INSERT INTO schema_migrations VALUES (51, 'synthetic conflicting history', 'created')",
+  );
+  const history = () =>
+    database.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+  const before = history();
+  assert.throws(() => applyMigrations(database));
+  assert.deepEqual(history(), before);
+  database.exec("DELETE FROM schema_migrations WHERE version = 51");
+  applyMigrations(database);
+  assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56);
+  assert.ok(
+    database
+      .prepare("PRAGMA table_info(scans)")
+      .all()
+      .some((column) => column.name === "name"),
+  );
+});
+
+for (const version of [43, 50])
+  test(`released severity history ${version} opens without replaying its table migration`, (t) => {
+    const database = memory(t, 50);
+    database
+      .prepare("UPDATE schema_migrations SET version = ? WHERE version = 43")
+      .run(version);
+    const schema = () =>
+      database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE name = 'scan_severity_assessments'",
+        )
+        .get();
+    const before = schema();
+    applyMigrations(database);
+    applyMigrations(database);
+    assert.deepEqual(schema(), before);
+    assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56);
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()!
+        .count,
+      migrations.length,
+    );
+  });
