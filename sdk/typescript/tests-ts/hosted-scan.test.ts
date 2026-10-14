@@ -2,18 +2,10 @@ import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { join } from "node:path";
+import { afterEach, expect, mock, test } from "bun:test";
 import {
   normalizeHostedScope,
   normalizeHostedPaths,
@@ -28,57 +20,45 @@ import {
   ScanExecutionResultSchema,
   type ScanExecutionEvent,
   type ScanExecutionResult,
+  type ScanExecutor,
 } from "../src/scan-executor.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
 import { runWorkbench } from "../src/runtime.js";
 import { pythonExecutable } from "./support/python.js";
+import { git } from "./git-fixture.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { parseJsonLines, readJson, writeJson } from "./support/json.js";
+import { rejecting } from "./support/errors.js";
+import { writeSource } from "./support/shell.js";
 
-const roots: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
+const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
+afterEach(cleanup);
 
 async function fixture(
   additionalFiles: readonly string[] = [],
 ): Promise<HostedScanInput> {
-  const root = await mkdtemp(join(await realpath(tmpdir()), "hosted-scan-"));
-  roots.push(root);
+  const root = await temporaryDirectory();
   const repository = join(root, "repository");
   for (const name of [
     "service-a/index.ts",
     "service-b/index.ts",
     "service-c/index.ts",
     ...additionalFiles,
-  ]) {
-    await mkdir(dirname(join(repository, name)), { recursive: true });
-    await writeFile(join(repository, name), "export const value = 1;\n");
-  }
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", repository, ...args], {
-      encoding: "utf8",
-    }).trim();
-  git("init", "-q");
-  git("add", ".");
-  git(
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-qm",
-    "fixture",
-  );
+  ])
+    writeSource(repository, name, "export const value = 1;\n");
+  git(repository, "init", "-q");
+  git(repository, "add", ".");
+  git(repository, "commit", "-qm", "fixture");
   return {
     version: 2,
     repository,
-    revision: git("rev-parse", "HEAD"),
+    revision: git(repository, "rev-parse", "HEAD"),
     scope: { paths: ["service-a"] },
-    outputDirectory: join(root, "output"),
-    stateDirectory: join(root, "state"),
+    outputDirectory: join(root, "run", "attempt", "output"),
+    stateDirectory: join(root, "run", "attempt", "state"),
     model: "gpt-5.6-sol",
     reasoningEffort: "high",
     identity: {
@@ -121,7 +101,68 @@ async function writeDraft(request: ScanExecutionRequest) {
     },
   };
   for (const [name, document] of Object.entries(documents))
-    await writeFile(join(directory, name), JSON.stringify(document));
+    await writeJson(join(directory, name), document);
+}
+
+function receipt(
+  request: Pick<ScanExecutionRequest, "requestId">,
+  overrides: Partial<ScanExecutionResult> = {},
+): ScanExecutionResult {
+  return {
+    requestId: request.requestId,
+    status: "completed",
+    sessionId: "host-session",
+    ...overrides,
+  };
+}
+
+function draftExecutor(
+  afterDraft?: (
+    ...args: Parameters<ScanExecutor["run"]>
+  ) => void | Promise<void>,
+) {
+  return {
+    run: mock<ScanExecutor["run"]>(async (request, options) => {
+      await writeDraft(request);
+      await afterDraft?.(request, options);
+      return receipt(request);
+    }),
+  };
+}
+
+function noExecution() {
+  return { run: mock(rejecting("must not execute")) };
+}
+
+function send(stream: Pick<Writable, "write">, message: object) {
+  stream.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
+}
+
+async function protocolError(params: unknown) {
+  const input = new PassThrough();
+  const output = capture();
+  const completed = runHostedScanProtocol(input, output.stream);
+  send(input, { id: "run", method: "run", params });
+  expect(await completed).toBe(2);
+  const messages = parseJsonLines(output.text());
+  expect(messages).toHaveLength(1);
+  input.destroy();
+  return messages[0].error;
+}
+
+function blockedOutput() {
+  const writing = Promise.withResolvers<void>();
+  let release!: () => void;
+  const write = mock((_chunk, _encoding, callback) => {
+    release = callback;
+    writing.resolve();
+  });
+  return {
+    output: new Writable({ write }),
+    write,
+    writing: writing.promise,
+    release: () => release(),
+  };
 }
 
 test.each([
@@ -145,37 +186,35 @@ for (const path of ["C:part.ts", "tab\tname.ts", "line\nname.ts"]) {
     async () => {
       const input = await fixture([path]);
       input.scope = { paths: [path] };
-      let calls = 0;
-      await expect(
-        runHostedScan(input, {
-          executor: {
-            async run(request) {
-              calls++;
-              await writeDraft(request);
-              return {
-                requestId: request.requestId,
-                status: "completed",
-                sessionId: "incompatible-scope",
-              };
-            },
-          },
-        }),
-      ).rejects.toMatchObject({ reason: "scope_syntax" });
-      expect(calls).toBe(0);
+      const executor = noExecution();
+      await expect(runHostedScan(input, { executor })).rejects.toMatchObject({
+        reason: "scope_syntax",
+      });
+      expect(executor.run).not.toHaveBeenCalled();
     },
   );
 }
 
-test.each([
+const sealedScopes: {
+  name: string;
+  paths: string[];
+  normalized?: string[];
+  files?: string[];
+  reported?: string[];
+}[] = [
+  { name: "repository", paths: ["."], reported: ["repository"] },
+  { name: "directory", paths: ["service-a"] },
+  { name: "file", paths: ["service-a/index.ts"] },
+  {
+    name: "multiple normalized paths",
+    paths: ["./service-b/", "service-a", "service-a/"],
+    normalized: ["service-a", "service-b"],
+  },
   {
     name: "bracketed routes, commas and a literal tilde",
     paths: ["app/[slug]/page.tsx", "reports/a,b.ts", "~"],
     files: ["app/[slug]/page.tsx", "reports/a,b.ts", "~"],
-    reportedPaths: [
-      String.raw`app/\[slug\]/page.tsx`,
-      '`"reports/a,b.ts"`',
-      "~",
-    ],
+    reported: [String.raw`app/\[slug\]/page.tsx`, '`"reports/a,b.ts"`', "~"],
   },
   ...(process.platform === "win32"
     ? []
@@ -191,7 +230,7 @@ test.each([
             "service  space/index.ts",
             "service space/index.ts",
           ],
-          reportedPaths: [
+          reported: [
             '`" "`',
             '`" service "`',
             String.raw`literal/\*?.ts`,
@@ -199,50 +238,84 @@ test.each([
           ],
         },
       ]),
-])(
-  "hosted literal paths preserve $name through sealed artifacts",
-  async ({ paths: selectedPaths, files, reportedPaths }) => {
-    const paths = [...selectedPaths];
+];
+
+test.each(sealedScopes)(
+  "hosted $name scope is retained in sealed artifacts and hashes",
+  async ({ paths, normalized = paths, files, reported = normalized }) => {
     const input = await fixture(files);
     input.scope = { paths };
-    const ordinary = await normalizeTarget(
-      input.repository,
-      paths.map((path) => `./${path}`),
-    );
-    expect(ordinary.paths).toEqual(paths);
-    const result = await runHostedScan(input, {
-      executor: {
-        async run(request) {
-          expect(request.scope.paths).toEqual(paths);
-          await writeDraft(request);
-          return {
-            requestId: request.requestId,
-            status: "completed",
-            sessionId: "literal-paths",
-          };
-        },
-      },
+    if (files) {
+      const ordinary = await normalizeTarget(
+        input.repository,
+        paths.map((path) => `./${path}`),
+      );
+      expect(ordinary.paths).toEqual(normalized);
+    }
+    const executor = draftExecutor((request) => {
+      expect(request.scope.paths).toEqual(normalized);
+      expect(request.identity).toEqual(input.identity);
+      expect(request).toMatchObject({
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
+      });
+      for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY"])
+        expect(request.runtime.environment).not.toHaveProperty(key);
+      const preflight = JSON.parse(
+        execFileSync(
+          request.runtime.environment["PYTHON"]!,
+          [
+            join(request.runtime.pluginRoot, "scripts/config_preflight.py"),
+            "--profile",
+            "security_scan",
+            "--cwd",
+            request.runtime.outputDirectory,
+            "--runtime-check",
+            "delegation_available=true",
+            "--config",
+            request.runtime.environment["CODEX_SECURITY_CONFIG_PATH"]!,
+          ],
+          { encoding: "utf8", env: request.runtime.environment },
+        ),
+      );
+      expect(preflight.status).toBe("ready");
     });
+    const result = await runHostedScan(input, { executor });
     expect(result.status, JSON.stringify(result)).toBe("completed");
-    expect(result.scope.paths).toEqual(paths);
-    const manifest = JSON.parse(
-      await readFile(
-        join(result.outputDirectory, "scan-manifest.json"),
-        "utf8",
-      ),
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    expect(result.scope.paths).toEqual(normalized);
+    const manifest = await readJson<any>(
+      join(result.outputDirectory, "scan-manifest.json"),
     );
-    const coverage = JSON.parse(
-      await readFile(join(result.outputDirectory, "coverage.json"), "utf8"),
+    const coverage = await readJson<any>(
+      join(result.outputDirectory, "coverage.json"),
     );
-    expect(manifest.scan.scope.includePaths).toEqual(paths);
+    expect(manifest.scan.scope.includePaths).toEqual(normalized);
+    expect(manifest.scan.target.revision).toBe(input.revision);
     expect(manifest.scan.sealedAt).toBeTruthy();
-    expect(coverage.includePaths).toEqual(paths);
-    expect(coverage.mode).toBe("scoped_path");
+    expect(coverage).toMatchObject({
+      includePaths: normalized,
+      mode: normalized[0] === "." ? "repository" : "scoped_path",
+      completeness: "complete",
+    });
     const report = await readFile(
       join(result.outputDirectory, "report.md"),
       "utf8",
     );
-    for (const path of reportedPaths) expect(report).toContain(path);
+    for (const path of reported) expect(report).toContain(path);
+    if (normalized.length > 1) expect(report).not.toContain("service-c");
+    for (const artifact of result.artifacts) {
+      const data = await readFile(join(result.outputDirectory, artifact.path));
+      expect(artifact.sha256).toBe(
+        createHash("sha256").update(data).digest("hex"),
+      );
+      expect(artifact.bytes).toBe(data.byteLength);
+    }
+    const artifactPaths = result.artifacts.map((artifact) => artifact.path);
+    for (const path of Object.keys(manifest.scan.preservedSources ?? {}))
+      expect(artifactPaths).toContain(path);
+    for (const artifact of manifest.scan.artifacts)
+      expect(artifactPaths).toContain(artifact.path);
   },
 );
 
@@ -250,104 +323,19 @@ test.skipIf(process.platform === "win32")(
   "missing whitespace paths never fall back to a trimmed sibling or repository",
   async () => {
     const input = await fixture();
-    let calls = 0;
+    const executor = noExecution();
     for (const path of [" ", " service-a "]) {
       await expect(
-        runHostedScan(
-          { ...input, scope: { paths: [path] } },
-          {
-            executor: {
-              async run(): Promise<never> {
-                calls++;
-                throw new Error("must not dispatch");
-              },
-            },
-          },
-        ),
+        runHostedScan({ ...input, scope: { paths: [path] } }, { executor }),
       ).rejects.toMatchObject({ reason: "scope_missing" });
     }
-    expect(calls).toBe(0);
-  },
-);
-
-test.each(["service-a", "service-a/index.ts", "."])(
-  "hosted Standard scope %p is finalized and sealed by the CLI",
-  async (path) => {
-    const input = await fixture();
-    input.scope!.paths = [path];
-    const requests: ScanExecutionRequest[] = [];
-    const result = await runHostedScan(input, {
-      executor: {
-        async run(request) {
-          requests.push(request);
-          expect(request.identity).toEqual(input.identity);
-          expect(request.runtime.environment).not.toHaveProperty(
-            "OPENAI_API_KEY",
-          );
-          expect(request.runtime.environment).not.toHaveProperty(
-            "CODEX_API_KEY",
-          );
-          const preflight = JSON.parse(
-            execFileSync(
-              request.runtime.environment["PYTHON"]!,
-              [
-                join(request.runtime.pluginRoot, "scripts/config_preflight.py"),
-                "--profile",
-                "security_scan",
-                "--cwd",
-                request.runtime.outputDirectory,
-                "--runtime-check",
-                "delegation_available=true",
-                "--config",
-                request.runtime.environment["CODEX_SECURITY_CONFIG_PATH"]!,
-              ],
-              { encoding: "utf8", env: request.runtime.environment },
-            ),
-          );
-          expect(preflight.status).toBe("ready");
-          await writeDraft(request);
-          return {
-            requestId: request.requestId,
-            status: "completed",
-            sessionId: "host-session",
-            usage: {
-              input_tokens: 10,
-              cached_input_tokens: 0,
-              output_tokens: 5,
-            },
-          };
-        },
-      },
-    });
-    expect(result.status, JSON.stringify(result)).toBe("completed");
-    expect(requests).toHaveLength(1);
-    const manifest = JSON.parse(
-      await readFile(
-        join(result.outputDirectory, "scan-manifest.json"),
-        "utf8",
-      ),
-    );
-    const coverage = JSON.parse(
-      await readFile(join(result.outputDirectory, "coverage.json"), "utf8"),
-    );
-    expect(manifest.scan.scope.includePaths).toEqual([path]);
-    expect(manifest.scan.target.revision).toBe(input.revision);
-    expect(manifest.scan.sealedAt).toBeTruthy();
-    expect(coverage.mode).toBe(path === "." ? "repository" : "scoped_path");
-    expect(coverage.completeness).toBe("complete");
-    expect(
-      await readFile(join(result.outputDirectory, "report.md"), "utf8"),
-    ).toContain(path === "." ? "repository" : path);
+    expect(executor.run).not.toHaveBeenCalled();
   },
 );
 
 test("preparation verifies revision and rejects missing or escaping paths before execution", async () => {
   const input = await fixture();
-  const executor = {
-    async run(): Promise<never> {
-      throw new Error("must not execute");
-    },
-  };
+  const executor = noExecution();
   await expect(
     runHostedScan(
       { ...input, revision: "0".repeat(40), scope: { paths: ["missing"] } },
@@ -365,31 +353,20 @@ test("preparation verifies revision and rejects missing or escaping paths before
   await expect(
     runHostedScan({ ...input, scope: { paths: ["escape"] } }, { executor }),
   ).rejects.toThrow("outside the repository");
+  expect(executor.run).not.toHaveBeenCalled();
 });
 
 test("remote uncertainty is terminal with no local fallback or resubmission", async () => {
-  const input = await fixture();
-  let calls = 0;
-  const result = await runHostedScan(input, {
-    executor: {
-      async run() {
-        calls++;
-        throw new Error("Remote acceptance unknown");
-      },
-    },
-  });
-  expect(calls).toBe(1);
+  const executor = { run: mock(rejecting("Remote acceptance unknown")) };
+  const result = await runHostedScan(await fixture(), { executor });
+  expect(executor.run).toHaveBeenCalledTimes(1);
   expect(result.status).toBe("acceptance_unknown");
   expect(result).toHaveProperty("error", "Remote acceptance unknown");
 });
 
 test("hosted aliases require a canonical path before inference, including aliases to root", async () => {
   const input = await fixture();
-  const executor = {
-    async run(): Promise<never> {
-      throw new Error("must not execute");
-    },
-  };
+  const executor = noExecution();
   for (const [name, target] of [
     ["alias", join(input.repository, "service-a")],
     ["root-alias", input.repository],
@@ -403,20 +380,14 @@ test("hosted aliases require a canonical path before inference, including aliase
       runHostedScan({ ...input, scope: { paths: [name] } }, { executor }),
     ).rejects.toMatchObject({ reason: "scope_alias" });
   }
+  expect(executor.run).not.toHaveBeenCalled();
 });
 
 test("a completed model turn without artifacts is not a completed scan", async () => {
   const usage = { input_tokens: 123, output_tokens: 7 };
   const result = await runHostedScan(await fixture(), {
     executor: {
-      async run(request) {
-        return {
-          requestId: request.requestId,
-          status: "completed",
-          sessionId: "host-session",
-          usage,
-        };
-      },
+      run: async (request) => receipt(request, { usage }),
     },
   });
   expect(result.status).not.toBe("completed");
@@ -430,21 +401,13 @@ test("a completed model turn without artifacts is not a completed scan", async (
 
 test("sealed partial coverage remains incomplete", async () => {
   const result = await runHostedScan(await fixture(), {
-    executor: {
-      async run(request) {
-        await writeDraft(request);
-        const file = join(request.runtime.outputDirectory, "coverage.json");
-        const coverage = JSON.parse(await readFile(file, "utf8"));
-        coverage.completeness = "partial";
-        coverage.surfaces[0].disposition = "needs_follow_up";
-        await writeFile(file, JSON.stringify(coverage));
-        return {
-          requestId: request.requestId,
-          status: "completed",
-          sessionId: "host-session",
-        };
-      },
-    },
+    executor: draftExecutor(async (request) => {
+      const file = join(request.runtime.outputDirectory, "coverage.json");
+      const coverage = await readJson<any>(file);
+      coverage.completeness = "partial";
+      coverage.surfaces[0].disposition = "needs_follow_up";
+      await writeJson(file, coverage);
+    }),
   });
   expect(result.status).toBe("incomplete");
   expect(result.artifacts.map((artifact) => artifact.path)).toContain(
@@ -455,80 +418,16 @@ test("sealed partial coverage remains incomplete", async () => {
 test("a changed checkout cannot produce accepted completed output", async () => {
   const input = await fixture();
   const result = await runHostedScan(input, {
-    executor: {
-      async run(request) {
-        await writeDraft(request);
-        execFileSync("git", [
-          "-C",
-          input.repository,
-          "-c",
-          "user.name=Fixture",
-          "-c",
-          "user.email=fixture@example.invalid",
-          "commit",
-          "--allow-empty",
-          "-qm",
-          "changed",
-        ]);
-        return {
-          requestId: request.requestId,
-          status: "completed",
-          sessionId: "host-session",
-        };
-      },
-    },
+    executor: draftExecutor(() => {
+      git(input.repository, "commit", "--allow-empty", "-qm", "changed");
+    }),
   });
   expect(result.status).not.toBe("completed");
   expect(result.artifacts).toEqual([]);
 });
 
-test("hosted scans create their private nested output and state directories", async () => {
-  const input = await fixture();
-  input.outputDirectory = join(
-    input.outputDirectory,
-    "run",
-    "attempt",
-    "output",
-  );
-  input.stateDirectory = join(input.stateDirectory, "run", "attempt", "state");
-  const result = await runHostedScan(input, {
-    executor: {
-      async run(request) {
-        await writeDraft(request);
-        return {
-          requestId: request.requestId,
-          status: "completed",
-          sessionId: "host-session",
-        };
-      },
-    },
-  });
-  expect(result.status, JSON.stringify(result)).toBe("completed");
-});
-
 test("malformed run input returns one protocol error", async () => {
-  const input = new PassThrough();
-  const output = new PassThrough();
-  let text = "";
-  output.on("data", (chunk) => {
-    text += chunk.toString();
-  });
-  const completed = runHostedScanProtocol(input, output);
-  input.write(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: "run",
-      method: "run",
-      params: { version: 2 },
-    }) + "\n",
-  );
-  expect(await completed).toBe(2);
-  const messages = text
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(messages).toHaveLength(1);
-  expect(messages[0].error.code).toBe(-32602);
+  expect((await protocolError({ version: 2 })).code).toBe(-32602);
 });
 
 test.each([
@@ -541,24 +440,7 @@ test.each([
   async ({ path, reason }) => {
     const params = await fixture();
     params.scope!.paths = [path];
-    const input = new PassThrough();
-    const output = new PassThrough();
-    let text = "";
-    output.on("data", (chunk) => {
-      text += chunk.toString();
-    });
-    const completed = runHostedScanProtocol(input, output);
-    input.write(
-      JSON.stringify({ jsonrpc: "2.0", id: "run", method: "run", params }) +
-        "\n",
-    );
-    expect(await completed).toBe(2);
-    const messages = text
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    expect(messages).toHaveLength(1);
-    expect(messages[0].error.data).toEqual({ reason });
+    expect((await protocolError(params)).data).toEqual({ reason });
   },
 );
 
@@ -577,7 +459,7 @@ test.each([
 });
 
 test.each([false, true])(
-  "CLI pipes support hosted execution and cancellation (%p)",
+  "CLI pipes retain progress and execution receipts, including cancellation (%p)",
   async (cancel) => {
     const input = await fixture();
     const child = spawn(
@@ -600,60 +482,61 @@ test.each([false, true])(
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
+    const messages: any[] = [];
+    const usage = { input_tokens: 88 };
+    let requestId: string | undefined;
     try {
-      child.stdin.write(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: "run",
-          method: "run",
-          params: input,
-        }) + "\n",
-      );
-      let final;
-      let executions = 0;
+      send(child.stdin, { id: "run", method: "run", params: input });
       for await (const line of createInterface({ input: child.stdout })) {
         const message = JSON.parse(line);
+        messages.push(message);
         if (message.method === "execution.run") {
-          executions++;
+          requestId = message.params.requestId;
+          for (const event of [progressEvent, { invalid: true }])
+            send(child.stdin, {
+              method: "execution.progress",
+              params: { requestId, event },
+            });
           if (cancel) {
-            child.stdin.write(
-              JSON.stringify({
-                jsonrpc: "2.0",
-                method: "cancel",
-                params: { id: "run" },
-              }) + "\n",
-            );
-            continue;
-          }
-          await writeDraft(message.params);
-          child.stdin.write(
-            JSON.stringify({
-              jsonrpc: "2.0",
+            send(child.stdin, { method: "cancel", params: { id: "run" } });
+          } else {
+            await writeDraft(message.params);
+            send(child.stdin, {
               id: message.id,
-              result: {
-                requestId: message.params.requestId,
-                status: "completed",
+              result: receipt(message.params, {
                 sessionId: "fake-host",
-              },
-            }) + "\n",
-          );
+                usage,
+              }),
+            });
+          }
         } else if (message.method === "execution.cancel") {
-          child.stdin.write(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              id: message.params.requestId,
-              result: {
-                requestId: message.params.requestId,
-                status: "canceled",
-                sessionId: "fake-host",
-              },
-            }) + "\n",
-          );
-        } else if (message.id === "run") final = message;
+          expect(message.params.requestId).toBe(requestId);
+          send(child.stdin, {
+            id: requestId,
+            result: receipt(message.params, {
+              status: "canceled",
+              sessionId: "fake-host",
+              usage,
+            }),
+          });
+        }
       }
       expect(await closed, stderr).toBe(cancel ? 1 : 0);
-      expect(executions).toBe(1);
-      expect(final.result.status).toBe(cancel ? "canceled" : "completed");
+      expect(
+        messages.filter((message) => message.method === "execution.run"),
+      ).toHaveLength(1);
+      expect(messages).toContainEqual({
+        jsonrpc: "2.0",
+        method: "scan.progress",
+        params: { id: "run", event: progressEvent },
+      });
+      expect(messages.at(-1)).toMatchObject({
+        id: "run",
+        result: {
+          status: cancel ? "canceled" : "completed",
+          execution: { sessionId: "fake-host", usage },
+        },
+      });
     } finally {
       child.kill();
     }
@@ -675,79 +558,6 @@ const activityEvent: ScanExecutionEvent = {
   },
 };
 
-test("multiple paths are normalized together, retained in every artifact, and hashed", async () => {
-  const input = await fixture();
-  input.scope = { paths: ["./service-b/", "service-a", "service-a/"] };
-  const result = await runHostedScan(input, {
-    executor: {
-      async run(request) {
-        expect(request.scope.paths).toEqual(["service-a", "service-b"]);
-        await writeDraft(request);
-        return {
-          requestId: request.requestId,
-          status: "completed",
-          sessionId: "multi-session",
-        };
-      },
-    },
-  });
-  expect(result.status, JSON.stringify(result)).toBe("completed");
-  expect(result.scope.paths).toEqual(["service-a", "service-b"]);
-  for (const name of ["scan-manifest.json", "coverage.json"]) {
-    const file = JSON.parse(
-      await readFile(join(result.outputDirectory, name), "utf8"),
-    );
-    expect(
-      name === "coverage.json"
-        ? file.includePaths
-        : file.scan.scope.includePaths,
-    ).toEqual(["service-a", "service-b"]);
-  }
-  const report = await readFile(
-    join(result.outputDirectory, "report.md"),
-    "utf8",
-  );
-  expect(report).toContain("service-a");
-  expect(report).toContain("service-b");
-  expect(report).not.toContain("service-c");
-  for (const artifact of result.artifacts) {
-    const data = await readFile(join(result.outputDirectory, artifact.path));
-    expect(artifact.sha256).toBe(
-      createHash("sha256").update(data).digest("hex"),
-    );
-    expect(artifact.bytes).toBe(data.byteLength);
-  }
-  const manifest = JSON.parse(
-    await readFile(join(result.outputDirectory, "scan-manifest.json"), "utf8"),
-  );
-  for (const path of Object.keys(manifest.scan.preservedSources ?? {}))
-    expect(result.artifacts.map((value) => value.path)).toContain(path);
-  for (const artifact of manifest.scan.artifacts)
-    expect(result.artifacts.map((value) => value.path)).toContain(
-      artifact.path,
-    );
-});
-
-test("omitting protocol scope mirrors the CLI default of the entire repository", async () => {
-  const input = await fixture();
-  delete input.scope;
-  const result = await runHostedScan(input, {
-    executor: {
-      async run(request) {
-        expect(request.scope.paths).toEqual(["."]);
-        await writeDraft(request);
-        return {
-          requestId: request.requestId,
-          status: "completed",
-          sessionId: "whole-repository",
-        };
-      },
-    },
-  });
-  expect(result.status, JSON.stringify(result)).toBe("completed");
-  expect(result.scope.paths).toEqual(["."]);
-});
-
 test("empty or root-mixed explicit scopes fail instead of broadening", () => {
   expect(() => normalizeHostedPaths([])).toThrow();
   expect(() => normalizeHostedPaths(["service-a", "."])).toThrow();
@@ -761,25 +571,17 @@ test("empty or root-mixed explicit scopes fail instead of broadening", () => {
 
 test("one missing or escaping path rejects the entire multi-path request before dispatch", async () => {
   const input = await fixture();
-  let dispatched = false;
-  const executor = {
-    async run(): Promise<never> {
-      dispatched = true;
-      throw new Error("Unexpected dispatch");
-    },
-  };
+  const executor = noExecution();
   for (const paths of [
+    [],
     ["service-a", "missing"],
     ["service-a", "../escape"],
   ]) {
     await expect(
       runHostedScan({ ...input, scope: { paths } }, { executor }),
     ).rejects.toThrow();
-    expect(dispatched).toBe(false);
   }
-  await expect(
-    runHostedScan({ ...input, scope: { paths: [] } }, { executor }),
-  ).rejects.toThrow();
+  expect(executor.run).not.toHaveBeenCalled();
 });
 
 test("standalone SDK forwards progress, isolates observer errors and defaults to full scan", async () => {
@@ -787,22 +589,11 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
   delete input.scope;
   const events: string[] = [];
   const result = await runHostedScan(input, {
-    executor: {
-      async run(request, options) {
-        expect(request.scope.paths).toEqual(["."]);
-        expect(request.runtime.environment).not.toHaveProperty(
-          "OPENAI_API_KEY",
-        );
-        options.onEvent?.(progressEvent);
-        options.onEvent?.(activityEvent);
-        await writeDraft(request);
-        return {
-          requestId: request.requestId,
-          status: "completed",
-          sessionId: "public-sdk",
-        };
-      },
-    },
+    executor: draftExecutor((request, options) => {
+      expect(request.scope.paths).toEqual(["."]);
+      options.onEvent?.(progressEvent);
+      options.onEvent?.(activityEvent);
+    }),
     onEvent(event) {
       events.push(event.type);
       if (event.type === "progress")
@@ -810,59 +601,43 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
     },
   });
   expect(result.status, JSON.stringify(result)).toBe("completed");
+  expect(result.scope.paths).toEqual(["."]);
   expect(events).toContain("progress");
   expect(events).toContain("activity");
 });
 
-test("standalone SDK passes the frozen model settings to its executor", async () => {
-  const input = await fixture();
-  const requests: ScanExecutionRequest[] = [];
-  const result = await runHostedScan(input, {
-    executor: {
-      async run(request) {
-        requests.push(request);
-        return {
-          requestId: request.requestId,
-          status: "failed",
-          message: "Synthetic stop after dispatch",
-        };
-      },
-    },
-  });
-  expect(result.status).toBe("failed");
-  expect(requests).toHaveLength(1);
-  expect(requests[0]?.model).toBe(input.model);
-  expect(requests[0]?.reasoningEffort).toBe(input.reasoningEffort);
-});
-
-test.each(["failed", "canceled", "acceptance_unknown"] as const)(
-  "standalone SDK retains %s host identity and usage in its terminal receipt",
-  async (status) => {
+test.each([
+  ["failed", undefined],
+  ["failed", "remote-session"],
+  ["canceled", "remote-session"],
+  ["acceptance_unknown", "remote-session"],
+] as const)(
+  "standalone SDK retains %s host identity %p and usage in its terminal receipt",
+  async (status, sessionId) => {
     const input = await fixture();
     const usage = {
       authoritative_snapshot: { input_tokens: 123, output_tokens: 7 },
     };
-    let receipt: ScanExecutionResult | undefined;
+    let execution: ScanExecutionResult | undefined;
     const terminal = await runHostedScan(input, {
       executor: {
         async run(request) {
-          receipt = {
-            requestId: request.requestId,
+          execution = receipt(request, {
             status,
-            sessionId: "remote-session",
+            sessionId,
             usage,
             error: {
               code: -32010,
               message: "Recorded remote outcome",
               data: { remoteTurnId: "turn-1" },
             },
-          };
-          return receipt;
+          });
+          return execution;
         },
       },
     });
     expect(terminal.status).toBe(status);
-    expect(terminal.execution).toEqual(receipt);
+    expect(terminal.execution).toEqual(execution);
     expect(terminal.artifacts).toEqual([]);
   },
 );
@@ -870,7 +645,7 @@ test.each(["failed", "canceled", "acceptance_unknown"] as const)(
 test("cancellation after registration retains scan identity before executor dispatch", async () => {
   const input = await fixture();
   const controller = new AbortController();
-  let calls = 0;
+  const executor = noExecution();
   const result = await runHostedScan(input, {
     signal: controller.signal,
     onEvent(event) {
@@ -881,21 +656,16 @@ test("cancellation after registration retains scan identity before executor disp
       )
         controller.abort();
     },
-    executor: {
-      async run(): Promise<never> {
-        calls++;
-        throw new Error("must not dispatch");
-      },
-    },
+    executor,
   });
   expect(result.status).toBe("canceled");
-  expect(calls).toBe(0);
+  expect(executor.run).not.toHaveBeenCalled();
   expect(result.scanId).toBeString();
   expect(result.execution).toBeUndefined();
   const history = await runWorkbench(
     {
       python: pythonExecutable()!,
-      pluginRoot: join(import.meta.dirname, "../_bundled_plugin"),
+      pluginRoot: PLUGIN_ROOT,
       environment: {
         PATH: process.env["PATH"],
         SYSTEMROOT: process.env["SYSTEMROOT"],
@@ -923,12 +693,11 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
         controller.abort();
         expect(options.signal.aborted).toBe(true);
         await Promise.resolve();
-        return {
-          requestId: request.requestId,
+        return receipt(request, {
           status: "canceled",
           sessionId: "canceled-session",
           usage: { input_tokens: 42 },
-        };
+        });
       },
     },
   });
@@ -942,21 +711,19 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
 
 test("mismatched execution receipts are never accepted or retried", async () => {
   const input = await fixture();
-  let calls = 0;
-  const result = await runHostedScan(input, {
-    executor: {
-      async run() {
-        calls++;
-        return {
-          requestId: "other-request",
-          status: "completed",
+  const executor = {
+    run: mock(async () =>
+      receipt(
+        { requestId: "other-request" },
+        {
           sessionId: "known-session",
           usage: { input_tokens: 9 },
-        };
-      },
-    },
-  });
-  expect(calls).toBe(1);
+        },
+      ),
+    ),
+  };
+  const result = await runHostedScan(input, { executor });
+  expect(executor.run).toHaveBeenCalledTimes(1);
   expect(result.status).toBe("acceptance_unknown");
   expect(result.execution?.sessionId).toBe("known-session");
   expect(result.artifacts).toEqual([]);
@@ -968,11 +735,10 @@ test("same Cloud attempt does not create CLI cross-invocation replay decisions",
   const executor = {
     async run(request: ScanExecutionRequest): Promise<ScanExecutionResult> {
       requests.push(request.requestId);
-      return {
-        requestId: request.requestId,
+      return receipt(request, {
         status: "acceptance_unknown",
         sessionId: "host-owned-session",
-      };
+      });
     },
   };
   for (const suffix of ["first", "second"]) {
@@ -986,97 +752,18 @@ test("same Cloud attempt does not create CLI cross-invocation replay decisions",
   expect(requests[0]).not.toBe(requests[1]);
 });
 
-test("wire progress and explicit cancel retain the host's cancellation receipt", async () => {
-  const params = await fixture();
-  const input = new PassThrough();
-  const messages: Record<string, any>[] = [];
-  let request: ScanExecutionRequest | undefined;
-  const send = (value: unknown) => input.write(JSON.stringify(value) + "\n");
-  const output = new Writable({
-    write(chunk, _encoding, callback) {
-      const message = JSON.parse(chunk.toString());
-      messages.push(message);
-      callback();
-      setImmediate(() => {
-        if (message.method === "execution.run") {
-          request = message.params;
-          send({
-            jsonrpc: "2.0",
-            method: "execution.progress",
-            params: { requestId: request!.requestId, event: progressEvent },
-          });
-          send({
-            jsonrpc: "2.0",
-            method: "execution.progress",
-            params: { requestId: request!.requestId, event: { invalid: true } },
-          });
-          send({ jsonrpc: "2.0", method: "cancel", params: { id: "run" } });
-        } else if (message.method === "execution.cancel") {
-          expect(message.params.requestId).toBe(request!.requestId);
-          send({
-            jsonrpc: "2.0",
-            id: request!.requestId,
-            result: {
-              requestId: request!.requestId,
-              status: "canceled",
-              sessionId: "canceled-wire-session",
-              usage: { input_tokens: 88 },
-            },
-          });
-        }
-      });
-    },
-  });
-  const finished = runHostedScanProtocol(input, output);
-  send({ jsonrpc: "2.0", id: "run", method: "run", params });
-  expect(await finished).toBe(1);
-  expect(
-    messages.filter((message) => message["method"] === "execution.run"),
-  ).toHaveLength(1);
-  expect(messages).toContainEqual({
-    jsonrpc: "2.0",
-    method: "scan.progress",
-    params: { id: "run", event: progressEvent },
-  });
-  expect(messages.at(-1)?.["result"]).toMatchObject({
-    status: "canceled",
-    execution: {
-      sessionId: "canceled-wire-session",
-      usage: { input_tokens: 88 },
-    },
-  });
-  input.destroy();
-  output.destroy();
-});
-
 test.each(["cancel", "disconnect", "signal"])(
   "blocked execution request terminates on %s",
   async (action) => {
     const params = await fixture();
     const input = new PassThrough();
     const controller = new AbortController();
-    const writing = Promise.withResolvers<void>();
-    let release!: () => void;
-    const output = new Writable({
-      write(_chunk, _encoding, callback) {
-        release = callback;
-        writing.resolve();
-      },
-    });
+    const { output, writing, release } = blockedOutput();
     const finished = runHostedScanProtocol(input, output, controller.signal);
-    input.write(
-      JSON.stringify({ jsonrpc: "2.0", id: "run", method: "run", params }) +
-        "\n",
-    );
-    await writing.promise;
+    send(input, { id: "run", method: "run", params });
+    await writing;
     if (action === "cancel")
-      input.write(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          method: "cancel",
-          params: { id: "run" },
-        }) + "\n",
-      );
+      send(input, { method: "cancel", params: { id: "run" } });
     else if (action === "signal") controller.abort();
     else input.end();
     expect(await finished).toBe(2);
@@ -1091,16 +778,7 @@ test.each(["result", "error"])(
   "output closure interrupts a blocked terminal %s without a second response",
   async (terminal) => {
     const input = new PassThrough();
-    const writing = Promise.withResolvers<void>();
-    let release!: () => void;
-    let writes = 0;
-    const output = new Writable({
-      write(_chunk, _encoding, callback) {
-        writes++;
-        release = callback;
-        writing.resolve();
-      },
-    });
+    const { output, writing, release, write } = blockedOutput();
     const finished = runHostProtocol(input, output, {
       label: "Scan",
       requestMethod: "execution.run",
@@ -1109,17 +787,14 @@ test.each(["result", "error"])(
         return { status: "completed" };
       },
     });
-    input.write(
-      JSON.stringify({ jsonrpc: "2.0", id: "run", method: "run", params: {} }) +
-        "\n",
-    );
-    await writing.promise;
+    send(input, { id: "run", method: "run", params: {} });
+    await writing;
     input.end();
     output.destroy();
     try {
       expect(await finished).toBe(2);
       expect(output.destroyed).toBe(true);
-      expect(writes).toBe(1);
+      expect(write).toHaveBeenCalledTimes(1);
     } finally {
       release();
       input.destroy();
@@ -1129,11 +804,8 @@ test.each(["result", "error"])(
 );
 
 test("the exported contract fixture matches v2 and rejects explicit empty scope", async () => {
-  const fixture = JSON.parse(
-    await readFile(
-      join(import.meta.dirname, "../schemas/hosted-scan-v2.fixture.json"),
-      "utf8",
-    ),
+  const fixture = await readJson<any>(
+    join(import.meta.dirname, "../schemas/hosted-scan-v2.fixture.json"),
   );
   expect(HostedScanInputSchema.parse(fixture.run.params).scope).toEqual({
     paths: ["service-a", "service-b"],
@@ -1161,13 +833,7 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
 
 test("standalone SDK rejects local scan options and configuration before dispatch", async () => {
   const input = await fixture();
-  let dispatched = false;
-  const executor = {
-    async run(): Promise<never> {
-      dispatched = true;
-      throw new Error("Unexpected execution");
-    },
-  };
+  const executor = noExecution();
   for (const extra of [
     { mode: "deep" },
     { config: { codexOverrides: { profile: "local" } } },
@@ -1175,7 +841,7 @@ test("standalone SDK rejects local scan options and configuration before dispatc
     await expect(
       runHostedScan({ ...input, ...extra }, { executor }),
     ).rejects.toThrow("Unrecognized key");
-  expect(dispatched).toBe(false);
+  expect(executor.run).not.toHaveBeenCalled();
 });
 
 test("ordinary SDK rejects the removed hosted option instead of using local inference", async () => {

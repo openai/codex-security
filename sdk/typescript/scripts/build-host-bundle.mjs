@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { bundledPluginFiles } from "./build-plugin.mjs";
 
 const packageRoot = resolve(import.meta.dirname, "..");
 const output = process.argv[2];
@@ -63,21 +64,8 @@ try {
   );
   await cp(process.execPath, join(bundle, "bin", "node"));
   const pluginRoot = join(bundle, "cli", "_bundled_plugin");
-  async function files(root, prefix = "") {
-    const result = [];
-    for (const entry of await readdir(join(root, prefix), {
-      withFileTypes: true,
-    })) {
-      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) result.push(...(await files(root, path)));
-      else if (entry.isFile()) result.push(path);
-      else
-        throw new Error(`Plugin payload contains a non-regular file: ${path}`);
-    }
-    return result.sort();
-  }
   const pluginHash = createHash("sha256");
-  for (const path of await files(pluginRoot))
+  for (const path of await bundledPluginFiles(pluginRoot))
     pluginHash.update(
       `${path}\0${sha(await readFile(join(pluginRoot, path)))}\n`,
     );

@@ -58,7 +58,7 @@ function launch(...args: string[]) {
     send(value: unknown) {
       child.stdin.write(JSON.stringify(value) + "\n");
     },
-    async cleanup() {
+    async [Symbol.asyncDispose]() {
       child.kill("SIGKILL");
       child.stdin.destroy();
       child.stdout.destroy();
@@ -79,63 +79,47 @@ test.each([
 ] as const)(
   "Node terminal write failure overrides a %s result (%s callback)",
   async (status, callback) => {
-    const host = launch("failed-terminal", status, callback);
-    try {
-      host.send(run);
-      expect(await host.exited).toEqual([2, null]);
-    } finally {
-      await host.cleanup();
-    }
+    await using host = launch("failed-terminal", status, callback);
+    host.send(run);
+    expect(await host.exited).toEqual([2, null]);
   },
 );
 
 test("Node input EOF waits for the selected terminal response to flush", async () => {
-  const host = launch("eof-before-flush");
-  try {
-    host.send(run);
-    expect(await host.lines.next()).toEqual({ value: "writing", done: false });
-    host.child.stdin.end();
-    expect(await host.lines.next()).toEqual({
-      value: '{"code":0}',
-      done: false,
-    });
-    expect(await host.exited).toEqual([0, null]);
-  } finally {
-    await host.cleanup();
-  }
+  await using host = launch("eof-before-flush");
+  host.send(run);
+  expect(await host.lines.next()).toEqual({ value: "writing", done: false });
+  host.child.stdin.end();
+  expect(await host.lines.next()).toEqual({
+    value: '{"code":0}',
+    done: false,
+  });
+  expect(await host.exited).toEqual([0, null]);
 });
 
 test("Node output close after a successful terminal flush preserves success", async () => {
-  const host = launch("close-after-flush");
-  try {
-    host.send(run);
-    expect(await host.exited).toEqual([0, null]);
-  } finally {
-    await host.cleanup();
-  }
+  await using host = launch("close-after-flush");
+  host.send(run);
+  expect(await host.exited).toEqual([0, null]);
 });
 
 test.each(["cancel", "disconnect"])(
   "Node queued stdout execution write terminates on %s without recursive teardown",
   async (action) => {
-    const host = launch("queued-execution");
-    try {
-      host.send(run);
-      expect(await host.lines.next()).toEqual({
-        value: '{"queued":true}',
-        done: false,
+    await using host = launch("queued-execution");
+    host.send(run);
+    expect(await host.lines.next()).toEqual({
+      value: '{"queued":true}',
+      done: false,
+    });
+    if (action === "cancel")
+      host.send({
+        jsonrpc: "2.0",
+        method: "cancel",
+        params: { id: "run-1" },
       });
-      if (action === "cancel")
-        host.send({
-          jsonrpc: "2.0",
-          method: "cancel",
-          params: { id: "run-1" },
-        });
-      else host.child.stdin.end();
-      expect(await host.exited).toEqual([2, null]);
-    } finally {
-      await host.cleanup();
-    }
+    else host.child.stdin.end();
+    expect(await host.exited).toEqual([2, null]);
   },
 );
 
@@ -149,15 +133,11 @@ test.each([
 ] as const)(
   "Node CLI %s %s exits with a transport failure when its reader closes",
   async (command, flag, params) => {
-    const host = launch("cli", command, flag);
-    try {
-      const closed = once(host.child.stdout, "close");
-      host.child.stdout.destroy();
-      await closed;
-      host.send({ ...run, params });
-      expect(await host.exited).toEqual([2, null]);
-    } finally {
-      await host.cleanup();
-    }
+    await using host = launch("cli", command, flag);
+    const closed = once(host.child.stdout, "close");
+    host.child.stdout.destroy();
+    await closed;
+    host.send({ ...run, params });
+    expect(await host.exited).toEqual([2, null]);
   },
 );
