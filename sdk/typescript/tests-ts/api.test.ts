@@ -530,8 +530,19 @@ describe("CodexSecurity finding validation", () => {
       });
       expect(workbench).not.toHaveBeenCalled();
       expect(captured.prompt).toContain(
-        JSON.stringify(join(PLUGIN_ROOT, "skills", "validation", "SKILL.md")),
+        await readFile(
+          join(PLUGIN_ROOT, "references", "standalone-validation.md"),
+          "utf8",
+        ),
       );
+      expect(captured.prompt).toContain(
+        await readFile(
+          join(PLUGIN_ROOT, "references", "static-finding-assessment.md"),
+          "utf8",
+        ),
+      );
+      expect(captured.prompt).not.toContain("$codex-security:");
+      expect(captured.prompt).not.toContain("validation_artifacts");
       expect(captured.prompt!.endsWith(JSON.stringify(finding))).toBe(true);
       expect(captured.prompt).not.toContain("Synthetic file contents");
       expect(captured.thread).toMatchObject({

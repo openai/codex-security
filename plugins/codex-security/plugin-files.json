@@ -43,6 +43,7 @@
     "references/scan-contract.md",
     "references/scan-prologue.md",
     "references/security-guidance.md",
+    "references/standalone-validation.md",
     "references/static-finding-assessment.md",
     "references/threat-model.md",
     "schemas/coverage.schema.json",
