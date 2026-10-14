@@ -84,6 +84,11 @@ export function ownershipRollout(
     uuid7TokenSnapshot(1_000, 100),
     uuid7TaskStarted(higherUuid7Turn),
     uuid7TokenSnapshot(1_100, 110),
+    {
+      type: "event_msg",
+      timestamp: uuid7EventTimestamp,
+      payload: { type: "task_complete" },
+    },
   ];
 }
 
@@ -100,12 +105,12 @@ export function readPythonRolloutUsage(
     "sys.path.insert(0, sys.argv[1])",
     "import workbench_scan_usage",
     "session = workbench_scan_usage.RolloutSession(sys.argv[3], sys.argv[4], Path(sys.argv[2]))",
-    "usage, warnings = workbench_scan_usage._read_rollout_usage(",
+    "usage = workbench_scan_usage._read_rollout_usage(",
     "    session,",
     "    started_at=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),",
     "    completed_at=None,",
     ")",
-    "print(json.dumps({'usage': usage, 'warnings': sorted(warnings)}, sort_keys=True))",
+    "print(json.dumps({'usage': usage.tokens, 'warnings': sorted(usage.warnings)}, sort_keys=True))",
   ].join("\n");
   const result = runNodePython(python!, [
     "-c",

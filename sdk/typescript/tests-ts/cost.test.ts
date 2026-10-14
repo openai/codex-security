@@ -1789,7 +1789,7 @@ describe("live scan cost tracking", () => {
       threadId: childUuid7Thread,
       codexHome: home,
     });
-    const ownedEvents = [rollout[0]!, ...rollout.slice(-2)];
+    const ownedEvents = [rollout[0]!, ...rollout.slice(-3)];
     expect(forwardedEvents.map(({ event }) => event)).toEqual(ownedEvents);
     expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
   });

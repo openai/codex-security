@@ -30,7 +30,11 @@ During a host-backed scan, checkpoint saved findings and pending candidates with
 
 On a confirmed failure or explicit cancellation, the workbench preserves saved results without marking the scan successful. Report validated findings separately from pending candidates and explain the incomplete coverage. Use the retained report and exports; do not start additional model work after cancellation or replace saved results with a no-findings response.
 
-After `complete_codex_security_scan` succeeds, include its returned `usage.totalTokens`, `usage.inputTokens`, and `usage.cachedInputTokens` in the final response when `usage.coverage` is `complete` or `partial`; explicitly label a partial measurement. If coverage is `unavailable`, say that token usage could not be measured instead of reporting zero or estimating a cost. Report only measured completion metadata in a terminal/chat host. Token usage is workbench metadata, not a reason to modify sealed scan artifacts or the deterministic report.
+Report the latest completion `usage`: total tokens, input tokens (including cached input), and cached input tokens. Include the parent/worker split when `byRole` is present. Use `window` and `tokensUpdatedAt` to explain the measured period. Label partial coverage and explain its warnings. If usage is unavailable, say so instead of reporting zero. Retain any separate cost estimate.
+
+For account allowance, use the latest `accountRateLimits` entry for each limit and quote its `observedAt`. These account-wide readings can include other work. Use window duration to identify weekly limits, not the primary/secondary label. Empty readings or null windows mean allowance was not observed. Saved readings are historical. This metadata provides no conversion between tokens, estimated API cost, and subscription allowance.
+
+Token usage is workbench metadata. Do not modify sealed scan artifacts or the deterministic report to add it.
 
 Before workbench-owned Standard or workbench-backed diff completion, require `record_codex_security_scan_draft` to succeed. Before Deep completion, require the coordinator to return the parent scan's already-authored canonical manifest; do not submit another draft or rerun worker phases. Explicitly SDK-owned workflows verify their canonical JSON before the SDK finalizes it. Completion validates and seals existing canonical artifacts and generates `report.md`; it does not create missing artifacts or run skipped scan phases.
 
