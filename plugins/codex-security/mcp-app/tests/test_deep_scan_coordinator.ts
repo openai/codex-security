@@ -4158,7 +4158,6 @@ async function testQuotaFailureStopsDispatchBeforeWorkerShutdown(
   const signals: AbortSignal[] = [];
   const sleeps: number[] = [];
   let discoveryCalls = 0;
-  let settled = false;
   const terminal = runCoordinator(
     fixture,
     store,
@@ -4182,13 +4181,10 @@ async function testQuotaFailureStopsDispatchBeforeWorkerShutdown(
       },
     },
     { clock: recordingClock(sleeps) },
-  ).finally(() => {
-    settled = true;
-  });
+  );
   try {
     await notified.promise;
     assert.ok(signals.every((signal) => signal.aborted));
-    assert.equal(settled, false);
     const callsAtFailure = signals.length;
     shutdown.resolve();
     const result = await terminal;

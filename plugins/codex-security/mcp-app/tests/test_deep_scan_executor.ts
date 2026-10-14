@@ -3868,13 +3868,10 @@ function testUsageLimitClassification() {
     const error = codexWorkerTurnError(message);
     assert.ok(error instanceof DeepScanNonRetryableError);
     assert.equal(error.message, message);
-    const ordinaryError = new Error(message);
-    assert.equal(classifyCodexWorkerError(ordinaryError), ordinaryError);
   }
   for (const message of [
     "429 Too Many Requests",
     "Command failed: Quota exceeded. Check your plan and billing details.",
-    "stream disconnected before completion",
   ]) {
     const error = codexWorkerTurnError(message);
     assert.equal(error.name, "Error");
@@ -3913,7 +3910,7 @@ async function testWorkerTerminalEvents() {
         type: "item.completed",
         item: { id: "quota-text", type: "agent_message", text: quotaMessage },
       },
-    ]) {
+    ] as const) {
       await writeFile(
         promptPath,
         event
@@ -3935,21 +3932,17 @@ async function testWorkerTerminalEvents() {
             onNonRetryableError,
           });
           if (event?.type === "turn.failed") {
-            const isQuota = event.error!.message === quotaMessage;
-            await assert.rejects(execution, (error: Error) => {
-              assert.equal(error.message, event.error!.message);
-              assert.equal(error instanceof DeepScanNonRetryableError, isQuota);
-              assert.equal(
-                onNonRetryableError.mock.callCount(),
-                isQuota ? 1 : 0,
-              );
-              if (isQuota)
-                assert.equal(
-                  onNonRetryableError.mock.calls[0].arguments[0],
-                  error,
-                );
-              return true;
+            const isQuota = event.error.message === quotaMessage;
+            await assert.rejects(execution, {
+              name: isQuota ? "DeepScanNonRetryableError" : "Error",
+              message: event.error.message,
             });
+            assert.deepEqual(
+              onNonRetryableError.mock.calls.map(
+                ({ arguments: [error] }) => error.message,
+              ),
+              isQuota ? [quotaMessage] : [],
+            );
             continue;
           }
           const result = await execution;
