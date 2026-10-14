@@ -55,6 +55,7 @@ export async function prepareCodexSecurityReviewItems(
     "generate_in_scope_files.py",
   );
   const arguments_ = [
+    "-B",
     helper,
     "--repo",
     context.repoRoot,
