@@ -2022,7 +2022,15 @@ def merge_saved_results(
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
-    if stopped or any(warning not in initial_warnings for warning in warnings):
+    if (
+        not stopped
+        and coverage.get("completeness") in ("complete", "unknown")
+        and isinstance(coverage.get("deferred"), list)
+        and coverage["deferred"]
+    ):
+        warnings.append("Coverage has deferred review work; marked coverage as partial.")
+        coverage["completeness"] = "partial"
+    elif stopped or any(warning not in initial_warnings for warning in warnings):
         coverage["completeness"] = "partial"
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
