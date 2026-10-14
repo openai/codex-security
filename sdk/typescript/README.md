@@ -118,6 +118,46 @@ Bedrock scans use AWS credentials and model access. They do not require
 [Bedrock guide](https://github.com/openai/codex-security/blob/main/docs/bedrock.md)
 for setup, model selection, and verification.
 
+## Release and bundle provenance
+
+The npm version identifies the SDK and CLI release. The bundled plugin manifest
+and the `@openai/codex` / `@openai/codex-sdk` dependencies have separate versions.
+`codex-security info --json` reports `bundledPluginVersion` for diagnostics; it
+is not a content hash or the version of an external plugin catalog.
+
+In a repository checkout with the release tags fetched, inspect a release with:
+
+```bash
+VERSION=0.2.0
+TAG="npm-v${VERSION}"
+
+git rev-parse "${TAG}^{commit}"
+git rev-parse "${TAG}:plugins/codex-security"
+git show "${TAG}:sdk/typescript/package.json" | jq '{version, dependencies}'
+git show "${TAG}:plugins/codex-security/.codex-plugin/plugin.json" | jq -r .version
+npm view "@openai/codex-security@${VERSION}" version gitHead dist.integrity
+```
+
+The tree hash identifies the plugin source at that tag. Current releases build
+`_bundled_plugin/` from that source and compiled MCP/native artifacts during
+packaging; the source tree hash does not identify the generated bundle bytes.
+Older releases such as `0.1.5` tracked the bundle directly at
+`sdk/typescript/_bundled_plugin`; inspect that path at those tags instead.
+
+Registry metadata and `dist.integrity` alone do not verify the publisher or
+build. In the consumer project where the package is installed, use a current
+npm version to [verify signatures and provenance attestations](https://docs.npmjs.com/cli/v11/commands/npm-audit/#audit-signatures):
+
+```bash
+npm audit signatures --registry=https://registry.npmjs.org/ --json --include-attestations
+```
+
+The release workflows additionally check that the verified SLSA attestation
+matches the package tarball, expected release workflow, and tagged commit; see
+[release verification](https://github.com/openai/codex-security/blob/main/RELEASING.md#verify). Only historical releases
+`0.1.0` and `0.1.1` may omit registry `gitHead`: the release verifier recovers it
+from verified provenance. Later releases require a matching `gitHead`.
+
 ## Run a scan from TypeScript
 
 Scan a repository you own or have permission to assess:
