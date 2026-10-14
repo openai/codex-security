@@ -1556,13 +1556,11 @@ def complete_scan_locked(
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
-        if scan["mode"] != "deep":
-            warnings.extend(prepared.warnings)
+        warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
-        if scan["mode"] == "deep" and prepared.warnings:
-            warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
+        if prepared.warnings:
             # Save the explanation before publication removes the broken reference,
-            # so a retry after an output-write failure retains it.
+            # so a retry after failed publication retains it.
             with connection:
                 connection.execute(
                     "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",

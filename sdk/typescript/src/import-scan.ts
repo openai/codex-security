@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import Ajv2020 from "ajv/dist/2020.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { loadContract, sameCheckedFileDevice } from "./contract.js";
 import {
@@ -25,6 +26,7 @@ import {
 } from "./findings-import.js";
 import { ScanResult } from "./result.js";
 import {
+  bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityStateDirectory,
   expandHome,
@@ -141,6 +143,41 @@ export async function importScan(
       options.format,
       pluginRoot,
     );
+    const schemaRoot = await bundledPluginRoot();
+    const [common, draft] = await Promise.all(
+      [
+        "definitions/artifact-common.schema.json",
+        "tools/scan-draft.schema.json",
+      ].map(async (name) =>
+        JSON.parse(
+          await readFile(join(schemaRoot, "schemas", name), {
+            encoding: "utf8",
+            signal,
+          }),
+        ),
+      ),
+    );
+    const ajv = new Ajv2020({ strict: false, validateFormats: false });
+    ajv.addSchema(common).addSchema(draft);
+    const validFinding = ajv.compile({ $ref: `${draft.$id}#/$defs/finding` });
+    for (const [index, finding] of findings.entries()) {
+      const semantic: Record<string, unknown> = {
+        ...finding,
+        provenance: { source: `${options.format}_import` },
+      };
+      // Import assigns new identities and retains source metadata as provenance.
+      for (const field of [
+        "findingId",
+        "occurrenceId",
+        "fingerprints",
+        "writeup",
+      ])
+        delete semantic[field];
+      if (!validFinding(semantic))
+        throw new CodexSecurityError(
+          `Imported finding does not match the current scan-draft finding schema: ${ajv.errorsText(validFinding.errors, { dataVar: `findings[${index}]` })}`,
+        );
+    }
     signal?.throwIfAborted();
     await validateOutputDir(options.outputDir, options.archiveExisting);
     if (options.dryRun) {

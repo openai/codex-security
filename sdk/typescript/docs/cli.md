@@ -389,10 +389,12 @@ or JSONL output produce:
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
 If the scan target changed, the error explains that the results no longer
-represent the current checkout. Retained results remain available under `data`
-when a result was produced. This also applies to `scans rerun` and `scans resume`.
-`--filter-output` applies to retained `data`; selecting an unavailable field can
-return `null` or omit `data`.
+represent the current checkout. Retained sealed results remain available under
+`data`, including their manifest, findings, coverage, scan directory, and report
+path. Unsealed or invalid artifacts are not included. This also applies to
+`scans rerun` and `scans resume`.
+For `scans rerun` and `scans resume`, `--filter-output` applies to retained `data`;
+selecting an unavailable field can return `null` or omit `data`.
 
 Saved-scan setup failures use the same output shape with
 `SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is

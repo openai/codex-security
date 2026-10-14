@@ -7,6 +7,10 @@ import { runNodePython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
+import { main } from "../src/cli.js";
+import { ScanInterruptedError } from "../src/errors.js";
+import { dependencies, fakeSecurity } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 
 type FindingsDocument = {
   findings: Array<{
@@ -181,6 +185,127 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("scan publication and artifact recovery", () => {
+  test.each(["scan", "rerun", "resume"] as const)(
+    "%s full-output includes sealed findings after execution throws",
+    async (command) => {
+      const fixture = await startDraftScan();
+      const message = "Synthetic execution failure after finding discovery.";
+      const recipe = {
+        repository: fixture.repository,
+        target: { kind: "repository", paths: [] },
+        mode: command === "resume" ? "deep" : "standard",
+        config: {},
+      };
+      const deps = dependencies({
+        currentDirectory: fixture.repository,
+        onWorkbench: () => ({
+          scanId: fixture.scanId,
+          scanDir: fixture.scanDir,
+          recipe,
+        }),
+      });
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
+          options?.onScanRegistered?.(fixture);
+          await workbench(fixture, [
+            "fail-scan",
+            "--scan-id",
+            fixture.scanId,
+            "--message",
+            message,
+          ]);
+          throw command === "resume"
+            ? new ScanInterruptedError(message, fixture.scanDir)
+            : new Error(message);
+        });
+      const args =
+        command === "scan" ? ["scan"] : ["scans", command, fixture.scanId];
+      const expectedError = { code: "SCAN_FAILED", message };
+      for (const output of ["full", "filtered", "ordinary"] as const) {
+        if (command === "scan" && output === "filtered") continue;
+        const cli = createCliTest(main);
+        expect(
+          await cli.runCli(
+            [
+              ...args,
+              "--format",
+              command === "resume" ? "jsonl" : "json",
+              ...(output === "ordinary" ? [] : ["--full-output"]),
+              ...(output === "filtered"
+                ? ["--filter-output", "findings.findings"]
+                : []),
+            ],
+            deps,
+          ),
+        ).toBe(2);
+        const envelope = JSON.parse(cli.stdout.text());
+        if (output === "ordinary") {
+          expect(envelope).toEqual({ status: "failed", ...expectedError });
+        } else {
+          expect(envelope).toMatchObject({ ok: false, error: expectedError });
+          if (output === "filtered") {
+            expect(Object.keys(envelope.data)).toEqual(["findings"]);
+            expect(envelope.data.findings.findings).toHaveLength(1);
+            expect(envelope.data.findings.findings[0].summary).toBeTruthy();
+          } else {
+            expect(envelope.data).toMatchObject({
+              manifest: { scan: { id: fixture.scanId, status: "failed" } },
+              scanDir: fixture.scanDir,
+              reportPath: join(fixture.scanDir, "report.md"),
+            });
+            expect(envelope.data.findings.findings).toHaveLength(1);
+            expect(envelope.data.coverage.deferred.length).toBeGreaterThan(0);
+            expect(envelope.data).not.toHaveProperty("turn");
+          }
+        }
+        expect(cli.stderr.text()).toContain(message);
+      }
+    },
+  );
+
+  test.each(["unregistered", "unsealed", "malformed", "different-scan"])(
+    "full-output preserves the execution error with %s saved artifacts",
+    async (artifactState) => {
+      const fixture = await startDraftScan();
+      const message = "Synthetic scanner failure.";
+      if (artifactState !== "unsealed") {
+        await workbench(fixture, [
+          "fail-scan",
+          "--scan-id",
+          fixture.scanId,
+          "--message",
+          message,
+        ]);
+      }
+      if (artifactState === "malformed")
+        await writeFile(join(fixture.scanDir, "findings.json"), "invalid");
+      const deps = dependencies({ currentDirectory: fixture.repository });
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
+          options?.onOutputDirReady?.(fixture.scanDir);
+          if (artifactState !== "unregistered")
+            options?.onScanRegistered?.({
+              ...fixture,
+              scanId:
+                artifactState === "different-scan"
+                  ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                  : fixture.scanId,
+            });
+          throw new Error(message);
+        });
+      const cli = createCliTest(main);
+      expect(await cli.runCli(["scan", "--json", "--full-output"], deps)).toBe(
+        2,
+      );
+      expect(JSON.parse(cli.stdout.text())).toMatchObject({
+        ok: false,
+        error: { code: "SCAN_FAILED", message },
+      });
+      expect(JSON.parse(cli.stdout.text())).not.toHaveProperty("data");
+      expect(cli.stderr.text()).toContain(message);
+    },
+  );
+
   test("registers a Unicode scan recipe delivered through stdin", async () => {
     const fixture = await startDraftScan("directory", true);
     expect(fixture.registration).toMatchObject({

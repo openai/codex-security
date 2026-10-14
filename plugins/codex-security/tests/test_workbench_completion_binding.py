@@ -1207,12 +1207,33 @@ def test_stopped_recovery_preserves_findings_with_invalid_or_duplicate_writeups(
 
 
 @pytest.mark.cross_platform
-def test_completion_preserves_finding_with_missing_optional_writeup(tmp_path: Path) -> None:
+def test_completion_retry_preserves_missing_writeup_warning(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     path = scan_dir / "findings.json"
     document = json.loads(path.read_text())
     document["findings"][0]["writeup"] = {"reportPath": "findings/missing/missing.md"}
     path.write_text(json.dumps(document))
+
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TRIGGER reject_completion BEFORE UPDATE OF status ON scans "
+            "WHEN NEW.status = 'complete' "
+            "BEGIN SELECT RAISE(ABORT, 'completion commit failed'); END"
+        )
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "completion commit failed" in rejected["stderr"]
+    pending = get_scan(state_dir, scan_id)["scan"]
+    assert pending["progress"]["status"] == "running"
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+    assert "writeup" not in json.loads(path.read_text())["findings"][0]
+    sealed_bytes = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER reject_completion")
 
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
 
@@ -1223,12 +1244,15 @@ def test_completion_preserves_finding_with_missing_optional_writeup(tmp_path: Pa
     finding = json.loads(path.read_text())["findings"][0]
     assert finding["summary"] == document["findings"][0]["summary"]
     assert "writeup" not in finding
-    sealed_bytes = path.read_bytes()
+    assert pending["warnings"] == completed["warnings"]
+    history = run_workbench(state_dir, "list-scans")["scans"]
+    assert history[0]["scanId"] == scan_id
+    assert history[0]["warnings"] == completed["warnings"]
     assert (
         scan_command(state_dir, "complete-scan", scan_id)["scan"]["warnings"]
         == completed["warnings"]
     )
-    assert path.read_bytes() == sealed_bytes
+    assert {name: (scan_dir / name).read_bytes() for name in sealed_bytes} == sealed_bytes
 
 
 def test_valid_checkpoint_survives_rejected_malformed_replacement_finding(tmp_path: Path) -> None:

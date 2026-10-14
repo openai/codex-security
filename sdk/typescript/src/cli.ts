@@ -968,6 +968,7 @@ interface ScanArguments extends ResolvedScanSettings {
   dryRun: boolean;
   parentScanId?: string;
   expectedPluginVersion?: string;
+  includeFailureResults?: boolean;
 }
 
 interface ScanOutcome {
@@ -2300,6 +2301,9 @@ export async function main(
             "SCAN_RESUME_UNAVAILABLE",
           );
         }
+        scanArguments.includeFailureResults =
+          argv.includes("--full-output") &&
+          (format === "json" || format === "jsonl");
         const outcome = await runScan(scanArguments, errorOutput, dependencies);
         return finishScan(outcome, format, incurError);
       },
@@ -2445,6 +2449,9 @@ export async function main(
             "SCAN_REPLAY_UNAVAILABLE",
           );
         }
+        scanArguments.includeFailureResults =
+          argv.includes("--full-output") &&
+          (format === "json" || format === "jsonl");
         const outcome = await runScan(
           scanArguments,
           errorOutput,
@@ -3698,6 +3705,9 @@ export async function main(
               headless: options.headless,
               dryRun: options.dryRun,
               mock: options.mock,
+              includeFailureResults:
+                argv.includes("--full-output") &&
+                (format === "json" || format === "jsonl"),
             },
             errorOutput,
             dependencies,
@@ -8009,12 +8019,15 @@ export function skillCommandFailure(
 }
 
 function incurErrorMessage(output: string): string {
-  try {
-    const parsed: unknown = parseYaml(output);
-    if (isJsonObject(parsed) && typeof parsed["message"] === "string")
-      return parsed["message"];
-  } catch {
-    // Output that is not YAML or JSON uses the line scan.
+  // YAML folds long strings across lines; JSON output keeps its serialized form.
+  if (!output.startsWith("{")) {
+    try {
+      const parsed: unknown = parseYaml(output);
+      if (isJsonObject(parsed) && typeof parsed["message"] === "string")
+        return parsed["message"];
+    } catch {
+      // Output that is not YAML (for example a Markdown table) uses the line scan.
+    }
   }
   const message = output
     .split("\n")
@@ -8136,7 +8149,8 @@ async function executeScan(
   dependencies: CliDependencies,
   interactive = true,
 ): Promise<ScanOutcome> {
-  let registeredScan: JsonObject | undefined;
+  let registeredScan:
+    Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0] | undefined;
   let scanDir: string | null = null;
   const scanInput = dependencies.scanInput ?? process.stdin;
   let requestedSignal: SignalName | null = null;
@@ -8774,6 +8788,29 @@ async function executeScan(
     removeSignalListeners();
   }
 
+  let failureData: Record<string, unknown> | undefined;
+  if (
+    arguments_.includeFailureResults &&
+    (failed || requestedSignal !== null)
+  ) {
+    if (result !== null) failureData = result.toJSON();
+    else if (registeredScan !== undefined) {
+      try {
+        const contract = await loadContract(registeredScan.scanDir, {
+          pluginRoot: await bundledPluginRoot(),
+          expectedScanId: registeredScan.scanId,
+        });
+        failureData = {
+          ...contract,
+          scanDir: registeredScan.scanDir,
+          reportPath: join(registeredScan.scanDir, "report.md"),
+        };
+      } catch {
+        // Missing or invalid retained artifacts must not replace the execution error.
+      }
+    }
+  }
+
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
@@ -8783,6 +8820,7 @@ async function executeScan(
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
       exitCode,
+      data: failureData,
       error:
         requestedSignal === "SIGINT"
           ? "Scan canceled by Ctrl-C."
@@ -8818,7 +8856,7 @@ async function executeScan(
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
       printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
-      return { exitCode: 2, error: message };
+      return { exitCode: 2, error: message, data: failureData };
     }
     if (scanDir !== null) {
       errorOutput.write(
@@ -8826,7 +8864,7 @@ async function executeScan(
       );
     }
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
-    return { exitCode: 2, error: message };
+    return { exitCode: 2, error: message, data: failureData };
   }
   if (preflight !== null) {
     const effectivePreflight: ScanPreflight = {

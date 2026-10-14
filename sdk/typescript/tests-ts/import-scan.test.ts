@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
+import { parseImportedFindings } from "../src/findings-import.js";
 import { importScan, type ImportScanOptions } from "../src/import-scan.js";
 import type { FindingsDocument } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
@@ -541,6 +542,45 @@ test("reimporting the retained source preserves finding identities with new scan
     (await storedScans(context)).map((scan) => scan.occurrence_count),
   ).toEqual([2, 2]);
 });
+
+for (const dryRun of [false, true]) {
+  test.each([
+    ["root_cause", "Legacy root cause detail."],
+    ["code_evidence", [{ id: "legacy-source", code: "extract(entry)" }]],
+  ] as const)(
+    `rejects legacy %s before import persistence (dryRun: ${dryRun})`,
+    async (field, detail) => {
+      const context = await fixture("json");
+      const document = JSON.parse(context.source) as FindingsDocument;
+      Object.assign(document.findings[0]!, { [field]: detail });
+      const source = JSON.stringify(document);
+      await writeFile(context.options.sourcePath, source);
+      // Historical report readers still accept the supplied artifact.
+      expect(
+        await parseImportedFindings(source, "json", PLUGIN_ROOT),
+      ).toHaveLength(2);
+      const persist = mock(runWorkbench);
+      const resolvePython = mock(context.dependencies.resolvePluginPython);
+      const outputDir = join(context.root, "output");
+      await expect(
+        importScan(
+          { ...context.options, dryRun, outputDir },
+          {
+            ...context.dependencies,
+            runWorkbench: persist,
+            resolvePluginPython: resolvePython,
+          },
+        ),
+      ).rejects.toThrow("current scan-draft finding schema");
+      expect(persist).not.toHaveBeenCalled();
+      expect(resolvePython).not.toHaveBeenCalled();
+      for (const directory of [context.stateDirectory, outputDir]) {
+        await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+      expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
+    },
+  );
+}
 
 test("dry run validates source rows without creating database state or invoking the workbench", async () => {
   const context = await fixture();
