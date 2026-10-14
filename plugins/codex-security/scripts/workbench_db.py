@@ -1516,7 +1516,6 @@ def complete_scan_locked(
     merge_parent_draft = (
         scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
     )
-    missing_writeup_warnings: list[str] | None = [] if scan["mode"] == "deep" else None
     wrote = False
     try:
         with (
@@ -1553,16 +1552,16 @@ def complete_scan_locked(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
-                missing_writeup_warnings=missing_writeup_warnings,
+                recover_unsealed=scan["mode"] != "deep",
+                allow_missing_writeups=scan["mode"] == "deep",
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
+        if scan["mode"] != "deep":
+            warnings.extend(prepared.warnings)
         add_warning()
-        if missing_writeup_warnings:
-            warnings.extend(
-                warning for warning in missing_writeup_warnings if warning not in warnings
-            )
+        if scan["mode"] == "deep" and prepared.warnings:
+            warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
             # Save the explanation before publication removes the broken reference,
             # so a retry after an output-write failure retains it.
             with connection:
