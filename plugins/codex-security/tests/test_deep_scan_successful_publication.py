@@ -391,6 +391,12 @@ def test_deep_completion_preserves_findings_with_missing_optional_writeups(
         (scan.scan_dir / missing_path).parent.mkdir()
     missing["writeup"] = {"reportPath": missing_path}
     scan.findings.append(missing)
+    if scope != ".":
+        excluded = copy.deepcopy(missing)
+        excluded["identity"]["anchor"] = "excluded-writeup"
+        excluded["locations"] = [{"path": "unrelated/extract.py", "startLine": 1}]
+        excluded["writeup"] = {"reportPath": "findings/excluded/excluded.md"}
+        scan.findings.insert(0, excluded)
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
     original_files = {valid_file: valid_file.read_bytes()}
     for kind in ("discovery", "dedup"):
@@ -416,6 +422,9 @@ def test_deep_completion_preserves_findings_with_missing_optional_writeups(
     assert len(completed["warnings"]) == 1
     assert completed["warnings"] == prepared["warnings"]
     assert completed["warnings"][0].startswith("Skipped missing writeup for finding 2:")
+    assert "findings[1].writeup.reportPath" in completed["warnings"][0]
+    if scope != ".":
+        scan.findings.pop(0)
     missing.pop("writeup")
     assert_published_aggregate(scan)
     assert {path: path.read_bytes() for path in original_files} == original_files
@@ -426,6 +435,30 @@ def test_deep_completion_preserves_findings_with_missing_optional_writeups(
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["status"] == "completed"
     assert manifest["scan"]["sealedAt"]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("invalid", ["unsafe-path", "directory"])
+def test_deep_scope_filter_does_not_hide_invalid_writeups(
+    workbench_api, workbench_db, publication_scan, invalid
+):
+    scan = publication_scan(scope="subdir")
+    finding = scan.findings[0]
+    finding["locations"] = [{"path": "unrelated/extract.py", "startLine": 1}]
+    report_path = "findings/invalid/invalid.md"
+    if invalid == "unsafe-path":
+        report_path = "../invalid.md"
+    else:
+        (scan.scan_dir / report_path).mkdir(parents=True)
+    finding["writeup"] = {"reportPath": report_path}
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
+
+    with pytest.raises(SystemExit, match="reportPath|regular non-symlink file"):
+        complete(workbench_api, workbench_db, scan)
+    assert (
+        workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
+        != "complete"
+    )
 
 
 @pytest.mark.cross_platform

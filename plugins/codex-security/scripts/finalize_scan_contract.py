@@ -3035,33 +3035,40 @@ def _prepare_scan_finalization(
     _validate_canonical_schemas_before_projection(
         manifest, findings_for_validation, coverage, schema_dir
     )
-    _require_derived_writeup_files(
-        scan_dir,
-        findings,
-        missing_writeup_warnings=missing_writeup_warnings if not was_sealed else None,
-    )
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent
         # projection is scoped, after the existing validation of every finding.
-        scoped_findings = [
-            finding
-            for finding in findings["findings"]
-            if any(
+        scoped_findings = []
+        excluded_findings = []
+        for finding in findings["findings"]:
+            in_scope = any(
                 PurePosixPath(location["path"]) == PurePosixPath(path)
                 if is_file
                 else path_within_scope(location["path"], path)
                 for location in finding["locations"]
                 for path, is_file in finding_scope
             )
-        ]
+            (scoped_findings if in_scope else excluded_findings).append(finding)
         if was_sealed and len(scoped_findings) != len(findings["findings"]):
             raise ContractError(
                 "The sealed Deep scan contains findings outside its requested paths; "
                 "start a new scan to produce scoped results."
             )
         if not was_sealed:
+            # Excluded findings still require safe writeups, but missing optional
+            # links should only produce warnings for findings in the final report.
+            _require_derived_writeup_files(
+                scan_dir,
+                {"findings": excluded_findings},
+                missing_writeup_warnings=[] if missing_writeup_warnings is not None else None,
+            )
             findings["findings"] = scoped_findings
+    _require_derived_writeup_files(
+        scan_dir,
+        findings,
+        missing_writeup_warnings=missing_writeup_warnings if not was_sealed else None,
+    )
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)

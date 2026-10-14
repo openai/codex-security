@@ -672,6 +672,11 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
 
+        with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
+            FINALIZER._prepare_scan_finalization(
+                self.scan_dir, finding_scope=[("unrelated", False)]
+            )
+
         writeup_path = self.scan_dir / report_path
         writeup_path.parent.mkdir(parents=True)
         writeup_path.mkdir()
