@@ -1049,13 +1049,25 @@ test.each([
                   expect(prompt).toContain(
                     "Keep the original scan instructions.",
                   );
-                  const deep = await readFile(
-                    join(f.codexHome, "codex-security", "config.toml"),
-                    "utf8",
+                  const deepConfigPath =
+                    options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+                  expect(deepConfigPath).toBe(
+                    preparedRuntime(f.codexHome).deepScanConfigPath,
                   );
-                  expect(deep).toContain("subagents = 0");
-                  expect(deep).toContain("stop_after_consecutive_errors = 2");
-                  expect(deep).toContain("max_time_hours = 1.5");
+                  const deep = parseToml(
+                    await readFile(deepConfigPath!, "utf8"),
+                  );
+                  expect(deep).toMatchObject({
+                    deep_scan: {
+                      workers: 2,
+                      subagents: 0,
+                      stop_after_no_new: 6,
+                      stop_after_consecutive_errors: 2,
+                      max_discovery_runs: 5,
+                      max_time_hours: 1.5,
+                    },
+                    worker_runtime: { features: { goals: false } },
+                  });
                   const workerConfigPath =
                     options.env?.["CODEX_SECURITY_CONFIG_PATH"];
                   expect(workerConfigPath).toBe(

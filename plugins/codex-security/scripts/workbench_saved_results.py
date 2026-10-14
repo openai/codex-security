@@ -2021,8 +2021,8 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return prepared.coverage
 
 
-def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
-    snapshots: dict[str, bytes | None] = {}
+def _snapshot_published_outputs(scan_dir: Path) -> dict[str, tuple[bytes, os.stat_result] | None]:
+    snapshots: dict[str, tuple[bytes, os.stat_result] | None] = {}
     for relative in _PUBLISHED_OUTPUTS:
         descriptor = -1
         try:
@@ -2031,7 +2031,8 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
             )
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = -1
-                snapshots[relative] = handle.read()
+                metadata = os.fstat(handle.fileno())
+                snapshots[relative] = (handle.read(), metadata)
         except ContractError:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
@@ -2046,14 +2047,19 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
     return snapshots
 
 
-def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None]) -> None:
-    for relative, contents in snapshots.items():
-        if contents is None:
+def _restore_published_outputs(
+    scan_dir: Path, snapshots: dict[str, tuple[bytes, os.stat_result] | None]
+) -> None:
+    for relative, snapshot in snapshots.items():
+        if snapshot is None:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
                 _remove_scan_local_file_if_exists(scan_dir, relative)
         else:
+            contents, metadata = snapshot
             write_scan_local_bytes(scan_dir, relative, contents)
+            # Saved-result selection uses mtime; rollback must preserve its ordering.
+            os.utime(scan_dir / relative, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
 
 
 @contextmanager

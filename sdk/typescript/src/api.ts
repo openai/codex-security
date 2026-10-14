@@ -296,7 +296,6 @@ interface PreparedSession {
   authentication: ScanAuthentication;
   approvalPolicy: "never" | "on-request";
   python: string;
-  releaseCredentialHome: (() => Promise<void>) | null;
 }
 
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
@@ -1237,8 +1236,6 @@ export class CodexSecurity {
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let deepProgressTracker: DeepScanProgressTracker | null = null;
-    let releaseCredentialHome: (() => Promise<void>) | null = null;
-    let scanFailure = false;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
@@ -1346,7 +1343,6 @@ export class CodexSecurity {
         approvalPolicy,
         python,
       } = session;
-      releaseCredentialHome = session.releaseCredentialHome;
       let git: InspectedExecutable = {
         executable: null,
         environment: selectedScanEnvironment(
@@ -2429,9 +2425,6 @@ export class CodexSecurity {
       }
       return result;
     } catch (error) {
-      // Recorded first: everything below can throw a different error for this same failed
-      // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
-      scanFailure = true;
       const snapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       let failure =
@@ -2513,7 +2506,6 @@ export class CodexSecurity {
                 : undefined,
             );
           }
-          scanFailure = false;
           return result;
         } catch {}
       }
@@ -2566,11 +2558,7 @@ export class CodexSecurity {
     } finally {
       budgetAbortController.abort();
       deepProgressTracker?.stop();
-      // Removing the temporary scan inputs is best effort. A throw here would replace the
-      // outcome the try and catch blocks already produced, so these failures are reported
-      // as warnings: a scan that failed has to say why it failed, not why its temporary
-      // files outlived it. The whole step is guarded so that a cleanup which rejects, or
-      // throws synchronously, still cannot skip a pending startup-lock release below.
+      // Temporary-input cleanup must not replace the scan's outcome.
       try {
         for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
@@ -2582,15 +2570,6 @@ export class CodexSecurity {
         }
       } catch (error) {
         warnCleanupFailed(options, error);
-      } finally {
-        // Release any remaining startup lock, but preserve the scan's error if both
-        // the scan and lock cleanup fail.
-        try {
-          await releaseCredentialHome?.();
-        } catch (error) {
-          if (!scanFailure) throw error;
-          warnCleanupFailed(options, error);
-        }
       }
     }
   }
@@ -3063,10 +3042,8 @@ export class CodexSecurity {
           ? "stored_credentials"
           : null;
       }
-      if (!deepScan || runtime.deepScanConfigPath !== undefined) {
-        await releaseCredentialHome?.();
-        releaseCredentialHome = null;
-      }
+      await releaseCredentialHome?.();
+      releaseCredentialHome = null;
       if (externalProvider === null && apiKey !== null) {
         this.#runtimeCredentialSource = "api_key";
       }
@@ -3135,7 +3112,6 @@ export class CodexSecurity {
         authentication,
         approvalPolicy,
         python,
-        releaseCredentialHome,
       };
     } catch (error) {
       try {

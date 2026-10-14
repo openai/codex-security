@@ -1206,6 +1206,31 @@ def test_stopped_recovery_preserves_findings_with_invalid_or_duplicate_writeups(
     assert (scan_dir / "report.md").is_file()
 
 
+@pytest.mark.cross_platform
+def test_completion_preserves_finding_with_missing_optional_writeup(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    document["findings"][0]["writeup"] = {"reportPath": "findings/missing/missing.md"}
+    path.write_text(json.dumps(document))
+
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    assert len(completed["warnings"]) == 1
+    assert completed["warnings"][0].startswith("Skipped missing writeup for finding 1:")
+    finding = json.loads(path.read_text())["findings"][0]
+    assert finding["summary"] == document["findings"][0]["summary"]
+    assert "writeup" not in finding
+    sealed_bytes = path.read_bytes()
+    assert (
+        scan_command(state_dir, "complete-scan", scan_id)["scan"]["warnings"]
+        == completed["warnings"]
+    )
+    assert path.read_bytes() == sealed_bytes
+
+
 def test_valid_checkpoint_survives_rejected_malformed_replacement_finding(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     findings = json.loads((scan_dir / "findings.json").read_text())

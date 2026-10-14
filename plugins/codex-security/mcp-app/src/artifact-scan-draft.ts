@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type * as z from "zod/v4";
+import * as z from "zod/v4";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
@@ -22,6 +22,10 @@ const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
   draftDefinitions.scanDraftInput,
 );
+// File-authored scan IDs are host-owned; their finding fields use the same contract.
+const fileScanDraftInputSchema = scanDraftInputSchema.extend({
+  scanId: z.string().min(1),
+});
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
 export type ScanDraftInput = z.infer<typeof scanDraftInputSchema>;
 type DraftCoverage = ScanDraftInput["coverage"];
@@ -1813,7 +1817,7 @@ function parseCanonicalCheckpoint(
 }
 
 export function parseScanDraft(input: unknown): ScanDraftInput {
-  const parsed = parseSemanticScanDraft(input);
+  const parsed = parsePersistedScanDraft(input);
   const deferredIds = new Set<string>();
   const ambiguousIds = ambiguousGenericDeferredIds([parsed]);
   for (const row of parsed.coverage.deferred) {
@@ -1831,18 +1835,15 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   return parsed;
 }
 
-function parseSemanticScanDraft(input: unknown): ScanDraftInput {
-  const parsed = scanDraftInputSchema.parse(input);
+/** Validate current draft fields without assigning workbench-owned identities. */
+export function parsePersistedScanDraft(
+  input: unknown,
+  schema: z.ZodType<ScanDraftInput> = scanDraftInputSchema,
+): ScanDraftInput {
+  const parsed = schema.parse(input);
   validateFindingSemantics(parsed.findings);
   delete parsed.coverage.completeness;
   return parsed;
-}
-
-/** Persisted worker outputs use the same current finding contract as live drafts. */
-export function parsePersistedScanDraft(
-  input: Record<string, unknown>,
-): ScanDraftInput {
-  return parseSemanticScanDraft(input);
 }
 
 function parsePersistedCheckpoint(
@@ -1875,7 +1876,7 @@ function parsePersistedCheckpoint(
       delete finding.fingerprints;
     }
   }
-  return parseSemanticScanDraft(compatible);
+  return parsePersistedScanDraft(compatible, fileScanDraftInputSchema);
 }
 
 function requireBoundScan(

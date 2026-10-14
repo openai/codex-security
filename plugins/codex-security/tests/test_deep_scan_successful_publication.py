@@ -208,11 +208,7 @@ def test_publication_renders_each_source_remediation(
     sources = [first, second, third, fourth]
     finding["remediation"] = first["remediation"]
     finding["remediationTests"] = first["remediationTests"]
-    if mode == "standard":
-        # Standard completion itself consolidates these duplicate logical findings.
-        scan.findings[:] = sources
-        finding = first
-    elif mode == "deep-nested":
+    if mode == "deep-nested":
         nested = copy.deepcopy(second)
         nested["provenance"]["previousFindings"] = [third]
         nested["provenance"]["sourceFindings"] = [{"id": "review-4:0", "finding": fourth}]
@@ -236,23 +232,7 @@ def test_publication_renders_each_source_remediation(
     completed = complete(workbench_api, workbench_db, scan)
 
     assert completed["progress"]["status"] == "complete"
-    if mode == "standard":
-        published = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-        assert len(published) == 1
-        canonical = published[0]
-        assert "sourceFindings" not in canonical["provenance"]
-        retained = [canonical, *canonical["provenance"].pop("previousFindings")]
-        for source in retained:
-            for field in ("findingId", "occurrenceId", "fingerprints"):
-                value = source.pop(field)
-                assert value
-        assert retained == sources
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        for field in ("documentType", "schemaVersion", "scanId"):
-            coverage.pop(field)
-        assert coverage == scan.coverage
-    else:
-        assert_published_aggregate(scan)
+    assert_published_aggregate(scan)
     report = (scan.scan_dir / "report.md").read_text()
     if linked_writeup:
         assert "findings/archive/archive.md" in report
@@ -470,11 +450,11 @@ def test_missing_deep_writeup_does_not_enable_general_recovery(
     if invalid == "finding":
         scan.findings[0]["severity"]["level"] = "invalid"
     else:
-        scan.coverage["completeness"] = "invalid"
+        scan.coverage["surfaces"] = "invalid"
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
 
-    with pytest.raises(SystemExit, match="severity|completeness"):
+    with pytest.raises(SystemExit, match="severity|surfaces"):
         complete(workbench_api, workbench_db, scan)
     assert (
         workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]

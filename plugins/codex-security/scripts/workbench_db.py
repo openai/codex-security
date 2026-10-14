@@ -1552,7 +1552,7 @@ def complete_scan_locked(
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
                 recover_unsealed=scan["mode"] != "deep",
-                allow_missing_writeups=scan["mode"] == "deep",
+                allow_missing_writeups=True,
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )

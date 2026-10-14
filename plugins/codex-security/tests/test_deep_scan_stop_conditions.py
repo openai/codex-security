@@ -160,11 +160,19 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
     workbench_api, workbench_db, publication_scan, existing_head
 ):
     scan = publication_scan()
+    canonical_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    for name in canonical_names:
+        os.utime(scan.scan_dir / name, ns=(1_000_000_000, 1_000_000_000))
+    pending = {"id": "authorization-review", "reason": "Review the remaining authorization path."}
     if existing_head:
-        checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", saved_draft(scan.scan_id))
+        checkpoint = write_checkpoint(
+            scan.scan_dir / "checkpoints",
+            saved_draft(scan.scan_id, findings=scan.findings, deferred=[pending]),
+        )
         head = scan.scan_dir / "checkpoint-head.json"
         head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(100, 100))
+        for path in (checkpoint, head):
+            os.utime(path, ns=(2_000_000_000, 2_000_000_000))
     saved = workbench_api["saved_results"]
 
     def observations():
@@ -179,8 +187,8 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
 
     before = observations()
     artifacts = {
-        name: (scan.scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        name: ((scan.scan_dir / name).read_bytes(), (scan.scan_dir / name).stat().st_mtime_ns)
+        for name in canonical_names
     }
     with workbench_db:
         workbench_db.execute(
@@ -197,7 +205,10 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
         finish(workbench_api, workbench_db, scan, terminal_reason="capped")
 
     assert observations() == before
-    assert {name: (scan.scan_dir / name).read_bytes() for name in artifacts} == artifacts
+    assert {
+        name: ((scan.scan_dir / name).read_bytes(), (scan.scan_dir / name).stat().st_mtime_ns)
+        for name in artifacts
+    } == artifacts
     assert (
         workbench_db.execute(
             "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
@@ -209,3 +220,6 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
     assert (
         finish(workbench_api, workbench_db, scan, terminal_reason="capped")["status"] == "succeeded"
     )
+    if existing_head:
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        assert any(item["reason"] == pending["reason"] for item in coverage["deferred"])

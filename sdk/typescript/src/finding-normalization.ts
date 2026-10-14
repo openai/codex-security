@@ -1,4 +1,3 @@
-/* Generated from plugin finding-normalization.ts. Run `pnpm generate:models`. */
 import { isRecord as isObject } from "./record.js";
 
 type JsonObject = Record<string, unknown>;
