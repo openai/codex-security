@@ -668,16 +668,23 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
   const apiRoot = `https://api.github.com/repos/${repository}/`;
   async function responseFor(method, path, body) {
     for (let retry = 0; ; retry += 1) {
-      const response = await fetcher(`${apiRoot}${path}`, {
-        method,
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "X-GitHub-Api-Version": "2026-03-10",
-          "Content-Type": "application/json",
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
+      let response;
+      try {
+        response = await fetcher(`${apiRoot}${path}`, {
+          method,
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${token}`,
+            "X-GitHub-Api-Version": "2026-03-10",
+            "Content-Type": "application/json",
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      } catch (error) {
+        if (method !== "GET" || retry >= 2) throw error;
+        await delay(1000 * 2 ** retry);
+        continue;
+      }
       if (response.ok) return response;
       if (
         method === "GET" &&
