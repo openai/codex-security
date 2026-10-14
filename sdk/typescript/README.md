@@ -417,10 +417,10 @@ await writeFile("/path/to/reports/assessment.md", result.report, "utf8");
 Pass finding text or a JSON-serializable object, not a file path. Standalone
 validation uses source evidence in a read-only, offline session. It does not build
 the target, execute application code, run tests or PoCs, or add a scan to history.
-The assessment is returned directly; the validator creates no reports or runtime
-artifacts. The example saves `result.report` in a caller-owned, existing directory.
-`outputDir` selects the session directory, not a report destination. Callers that
-previously read report files from it must retain the returned assessment themselves.
+The validator returns the assessment without writing report files. The example
+saves `result.report` in an existing directory. `outputDir` selects the session
+directory, not a report destination. Callers that previously read reports from it
+must save `result.report` instead.
 Callers needing runtime proof must arrange a separate reproduction step. Standard,
 Deep, and diff scan validation keep their existing workflows.
 

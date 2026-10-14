@@ -1526,7 +1526,7 @@ The token needs code-scanning read access; access failures reject the import.
 
 `validate` assesses candidates from local source evidence without building the
 target, executing application code, running tests or PoCs, or contacting services.
-It uses a read-only sandbox. Standard and Deep scans retain their existing
+It uses a read-only sandbox. Standard, Deep, and diff scans retain their existing
 validation, and `patch` still fixes and verifies findings. Both commands accept files
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
@@ -1561,17 +1561,14 @@ or a schema mismatch fails with exit code 2 and no assessment on stdout.
 
 Use a self-contained schema in the subset supported by the selected Codex model
 and provider. The local checker uses JSON Schema 2020-12, but accepting a schema
-locally does not establish provider support. Keep the schema small and use it only
+locally does not guarantee provider support. Keep the schema small and use it only
 when the caller needs structured results. It checks the result's shape, not whether
 the security conclusion is correct. Relative paths resolve from the current directory.
 
-Standalone validation is useful when callers need source assessment without
-application setup. It no longer attempts runtime reproduction or writes report
-artifacts. Save the returned assessment yourself, for example:
-`codex-security validate findings.json > assessment.md`. Callers needing runtime
-proof must arrange a separate reproduction step; Standard, Deep, and diff scan
-validation keep their existing workflows. Missing facts are reported as proof gaps,
-and a source-supported finding does not require runtime reproduction.
+The validator no longer writes reports. Save the assessment by redirecting stdout:
+`codex-security validate findings.json > assessment.md`. For runtime proof, run a
+separate reproduction step. Missing facts are reported as proof gaps; a finding
+supported by source evidence does not require runtime reproduction.
 
 ### Structured validation example
 

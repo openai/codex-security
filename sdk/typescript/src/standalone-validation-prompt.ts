@@ -10,7 +10,7 @@ export async function standaloneValidationPrompt(
     ),
   );
   return [
-    "Use the standalone validation instructions and static assessment reference below. They are provided in full; do not reread them or load other workflow skills.",
+    "Follow the standalone validation instructions and static assessment reference included below. Do not reload these instruction files or load scan workflow skills. Read repository files and supplied context as needed for the assessment.",
     ...instructions,
   ].join("\n\n");
 }

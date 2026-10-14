@@ -7630,7 +7630,7 @@ async function runSkill(
       ? [await standaloneValidationPrompt(plugin)]
       : verify
         ? [
-            "Use the bundled $codex-security:verify-fix skill. Its complete instructions and shared assessment reference are provided below; do not reread either file.",
+            "Follow the bundled $codex-security:verify-fix instructions and shared assessment reference included below. Do not reload these instruction files.",
             await readFile(
               join(plugin, "skills", "verify-fix", "SKILL.md"),
               "utf8",
@@ -7665,9 +7665,7 @@ async function runSkill(
         ]),
     ...(schemaPath === undefined
       ? []
-      : [
-          "Return only JSON matching the supplied output schema. Preserve supplied finding identifiers and account for every candidate, including unresolved and rejected claims.",
-        ]),
+      : ["Return only JSON matching the supplied output schema."]),
     ...(options.findingInstructions === undefined
       ? []
       : [
@@ -7686,7 +7684,7 @@ async function runSkill(
   ].join("\n");
   if (assess) {
     prompt = [
-      "Use the bundled $codex-security:assess-patch-risk skill. Its complete instructions and rubric are provided below; do not reread either file.",
+      "Follow the bundled $codex-security:assess-patch-risk instructions and rubric included below. Do not reload these instruction files.",
       await readFile(join(plugin, "skills", skill, "SKILL.md"), "utf8"),
       "Risk rubric:",
       await readFile(
