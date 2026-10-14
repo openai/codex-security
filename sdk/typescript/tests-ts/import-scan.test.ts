@@ -543,16 +543,33 @@ test("reimporting the retained source preserves finding identities with new scan
   ).toEqual([2, 2]);
 });
 
+const evidence = {
+  id: "source",
+  label: "Imported source",
+  path: "src/extract.ts",
+  startLine: 41,
+  code: "extract(entry)",
+  explanation: "The entry reaches archive extraction.",
+};
 for (const dryRun of [false, true]) {
   test.each([
-    ["root_cause", "Legacy root cause detail."],
-    ["code_evidence", [{ id: "legacy-source", code: "extract(entry)" }]],
+    ["legacy root cause", { root_cause: "Legacy root cause detail." }],
+    [
+      "dangling evidence reference",
+      {
+        rootCause: {
+          summary: "Archive entry extraction.",
+          evidenceRefs: ["missing"],
+        },
+      },
+    ],
+    ["duplicate evidence ID", { codeEvidence: [evidence, evidence] }],
   ] as const)(
-    `rejects legacy %s before import persistence (dryRun: ${dryRun})`,
-    async (field, detail) => {
+    `rejects %s before import persistence (dryRun: ${dryRun})`,
+    async (_name, details) => {
       const context = await fixture("json");
       const document = JSON.parse(context.source) as FindingsDocument;
-      Object.assign(document.findings[0]!, { [field]: detail });
+      Object.assign(document.findings[0]!, details);
       const source = JSON.stringify(document);
       await writeFile(context.options.sourcePath, source);
       // Historical report readers still accept the supplied artifact.
@@ -571,7 +588,7 @@ for (const dryRun of [false, true]) {
             resolvePluginPython: resolvePython,
           },
         ),
-      ).rejects.toThrow("current scan-draft finding schema");
+      ).rejects.toThrow("current scan-draft finding");
       expect(persist).not.toHaveBeenCalled();
       expect(resolvePython).not.toHaveBeenCalled();
       for (const directory of [context.stateDirectory, outputDir]) {

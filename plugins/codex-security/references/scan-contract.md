@@ -187,7 +187,7 @@ These fields are optional for compatibility with existing v1 canonical artifacts
 
 ## Schemas
 
-New completed findings must match `schemas/tools/scan-draft.schema.json` before host-owned IDs are stamped. Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
+New completed findings must match `schemas/tools/scan-draft.schema.json`. Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
 
 - `schemas/scan-manifest.schema.json`
 - `schemas/findings.schema.json`

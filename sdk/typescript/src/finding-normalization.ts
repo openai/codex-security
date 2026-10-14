@@ -5,17 +5,12 @@ type JsonObject = Record<string, unknown>;
 /** Compatibility for historical report reads; never use this to admit new writes. */
 export function normalizePersistedFindingDetails(finding: JsonObject): void {
   if (Array.isArray(finding["code_evidence"])) {
-    const compatibleEvidence: JsonObject[] = [];
-    for (const evidence of finding["code_evidence"]) {
-      if (!isObject(evidence)) continue;
-      const id = evidence["id"];
-      const code = evidence["code"];
-      if (!isNonEmptyString(id) || !isNonEmptyString(code)) {
-        continue;
-      }
-      compatibleEvidence.push(evidence);
-    }
-    finding["code_evidence"] = compatibleEvidence;
+    finding["code_evidence"] = finding["code_evidence"].filter(
+      (evidence) =>
+        isObject(evidence) &&
+        isNonEmptyString(evidence["id"]) &&
+        isNonEmptyString(evidence["code"]),
+    );
   } else if (finding["code_evidence"] !== null) {
     delete finding["code_evidence"];
   }
@@ -118,13 +113,10 @@ export function normalizePersistedFindingDetails(finding: JsonObject): void {
   ): void {
     for (const field of fields) {
       const value = section[field];
-      if (field === "evidence" && isNonEmptyString(value)) continue;
-      const normalized = isNonEmptyString(value)
-        ? [value]
-        : Array.isArray(value)
-          ? value.filter(isNonEmptyString)
-          : undefined;
-      if (normalized !== undefined) section[field] = normalized;
+      if (isNonEmptyString(value)) {
+        if (field !== "evidence") section[field] = [value];
+      } else if (Array.isArray(value))
+        section[field] = value.filter(isNonEmptyString);
       else delete section[field];
     }
   }

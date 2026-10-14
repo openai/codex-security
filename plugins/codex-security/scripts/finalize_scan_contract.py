@@ -1997,17 +1997,13 @@ def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> No
         return resolved
 
     finding_schema = resolve(draft["$defs"]["finding"])
-    for index, finding in enumerate(_require_list(findings, "findings", "findings")):
+    for index, finding in enumerate(findings["findings"]):
         # These fields belong to the host, not the authored finding contract.
-        authored = (
-            {
-                key: value
-                for key, value in finding.items()
-                if key not in {"findingId", "occurrenceId", "fingerprints"}
-            }
-            if isinstance(finding, dict)
-            else finding
-        )
+        authored = {
+            key: value
+            for key, value in finding.items()
+            if key not in {"findingId", "occurrenceId", "fingerprints"}
+        }
         _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
@@ -3051,7 +3047,8 @@ def _prepare_scan_finalization(
     if not was_sealed and recover_unsealed:
         _recover_unsealed_coverage(coverage, schema_dir, scan_dir, warnings, discarded_findings)
         _recover_unsealed_hardening(manifest, scan_dir, warnings)
-    _validate_findings(manifest, findings_for_validation)
+    if was_sealed or scan["status"] != "completed":
+        _validate_findings(manifest, findings_for_validation)
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)

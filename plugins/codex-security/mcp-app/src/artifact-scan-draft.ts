@@ -1835,6 +1835,14 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   return parsed;
 }
 
+export function parseCurrentFindings(
+  input: unknown,
+): ScanDraftInput["findings"] {
+  const findings = draftDefinitions.finding.array().parse(input);
+  validateFindingSemantics(findings);
+  return findings;
+}
+
 /** Validate current draft fields without assigning workbench-owned identities. */
 export function parsePersistedScanDraft(
   input: unknown,
@@ -2244,7 +2252,7 @@ function inventoryStrategy(
   return "repository";
 }
 
-function validateFindingSemantics(findings: JsonObject[]): void {
+export function validateFindingSemantics(findings: JsonObject[]): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity as JsonObject;
     if (

@@ -8854,11 +8854,7 @@ async function executeScan(
           : formatScanCost(costLimitFailure.cost),
     });
     errorOutput.write(`${message}\n`);
-    if (failure instanceof ScanInterruptedError) {
-      printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
-      return { exitCode: 2, error: message, data: failureData };
-    }
-    if (scanDir !== null) {
+    if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
       errorOutput.write(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );

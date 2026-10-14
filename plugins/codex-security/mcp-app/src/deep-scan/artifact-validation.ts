@@ -1,12 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
 import { dirname, relative, sep } from "node:path";
 import type { JsonObject } from "../types.js";
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
+import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
 import {
   parsePersistedScanDraft,
-  parseScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
+  validateFindingSemantics,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import {
@@ -17,6 +19,9 @@ import {
 import type { DeepScanArtifacts } from "./artifacts.js";
 
 export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
+);
 
 export interface DeepReductionSources {
   discoveries: { workerId: string; result: DeepReductionInput }[];
@@ -77,25 +82,9 @@ export function aggregateDiscoveryCoverage(
   return coverage;
 }
 
-/**
- * Check reducer findings with the Standard scan validator.
- * It requires coverage, so add an empty value and remove it after validation.
- */
-export function parseDeepReduction(
-  input: Record<string, unknown>,
-  persisted = false,
-): DeepReductionInput {
-  const standard = {
-    ...input,
-    coverage: {
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
-  };
-  const { coverage: _coverage, ...parsed } = persisted
-    ? parsePersistedScanDraft(standard)
-    : parseScanDraft(standard as unknown as ScanDraftInput);
+export function parseDeepReduction(input: unknown): DeepReductionInput {
+  const parsed = deepReductionInputSchema.parse(input);
+  validateFindingSemantics(parsed.findings);
   return parsed;
 }
 
@@ -144,7 +133,7 @@ export async function validateReducerArtifacts(
     await readJsonObject(resultPath),
     reducerId,
     expectedScanId,
-    (value) => parseDeepReduction(value, true),
+    parseDeepReduction,
   );
   if (result.complete === false)
     throw new Error(
@@ -158,7 +147,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      (value) => parseDeepReduction(value, true),
+      parseDeepReduction,
     );
   }
 

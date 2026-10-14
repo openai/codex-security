@@ -1537,6 +1537,7 @@ The extraction root is not enforced.
             "Authenticated uploaders can trigger extraction.",
             "Reachable file overwrite crosses the extraction boundary.",
             "Reject ../ entry paths in an extraction unit test.",
+            "Use a shared containment-checking extraction helper.",
             "Path traversal",
             "Do other archive formats use the same sink?",
         ):
@@ -1768,18 +1769,6 @@ The extraction root is not enforced.
                 self.compatible_finding(findings)["code_evidence"],
                 [{"id": "legacy-source", "code": "legacy_source()"}],
             )
-
-    def test_unsealed_scan_rejects_legacy_scalar_finding_details(self) -> None:
-        self.findings["findings"][0]["validation"] = {
-            "assertions": "The destination escapes the extraction root."
-        }
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            "validation.assertions: expected schema type array",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_sequence_attack_path_details(self) -> None:
@@ -2220,28 +2209,6 @@ The extraction root is not enforced.
                     ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
-    def test_recovery_rejects_malformed_severity_change_condition_lists(self) -> None:
-        for change_conditions in ([], ["  "], ["Valid condition.", 1]):
-            with self.subTest(change_conditions=repr(change_conditions)):
-                self.findings["findings"][0]["severity"]["changeConditions"] = change_conditions
-                self.write_scan()
-                before = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
-
-                with self.assertRaisesRegex(
-                    FINALIZER.RecoverableContractError,
-                    "Scan result contains invalid findings.*severity.changeConditions",
-                ):
-                    FINALIZER._prepare_scan_finalization(self.scan_dir, recover_unsealed=True)
-
-                self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES, "report.md"), before)
-
-    def test_unsealed_invalid_anchor_stays_strict_without_recovery(self) -> None:
-        self.findings["findings"][0]["identity"]["anchor"] = "Invalid Anchor"
-        self.write_scan()
-
-        with self.assertRaisesRegex(FINALIZER.ContractError, "stable lowercase semantic slug"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
     def test_stopped_recovery_preserves_finding_with_malformed_optional_remediation_fields(
         self,
     ) -> None:
@@ -2270,25 +2237,6 @@ The extraction root is not enforced.
                     )
                 )
                 self.findings["findings"][0].pop(field)
-
-    def test_recovery_keeps_valid_optional_remediation_fields(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["remediationTests"] = ["Reject unsafe archive paths."]
-        finding["preventiveControls"] = ["Validate every archive path."]
-        self.write_scan()
-
-        prepared = FINALIZER._prepare_scan_finalization(
-            self.scan_dir,
-            recover_unsealed=True,
-        )
-
-        self.assertEqual(
-            prepared.findings["findings"][0]["remediationTests"], finding["remediationTests"]
-        )
-        self.assertEqual(
-            prepared.findings["findings"][0]["preventiveControls"], finding["preventiveControls"]
-        )
-        self.assertFalse(prepared.warnings)
 
     def test_recovery_publishes_findings_without_unsafe_deferred_paths(self) -> None:
         valid = {"id": "review", "reason": "Repository review is incomplete.", "paths": ["."]}

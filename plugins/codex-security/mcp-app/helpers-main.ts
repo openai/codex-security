@@ -1,6 +1,9 @@
 import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
+export {
+  parseCanonicalScanDraft,
+  parseCurrentFindings,
+} from "./src/artifact-scan-draft.js";
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";

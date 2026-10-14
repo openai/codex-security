@@ -365,9 +365,9 @@ high or critical findings. Scope exclusions, skipped files, and follow-up notes
 do not fail a scan or bypass the findings threshold. Execution, target-integrity,
 and required-output failures exit with `2`.
 
-New reports omit `coverage.completeness`. Existing sealed reports remain readable;
-use `manifest.scan.status` and the command exit code to distinguish execution
-failures from findings-policy violations. Legacy completeness values affect neither.
+New reports omit `coverage.completeness`. Use `manifest.scan.status` and the
+command exit code to distinguish execution failures from findings-policy violations.
+Legacy completeness values affect neither.
 Bulk and component summaries report completed and failed scans without an
 `incomplete` count. Component matching errors have status `failed`.
 

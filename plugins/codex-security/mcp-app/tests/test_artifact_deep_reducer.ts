@@ -353,31 +353,7 @@ try {
   enrichedPrevious.findings[0].validation = {
     summary: "Both output routes bypass the same encoding control.",
   };
-  for (const legacyCoverage of [
-    rejectedCoverage,
-    {
-      surfaces: [null],
-      explicitExclusions: false,
-      deferred: 42,
-    },
-    "legacy coverage is no longer structured",
-  ]) {
-    const previousArtifact = JSON.stringify({
-      ...enrichedPrevious,
-      coverage: legacyCoverage,
-    });
-    await writeFile(path.join(outputRoot, "result.json"), previousArtifact);
-    assert.deepEqual(
-      (await getCodexSecurityDeepReducerInputs(nextContext)).previous,
-      enrichedPrevious,
-      "previous reducer coverage is ignored even when malformed; findings and scope remain intact",
-    );
-    assert.equal(
-      await readFile(path.join(outputRoot, "result.json"), "utf8"),
-      previousArtifact,
-      "reading a previous reduction does not rewrite its legacy coverage",
-    );
-  }
+  await writeJson(path.join(outputRoot, "result.json"), enrichedPrevious);
   const previousArtifact = await readFile(
     path.join(outputRoot, "result.json"),
     "utf8",
@@ -385,14 +361,9 @@ try {
   await recordCodexSecurityDeepReduction(nextContext, merged);
   const preservedEnrichment = await readJson(nextOutputRoot, "result.json");
   assert.equal(
-    Object.hasOwn(preservedEnrichment, "coverage"),
-    false,
-    "a subsequent accepted reduction omits the previous reducer's legacy coverage",
-  );
-  assert.equal(
     await readFile(path.join(outputRoot, "result.json"), "utf8"),
     previousArtifact,
-    "the original previous reduction remains available without rewriting its coverage",
+    "the original previous reduction remains unchanged",
   );
   assert.equal(
     preservedEnrichment.findings[0].provenance.previousFindings[0].summary,

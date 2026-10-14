@@ -3763,6 +3763,7 @@ async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus() 
   };
   executor.run = async (request) => {
     const outcome = await run(request);
+    if (request.kind !== "discovery") return outcome;
     const resultPath = path.join(request.artifactContext!.root, "result.json");
     const draft = await readJson(resultPath);
     draft.coverage = {
@@ -3779,15 +3780,13 @@ async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus() 
       ],
       openQuestions: ["Does the deployment enable this path?"],
     };
-    if (request.kind === "discovery") {
-      await mkdir(path.join(request.artifactContext!.root, "artifacts"), {
-        recursive: true,
-      });
-      await writeFile(
-        path.join(request.artifactContext!.root, "artifacts/worker-receipt.md"),
-        "Reviewed query evidence.\n",
-      );
-    }
+    await mkdir(path.join(request.artifactContext!.root, "artifacts"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(request.artifactContext!.root, "artifacts/worker-receipt.md"),
+      "Reviewed query evidence.\n",
+    );
     await writeJson(resultPath, draft);
     return outcome;
   };
