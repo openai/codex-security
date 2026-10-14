@@ -878,7 +878,7 @@ def preserve_parent_head_on_error(scan_dir: Path) -> Iterator[None]:
     }
     try:
         yield
-    except ContractError:
+    except BaseException:
         if previous is None:
             _remove_scan_local_file_if_exists(scan_dir, "checkpoint-head.json")
         else:
@@ -2021,11 +2021,9 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return coverage
 
 
-def _snapshot_published_outputs(
-    scan_dir: Path, additional_paths: tuple[str, ...] = ()
-) -> dict[str, bytes | None]:
+def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
     snapshots: dict[str, bytes | None] = {}
-    for relative in (*_PUBLISHED_OUTPUTS, *additional_paths):
+    for relative in _PUBLISHED_OUTPUTS:
         descriptor = -1
         try:
             descriptor = open_scan_local_file_descriptor(
@@ -2058,64 +2056,64 @@ def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None
             write_scan_local_bytes(scan_dir, relative, contents)
 
 
-def preserve_deep_deadline_draft(
-    db: Any, connection: Any, scan: Any
-) -> tuple[Path, dict[str, bytes | None]]:
+@contextmanager
+def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterator[None]:
     """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    snapshots = _snapshot_published_outputs(scan_dir, ("checkpoint-head.json",))
+    snapshots = _snapshot_published_outputs(scan_dir)
     warnings = json.loads(scan["completion_warnings_json"])
     binding = db.workbench_completion_binding(scan, db.now())
-    try:
-        documents = merge_saved_results(
-            scan_dir,
-            scan["id"],
-            binding,
+    with preserve_parent_head_on_error(scan_dir):
+        try:
+            documents = merge_saved_results(
+                scan_dir,
+                scan["id"],
+                binding,
+                connection.execute(
+                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                    (scan["id"],),
+                ).fetchall(),
+                warnings,
+                stopped=True,
+                reason=(
+                    "The configured discovery time limit elapsed before any source review completed. "
+                    "Saved findings and pending review were preserved without a completed reduction."
+                ),
+            )
+            if documents is None:
+                raise ContractError("Deep Scan deadline has no saved parent draft.")
+            documents[0]["scan"].pop("complete", None)
+            # Reuse stopped-result recovery's per-record validation, scope checks,
+            # source lineage, and receipt validation before admitting this draft.
+            prepared = _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=db.expected_coverage_mode(scan),
+                completion_binding=binding,
+                completion_warnings=warnings,
+                draft_documents=documents,
+            )
+            manifest, findings, coverage = prepared[2:5]
+            manifest["scan"].pop("sealedAt", None)
+            manifest["scan"].pop("artifacts", None)
+            checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
+            contents = _encoded(checkpoint)
+            name = f"{hashlib.sha256(contents).hexdigest()}.json"
+            write_scan_local_bytes(scan_dir, f"checkpoints/{name}", contents)
+            write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
+            for filename, document in (
+                ("findings.json", findings),
+                ("coverage.json", coverage),
+                ("scan-manifest.json", manifest),
+            ):
+                write_scan_local_bytes(scan_dir, filename, _encoded(document))
             connection.execute(
-                "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                (scan["id"],),
-            ).fetchall(),
-            warnings,
-            stopped=True,
-            reason=(
-                "The configured discovery time limit elapsed before any source review completed. "
-                "Saved findings and pending review were preserved without a completed reduction."
-            ),
-        )
-        if documents is None:
-            raise ContractError("Deep Scan deadline has no saved parent draft.")
-        documents[0]["scan"].pop("complete", None)
-        # Reuse stopped-result recovery's per-record validation, scope checks,
-        # source lineage, and receipt validation before admitting this draft.
-        prepared = _prepare_scan_finalization(
-            scan_dir,
-            expected_coverage_mode=db.expected_coverage_mode(scan),
-            completion_binding=binding,
-            completion_warnings=warnings,
-            draft_documents=documents,
-        )
-        manifest, findings, coverage = prepared[2:5]
-        manifest["scan"].pop("sealedAt", None)
-        manifest["scan"].pop("artifacts", None)
-        checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
-        contents = _encoded(checkpoint)
-        name = f"{hashlib.sha256(contents).hexdigest()}.json"
-        write_scan_local_bytes(scan_dir, f"checkpoints/{name}", contents)
-        write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
-        for filename, document in (
-            ("findings.json", findings),
-            ("coverage.json", coverage),
-            ("scan-manifest.json", manifest),
-        ):
-            write_scan_local_bytes(scan_dir, filename, _encoded(document))
-        connection.execute(
-            "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
-            (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
-        )
-    except BaseException:
-        _restore_published_outputs(scan_dir, snapshots)
-        raise
-    return scan_dir, snapshots
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
+            )
+            yield
+        except BaseException:
+            _restore_published_outputs(scan_dir, snapshots)
+            raise
 
 
 def preserve_scan_results_locked(

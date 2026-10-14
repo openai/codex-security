@@ -2522,7 +2522,7 @@ export async function createMarketplace(
     const marketplace = join(codexHome, "sdk-marketplace");
     const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
     await copyPluginTree(root, pluginDestination, signal);
-    const projection = await legacyPluginProjection(pluginDestination, signal);
+    const projection = await pluginRuntimeProjection(pluginDestination, signal);
     for (const [path, file] of projection?.files ?? []) {
       const destination = join(pluginDestination, path);
       await mkdir(dirname(destination), { recursive: true });
@@ -2572,15 +2572,15 @@ async function writeMarketplaceManifest(
   }
 }
 
-type LegacyPluginProjection = {
+type PluginRuntimeProjection = {
   root: string;
   files: Map<string, { contents: Buffer; mode?: number }>;
 };
 
-async function legacyPluginProjection(
+async function pluginRuntimeProjection(
   root: string,
   signal?: AbortSignal,
-): Promise<LegacyPluginProjection | undefined> {
+): Promise<PluginRuntimeProjection | undefined> {
   const path = join(root, ".mcp.json");
   // Keep the source link checks ahead of any configuration read.
   if (!(await lstat(path).catch(nullIfMissingFileError))?.isFile()) return;
@@ -2611,7 +2611,7 @@ async function legacyPluginProjection(
       "CODEX_SECURITY_PLUGIN_ROOT",
     ];
   }
-  const files: LegacyPluginProjection["files"] = new Map();
+  const files: PluginRuntimeProjection["files"] = new Map();
   if (directNode) {
     const args = [...(server["args"] as string[])];
     args[args.findIndex(isLegacyNodeMcpEntry)] =
@@ -2754,7 +2754,7 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const projection = await legacyPluginProjection(root, options.signal).catch(
+  const projection = await pluginRuntimeProjection(root, options.signal).catch(
     (error: unknown) => {
       if (options.signal?.aborted) throw error;
       throw new LocalPluginBootstrapError(errorMessage(error), {
@@ -2930,7 +2930,7 @@ async function pluginContentsMatch(
   destination: string,
   signal?: AbortSignal,
   allowExtraFiles = false,
-  projection?: LegacyPluginProjection,
+  projection?: PluginRuntimeProjection,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 

@@ -2234,7 +2234,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
-      hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
+      hint: "Execution failures in full-output JSON or JSONL use ok: false and keep available scan results under data.",
       mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -2306,7 +2306,7 @@ export async function main(
     .command("rerun", {
       description:
         "Start a new scan using saved settings and current checkout/context files.",
-      hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
+      hint: "Execution failures in full-output JSON or JSONL use ok: false and keep available scan results under data.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3486,7 +3486,7 @@ export async function main(
         "  codex-security scan import --csv findings.csv\n" +
         "  codex-security scan import --json findings.json\n" +
         "Use ./import to scan a repository named import.\n" +
-        "Incomplete JSON/JSONL --full-output returns ok: false and keeps scan results under data.",
+        "Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
