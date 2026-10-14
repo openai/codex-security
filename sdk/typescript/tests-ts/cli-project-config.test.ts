@@ -1260,7 +1260,7 @@ test.each(["yaml", "toon", "json"])(
     const missing = join(
       root,
       "a-directory-name-long-enough-to-make-yaml-fold-the-line",
-      "scan.yaml",
+      "nested\\scan.yaml",
     );
     const { stderr, runCli } = createCliTest(main);
     expect(
@@ -1269,6 +1269,10 @@ test.each(["yaml", "toon", "json"])(
         dependencies({ currentDirectory: root }),
       ),
     ).toBe(2);
-    expect(stderr.text()).toContain(missing);
+    const message =
+      format === "json"
+        ? JSON.parse(stderr.text().replace(/^codex-security: /u, "")).message
+        : stderr.text();
+    expect(message).toContain(missing);
   },
 );

@@ -19,7 +19,7 @@ import struct
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, TextIO
+from typing import Any, NamedTuple, TextIO
 from urllib.parse import quote, urlsplit
 
 # Keep sibling helpers importable when Python starts in isolated mode.
@@ -93,6 +93,10 @@ WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
 
 class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
+
+
+class MissingScanLocalFileError(ContractError):
+    """Raised when a scan-local file or its containing directory is absent."""
 
 
 class RecoverableContractError(ContractError):
@@ -587,6 +591,9 @@ def _open_scan_local_file_with_path(
                 return backend.open_read_fd_with_path(scan_dir, relative_path, context)
             return backend.open_read_fd(scan_dir, relative_path, context), relative_path
         except OSError as exc:
+            # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
+            if exc.errno in {2, 3}:
+                raise MissingScanLocalFileError(str(exc)) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -602,6 +609,10 @@ def _open_scan_local_file_with_path(
                 dir_fd=parent_fd,
             )
         except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise MissingScanLocalFileError(
+                    f"{context}: expected a file inside the scan directory"
+                ) from exc
             if exc.errno == errno.ELOOP:
                 try:
                     link_target = Path(os.readlink(parts[-1], dir_fd=parent_fd))
@@ -647,7 +658,13 @@ def _require_scan_local_file(scan_dir: Path, relative_path: str, context: str) -
     os.close(descriptor)
 
 
-def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> None:
+def _prepare_derived_writeups(
+    scan_dir: Path,
+    findings: dict[str, Any],
+    *,
+    allow_missing: bool = False,
+) -> list[str]:
+    warnings: list[str] = []
     for index, finding in enumerate(findings.get("findings", [])):
         if not isinstance(finding, dict):
             continue
@@ -656,11 +673,18 @@ def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> 
             continue
         report_path = writeup.get("reportPath")
         if isinstance(report_path, str):
-            _require_scan_local_file(
-                scan_dir,
-                report_path,
-                f"findings[{index}].writeup.reportPath",
-            )
+            try:
+                _require_scan_local_file(
+                    scan_dir,
+                    report_path,
+                    f"findings[{index}].writeup.reportPath",
+                )
+            except MissingScanLocalFileError as exc:
+                if not allow_missing:
+                    raise
+                finding.pop("writeup")
+                warnings.append(f"Skipped missing writeup for finding {index + 1}: {exc}.")
+    return warnings
 
 
 def _require_hardening_portfolio_file(scan_dir: Path, scan: dict[str, Any]) -> None:
@@ -2911,15 +2935,15 @@ def _write_sarif_projection_if_possible(
         )
 
 
-PreparedScanFinalization = tuple[
-    Path,
-    Path,
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-    bool,
-    bytes,
-]
+class PreparedScanFinalization(NamedTuple):
+    scan_dir: Path
+    schema_dir: Path
+    manifest: dict[str, Any]
+    findings: dict[str, Any]
+    coverage: dict[str, Any]
+    was_sealed: bool
+    report_markdown_bytes: bytes
+    warnings: list[str]
 
 
 def _prepare_scan_finalization(
@@ -2928,12 +2952,14 @@ def _prepare_scan_finalization(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
-    completion_warnings: list[str] | None = None,
+    recover_unsealed: bool = False,
+    allow_missing_writeups: bool = False,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
-    """Read, populate, and validate a scan without writing any output files."""
+    """Prepare validated documents and warnings without writing any output files."""
 
+    warnings: list[str] = []
     scan_dir = _require_scan_directory(scan_dir)
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
     manifest = (
@@ -2993,14 +3019,12 @@ def _prepare_scan_finalization(
     findings_for_validation = (
         _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
     )
-    if not was_sealed and completion_warnings is not None:
+    if not was_sealed and recover_unsealed:
         discarded_findings = _recover_unsealed_findings(
-            manifest, findings, schema_dir, scan_dir, completion_warnings
+            manifest, findings, schema_dir, scan_dir, warnings
         )
-        _recover_unsealed_coverage(
-            coverage, schema_dir, scan_dir, completion_warnings, discarded_findings
-        )
-        _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
+        _recover_unsealed_coverage(coverage, schema_dir, scan_dir, warnings, discarded_findings)
+        _recover_unsealed_hardening(manifest, scan_dir, warnings)
     elif not was_sealed:
         _populate_unsealed_finding_identities(manifest, findings)
     _validate_findings(manifest, findings_for_validation)
@@ -3010,29 +3034,42 @@ def _prepare_scan_finalization(
     _validate_canonical_schemas_before_projection(
         manifest, findings_for_validation, coverage, schema_dir
     )
-    _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent
         # projection is scoped, after the existing validation of every finding.
-        scoped_findings = [
-            finding
-            for finding in findings["findings"]
-            if any(
+        scoped_findings = []
+        excluded_findings = []
+        for finding in findings["findings"]:
+            in_scope = any(
                 PurePosixPath(location["path"]) == PurePosixPath(path)
                 if is_file
                 else path_within_scope(location["path"], path)
                 for location in finding["locations"]
                 for path, is_file in finding_scope
             )
-        ]
+            (scoped_findings if in_scope else excluded_findings).append(finding)
         if was_sealed and len(scoped_findings) != len(findings["findings"]):
             raise ContractError(
                 "The sealed Deep scan contains findings outside its requested paths; "
                 "start a new scan to produce scoped results."
             )
         if not was_sealed:
+            # Excluded findings still require safe writeups, but missing optional
+            # links should only produce warnings for findings in the final report.
+            _prepare_derived_writeups(
+                scan_dir,
+                {"findings": excluded_findings},
+                allow_missing=allow_missing_writeups,
+            )
             findings["findings"] = scoped_findings
+    warnings.extend(
+        _prepare_derived_writeups(
+            scan_dir,
+            findings,
+            allow_missing=allow_missing_writeups and not was_sealed,
+        )
+    )
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
@@ -3055,14 +3092,15 @@ def _prepare_scan_finalization(
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
         _contract_json_bytes("scan-manifest.json", manifest)
-    return (
-        scan_dir,
-        schema_dir,
-        manifest,
-        findings,
-        coverage,
-        was_sealed,
-        report_markdown_bytes,
+    return PreparedScanFinalization(
+        scan_dir=scan_dir,
+        schema_dir=schema_dir,
+        manifest=manifest,
+        findings=findings,
+        coverage=coverage,
+        was_sealed=was_sealed,
+        report_markdown_bytes=report_markdown_bytes,
+        warnings=warnings,
     )
 
 
@@ -3074,33 +3112,25 @@ def _write_prepared_scan_finalization(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write a previously validated scan finalization result."""
 
-    (
-        scan_dir,
-        schema_dir,
-        manifest,
-        findings,
-        coverage,
-        was_sealed,
-        report_markdown_bytes,
-    ) = prepared
-    scan = _require_dict(manifest, "scan", "manifest")
-    if not was_sealed:
-        _write_scan_local_json(scan_dir, "findings.json", findings)
-        _write_scan_local_json(scan_dir, "coverage.json", coverage)
-    write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
+    scan_dir = prepared.scan_dir
+    scan = _require_dict(prepared.manifest, "scan", "manifest")
+    if not prepared.was_sealed:
+        _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
+        _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
+    write_scan_local_bytes(scan_dir, "report.md", prepared.report_markdown_bytes)
     _remove_scan_local_file_if_exists(scan_dir, "report.html")
-    if not was_sealed:
-        _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
+    if not prepared.was_sealed:
+        _write_scan_local_json(scan_dir, "scan-manifest.json", prepared.manifest)
         _validate_existing_seal(scan_dir, scan)
-    _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
-    warning = write_threat_model_projection_if_possible(scan_dir, manifest)
+    _write_sarif_projection_if_possible(scan_dir, source_root, prepared.schema_dir)
+    warning = write_threat_model_projection_if_possible(scan_dir, prepared.manifest)
     if (
         warning is not None
         and projection_warnings is not None
         and warning not in projection_warnings
     ):
         projection_warnings.append(warning)
-    return manifest, findings, coverage
+    return prepared.manifest, prepared.findings, prepared.coverage
 
 
 def finalize_scan(
