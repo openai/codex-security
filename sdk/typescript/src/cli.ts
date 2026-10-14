@@ -61,6 +61,7 @@ import {
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
@@ -8033,6 +8034,16 @@ export function skillCommandFailure(
 }
 
 function incurErrorMessage(output: string): string {
+  // YAML folds long strings across lines; JSON output keeps its serialized form.
+  if (!output.startsWith("{")) {
+    try {
+      const parsed: unknown = parseYaml(output);
+      if (isJsonObject(parsed) && typeof parsed["message"] === "string")
+        return parsed["message"];
+    } catch {
+      // Output that is not YAML (for example a Markdown table) uses the line scan.
+    }
+  }
   const message = output
     .split("\n")
     .find((line) => line.startsWith("message: "))

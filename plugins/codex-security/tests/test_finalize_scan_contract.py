@@ -672,6 +672,11 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
 
+        with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
+            FINALIZER._prepare_scan_finalization(
+                self.scan_dir, finding_scope=[("unrelated", False)]
+            )
+
         writeup_path = self.scan_dir / report_path
         writeup_path.parent.mkdir(parents=True)
         writeup_path.mkdir()
@@ -684,6 +689,12 @@ The extraction root is not enforced.
         writeup_path.unlink()
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
+        sealed_files = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+        with self.assertRaises(FINALIZER.ContractError):
+            FINALIZER._prepare_scan_finalization(self.scan_dir, allow_missing_writeups=True)
+        self.assertEqual(
+            {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}, sealed_files
+        )
 
     def test_finalize_requires_hardening_portfolio_to_be_regular_scan_local_file(self) -> None:
         portfolio_path = "hardening/hardening.md"
@@ -2062,10 +2073,8 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "missing from sealed artifacts"):
             FINALIZER.finalize_scan(self.scan_dir)
 
-        warnings: list[str] = []
         with self.assertRaisesRegex(FINALIZER.ContractError, "missing from sealed artifacts"):
-            FINALIZER._prepare_scan_finalization(self.scan_dir, completion_warnings=warnings)
-        self.assertEqual(warnings, [])
+            FINALIZER._prepare_scan_finalization(self.scan_dir, recover_unsealed=True)
 
     def test_fingerprint_survives_line_movement_and_file_rename(self) -> None:
         renamed = copy.deepcopy(self.finding)
@@ -2160,18 +2169,19 @@ The extraction root is not enforced.
             "Lower if the input is constrained before parsing.",
         ]
         self.write_scan()
-        warnings: list[str] = []
 
-        prepared = FINALIZER._prepare_scan_finalization(self.scan_dir, completion_warnings=warnings)
+        prepared = FINALIZER._prepare_scan_finalization(self.scan_dir, recover_unsealed=True)
 
-        finding = prepared[3]["findings"][0]
+        finding = prepared.findings["findings"][0]
         self.assertEqual(
             finding["severity"]["changeConditions"],
             "Raise if the vulnerable path becomes internet-reachable. "
             "Lower if the input is constrained before parsing.",
         )
-        self.assertEqual(warnings, ["Recovered finding 1: normalized severity change conditions."])
-        self.assertEqual(prepared[4]["completeness"], "complete")
+        self.assertEqual(
+            prepared.warnings, ["Recovered finding 1: normalized severity change conditions."]
+        )
+        self.assertEqual(prepared.coverage["completeness"], "complete")
 
     @pytest.mark.cross_platform
     def test_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
@@ -2197,17 +2207,16 @@ The extraction root is not enforced.
                 second["root_cause"] = None
                 self.findings["findings"] = [first, second]
                 self.write_scan()
-                warnings: list[str] = []
 
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
+                    self.scan_dir, recover_unsealed=True
                 )
 
-                self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
-                self.assertIsNone(prepared[3]["findings"][0]["root_cause"])
-                self.assertEqual(prepared[3]["findings"][0][evidence_field], [evidence])
+                self.assertEqual(prepared.findings["findings"][0]["summary"], "SECOND")
+                self.assertIsNone(prepared.findings["findings"][0]["root_cause"])
+                self.assertEqual(prepared.findings["findings"][0][evidence_field], [evidence])
                 self.assertEqual(
-                    warnings,
+                    prepared.warnings,
                     ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
@@ -2235,15 +2244,14 @@ The extraction root is not enforced.
                 second["rootCause"] = root_cause
                 self.findings["findings"] = [first, second]
                 self.write_scan()
-                warnings: list[str] = []
 
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
+                    self.scan_dir, recover_unsealed=True
                 )
 
-                self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
+                self.assertEqual(prepared.findings["findings"][0]["summary"], "SECOND")
                 self.assertEqual(
-                    warnings,
+                    prepared.warnings,
                     ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
@@ -2252,16 +2260,15 @@ The extraction root is not enforced.
             with self.subTest(change_conditions=repr(change_conditions)):
                 self.findings["findings"][0]["severity"]["changeConditions"] = change_conditions
                 self.write_scan()
-                warnings: list[str] = []
 
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
+                    self.scan_dir, recover_unsealed=True
                 )
 
-                self.assertEqual(prepared[3]["findings"], [])
-                self.assertEqual(prepared[4]["completeness"], "partial")
-                self.assertEqual(len(warnings), 1)
-                self.assertIn("severity.changeConditions", warnings[0])
+                self.assertEqual(prepared.findings["findings"], [])
+                self.assertEqual(prepared.coverage["completeness"], "partial")
+                self.assertEqual(len(prepared.warnings), 1)
+                self.assertIn("severity.changeConditions", prepared.warnings[0])
 
     def test_unsealed_invalid_anchor_stays_strict_without_recovery(self) -> None:
         self.findings["findings"][0]["identity"]["anchor"] = "Invalid Anchor"
@@ -2279,18 +2286,20 @@ The extraction root is not enforced.
             with self.subTest(field=field, value=value):
                 self.findings["findings"][0][field] = value
                 self.write_scan()
-                warnings: list[str] = []
 
-                _, _, _, findings, coverage, _, _ = FINALIZER._prepare_scan_finalization(
+                prepared = FINALIZER._prepare_scan_finalization(
                     self.scan_dir,
-                    completion_warnings=warnings,
+                    recover_unsealed=True,
                 )
 
-                self.assertEqual(len(findings["findings"]), 1)
-                self.assertNotIn(field, findings["findings"][0])
-                self.assertEqual(coverage["completeness"], "complete")
+                self.assertEqual(len(prepared.findings["findings"]), 1)
+                self.assertNotIn(field, prepared.findings["findings"][0])
+                self.assertEqual(prepared.coverage["completeness"], "complete")
                 self.assertTrue(
-                    any(warning.startswith(f"Skipped malformed {field}") for warning in warnings)
+                    any(
+                        warning.startswith(f"Skipped malformed {field}")
+                        for warning in prepared.warnings
+                    )
                 )
                 self.findings["findings"][0].pop(field)
 
@@ -2299,18 +2308,19 @@ The extraction root is not enforced.
         finding["remediationTests"] = ["Reject unsafe archive paths."]
         finding["preventiveControls"] = ["Validate every archive path."]
         self.write_scan()
-        warnings: list[str] = []
 
-        _, _, _, findings, _, _, _ = FINALIZER._prepare_scan_finalization(
+        prepared = FINALIZER._prepare_scan_finalization(
             self.scan_dir,
-            completion_warnings=warnings,
+            recover_unsealed=True,
         )
 
-        self.assertEqual(findings["findings"][0]["remediationTests"], finding["remediationTests"])
         self.assertEqual(
-            findings["findings"][0]["preventiveControls"], finding["preventiveControls"]
+            prepared.findings["findings"][0]["remediationTests"], finding["remediationTests"]
         )
-        self.assertFalse(warnings)
+        self.assertEqual(
+            prepared.findings["findings"][0]["preventiveControls"], finding["preventiveControls"]
+        )
+        self.assertFalse(prepared.warnings)
 
     def test_recovery_publishes_findings_without_unsafe_deferred_paths(self) -> None:
         valid = {"id": "review", "reason": "Repository review is incomplete.", "paths": ["."]}
@@ -2322,9 +2332,8 @@ The extraction root is not enforced.
             with self.subTest(status=status):
                 self.write_scan()
                 binding = {**self.completion_binding(), "status": status}
-                warnings: list[str] = []
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_binding=binding, completion_warnings=warnings
+                    self.scan_dir, completion_binding=binding, recover_unsealed=True
                 )
                 manifest, findings, coverage = FINALIZER._write_prepared_scan_finalization(prepared)
 
@@ -2336,7 +2345,7 @@ The extraction root is not enforced.
                 self.assertTrue(
                     any(
                         "Skipped malformed deferred coverage item 1" in warning
-                        for warning in warnings
+                        for warning in prepared.warnings
                     )
                 )
                 self.assertEqual(self.read_json("findings.json"), findings)
@@ -3141,6 +3150,61 @@ def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
     FINALIZER._validate_schema_node(value, schema, "value")
     with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
         FINALIZER._validate_schema_node(True, schema, "value")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file permissions")
+@pytest.mark.parametrize(
+    "kind", ["unsafe", "symlink", "dangling-symlink", "parent-symlink", "directory", "unreadable"]
+)
+def test_missing_writeup_recovery_rejects_other_file_errors(tmp_path, kind):
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    report = scan_dir / "findings" / "report.md"
+    report.parent.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside the scan\n")
+    report_path = "findings/report.md"
+    if kind == "unsafe":
+        report_path = "../outside.md"
+    elif kind == "symlink":
+        report.symlink_to(outside)
+    elif kind == "dangling-symlink":
+        report.symlink_to(report.parent / "missing.md")
+    elif kind == "parent-symlink":
+        report.parent.rmdir()
+        report.parent.symlink_to(tmp_path, target_is_directory=True)
+    elif kind == "directory":
+        report.mkdir()
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root can read files without permission bits")
+        report.write_text("# Unreadable writeup\n")
+        report.chmod(0)
+    findings = {"findings": [{"writeup": {"reportPath": report_path}}]}
+    original = copy.deepcopy(findings)
+    with pytest.raises(FINALIZER.ContractError):
+        FINALIZER._prepare_derived_writeups(scan_dir, findings, allow_missing=True)
+    assert findings == original
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("error_code", [2, 3, 5, 22, 32, 33])
+def test_windows_writeup_recovery_only_omits_missing_files(tmp_path, monkeypatch, error_code):
+    backend = windows_file_backend()
+    windows_error = load_script("windows_scan_local_files").WindowsScanLocalFileError
+    backend.open_read_fd.side_effect = windows_error(error_code, "Synthetic Windows file error")
+    monkeypatch.setattr(FINALIZER.os, "supports_dir_fd", set())
+    monkeypatch.setattr(FINALIZER, "_is_windows", lambda: True)
+    monkeypatch.setattr(FINALIZER, "_windows_scan_local_files", lambda: backend)
+    findings = {"findings": [{"writeup": {"reportPath": "findings/report.md"}}]}
+    if error_code in {2, 3}:
+        warnings = FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
+        assert findings == {"findings": [{}]}
+        assert len(warnings) == 1
+    else:
+        with pytest.raises(FINALIZER.ContractError):
+            FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
+        assert "writeup" in findings["findings"][0]
 
 
 def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:

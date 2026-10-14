@@ -298,6 +298,7 @@ test("overlapping draft projections retain the latest committed model", async (t
   t.mock.method(childProcess, "spawn", (command: string, args: string[]) => {
     assert.equal(command, "fixture-python");
     assert.deepEqual(args, [
+      "-B",
       "-I",
       "-X",
       "utf8",

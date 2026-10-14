@@ -46,6 +46,16 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           cargo +1.97.1 fetch --locked
+      - name: Pull pinned musl images
+        run: |
+          for image_variable in RUST_IMAGE NODE22_IMAGE NODE20_IMAGE; do
+            native_image="${!image_variable}"
+            if ! docker pull "$native_image"; then
+              native_image="docker.io/library/${native_image#public.ecr.aws/docker/library/}"
+              docker pull "$native_image"
+            fi
+            printf '%s=%s\n' "$image_variable" "$native_image" >> "$GITHUB_ENV"
+          done
       - name: Assemble pinned musl compiler image
         run: |
           docker build --network none \
