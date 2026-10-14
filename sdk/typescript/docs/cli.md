@@ -1279,6 +1279,11 @@ Comparisons classify findings as new, persisting, reopened, resolved, or unknown
 An absent finding is not resolved when the later scan is incomplete or excludes
 its scope. One comparison ID is compared with the latest completed scan.
 
+When two scans reviewed identical content, such as Standard and Deep scans of
+the same revision, comparisons group findings that unambiguously share a
+vulnerability class, primary location, and instance even when their recorded
+identities differ.
+
 ```bash
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
 ```
