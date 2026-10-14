@@ -50,12 +50,191 @@ function finding(
     )
     .run(findingId, findingId, findingId, stringifyJson(document));
   database
-    .prepare("INSERT INTO finding_embeddings VALUES (?, ?, ?)")
+    .prepare(
+      "INSERT INTO finding_embeddings (finding_id, model, vector_json) VALUES (?, ?, ?)",
+    )
     .run(findingId, model, JSON.stringify(vector));
   database
     .prepare("INSERT INTO finding_repositories VALUES (?, ?)")
     .run(repository, findingId);
   return document;
+}
+
+test("local neighborhoods keep repository associations separate from finding bodies", (t) => {
+  const database = open(t);
+  const anchor = finding(
+    database,
+    "finding-a\0tail",
+    [1, 0],
+    "repository-a\0suffix",
+  );
+  const other = finding(database, 2, [1, 0], "repository-b\0suffix");
+  database
+    .prepare("INSERT INTO finding_repositories VALUES (?, ?)")
+    .run("repository-alias", anchor.findingId);
+  const keys = Object.fromEntries(
+    [anchor, other].map((f) => [f.findingId, `cache-${f.findingId}`]),
+  );
+  for (const f of [anchor, other])
+    database
+      .prepare(
+        "INSERT INTO local_finding_embeddings VALUES (?, 'local-model', '[1, 0]', ?)",
+      )
+      .run(f.findingId, keys[f.findingId]);
+  const local = findPotentialDuplicates(
+    database,
+    anchor.findingId,
+    undefined,
+    keys,
+  );
+  assert.deepEqual(local.repositoryIds, {
+    [anchor.findingId]: ["repository-a\0suffix", "repository-alias"],
+    [other.findingId]: ["repository-b\0suffix"],
+  });
+  assert.deepEqual(local.finding, anchor);
+  assert.deepEqual(local.potentialDuplicates, [other]);
+  assert.deepEqual(local.sourceSnapshots, {});
+  assert.equal(
+    "repositoryIds" in findPotentialDuplicates(database, anchor.findingId),
+    false,
+  );
+});
+
+for (const scenario of [
+  "matching",
+  "empty",
+  "missing",
+  "deleted",
+  "stale",
+  "changed-body",
+]) {
+  test(`local search and group writes validate the whole cache map: ${scenario}`, (t) => {
+    const database = open(t);
+    const anchor = finding(database, 1);
+    const neighbor = finding(database, 'finding-2-"-☃', [0, 1]);
+    const keys: Record<string, string> = {};
+    for (const item of [anchor, neighbor]) {
+      keys[item.findingId] = `cache-${item.findingId}`;
+      database
+        .prepare(
+          "INSERT INTO local_finding_embeddings VALUES (?, 'local-model', '[0, 1]', ?)",
+        )
+        .run(item.findingId, keys[item.findingId]);
+    }
+    // Local vectors must not change the service's orthogonal-vector search.
+    assert.deepEqual(
+      findPotentialDuplicates(database, anchor.findingId).potentialDuplicates,
+      [],
+    );
+    if (scenario === "empty") {
+      for (const key of Object.keys(keys)) delete keys[key];
+    } else if (scenario === "missing") keys.missing = "missing-key";
+    else if (scenario === "deleted")
+      database
+        .prepare("DELETE FROM local_finding_embeddings WHERE finding_id = ?")
+        .run(neighbor.findingId);
+    else if (scenario === "stale")
+      database
+        .prepare(
+          "UPDATE local_finding_embeddings SET cache_key = 'stale' WHERE finding_id = ?",
+        )
+        .run(neighbor.findingId);
+    else if (scenario === "changed-body")
+      database
+        .prepare("UPDATE findings SET details_json = '{}' WHERE id = ?")
+        .run(neighbor.findingId);
+    const neighbors = findPotentialDuplicates(
+      database,
+      anchor.findingId,
+      undefined,
+      keys,
+    );
+    const groups = storeDedupeGroups(
+      database,
+      [[anchor.findingId, neighbor.findingId]],
+      "created",
+      keys,
+    );
+    if (scenario === "matching" || scenario === "empty") {
+      assert.deepEqual(
+        neighbors.potentialDuplicates,
+        scenario === "matching" ? [neighbor] : [],
+      );
+      assert.ok("groups" in groups);
+      assert.equal(groups.groups.length, 1);
+    } else {
+      assert.deepEqual(neighbors, { error: "finding_changed" });
+      assert.deepEqual(groups, { error: "finding_changed" });
+      assert.equal(
+        listDedupeGroups(database, anchor.findingId).groups.length,
+        0,
+      );
+    }
+  });
+}
+
+for (const body of ["identical", "reformatted", "changed", "prototype-id"]) {
+  test(`saved source context follows semantically matching occurrence bodies: ${body}`, (t) => {
+    const database = open(t);
+    const document = {
+      ...finding(database, body === "prototype-id" ? "__proto__" : 1),
+      occurrenceId: "occurrence-a",
+    };
+    database
+      .prepare("UPDATE findings SET details_json = ? WHERE id = ?")
+      .run(stringifyJson(document), document.findingId);
+    database.exec(`
+      INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at)
+        VALUES ('synthetic-repository', '/synthetic', 'Synthetic', 'now', 'now');
+      INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace-a', 'now', 'now');
+      INSERT INTO scans (id, workspace_id, target_path, target_revision, target_snapshot_digest,
+                         target_id, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at)
+        VALUES ('scan-a', 'workspace-a', '/synthetic', 'recorded-revision', 'recorded-snapshot',
+                'synthetic-repository', '.', 'standard', '/synthetic-scan', 'complete', 'reporting', 'now', 'now', 'now');
+    `);
+    const occurrence =
+      body === "identical"
+        ? stringifyJson(document)
+        : body === "changed"
+          ? stringifyJson({ ...document, title: "A different observation" })
+          : `{\n  "extensions": ${stringifyJson(document.extensions)},\n  "occurrenceId": "occurrence-a",\n  "findingId": ${JSON.stringify(document.findingId)}\n}`;
+    database
+      .prepare(
+        `INSERT INTO finding_occurrences
+      (id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at)
+      VALUES ('occurrence-a', ?, 'scan-a', 'Synthetic', 'Synthetic', 'high', 'high', 'Fix', ?, 'now')`,
+      )
+      .run(document.findingId, occurrence);
+    database
+      .prepare(
+        "INSERT INTO local_finding_embeddings VALUES (?, 'local-model', '[1, 0]', 'cache')",
+      )
+      .run(document.findingId);
+    for (const kind of [null, "working_tree", "commit", "range"]) {
+      const snapshot = kind === null ? "recorded-snapshot" : null;
+      const diffSnapshot =
+        kind === "working_tree" ? "recorded-diff-snapshot" : null;
+      database
+        .prepare(
+          "UPDATE scans SET target_snapshot_digest = ?, diff_target_kind = ?, diff_content_digest = ? WHERE id = 'scan-a'",
+        )
+        .run(snapshot, kind, diffSnapshot);
+      assert.deepEqual(
+        findPotentialDuplicates(database, document.findingId, undefined, {
+          [document.findingId]: "cache",
+        }).sourceSnapshots,
+        body === "changed"
+          ? {}
+          : {
+              [document.findingId]: {
+                repositoryId: "synthetic-repository",
+                revision: "recorded-revision",
+                snapshotDigest: diffSnapshot ?? snapshot,
+              },
+            },
+      );
+    }
+  });
 }
 
 test("duplicate helper requires an explicit JSON scope before accessing state", async () => {

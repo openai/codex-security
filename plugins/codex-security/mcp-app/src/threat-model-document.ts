@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { join } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
@@ -6,7 +5,8 @@ import {
   readArtifactJsonObject,
   replaceArtifactText,
 } from "./artifact-io.js";
-import { resolvePythonCommand } from "./python_command.js";
+import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
+import { asRecord } from "./record.js";
 
 const pendingDocuments = new Map<string, Promise<void>>();
 
@@ -40,11 +40,8 @@ async function writeCurrentThreatModelDocument(
       [context.layout === "scan" ? "scan-manifest.json" : "result.json"],
       "saved threat model",
     );
-    const document = context.layout === "scan" ? source.scan : source;
-    const threatModel =
-      document && typeof document === "object" && !Array.isArray(document)
-        ? (document as Record<string, unknown>).threatModel
-        : undefined;
+    const document = asRecord(context.layout === "scan" ? source.scan : source);
+    const threatModel = document?.threatModel;
     if (threatModel === undefined) return;
     const destination = await artifactDestination(
       context,
@@ -52,8 +49,7 @@ async function writeCurrentThreatModelDocument(
       "threat model document",
     );
     const python = context.pythonCommand ?? (await resolvePythonCommand());
-    const target = context.targetContract?.target as
-      Record<string, unknown> | undefined;
+    const target = asRecord(document?.target);
     const markdown = await renderThreatModel(python, context.pluginRoot!, {
       threatModel,
       provenance: {
@@ -61,7 +57,9 @@ async function writeCurrentThreatModelDocument(
         scanId: context.scanId,
         target: context.repoRoot,
         revision: context.targetRevision,
-        snapshotDigest: target?.requiredSnapshotDigest,
+        snapshotDigest:
+          target?.snapshotDigest ??
+          asRecord(context.targetContract?.target)?.requiredSnapshotDigest,
         status: context.status ?? "running",
         provisional: context.status !== "complete",
         ...(context.scope === undefined
@@ -81,38 +79,16 @@ function renderThreatModel(
   pluginRoot: string,
   input: Record<string, unknown>,
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      python,
-      [
-        "-I",
-        "-X",
-        "utf8",
-        join(pluginRoot, "scripts", "threat_model_projection.py"),
-        "--input-json-stdin",
-      ],
-      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
-    );
-    const output: string[] = [];
-    const errors: string[] = [];
-    child.stdout
-      .setEncoding("utf8")
-      .on("data", (chunk: string) => output.push(chunk));
-    child.stderr
-      .setEncoding("utf8")
-      .on("data", (chunk: string) => errors.push(chunk));
-    child.on("error", reject);
-    child.stdin.on("error", reject);
-    child.on("close", (code, signal) => {
-      if (code === 0) resolve(output.join(""));
-      else
-        reject(
-          new Error(
-            errors.join("").trim() ||
-              `Threat-model renderer exited with ${signal ?? code}.`,
-          ),
-        );
-    });
-    child.stdin.end(JSON.stringify(input));
-  });
+  return runPythonWithInput(
+    python,
+    [
+      "-I",
+      "-X",
+      "utf8",
+      join(pluginRoot, "scripts", "threat_model_projection.py"),
+      "--input-json-stdin",
+    ],
+    JSON.stringify(input),
+    "Threat-model renderer",
+  );
 }

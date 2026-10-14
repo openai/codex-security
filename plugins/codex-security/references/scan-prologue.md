@@ -16,6 +16,12 @@ Preserve the complete exact user-provided security context, including user-suppl
 
 For a running host-backed scan, immediately persist requested additions, edits, clearances, or replacements with `update_codex_security_scan_context`, passing the complete replacement and current handoff token when required. At each genuine parent-owned forward phase transition, use `structuredContent.scan.userContext` from `update_codex_security_scan_progress` as the immutable context for that phase and its workers. Prompt-only scans retain their original context; independent workers retain the exact immutable context captured by their owner. Never repeat a completed phase or publish progress belonging to a currently running coordinator.
 
+## Tool Results and Code Mode
+
+Check the result of each tool operation before using it: a completed code-mode cell can contain an MCP response with `isError: true`, or a shell command with a failing exit status. Preserve and act on that diagnostic before parsing output as JSON or emitting a success marker. Parse only the intended JSON output of a successful command; shell error text and truncated previews are not JSON documents.
+
+Code mode is a fresh JavaScript isolate, not a Node.js shell. Use only the host's documented globals and tools; do not assume `process`, `require`, `Buffer`, `TextEncoder`, or `structuredClone` exist. Use ordinary JSON operations for JSON data and the documented `load`/`store` helpers for state across cells. Store only serializable values, using `null` for an absent value, and commit dependent state together so a failed later operation cannot leave a stale cursor or count paired with new data.
+
 ## Standard Capability Preflight
 
 Only a top-level Standard scan reads `config-preflight.md` and runs its existing `security_scan` capability profile once. A desktop Standard host also follows `desktop-config-preflight.md` after its authoritative scan context exists. Resolve only the minimum target, scope, revision, or launch arguments needed beforehand; do not inspect source or launch Standard scan workers until the helper returns `ready`. Retain the existing host-specific direct/delegated execution, remediation, fallback, and degraded-worker behavior; configured worker capacity is not a required number of running workers.

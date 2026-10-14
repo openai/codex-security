@@ -87,7 +87,6 @@ export function verifyInstallation(
 }
 
 function createInstallation(target: string) {
-  fs.mkdirSync(target, { recursive: true });
   if (fs.readdirSync(target).length !== 0) {
     throw new Error(`Refusing to install into non-empty directory: ${target}`);
   }
@@ -101,7 +100,13 @@ export function installSastBench(target: string = DEFAULT_INSTALL_ROOT) {
   const resolvedTarget = path.resolve(target);
   if (!fs.existsSync(resolvedTarget)) {
     fs.mkdirSync(path.dirname(resolvedTarget), { recursive: true });
-    createInstallation(resolvedTarget);
+    fs.mkdirSync(resolvedTarget);
+    try {
+      createInstallation(resolvedTarget);
+    } catch (error) {
+      fs.rmSync(resolvedTarget, { recursive: true, force: true });
+      throw error;
+    }
   }
   return verifyInstallation(inspectInstallation(resolvedTarget));
 }

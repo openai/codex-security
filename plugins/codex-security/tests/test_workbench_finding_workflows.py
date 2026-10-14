@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +15,99 @@ def workflow(api, connection, action, *, workflow_id="synthetic-workflow", **pay
     return api["finding_workflow"](
         connection, {"id": workflow_id, "action": action, **payload}, TIMESTAMP
     )
+
+
+def test_source_snapshot_excludes_private_storage_without_hiding_source(
+    workbench_api, workbench_db, tmp_path, monkeypatch
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "source.py"
+    source.write_text("original source")
+    private = repository / "native-state"
+    private.mkdir()
+    database = private / "state.sqlite"
+    database.write_text("synthetic state")
+    original_scandir = os.scandir
+
+    def inspect(path):
+        assert Path(path) != private, "private storage must not be traversed"
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", inspect)
+
+    def snapshot():
+        return workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            privateStatePaths=[str(private)],
+        )["source"]
+
+    before = snapshot()
+    database.write_text("later native state")
+    assert snapshot() == before
+    assert before["privateStatePaths"] == [str(private)]
+    source.write_text("changed source")
+    assert snapshot()["content"] != before["content"]
+    with pytest.raises(SystemExit, match="repository root"):
+        workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            privateStatePaths=[str(repository)],
+        )
+    with pytest.raises(SystemExit, match="absolute paths"):
+        workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            privateStatePaths=["relative-state"],
+        )
+
+
+@pytest.mark.parametrize("location", ["root", "descendant"])
+def test_source_snapshot_preserves_unreadable_directory_errors(
+    workbench_api, workbench_db, tmp_path, monkeypatch, location
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    unreadable = repository if location == "root" else repository / "unreadable"
+    unreadable.mkdir(exist_ok=True)
+    (unreadable / "contents.txt").write_text("source content")
+    private = repository / "native-state"
+    private.mkdir()
+    original_scandir = os.scandir
+    failure = PermissionError("synthetic inaccessible source directory")
+
+    def inspect(path):
+        assert Path(path) != private, "private storage must not be traversed"
+        if Path(path) == unreadable:
+            raise failure
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", inspect)
+
+    def snapshot(excluded):
+        return workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            gitDisabled=True,
+            privateStatePaths=[str(path) for path in excluded],
+        )["source"]
+
+    with pytest.raises(PermissionError) as raised:
+        snapshot([private])
+    assert raised.value is failure
+    if location == "descendant":
+        assert snapshot([private, unreadable])["privateStatePaths"] == sorted(
+            [str(private), str(unreadable)]
+        )
 
 
 @pytest.mark.parametrize("stage", ["scan", "publish", "dedupe"])

@@ -376,8 +376,12 @@ export function PatchTui({
   const [selected, setSelected] = useState(
     () => new Set(findings.map(({ occurrenceId }) => occurrenceId)),
   );
-  const rows = stdout.rows ?? 28;
-  const columns = stdout.columns ?? 100;
+  const terminal = stdout as NodeJS.WritableStream & {
+    rows?: number;
+    columns?: number;
+  };
+  const rows = terminal.rows ?? 28;
+  const columns = terminal.columns ?? 100;
   const visibleRows = Math.max(4, rows - 15);
   const listStart = Math.max(
     0,

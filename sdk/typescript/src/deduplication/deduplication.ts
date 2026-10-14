@@ -1,3 +1,4 @@
+import { SCAN_SEVERITIES } from "../scan-settings.js";
 import { findingGroupRoots } from "../finding-catalogue.js";
 import type { Finding } from "../models.js";
 import type { FindingNeighborhood } from "../finding-retrieval.js";
@@ -83,14 +84,6 @@ export interface DeduplicationResult {
   /** Refused reviews are kept separate without claiming a DISTINCT verdict. */
   refusals?: DeduplicationRefusal[];
 }
-
-const severityOrder: Record<Finding["severity"]["level"], number> = {
-  critical: 0,
-  high: 1,
-  medium: 2,
-  low: 3,
-  informational: 4,
-};
 
 /** @internal */
 export interface ContradictionGroupingMetrics {
@@ -347,36 +340,25 @@ export class FindingDeduplicator {
       return parents.has(id) ? root(id) : undefined;
     });
     membersByRoot.delete(undefined);
-    const components = [...membersByRoot.values()].map((members) => ({
-      members,
-      supported: [] as [string, string][],
-      rejected: [] as [string, string][],
-    }));
-    const componentByFinding = new Map(
-      components.flatMap((component) =>
-        component.members.map((id) => [id, component] as const),
-      ),
+    const supportedByRoot = Map.groupBy(supported, ([left]) => root(left));
+    const rejectedByRoot = Map.groupBy(
+      rejected.filter(([left, right]) => root(left) === root(right)),
+      ([left]) => root(left),
     );
-    for (const pair of supported)
-      componentByFinding.get(pair[0])!.supported.push(pair);
-    for (const pair of rejected) {
-      const component = componentByFinding.get(pair[0]);
-      if (component && component === componentByFinding.get(pair[1]))
-        component.rejected.push(pair);
-    }
 
     const selected = new Set(ids);
     const duplicateGroups: string[][] = [];
     const canonical = new Map<string, string>();
-    for (const component of components) {
+    for (const [componentRoot, members] of membersByRoot) {
       this.signal?.throwIfAborted();
+      const conflicts = rejectedByRoot.get(componentRoot!);
       const groups =
-        component.rejected.length === 0
-          ? [new Set(component.members)]
+        conflicts === undefined
+          ? [new Set(members)]
           : contradictionFreeSubgroups(
-              component.members,
-              component.supported,
-              component.rejected,
+              members,
+              supportedByRoot.get(componentRoot!)!,
+              conflicts,
               this.signal,
             );
       for (const group of groups) {
@@ -384,8 +366,8 @@ export class FindingDeduplicator {
         if (!groupMembers.some((member) => selected.has(member))) continue;
         groupMembers.sort(
           (left, right) =>
-            severityOrder[findings.get(left)!.severity.level] -
-              severityOrder[findings.get(right)!.severity.level] ||
+            SCAN_SEVERITIES.indexOf(findings.get(left)!.severity.level) -
+              SCAN_SEVERITIES.indexOf(findings.get(right)!.severity.level) ||
             (left < right ? -1 : left > right ? 1 : 0),
         );
         duplicateGroups.push(groupMembers);
